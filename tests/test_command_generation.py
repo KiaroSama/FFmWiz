@@ -741,6 +741,25 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertNotIn("-b:a", text)
         self.assertTrue(str(answers["output_path"]).lower().endswith(".wav"))
 
+    def test_audio_transform_command_combines_cut_and_speed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "output_location": Path(tmp),
+                "audio_index": 0,
+                "audio_cut_keep_ranges": [(0.0, 2.0), (4.0, 6.0)],
+                "audio_speed_enabled": True,
+                "audio_speed_factor": 0.5,
+                "reverse_audio": True,
+            })
+            cmd = FFmWiz.build_audio_transform_command(answers)
+            text = " ".join(cmd)
+        self.assertIn("atrim=start=0.000000:end=2.000000", text)
+        self.assertIn("concat=n=2:v=0:a=1", text)
+        self.assertIn("areverse,asetpts=PTS-STARTPTS,atempo=0.5", text)
+        self.assertIn("-map [aout0]", text)
+        self.assertIn("-c:a aac", text)
+
     def test_audio_cut_multiple_ranges_uses_atrim_concat(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)

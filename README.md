@@ -13,7 +13,7 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 - Includes Media info report mode for exporting detailed ffprobe reports for a file or every ffprobe-readable file in a folder.
 - Includes Stream Cleanup Remux mode for keeping selected audio/subtitle streams without re-encoding.
 - Includes Hard Sub Encode mode for burning internal or external subtitles into video with HDR/Dolby handling options.
-- Includes Video Speed / Reverse, Audio Waveform Cut, and Audio Speed / Reverse GUI modes.
+- Includes Video Speed / Reverse and combined Audio Cut / Speed / Reverse GUI modes.
 - Accepts pasted paths and terminal drag-and-drop paths for the input file, including Unicode/Persian paths.
 - Supports output folders, full output paths, or bare output names.
 - Prevents accidental input/output filename collisions.
@@ -120,11 +120,10 @@ The installer adds the local `Commands` folder to your User PATH and also adds o
 7 = Stream Cleanup Remux
 8 = Hard Sub Encode
 9 = Video Speed / Reverse
-10 = Audio Waveform Cut
-11 = Audio Speed / Reverse
+10 = Audio Cut / Speed / Reverse
 ```
 
-Mode `1` is the default and asks every question. It supports an optional cut step that uses `filter_complex` (`trim` / `atrim` / `concat`) for frame-accurate cuts during re-encode.
+Mode `1` is the default and asks every question. On the `feature/unified-editors` branch it can open the experimental Unified Video Editor, which combines crop, video cuts, video speed/reverse, and audio waveform preview in one maximized Qt window. If you skip the unified editor, the archived standalone GUI prompts still work.
 
 Mode `2` reads settings from `config.json`, then asks only the crop question. Use this when encode settings stay the same but crop changes per file.
 
@@ -389,7 +388,7 @@ Esc               Cancel and discard the GUI selection
 
 The Zoom Tool always zooms in by default. Holding `Alt` temporarily switches click-zoom to zoom out, and pressing or releasing `Alt` immediately changes the magnifier cursor/button icon between plus and minus. Drag mostly upward with the Zoom Tool to zoom in smoothly, and drag mostly downward to zoom out smoothly; zoom stays focused around the click/drag origin. Hand Tool panning uses left-click drag; right-click toggles playback in both Hand Tool and Zoom Tool. Crop rectangle editing works from the visible square handles and from a larger invisible hit area around the crop edges, so precise edge grabs do not require pixel-perfect mouse placement and crop resizing takes priority over the active tool. Hold `Ctrl` and drag inside the crop box to move it without changing its size. The Crop Editor displays positions as `hh:mm:ss:frame`. Undo and redo shortcuts are shown on the buttons as `Undo (Ctrl+Z)` and `Redo (Ctrl+Y)`.
 
-### Speed / Reverse Editors (Modes 9 and 11)
+### Speed / Reverse Editors
 
 Mode 9 opens the Video Speed / Reverse workflow. At the speed question, Enter defaults to `n` and `g=Show Graphical Video Speed Editor` opens the dark Qt editor. The GUI has live percent and multiplier speed controls, percent/factor presets, a timeline, preview volume, undo/redo, a reverse toggle, click-to-play preview, and an option to transform the first audio track with the video. Export uses FFmpeg timestamp filters:
 
@@ -400,15 +399,13 @@ Mode 9 opens the Video Speed / Reverse workflow. At the speed question, Enter de
 
 FFmpeg's `reverse` and `areverse` filters buffer the whole filtered clip in memory. FFmWiz avoids full-video RAM spikes by processing reversed video in short segments, reversing each segment, then concatenating the finished segments in reverse order. This is used by the standalone Video Speed / Reverse mode and by the normal encode path when video reverse is enabled.
 
-Mode 11 is the audio-only Speed / Reverse editor. It shows a waveform preview, uses the same speed/reverse, timeline, volume, preset, and undo/redo controls, and exports the selected audio track as an audio file.
+The same speed/reverse options are also available inside the normal Interactive wizard (Mode 1) and Folder Encode (Mode 4). Video speed/reverse is used when the output contains video. In Folder Encode, graphical editors are disabled by design, so shared settings are entered in the terminal and applied to every file in the folder.
 
-The same speed/reverse options are also available inside the normal Interactive wizard (Mode 1) and Folder Encode (Mode 4). Video speed/reverse is used when the output contains video. The separate audio speed/reverse prompt is only shown for audio-only outputs, because video outputs should keep audio speed changes synced through the Video Speed / Reverse step. In Folder Encode, graphical editors are disabled by design, so shared settings are entered in the terminal and applied to every file in the folder.
+### Audio Cut / Speed / Reverse Editor (Mode 10)
 
-### Audio Waveform Cut Editor (Mode 10)
+Mode 10 opens the experimental combined audio editor. It embeds the waveform cut editor and the audio Speed / Reverse editor in one maximized Qt window. Mark the ranges you want removed with `Mark In`, `Mark Out`, and `Add Cut`; the output keeps everything outside those marked ranges. The editor includes waveform view/zoom controls, time ticks, cut selection by right-click, invert cuts, undo/redo, and red delete actions. Audio speed/reverse can be applied in the same workflow.
 
-Mode 10 opens an audio cut editor that generates a waveform preview with FFmpeg `showwavespic`. Mark the ranges you want removed with `Mark In`, `Mark Out`, and `Add Cut`; the output keeps everything outside those marked ranges. The editor includes waveform view/zoom controls, time ticks, cut selection by right-click, invert cuts, undo/redo, and red delete actions. Single-range audio cuts use `-ss ... -i ... -t ...`; multiple ranges use `atrim`, `asetpts`, and `concat`.
-
-Audio cuts are also available in Mode 1 and Mode 4 for audio-only outputs. They are not shown for video outputs; use the normal video cut step for files where the output contains video.
+Audio cuts and audio speed/reverse are also available in Mode 1 and Mode 4 for audio-only outputs. They are not shown for video outputs; use the normal video cut/speed steps or the Unified Video Editor for files where the output contains video.
 
 ### Troubleshooting the new GUI
 
@@ -667,7 +664,7 @@ While FFmpeg is running in a real terminal, FFmWiz shows a single in-place statu
 42.7%  •  time 00:30:46 / 01:12:04  •  fps 63.70  •  q 9.0  •  speed 15.9x  •  size 18.8 MB  •  bitrate 137.8kbits/s  •  elapsed 01.02  •  ETA 03:49
 ```
 
-This applies equally to encode mode, crop+encode mode, stream-copy cut mode (Mode 3), Folder Encode (Mode 4), Add files to video (Mode 5), Stream Cleanup Remux (Mode 7), Hard Sub Encode (Mode 8), Video Speed / Reverse (Mode 9), Audio Waveform Cut (Mode 10), and Audio Speed / Reverse (Mode 11). Raw FFmpeg output is captured to the log file; normal console output only shows the single in-place status line plus the final summary.
+This applies equally to encode mode, crop+encode mode, stream-copy cut mode (Mode 3), Folder Encode (Mode 4), Add files to video (Mode 5), Stream Cleanup Remux (Mode 7), Hard Sub Encode (Mode 8), Video Speed / Reverse (Mode 9), and Audio Cut / Speed / Reverse (Mode 10). Raw FFmpeg output is captured to the log file; normal console output only shows the single in-place status line plus the final summary.
 
 Sizes are shown with automatic units (`B`, `KB`, `MB`, `GB`, ...). Progress time and total duration are shown as `hh:mm:ss`; elapsed time is shown as `mm.ss` until it reaches one hour. If duration information is not yet available, you'll see `ETA calculating` until enough frames have been processed. The old `finish` field is intentionally not shown.
 
