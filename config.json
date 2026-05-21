@@ -1,0 +1,175 @@
+{
+    "_name": "FFmWiz config",
+    "_version": "2",
+    "_documentation": {
+        "overview": "FFmWiz is a Windows-focused interactive FFmpeg command builder. This file feeds Mode 2 (load config and ask crop only) and is also a reference document for every setting the wizard understands.",
+        "how_to_edit": "Edit values inside the 'settings' object. JSON does not support /* comments */, so explanations live in the '_help' object below each section. Keys starting with an underscore are documentation only and are ignored by the parser.",
+        "parser_rules": "Empty strings and missing keys fall back to interactive defaults. Use the string 'n' where supported to mean 'keep source / no change'. Booleans accept y/yes/true/1/on or n/no/false/0/off.",
+        "json_syntax": "Use only double quotes for strings. No trailing commas. Backslashes in Windows paths must be escaped: C:\\\\Users\\\\Me\\\\Videos\\\\input.mkv -> in JSON that becomes \"C:\\\\\\\\Users\\\\\\\\Me\\\\\\\\Videos\\\\\\\\input.mkv\".",
+        "windows_paths": "Forward slashes also work on Windows for FFmpeg input/output paths and are easier inside JSON. Quoted paths with spaces and Unicode characters are supported in any case.",
+        "unicode": "FFmWiz uses UTF-8 throughout. Save this file as UTF-8 (no BOM is required) if you put Unicode characters in paths or titles.",
+        "ffmpeg_capabilities": "Available formats, codecs, encoders, filters, etc. are build-specific. Generate a snapshot of what your installed ffmpeg.exe supports into the companion file 'ffmwiz-ffmpeg-reference.txt'. FFmWiz creates it next to this config on first run and refreshes it any time you delete it.",
+        "modes": "Mode 1 = full interactive wizard (every question asked). Mode 2 = read this file, then only ask the crop question. Mode 3 = stream-copy cut tool (does not read this file). Mode 4 = folder encode. Mode 5 = add audio/subtitle files to a video without re-encoding and optionally set language/title metadata for added streams. Mode 6 = write detailed ffprobe media info reports for a file or folder. Mode 7 = stream-cleanup remux for keeping selected audio/subtitle streams without re-encoding. Mode 8 = hard-sub encode for burning an internal or external subtitle into the video. Mode 9 = video speed/reverse editor. Mode 10 = audio waveform cut editor. Mode 11 = audio speed/reverse editor.",
+        "safety": "FFmWiz never modifies the input file. The final FFmpeg command is shown before it runs and you can cancel.",
+        "gui_debug": "For Cut/Crop GUI troubleshooting, set FFMWIZ_DEBUG=1 before running FFmWiz to print the full Qt GUI traceback if an internal GUI error occurs."
+    },
+    "_capability_reference": {
+        "_doc": "FFmpeg-supported formats, codecs, encoders, decoders, muxers, demuxers, filters, protocols, pixel formats, sample formats, and hardware accelerators all depend on the build of ffmpeg.exe installed on this machine. Do NOT assume the lists below are exhaustive.",
+        "file_next_to_config": "ffmwiz-ffmpeg-reference.txt",
+        "regenerate": "Delete the file or run FFmWiz; the script regenerates it from your installed FFmpeg. To inspect manually, run: ffmpeg -formats / -muxers / -demuxers / -codecs / -encoders / -decoders / -filters / -protocols / -hwaccels / -pix_fmts / -sample_fmts.",
+        "container_compatibility_notes": [
+            "MP4/MOV/M4V/ISMV: H.264/H.265/AV1/MPEG-4 video; AAC/AC3/EAC3/Opus(*caveat*)/ALAC audio; mov_text text subtitles only.",
+            "MKV: Almost any video/audio/subtitle codec including SRT, ASS, PGS, VobSub.",
+            "WebM: VP8/VP9/AV1 video; Opus/Vorbis audio; WebVTT subtitles.",
+            "MP3 / M4A / WAV / FLAC / OGG / OPUS: audio-only containers. Video streams are dropped automatically by FFmWiz."
+        ]
+    },
+    "_help": {
+        "input_path": "Absolute path to the source file. Required in Mode 2. Examples: \"C:\\\\Videos\\\\input.mkv\", \"D:/clips/cam01.mov\", \"\\\\\\\\NAS\\\\share\\\\episode.ts\".",
+        "output_path": "Either a folder (\"E:\\output\"), a full file path (\"E:\\out\\final.mp4\"), or a bare base name (\"lesson6\" -> dropped into the input folder using the chosen output_format extension). Empty uses the input folder. If the resolved output would overwrite the input, encode/re-encode adds _Encode and cut-only mode adds _cut; existing generated names receive a numeric suffix like (2).",
+        "output_format": "Final container extension without leading dot. Examples: mp4, mkv, mov, webm, mp3, m4a, opus. Use the string 'n' to inherit the input extension. Container choice affects which codecs are allowed - see _capability_reference.container_compatibility_notes.",
+        "video_codec": "H265 | H264 | AV1 | VP9 | MPEG4 | copy | <any encoder name from ffmpeg -encoders>. FFmWiz maps aliases to a CPU encoder and (when GPU is enabled) an NVENC encoder. Use 'copy' to stream-copy the video without re-encoding. 'copy' is incompatible with crop/fps/scale/setparams/cuts and will be auto-promoted to H265 if any filter is required.",
+        "use_gpu": "y/n. y enables NVIDIA NVENC and CUDA decode/filter pipeline when the resolved encoder supports it. Falls back to CPU encoding silently when the encoder is not NVENC. Requires an FFmpeg build compiled with CUDA/NVENC support and a compatible NVIDIA GPU + driver.",
+        "crop": "n (off), y (use crop_top/crop_left/crop_right/crop_bottom below), or an inline top,left,right,bottom string like '100,300,200,550'. Crop margins are pixels removed from each side, NOT x/y offsets. Mode 2 ignores this and asks crop interactively.",
+        "crop_top": "Pixels removed from the top. Integer >= 0. Used only when 'crop' = y.",
+        "crop_left": "Pixels removed from the left. Integer >= 0.",
+        "crop_right": "Pixels removed from the right. Integer >= 0.",
+        "crop_bottom": "Pixels removed from the bottom. Integer >= 0.",
+        "video_bitrate_kbps": "Target average video bitrate in kbps. Examples: 400, 800, 1500, 3500, 8000. Use 'n' to keep the detected source bitrate. Interactive prompts warn before accepting a target above the detected source bitrate.",
+        "video_bitrate_mode": "quality_vbr or strict_size. quality_vbr uses -b:v Xk -maxrate:v 2Xk -bufsize:v 4Xk. strict_size uses -b:v Xk -maxrate:v Xk -bufsize:v 2Xk.",
+        "resolution": "Output scale target. Presets/plain numbers like 480p or 480 preserve aspect ratio using closest-edge scaling against the standard preset box. Use w720/720w for explicit width, h480/480h for explicit height, WIDTHxHEIGHT for a preserve-aspect target box, and stretch:WIDTHxHEIGHT only when intentional distortion is wanted. Use 'n' to keep source/cropped size. SAR is forced to 1 by default.",
+        "fps": "Output frames-per-second as an integer. Use 'n' to keep the source rate. Examples: 24, 25, 30, 50, 60. Interactive prompts warn before accepting an FPS above the detected source FPS. Float rates (e.g. 23.976) are not exposed here; if you need fractional rates, prefer the interactive wizard or edit the FFmpeg command before running.",
+        "audio_tracks": "Selection for which audio streams to keep. Accepts: '0' or '0,1,2' (stream indices among audio streams), 'all', 'd' (drop confirmed duplicates), 'e' (drop empty / near-empty), 'de' (both). Empty defaults to 'de'.",
+        "audio_codec": "aac | libopus | libmp3lame | flac | pcm_s16le | copy | <any encoder name from ffmpeg -encoders>. Container compatibility is enforced: WebM forces libopus; pcm_*/flac ignore bitrate; 'copy' skips re-encoding.",
+        "audio_bitrate_kbps": "Target audio bitrate per stream in kbps. Used only for bitrate-based codecs (aac/libopus/libmp3lame/etc.). Use 'n' to keep the source bitrate. Interactive prompts warn before accepting a target above the detected selected source audio bitrate. Common values: 64, 96, 128, 160, 192, 256, 320.",
+        "subtitle_tracks": "Selection for which subtitle streams to keep. Same syntax as audio_tracks plus 'none' / 'clear' / 'delete' to drop all subtitles. MP4/MOV outputs convert text subtitles to mov_text and drop non-text (PGS, VobSub).",
+        "detect_duplicate_audio": "y/n. When y, FFmWiz uses stream metadata plus exact packet sizes when needed to flag empty/near-empty tracks. Likely duplicate tracks are prechecked with short sampled hashes, then confirmed with a full audio hash. Used by the 'd' / 'e' / 'de' shortcuts.",
+        "logging_enabled": "y/n. Logging is enabled by default and writes dated UTF-8 logs into the Logs folder next to FFmWiz.py. Set to n only when you intentionally want no log file for future runs.",
+        "log_retention_days": "Optional integer. 0 keeps logs forever. Any positive value deletes FFmWiz log files older than that many days when logging starts."
+    },
+    "settings": {
+        "input_path": "",
+        "output_path": "",
+        "output_format": "n",
+        "video_codec": "H265",
+        "use_gpu": "y",
+        "crop": "n",
+        "crop_top": 0,
+        "crop_left": 0,
+        "crop_right": 0,
+        "crop_bottom": 0,
+        "video_bitrate_kbps": "n",
+        "video_bitrate_mode": "quality_vbr",
+        "resolution": "n",
+        "fps": "n",
+        "audio_tracks": "de",
+        "audio_codec": "aac",
+        "audio_bitrate_kbps": "n",
+        "subtitle_tracks": "none",
+        "detect_duplicate_audio": "y",
+        "logging_enabled": "y",
+        "log_retention_days": 0
+    },
+    "_examples": {
+        "fast_stream_copy_same_container": {
+            "_doc": "Stream-copy the source video/audio without re-encoding while keeping the original container. Pure copy/remux workflows should not change the output extension.",
+            "settings": {
+                "output_format": "n",
+                "video_codec": "copy",
+                "use_gpu": "n",
+                "crop": "n",
+                "audio_codec": "copy",
+                "subtitle_tracks": "none"
+            }
+        },
+        "h264_mp4_1080p_cpu": {
+            "_doc": "Classic 1080p H.264 MP4, CPU encode, AAC stereo audio at 160 kbps.",
+            "settings": {
+                "output_format": "mp4",
+                "video_codec": "H264",
+                "use_gpu": "n",
+                "resolution": "1080p",
+                "fps": "n",
+                "video_bitrate_kbps": 6000,
+                "audio_codec": "aac",
+                "audio_bitrate_kbps": 160,
+                "subtitle_tracks": "none"
+            }
+        },
+        "h265_mp4_nvenc": {
+            "_doc": "HEVC NVENC for fast GPU-accelerated 1080p encodes; tag:v hvc1 is added automatically for Apple compatibility.",
+            "settings": {
+                "output_format": "mp4",
+                "video_codec": "H265",
+                "use_gpu": "y",
+                "resolution": "1080p",
+                "video_bitrate_kbps": 4500,
+                "audio_codec": "aac",
+                "audio_bitrate_kbps": 160
+            }
+        },
+        "av1_webm": {
+            "_doc": "AV1 in WebM with Opus audio. AV1 NVENC is preferred when use_gpu=y and the build supports av1_nvenc.",
+            "settings": {
+                "output_format": "webm",
+                "video_codec": "AV1",
+                "use_gpu": "y",
+                "video_bitrate_kbps": 2500,
+                "audio_codec": "libopus",
+                "audio_bitrate_kbps": 96
+            }
+        },
+        "audio_only_aac_m4a": {
+            "_doc": "Extract first audio track as AAC in an M4A container.",
+            "settings": {
+                "output_format": "m4a",
+                "audio_tracks": "0",
+                "audio_codec": "aac",
+                "audio_bitrate_kbps": 192,
+                "subtitle_tracks": "none"
+            }
+        },
+        "audio_only_flac": {
+            "_doc": "Lossless FLAC audio. audio_bitrate_kbps is ignored for FLAC.",
+            "settings": {
+                "output_format": "flac",
+                "audio_tracks": "all",
+                "audio_codec": "flac",
+                "subtitle_tracks": "none"
+            }
+        },
+        "drop_duplicate_and_empty_audio": {
+            "_doc": "Keep all audio but drop confirmed duplicates and empty/near-empty tracks before encoding.",
+            "settings": {
+                "audio_tracks": "de",
+                "detect_duplicate_audio": "y"
+            }
+        },
+        "crop_and_scale_720p": {
+            "_doc": "Crop a letterboxed source and scale down to 720p with H.265 NVENC.",
+            "settings": {
+                "video_codec": "H265",
+                "use_gpu": "y",
+                "crop": "y",
+                "crop_top": 132,
+                "crop_left": 0,
+                "crop_right": 0,
+                "crop_bottom": 132,
+                "resolution": "720p",
+                "video_bitrate_kbps": 3000,
+                "audio_codec": "aac",
+                "audio_bitrate_kbps": 128
+            }
+        }
+    },
+    "_glossary": {
+        "stream_copy_vs_reencode": "Stream copy (-c copy) skips decoding/encoding entirely. It is keyframe-bound for video, so cut points snap to nearby keyframes. Re-encoding is slower and lossy per pass but is frame-accurate and lets filters run.",
+        "crf_vs_bitrate": "CRF (Constant Rate Factor) targets a perceptual quality level (libx264/libx265 default ~ 23; smaller = higher quality). Bitrate mode (-b:v + -maxrate + -bufsize) targets a file size. FFmWiz currently uses bitrate mode with NVENC's VBR rc.",
+        "preset_tune_profile": "preset = encoder speed/quality tradeoff (NVENC: p1..p7; libx264/libx265: ultrafast..veryslow). tune = content hint (NVENC: hq/ll/ull/lossless). profile = stream profile (HEVC: main / main10 / rext).",
+        "gop": "GOP = Group of Pictures; the keyframe interval. Larger GOP = better compression but slower seeking. Default GOP is set by the encoder.",
+        "movflags_faststart": "Moves the MP4 moov atom to the start of the file so streaming/progressive playback can begin without downloading the whole file. FFmWiz applies +faststart to MP4/MOV outputs by default.",
+        "tag_hvc1_vs_hev1": "Apple devices and some browsers require the hvc1 tag instead of hev1 for HEVC in MP4. FFmWiz applies -tag:v hvc1 automatically for HEVC -> MP4-like outputs.",
+        "color_range_tv_vs_pc": "tv = limited range 16..235 (YUV broadcast). pc = full range 0..255. FFmWiz defaults to tv for compatibility.",
+        "yuv420p_vs_nv12": "yuv420p is the most compatible CPU pixel format. NV12 is the typical NVENC input. FFmWiz handles conversion automatically based on the pipeline."
+    }
+}
