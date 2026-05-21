@@ -355,7 +355,7 @@ CONFIG_TEMPLATE = """{
         "windows_paths": "Forward slashes also work on Windows for FFmpeg input/output paths and are easier inside JSON. Quoted paths with spaces and Unicode characters are supported in any case.",
         "unicode": "FFmWiz uses UTF-8 throughout. Save this file as UTF-8 (no BOM is required) if you put Unicode characters in paths or titles.",
         "ffmpeg_capabilities": "Available formats, codecs, encoders, filters, etc. are build-specific. Generate a snapshot of what your installed ffmpeg.exe supports into the companion file 'ffmwiz-ffmpeg-reference.txt'. FFmWiz creates it next to this config on first run and refreshes it any time you delete it.",
-        "modes": "Mode 1 = full interactive wizard (every question asked). Mode 2 = read this file, then only ask the crop question. Mode 3 = stream-copy cut tool (does not read this file). Mode 4 = folder encode. Mode 5 = add audio/subtitle files to a video without re-encoding and optionally set language/title metadata for added streams. Mode 6 = write detailed ffprobe media info reports for a file or folder. Mode 7 = stream-cleanup remux for keeping selected audio/subtitle streams without re-encoding. Mode 8 = hard-sub encode for burning an internal or external subtitle into the video. Mode 9 = video speed/reverse editor. Mode 10 = audio waveform cut editor. Mode 11 = audio speed/reverse editor.",
+        "modes": "Mode 1 = full interactive wizard (every question asked; can use the experimental Unified Video Editor on the feature/unified-editors branch). Mode 2 = read this file, then only ask the crop question. Mode 3 = stream-copy cut tool (does not read this file). Mode 4 = folder encode. Mode 5 = add audio/subtitle files to a video without re-encoding and optionally set language/title metadata for added streams. Mode 6 = write detailed ffprobe media info reports for a file or folder. Mode 7 = stream-cleanup remux for keeping selected audio/subtitle streams without re-encoding. Mode 8 = hard-sub encode for burning an internal or external subtitle into the video. Mode 9 = video speed/reverse editor. Mode 10 = audio cut/speed/reverse editor.",
         "safety": "FFmWiz never modifies the input file. The final FFmpeg command is shown before it runs and you can cancel."
     },
     "_capability_reference": {
@@ -7188,6 +7188,54 @@ def open_video_speed_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
+    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    try:
+        source_w, source_h = first_video_size(answers)
+    except Exception:
+        source_w, source_h = 1920, 1080
+    request = {
+        "mode": "video_unified",
+        "input_path": str(answers["input_path"]),
+        "duration": float(duration),
+        "fps": float(get_video_fps(answers)),
+        "source_w": int(source_w),
+        "source_h": int(source_h),
+        "has_audio": bool(answers.get("audio_streams")),
+        "audio_count": len(answers.get("audio_streams") or []),
+        "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
+        "log_path": str(log_path()) if log_path() is not None else "",
+        "start_maximized": True,
+    }
+    reply = _launch_qt_gui(request)
+    if reply is None:
+        error("Unified graphical video editor is not available. Install PySide6 and try again.")
+        return None
+    if reply.get("status") == "ok":
+        try:
+            margins = reply.get("margins") or [0, 0, 0, 0]
+            top, left, right, bottom = (int(x) for x in margins)
+            keep_ranges: list[tuple[float, float]] = []
+            for entry in reply.get("keep_ranges") or []:
+                s, e = float(entry[0]), float(entry[1])
+                if e > s:
+                    keep_ranges.append((s, e))
+            return {
+                "margins": (top, left, right, bottom),
+                "keep_ranges": normalize_cut_ranges(keep_ranges, duration),
+                "speed": clamp_speed_factor(reply.get("speed", DEFAULT_SPEED_FACTOR)),
+                "reverse": bool(reply.get("reverse")),
+                "include_audio": bool(reply.get("include_audio", True)),
+            }
+        except Exception as exc:
+            error(f"Unified video editor returned invalid data: {exc}")
+            return None
+    if reply.get("status") == "error":
+        answers["_last_gui_error"] = "video_unified"
+        error("Unified video GUI failed. Set FFMWIZ_DEBUG=1 before running FFmWiz to print the full traceback.")
+    return None
+
+
 def open_audio_speed_gui(answers: dict[str, Any], audio_index: int) -> dict[str, Any] | None:
     duration = stream_duration_seconds({}, answers.get("format")) or 0.0
     request = {
@@ -7214,6 +7262,42 @@ def open_audio_speed_gui(answers: dict[str, Any], audio_index: int) -> dict[str,
     if reply.get("status") == "error":
         answers["_last_gui_error"] = "audio_speed"
         error("Audio speed GUI failed. Set FFMWIZ_DEBUG=1 before running FFmWiz to print the full traceback.")
+    return None
+
+
+def open_audio_transform_gui(answers: dict[str, Any], audio_index: int) -> dict[str, Any] | None:
+    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    request = {
+        "mode": "audio_transform",
+        "input_path": str(answers["input_path"]),
+        "audio_index": int(audio_index),
+        "duration": float(duration),
+        "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
+        "log_path": str(log_path()) if log_path() is not None else "",
+        "start_maximized": True,
+    }
+    reply = _launch_qt_gui(request)
+    if reply is None:
+        error("Graphical audio transform editor is not available. Install PySide6 and try again.")
+        return None
+    if reply.get("status") == "ok":
+        try:
+            ranges: list[tuple[float, float]] = []
+            for entry in reply.get("keep_ranges") or []:
+                s, e = float(entry[0]), float(entry[1])
+                if e > s:
+                    ranges.append((s, e))
+            return {
+                "keep_ranges": normalize_cut_ranges(ranges, duration),
+                "speed": clamp_speed_factor(reply.get("speed", DEFAULT_SPEED_FACTOR)),
+                "reverse": bool(reply.get("reverse")),
+            }
+        except Exception as exc:
+            error(f"Audio transform editor returned invalid data: {exc}")
+            return None
+    if reply.get("status") == "error":
+        answers["_last_gui_error"] = "audio_transform"
+        error("Audio transform GUI failed. Set FFMWIZ_DEBUG=1 before running FFmWiz to print the full traceback.")
     return None
 
 
@@ -8460,7 +8544,60 @@ def step_use_gpu(answers: dict[str, Any]) -> None:
     )
 
 
+def step_unified_video_editor_for_encode(answers: dict[str, Any]) -> None:
+    if answers.get("_disable_graphical_editors"):
+        answers["_unified_video_editor_used"] = False
+        return
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Open unified graphical video editor?",
+                f"y/n, {graphical_hint('g=Show Unified Video Editor')}; combines crop, cuts, speed/reverse, and audio waveform preview",
+                "n",
+            )
+        )
+        if value == "0":
+            raise Back()
+        if not value:
+            value = "n"
+        lowered = value.lower()
+        if lowered in {"n", "no"}:
+            answers["_unified_video_editor_used"] = False
+            return
+        if lowered in {"y", "yes", "g", "gui", "graphical"}:
+            note("Loading Unified Graphical Video Editor...")
+            sys.stdout.flush()
+            result = open_unified_video_gui(answers)
+            if result is None:
+                note("Unified graphical video editor was canceled. Returning to the unified editor question.")
+                continue
+            top, left, right, bottom = result["margins"]
+            if not set_crop_margins_if_valid(answers, top, left, right, bottom):
+                continue
+            answers["_unified_video_editor_used"] = True
+            answers["_unified_cut_keep_ranges"] = result.get("keep_ranges") or []
+            answers["_unified_video_speed"] = result["speed"]
+            answers["_unified_reverse_video"] = result["reverse"]
+            answers["_unified_include_audio"] = result["include_audio"]
+            print(paint("Unified graphical edits captured.", Color.LIME))
+            return
+        error("Enter y, n, or g.")
+
+
 def step_crop_enabled(answers: dict[str, Any]) -> None:
+    if answers.get("_unified_video_editor_used"):
+        margins = (
+            int(answers.get("crop_top", 0) or 0),
+            int(answers.get("crop_left", 0) or 0),
+            int(answers.get("crop_right", 0) or 0),
+            int(answers.get("crop_bottom", 0) or 0),
+        )
+        answers["crop_enabled"] = any(margins)
+        answers["crop_values_inline"] = bool(any(margins))
+        if any(margins):
+            print(paint(f"Applied unified crop: {format_crop_margins(answers)}", Color.LIME))
+        return
     while True:
         # Highlight the graphical crop editor shortcut so it stands out from
         # the rest of the hint text. The outer paint() wraps the whole hint
@@ -9572,6 +9709,53 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
     return cmd
 
 
+def build_audio_transform_command(answers: dict[str, Any]) -> list[str]:
+    ffmpeg = answers["ffmpeg"]
+    input_path: Path = answers["input_path"]
+    answers["output_ext"] = resolve_audio_tool_output_ext(answers)
+    suffix_parts: list[str] = []
+    if answers.get("audio_cut_keep_ranges"):
+        suffix_parts.append("AudioCut")
+    if answers.get("audio_speed_enabled"):
+        suffix_parts.append(
+            speed_suffix(
+                float(answers.get("audio_speed_factor", DEFAULT_SPEED_FACTOR)),
+                bool(answers.get("reverse_audio")),
+            ).lstrip("_")
+        )
+    answers["output_collision_suffix"] = "_" + "_".join(suffix_parts or ["AudioTransform"])
+    output_path = build_output_path(answers)
+    answers["output_path"] = output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    audio_index = int(answers.get("audio_index", 0))
+    filter_complex, labels = build_audio_transform_filter_complex(answers, [audio_index])
+    if not labels:
+        raise ValueError("No audio stream was selected for transformation.")
+    cmd: list[str] = [
+        ffmpeg,
+        "-y" if OVERWRITE_OUTPUT else "-n",
+        "-i",
+        str(input_path),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        f"[{labels[0]}]",
+        "-vn",
+        "-sn",
+        "-dn",
+    ]
+    cmd.extend(audio_tool_encode_options(answers["output_ext"]))
+    cmd.append(str(output_path))
+    log_info(
+        f"Audio transform command built: audio_index={audio_index}; "
+        f"cuts={answers.get('audio_cut_keep_ranges')}; "
+        f"speed={answers.get('audio_speed_factor')}; reverse={answers.get('reverse_audio')}; "
+        f"output={output_path}"
+    )
+    return cmd
+
+
 def step_start_now(answers: dict[str, Any]) -> None:
     if output_is_audio_only(answers) and not answers.get("audio_streams"):
         fail("Audio-only output was selected, but the input file has no audio stream.")
@@ -9954,6 +10138,16 @@ def step_video_speed_reverse_options(answers: dict[str, Any]) -> None:
 def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
     for key in ("video_speed_enabled", "video_speed_factor", "reverse_video", "audio_speed_from_video"):
         answers.pop(key, None)
+    if answers.get("_unified_video_editor_used"):
+        speed = clamp_speed_factor(answers.get("_unified_video_speed", DEFAULT_SPEED_FACTOR))
+        reverse = bool(answers.get("_unified_reverse_video"))
+        answers["video_speed_enabled"] = bool(reverse or abs(speed - 1.0) > 1e-6)
+        answers["video_speed_factor"] = speed
+        answers["reverse_video"] = reverse
+        answers["audio_speed_from_video"] = bool(answers.get("_unified_include_audio"))
+        if answers["video_speed_enabled"]:
+            print(paint(f"Applied unified speed/reverse: {speed:.2f}x, reverse={'yes' if reverse else 'no'}", Color.LIME))
+        return
     allow_gui = not answers.get("_disable_graphical_editors")
     while True:
         hint = (
@@ -10176,6 +10370,33 @@ def step_audio_cut_editor(answers: dict[str, Any]) -> None:
         return
 
 
+def step_audio_transform_editor(answers: dict[str, Any]) -> None:
+    audio_index = int(answers.get("audio_index", 0))
+    while True:
+        result = open_audio_transform_gui(answers, audio_index)
+        if result is None:
+            note("Graphical audio transform editor was canceled.")
+            try_again = ask_yes_no("Open it again? (y/n) [y]: ", True)
+            if not try_again:
+                answers["_audio_transform_noop"] = True
+                return
+            continue
+        keep_ranges = list(result.get("keep_ranges") or [])
+        speed = clamp_speed_factor(result.get("speed", DEFAULT_SPEED_FACTOR))
+        reverse = bool(result.get("reverse"))
+        changed = bool(keep_ranges) or reverse or abs(speed - 1.0) > 1e-6
+        if not changed:
+            note("No audio transform was selected.")
+            answers["_audio_transform_noop"] = True
+            return
+        answers["audio_cut_keep_ranges"] = keep_ranges
+        answers["audio_speed_enabled"] = bool(reverse or abs(speed - 1.0) > 1e-6)
+        answers["audio_speed_factor"] = speed
+        answers["reverse_audio"] = reverse
+        answers["_audio_transform_noop"] = False
+        return
+
+
 def step_audio_cut_for_encode(answers: dict[str, Any]) -> None:
     answers.pop("audio_cut_keep_ranges", None)
     allow_gui = not answers.get("_disable_graphical_editors")
@@ -10230,6 +10451,8 @@ def print_transform_summary(answers: dict[str, Any], cmd: list[str], title: str)
     print("  " + field_text("output", answers["output_path"], Color.LIME))
     if "speed_factor" in answers:
         print("  " + field_text("speed", f"{float(answers['speed_factor']) * 100:.0f}%", Color.MAGENTA))
+    if "audio_speed_factor" in answers:
+        print("  " + field_text("audio speed", f"{float(answers['audio_speed_factor']) * 100:.0f}%", Color.MAGENTA))
     if "reverse_video" in answers:
         print("  " + field_text("reverse video", "yes" if answers.get("reverse_video") else "no", Color.ORANGE))
         print("  " + field_text("audio", "all tracks synced" if answers.get("include_audio") else "none", Color.BLUE))
@@ -10244,6 +10467,9 @@ def print_transform_summary(answers: dict[str, Any], cmd: list[str], title: str)
     if "audio_keep_ranges" in answers:
         print("  " + field_text("audio track", answers.get("audio_index", 0), Color.BLUE))
         print(paint(format_audio_ranges_for_summary(answers["audio_keep_ranges"], "audio keep ranges"), Color.LIME))
+    if "audio_cut_keep_ranges" in answers:
+        print("  " + field_text("audio track", answers.get("audio_index", 0), Color.BLUE))
+        print(paint(format_audio_ranges_for_summary(answers["audio_cut_keep_ranges"], "audio keep ranges"), Color.LIME))
     print()
     print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
     log_info("Final PowerShell command: " + command_to_powershell(cmd))
@@ -10286,6 +10512,18 @@ def step_audio_cut_start_now(answers: dict[str, Any]) -> None:
     )
 
 
+def step_audio_transform_start_now(answers: dict[str, Any]) -> None:
+    if answers.get("_audio_transform_noop"):
+        return
+    cmd = build_audio_transform_command(answers)
+    answers["cmd"] = cmd
+    print_transform_summary(answers, cmd, "Audio Cut / Speed / Reverse")
+    answers["start_now"] = ask_yes_no(
+        question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
+        True,
+    )
+
+
 def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print()
     print(paint("FFmWiz Main menu:", Color.BOLD + Color.LIGHT_BLUE))
@@ -10298,8 +10536,7 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print(f"  {paint('7.', Color.LIGHT_BLUE)} Stream Cleanup Remux")
     print(f"  {paint('8.', Color.LIGHT_BLUE)} Hard Sub Encode")
     print(f"  {paint('9.', Color.LIGHT_BLUE)} Video Speed / Reverse")
-    print(f"  {paint('10.', Color.LIGHT_BLUE)} Audio Waveform Cut")
-    print(f"  {paint('11.', Color.LIGHT_BLUE)} Audio Speed / Reverse")
+    print(f"  {paint('10.', Color.LIGHT_BLUE)} Audio Cut / Speed / Reverse")
     print()
     # The main menu has no previous step, so '0=back' is intentionally not
     # advertised. Submenus continue to support 0=back where it makes sense.
@@ -10310,9 +10547,9 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
         )
         if not value:
             return 1
-        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"}:
+        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
             return int(value)
-        error("Enter a menu number from 1 to 11.")
+        error("Enter a menu number from 1 to 10.")
 
 
 # Kept as a thin wrapper for backwards compatibility with any external caller.
@@ -11055,6 +11292,15 @@ def step_cuts(answers: dict[str, Any]) -> None:
     answers.pop("cut_keep_ranges", None)
     fps = get_video_fps(answers)
     duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    if answers.get("_unified_video_editor_used"):
+        keep_ranges = normalize_cut_ranges(list(answers.get("_unified_cut_keep_ranges") or []), duration)
+        if keep_ranges and not (len(keep_ranges) == 1 and keep_ranges[0][0] <= 1e-6 and keep_ranges[0][1] >= duration - 1e-6):
+            answers["cut_keep_ranges"] = keep_ranges
+            print(paint(
+                format_cut_ranges_for_summary(keep_ranges, fps, "Unified cuts (keep ranges)"),
+                Color.LIME,
+            ))
+        return
     while True:
         allow_gui = not answers.get("_disable_graphical_editors")
         if allow_gui and USE_COLOR:
@@ -11202,6 +11448,7 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
         Step("output_format", lambda a: True, step_output_format),
         Step("video_codec", output_has_video, step_video_codec),
         Step("use_gpu", output_has_video, step_use_gpu),
+        Step("unified_video_editor", output_has_video, step_unified_video_editor_for_encode),
         Step("crop_enabled", output_has_video, step_crop_enabled),
         Step("crop_top", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_top),
         Step("crop_left", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_left),
@@ -12719,14 +12966,56 @@ def _run_audio_speed_reverse_mode_impl(base_answers: dict[str, Any]) -> tuple[in
     )
 
 
+def run_audio_transform_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    try:
+        return _run_audio_transform_mode_impl(base_answers)
+    except Back:
+        note("Returning to main menu.")
+        return None
+
+
+def _run_audio_transform_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    answers = dict(base_answers)
+    answers["_question_number"] = 1
+    steps = [
+        Step("input_path", lambda a: True, step_input_path),
+        Step("audio_track", lambda a: True, step_audio_track_for_tool),
+        Step("output_location", lambda a: True, step_output_location),
+        Step("audio_transform_gui", lambda a: True, step_audio_transform_editor),
+        Step("start_now", lambda a: not a.get("_audio_transform_noop"), step_audio_transform_start_now),
+    ]
+    try:
+        run_mode_steps(answers, steps)
+    except ValueError as exc:
+        error(str(exc))
+        return None
+    ensure_audio_input(answers)
+    if answers.get("_audio_transform_noop"):
+        note("Audio transform was not enabled. Returning to the first question.")
+        return None
+    if not answers.get("start_now", True):
+        note("FFmpeg was not started. The command above is ready to run manually.")
+        return None
+    print()
+    print(paint("Starting FFmpeg...", Color.GREEN))
+    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    keep_duration = total_keep_duration(answers.get("audio_cut_keep_ranges") or [])
+    if keep_duration <= 0:
+        keep_duration = duration
+    speed = max(0.001, float(answers.get("audio_speed_factor", DEFAULT_SPEED_FACTOR) or DEFAULT_SPEED_FACTOR))
+    return run_ffmpeg_with_progress(
+        answers["cmd"],
+        total_duration=(keep_duration / speed if keep_duration > 0 else None),
+        label="Audio Cut / Speed / Reverse",
+    )
+
+
 def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, float] | None:
     answers = dict(base_answers)
     answers["_question_number"] = 1
     start_mode = ask_main_menu(answers, config_path)
-    if start_mode == 11:
-        return run_audio_speed_reverse_mode(base_answers)
     if start_mode == 10:
-        return run_audio_cut_mode(base_answers)
+        return run_audio_transform_mode(base_answers)
     if start_mode == 9:
         return run_video_speed_reverse_mode(base_answers)
     if start_mode == 8:

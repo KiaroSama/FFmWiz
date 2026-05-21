@@ -5879,6 +5879,356 @@ def build_audio_cut_editor(request: dict[str, Any]):
 
 
 # =====================================================================
+# Unified experimental editor shells.
+# These live on the feature/unified-editors branch and embed the existing
+# editor panels instead of deleting the archived standalone editors.
+# =====================================================================
+
+
+def _hide_embedded_editor_actions(root_widget: Any) -> None:
+    try:
+        from PySide6 import QtWidgets  # type: ignore
+        for button in root_widget.findChildren(QtWidgets.QPushButton):
+            text = str(button.text() or "").lower()
+            if "apply" in text or "confirm" in text or "cancel" in text:
+                button.hide()
+    except Exception:
+        pass
+
+
+def _stop_embedded_editor(editor: Any) -> None:
+    for attr in ("player", "wave_proc", "_preview_proc"):
+        obj = getattr(editor, attr, None)
+        if obj is None:
+            continue
+        try:
+            obj.stop()
+        except Exception:
+            try:
+                obj.kill()
+            except Exception:
+                pass
+        try:
+            obj.waitForFinished(1000)
+        except Exception:
+            pass
+    try:
+        editor._stop_worker()
+    except Exception:
+        pass
+
+
+def build_unified_video_editor(request: dict[str, Any]):
+    QtCore, QtGui, QtWidgets, _ = _import_qt()
+    Qt = QtCore.Qt
+    QMainWindow = QtWidgets.QMainWindow
+    QWidget = QtWidgets.QWidget
+    QVBoxLayout = QtWidgets.QVBoxLayout
+    QHBoxLayout = QtWidgets.QHBoxLayout
+    QLabel = QtWidgets.QLabel
+    QPushButton = QtWidgets.QPushButton
+    QTabWidget = QtWidgets.QTabWidget
+    QFrame = QtWidgets.QFrame
+    QStyle = QtWidgets.QStyle
+
+    class UnifiedVideoEditorWindow(QMainWindow):
+        def __init__(self, req):
+            super().__init__()
+            self.request = req
+            self.duration = float(req.get("duration") or 0.0)
+            self.result = {"status": "canceled"}
+            self._icon = _icon_loader(self, self.style())
+            self._embedded_editors: list[Any] = []
+            self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_unified_waveform_")
+            self._wave_path = Path(self._wave_temp.name) / "waveform.png"
+            self._wave_proc = None
+            self.setWindowTitle("FFmWiz Unified Video Editor")
+            _apply_window_icon(self, self._icon)
+            self.setMinimumSize(1180, 760)
+            self._build_ui()
+            QtCore.QTimer.singleShot(80, self._start_waveform)
+
+        def _child_request(self, mode: str) -> dict[str, Any]:
+            child = dict(self.request)
+            child["mode"] = mode
+            return child
+
+        def _embed_editor(self, title: str, editor: Any) -> QWidget:
+            self._embedded_editors.append(editor)
+            widget = editor.takeCentralWidget()
+            if widget is None:
+                widget = QWidget()
+                layout = QVBoxLayout(widget)
+                layout.addWidget(QLabel(f"{title} could not be embedded."))
+            widget.setParent(self)
+            _hide_embedded_editor_actions(widget)
+            return widget
+
+        def _build_ui(self):
+            central = QWidget()
+            central.setObjectName("central")
+            self.setCentralWidget(central)
+            root = QVBoxLayout(central)
+            root.setContentsMargins(14, 10, 14, 10)
+            root.setSpacing(8)
+
+            header = QFrame()
+            header.setObjectName("header")
+            h = QHBoxLayout(header)
+            h.setContentsMargins(14, 10, 14, 10)
+            title = QLabel("FFmWiz Unified Video Editor")
+            title.setObjectName("title")
+            h.addWidget(title)
+            h.addSpacing(16)
+            h.addWidget(QLabel(f"Source  {Path(self.request.get('input_path', '')).name}"))
+            h.addStretch(1)
+            root.addWidget(header)
+
+            self.tabs = QTabWidget()
+            self.crop_editor = build_crop_editor(self._child_request("crop"))
+            self.cut_editor = build_cut_editor(self._child_request("cut"))
+            self.speed_editor = build_speed_editor(self._child_request("video_speed"), "video")
+            self.tabs.addTab(self._embed_editor("Crop", self.crop_editor), "Crop")
+            self.tabs.addTab(self._embed_editor("Cut", self.cut_editor), "Cut")
+            self.tabs.addTab(self._embed_editor("Speed / Reverse", self.speed_editor), "Speed / Reverse")
+            self.tabs.addTab(self._build_waveform_tab(), "Audio Waveform")
+            root.addWidget(self.tabs, 1)
+
+            footer = QHBoxLayout()
+            self.status = QLabel("Use the tabs to edit crop, cuts, speed/reverse, and inspect the audio waveform.")
+            self.status.setObjectName("dim")
+            footer.addWidget(self.status, 1)
+            btn_cancel = QPushButton("Cancel (Esc)")
+            btn_cancel.setObjectName("danger")
+            btn_cancel.clicked.connect(self.cancel)
+            footer.addWidget(btn_cancel)
+            btn_apply = QPushButton(self._icon("check", QStyle.SP_DialogOkButton), " Apply Unified Edits (Enter)")
+            btn_apply.setObjectName("primary")
+            btn_apply.clicked.connect(self.confirm)
+            footer.addWidget(btn_apply)
+            root.addLayout(footer)
+            QtGui.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.cancel)
+            QtGui.QShortcut(QtGui.QKeySequence("Return"), self, activated=self.confirm)
+            QtGui.QShortcut(QtGui.QKeySequence("Enter"), self, activated=self.confirm)
+
+        def _build_waveform_tab(self):
+            panel = QWidget()
+            layout = QVBoxLayout(panel)
+            layout.setContentsMargins(12, 12, 12, 12)
+            self.wave_label = QLabel("Loading audio waveform preview...")
+            self.wave_label.setAlignment(Qt.AlignCenter)
+            self.wave_label.setObjectName("status")
+            layout.addWidget(self.wave_label, 1)
+            return panel
+
+        def _start_waveform(self):
+            if not bool(self.request.get("has_audio")):
+                self.wave_label.setText("No audio stream is available for waveform preview.")
+                return
+            args = [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(self.request.get("input_path") or ""),
+                "-filter_complex", "[0:a:0]aformat=channel_layouts=mono,showwavespic=s=1800x320:colors=388bfd[wave]",
+                "-map", "[wave]",
+                "-frames:v", "1",
+                "-c:v", "png",
+                str(self._wave_path),
+            ]
+            self._wave_proc = QtCore.QProcess(self)
+            self._wave_proc.finished.connect(self._waveform_finished)
+            self._wave_proc.start(str(self.request.get("ffmpeg") or "ffmpeg"), args)
+
+        def _waveform_finished(self, *_args):
+            if not self._wave_path.exists():
+                self.wave_label.setText("Waveform preview could not be generated.")
+                return
+            pix = QtGui.QPixmap(str(self._wave_path))
+            if pix.isNull():
+                self.wave_label.setText("Waveform preview could not be loaded.")
+                return
+            self.wave_label.setPixmap(pix.scaled(
+                self.wave_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            ))
+
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            if hasattr(self, "wave_label") and self._wave_path.exists():
+                self._waveform_finished()
+
+        def confirm(self):
+            margins = [0, 0, 0, 0]
+            try:
+                margins = [int(v) for v in self.crop_editor.canvas.margins]
+            except Exception:
+                pass
+            keep_ranges: list[list[float]] = []
+            try:
+                cuts = self.cut_editor._cuts()
+                keep_ranges = [[float(s), float(e)] for s, e in (invert_cuts_to_keep(cuts, self.duration) if cuts else [])]
+            except Exception:
+                keep_ranges = []
+            speed = 1.0
+            reverse = False
+            include_audio = False
+            try:
+                speed = float(self.speed_editor._speed())
+                reverse = bool(self.speed_editor.reverse_box.isChecked())
+                include_audio = bool(getattr(self.speed_editor, "include_audio_box", None) and self.speed_editor.include_audio_box.isChecked())
+            except Exception:
+                pass
+            self.result = {
+                "status": "ok",
+                "margins": margins,
+                "keep_ranges": keep_ranges,
+                "speed": speed,
+                "reverse": reverse,
+                "include_audio": include_audio,
+            }
+            self.close()
+
+        def cancel(self):
+            self.result = {"status": "canceled"}
+            self.close()
+
+        def closeEvent(self, event):
+            for editor in self._embedded_editors:
+                _stop_embedded_editor(editor)
+            try:
+                if self._wave_proc is not None:
+                    if self._wave_proc.state() != QtCore.QProcess.NotRunning:
+                        self._wave_proc.kill()
+                        self._wave_proc.waitForFinished(1000)
+            except Exception:
+                pass
+            try:
+                self._wave_temp.cleanup()
+            except Exception:
+                pass
+            super().closeEvent(event)
+
+    return UnifiedVideoEditorWindow(request)
+
+
+def build_audio_transform_editor(request: dict[str, Any]):
+    QtCore, QtGui, QtWidgets, _ = _import_qt()
+    QMainWindow = QtWidgets.QMainWindow
+    QWidget = QtWidgets.QWidget
+    QVBoxLayout = QtWidgets.QVBoxLayout
+    QHBoxLayout = QtWidgets.QHBoxLayout
+    QLabel = QtWidgets.QLabel
+    QPushButton = QtWidgets.QPushButton
+    QTabWidget = QtWidgets.QTabWidget
+    QFrame = QtWidgets.QFrame
+    QStyle = QtWidgets.QStyle
+
+    class AudioTransformEditorWindow(QMainWindow):
+        def __init__(self, req):
+            super().__init__()
+            self.request = req
+            self.duration = float(req.get("duration") or 0.0)
+            self.result = {"status": "canceled"}
+            self._icon = _icon_loader(self, self.style())
+            self._embedded_editors: list[Any] = []
+            self.setWindowTitle("FFmWiz Audio Cut / Speed / Reverse")
+            _apply_window_icon(self, self._icon)
+            self.setMinimumSize(1080, 680)
+            self._build_ui()
+
+        def _child_request(self, mode: str) -> dict[str, Any]:
+            child = dict(self.request)
+            child["mode"] = mode
+            return child
+
+        def _embed_editor(self, title: str, editor: Any) -> QWidget:
+            self._embedded_editors.append(editor)
+            widget = editor.takeCentralWidget()
+            if widget is None:
+                widget = QWidget()
+                layout = QVBoxLayout(widget)
+                layout.addWidget(QLabel(f"{title} could not be embedded."))
+            widget.setParent(self)
+            _hide_embedded_editor_actions(widget)
+            return widget
+
+        def _build_ui(self):
+            central = QWidget()
+            central.setObjectName("central")
+            self.setCentralWidget(central)
+            root = QVBoxLayout(central)
+            root.setContentsMargins(14, 10, 14, 10)
+            root.setSpacing(8)
+
+            header = QFrame()
+            header.setObjectName("header")
+            h = QHBoxLayout(header)
+            h.setContentsMargins(14, 10, 14, 10)
+            title = QLabel("FFmWiz Audio Cut / Speed / Reverse")
+            title.setObjectName("title")
+            h.addWidget(title)
+            h.addStretch(1)
+            root.addWidget(header)
+
+            self.tabs = QTabWidget()
+            self.cut_editor = build_audio_cut_editor(self._child_request("audio_cut"))
+            self.speed_editor = build_speed_editor(self._child_request("audio_speed"), "audio")
+            self.tabs.addTab(self._embed_editor("Audio Cut", self.cut_editor), "Audio Cut")
+            self.tabs.addTab(self._embed_editor("Speed / Reverse", self.speed_editor), "Speed / Reverse")
+            root.addWidget(self.tabs, 1)
+
+            footer = QHBoxLayout()
+            self.status = QLabel("Edit audio cuts and speed/reverse in one place.")
+            self.status.setObjectName("dim")
+            footer.addWidget(self.status, 1)
+            btn_cancel = QPushButton("Cancel (Esc)")
+            btn_cancel.setObjectName("danger")
+            btn_cancel.clicked.connect(self.cancel)
+            footer.addWidget(btn_cancel)
+            btn_apply = QPushButton(self._icon("check", QStyle.SP_DialogOkButton), " Apply Audio Edits (Enter)")
+            btn_apply.setObjectName("primary")
+            btn_apply.clicked.connect(self.confirm)
+            footer.addWidget(btn_apply)
+            root.addLayout(footer)
+            QtGui.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.cancel)
+            QtGui.QShortcut(QtGui.QKeySequence("Return"), self, activated=self.confirm)
+            QtGui.QShortcut(QtGui.QKeySequence("Enter"), self, activated=self.confirm)
+
+        def confirm(self):
+            keep_ranges: list[list[float]] = []
+            try:
+                cuts = normalize_ranges(self.cut_editor.waveform.cut_ranges, self.duration)
+                keep_ranges = [[float(s), float(e)] for s, e in (invert_cuts_to_keep(cuts, self.duration) if cuts else [])]
+            except Exception:
+                keep_ranges = []
+            speed = 1.0
+            reverse = False
+            try:
+                speed = float(self.speed_editor._speed())
+                reverse = bool(self.speed_editor.reverse_box.isChecked())
+            except Exception:
+                pass
+            self.result = {
+                "status": "ok",
+                "keep_ranges": keep_ranges,
+                "speed": speed,
+                "reverse": reverse,
+            }
+            self.close()
+
+        def cancel(self):
+            self.result = {"status": "canceled"}
+            self.close()
+
+        def closeEvent(self, event):
+            for editor in self._embedded_editors:
+                _stop_embedded_editor(editor)
+            super().closeEvent(event)
+
+    return AudioTransformEditorWindow(request)
+
+
+# =====================================================================
 # Entry point: JSON IPC dispatcher
 # =====================================================================
 
@@ -5937,8 +6287,12 @@ def main() -> int:
             window = build_cut_editor(request)
         elif mode == "crop":
             window = build_crop_editor(request)
+        elif mode == "video_unified":
+            window = build_unified_video_editor(request)
         elif mode == "video_speed":
             window = build_speed_editor(request, "video")
+        elif mode == "audio_transform":
+            window = build_audio_transform_editor(request)
         elif mode == "audio_speed":
             window = build_speed_editor(request, "audio")
         elif mode == "audio_cut":
@@ -5961,7 +6315,10 @@ def main() -> int:
         f"{mode} GUI window built in {time.perf_counter() - gui_start:.3f}s",
         force=True,
     )
-    window.show()
+    if request.get("start_maximized"):
+        window.showMaximized()
+    else:
+        window.show()
     _apply_native_windows_icon(window)
 
     def apply_deferred_stylesheet():
