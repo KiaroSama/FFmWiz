@@ -2887,6 +2887,7 @@ def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
         "json",
         "-show_format",
         "-show_streams",
+        "-show_chapters",
         str(input_path),
     ]
     stdout_text = ""
@@ -7130,6 +7131,7 @@ def open_cut_gui(
         "duration": float(duration),
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "ffprobe": answers.get("ffprobe") or shutil.which("ffprobe") or "ffprobe",
+        "chapters": (answers.get("probe") or {}).get("chapters") or [],
         "log_path": str(log_path()) if log_path() is not None else "",
     }
     reply = _launch_qt_gui(request)
@@ -7205,6 +7207,7 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "source_h": int(source_h),
         "has_audio": bool(answers.get("audio_streams")),
         "audio_count": len(answers.get("audio_streams") or []),
+        "chapters": (answers.get("probe") or {}).get("chapters") or [],
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "log_path": str(log_path()) if log_path() is not None else "",
         "start_maximized": True,

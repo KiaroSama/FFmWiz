@@ -859,6 +859,57 @@ def invert_cut_ranges(cut_ranges, duration: float):
     return invert_cuts_to_keep(cut_ranges, duration)
 
 
+def _chapter_time_seconds(chapter: dict[str, Any], key: str) -> float | None:
+    text_key = f"{key}_time"
+    if chapter.get(text_key) is not None:
+        try:
+            return float(chapter.get(text_key))
+        except (TypeError, ValueError):
+            return None
+    raw = chapter.get(key)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    time_base = str(chapter.get("time_base") or "")
+    match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", time_base)
+    if match:
+        numerator = float(match.group(1))
+        denominator = max(1.0, float(match.group(2)))
+        return value * numerator / denominator
+    return value / 1000.0 if value > 10000 else value
+
+
+def normalize_chapters(chapters, duration: float) -> list[dict[str, Any]]:
+    duration = max(0.0, float(duration or 0.0))
+    normalized: list[dict[str, Any]] = []
+    for idx, chapter in enumerate(chapters or []):
+        if not isinstance(chapter, dict):
+            continue
+        start = _chapter_time_seconds(chapter, "start")
+        end = _chapter_time_seconds(chapter, "end")
+        if start is None:
+            continue
+        if end is None or end <= start:
+            end = duration if duration > start else start
+        start = max(0.0, min(duration, start)) if duration else max(0.0, start)
+        end = max(start, min(duration, end)) if duration else max(start, end)
+        tags = chapter.get("tags") if isinstance(chapter.get("tags"), dict) else {}
+        title = str(tags.get("title") or chapter.get("title") or f"Chapter {idx + 1}")
+        normalized.append({"start": start, "end": end, "title": title})
+    normalized.sort(key=lambda item: item["start"])
+    return normalized
+
+
+def short_gui_label(value: Any, max_chars: int = 24) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[: max(1, max_chars - 3)] + "..."
+
+
 def _format_debug_ranges(ranges) -> str:
     normalized = []
     for entry in ranges or []:
@@ -1260,6 +1311,7 @@ def build_cut_editor(request: dict[str, Any]):
         playhead: float = 0.0
         markers: list = field(default_factory=list)
         cuts: list = field(default_factory=list)
+        chapters: list = field(default_factory=list)
         selected_marker_ids: set = field(default_factory=set)
         selected_cut: int = -1
         view_start: float = 0.0
@@ -1309,6 +1361,10 @@ def build_cut_editor(request: dict[str, Any]):
 
         def set_selected_cut(self, idx):
             self.state.selected_cut = idx
+            self.update()
+
+        def set_chapters(self, chapters):
+            self.state.chapters = list(chapters or [])
             self.update()
 
         def _clamp_view(self):
@@ -1489,6 +1545,23 @@ def build_cut_editor(request: dict[str, Any]):
                         painter.setPen(QPen(QColor(PALETTE["tick_lo"]), 1))
                         painter.drawLine(QPointF(x, track_top - 3), QPointF(x, track_top))
                     t += minor_step
+
+            for chapter in self.state.chapters:
+                cs = float(chapter.get("start", 0.0))
+                if cs < start_t or cs > end_t:
+                    continue
+                x = self._time_to_x(cs)
+                painter.setPen(QPen(QColor(PALETTE["purple_hover"]), 1, Qt.DashLine))
+                painter.drawLine(QPointF(x, track_top), QPointF(x, track_bottom))
+                title = str(chapter.get("title") or "Chapter")
+                label = short_gui_label(title, 24)
+                painter.setFont(QFont("Segoe UI Semibold", 8))
+                painter.setPen(QPen(QColor(PALETTE["accent_text"]), 1))
+                painter.drawText(
+                    QRectF(max(self.PAD, min(x + 4, w - self.PAD - 150)), track_top + 4, 150, 18),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    label,
+                )
 
             for idx, (cs, ce) in enumerate(self.state.cuts):
                 if ce < start_t or cs > end_t:
@@ -1716,6 +1789,7 @@ def build_cut_editor(request: dict[str, Any]):
             if not requested_fps:
                 print("Cut Editor FPS fallback: using 25.000 fps.", file=sys.stderr)
             self.duration = float(request.get("duration") or 0.0)
+            self.chapters = normalize_chapters(request.get("chapters") or [], self.duration)
             self._log_path = Path(request["log_path"]) if request.get("log_path") else None
             self.result = {"status": "canceled", "keep_ranges": []}
 
@@ -1879,6 +1953,7 @@ def build_cut_editor(request: dict[str, Any]):
             root.addWidget(self.status_strip)
 
             self.timeline = TimelineWidget(self.fps, self.duration)
+            self.timeline.set_chapters(self.chapters)
             self.timeline.playhead_seek_requested.connect(self._on_timeline_seek)
             self.timeline.marker_selection_requested.connect(self._on_marker_selection_requested)
             self.timeline.marker_drag_started.connect(self._on_marker_drag_started)
@@ -5282,6 +5357,7 @@ def build_audio_cut_editor(request: dict[str, Any]):
             self.in_marker = 0.0
             self.out_marker = min(5.0, self.duration)
             self.cut_ranges: list[tuple[float, float]] = []
+            self.chapters: list[dict[str, Any]] = []
             self.selected_cut = -1
             self.view_start = 0.0
             self.view_span = self.duration
@@ -6198,6 +6274,10 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.selected_cut = min(self.selected_cut, len(self.cut_ranges) - 1)
             self.update()
 
+        def set_chapters(self, chapters) -> None:
+            self.chapters = list(chapters or [])
+            self.update()
+
         def _timeline_rect(self):
             return QRectF(self.PAD, 30, max(1, self.width() - self.PAD * 2), 150)
 
@@ -6278,6 +6358,22 @@ def build_unified_video_editor(request: dict[str, Any]):
                 p.drawLine(QPointF(x, r.top() + 18), QPointF(x, r.bottom() - 8))
                 p.drawText(QRectF(max(r.left(), min(x - 55, r.right() - 110)), r.top() + 2, 110, 20), Qt.AlignCenter, seconds_to_timecode(t))
                 t += step
+            for chapter in self.chapters:
+                cs = float(chapter.get("start", 0.0))
+                if cs < start or cs > end:
+                    continue
+                x = self._time_to_x(cs)
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["purple_hover"]), 1, Qt.DashLine))
+                p.drawLine(QPointF(x, r.top() + 18), QPointF(x, r.bottom() - 8))
+                title = str(chapter.get("title") or "Chapter")
+                label = short_gui_label(title, 24)
+                p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["accent_text"]), 1))
+                p.drawText(
+                    QRectF(max(r.left(), min(x + 4, r.right() - 150)), r.top() + 22, 150, 18),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    label,
+                )
             if self.wave_pix is not None:
                 source_left = int(max(0, self.view_start / self.duration) * self.wave_pix.width())
                 source_width = int(max(1, self.view_span / self.duration * self.wave_pix.width()))
@@ -6383,6 +6479,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.source_w = int(req.get("source_w") or 1920)
             self.source_h = int(req.get("source_h") or 1080)
             self.input_path = Path(req.get("input_path") or "")
+            self.chapters = normalize_chapters(req.get("chapters") or [], self.duration)
             self.result = {"status": "canceled"}
             self._icon = _icon_loader(self, self.style())
             self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_unified_waveform_")
@@ -6579,6 +6676,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             root.addWidget(self.preview, 1)
 
             self.timeline = UnifiedTimelineWidget(self.duration, self.fps)
+            self.timeline.set_chapters(self.chapters)
             self.timeline.seek_requested.connect(self.seek)
             self.timeline.cut_selected.connect(self._on_cut_selected)
             self.timeline.view_changed.connect(self._sync_timeline_controls)
@@ -6910,7 +7008,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             out_text = seconds_to_timecode(self._mark_out) if self._mark_out is not None else "--"
             summary = (
                 f"Crop {crop_w}x{crop_h}  |  Mark In {in_text}  |  Mark Out {out_text}  |  "
-                f"Cuts {len(self._cut_ranges)}  |  Speed {self._speed():g}x  |  "
+                f"Cuts {len(self._cut_ranges)}  |  Chapters {len(self.chapters)}  |  Speed {self._speed():g}x  |  "
                 f"Reverse {'yes' if self.reverse_box.isChecked() else 'no'}"
             )
             self.summary_label.setText(summary)

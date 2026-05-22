@@ -618,6 +618,32 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(answers["video_speed_factor"], 1.5)
         self.assertTrue(answers["reverse_video"])
 
+    def test_graphical_video_requests_include_chapters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            chapters = [self.chapter(10.0, 20.0, "Opening")]
+            answers["probe"] = {"chapters": chapters}
+            captured: list[dict] = []
+
+            def fake_launch(request):
+                captured.append(request)
+                if request["mode"] == "video_unified":
+                    return {
+                        "status": "ok",
+                        "margins": [0, 0, 0, 0],
+                        "keep_ranges": [],
+                        "speed": 1.0,
+                        "reverse": False,
+                        "include_audio": True,
+                    }
+                return {"status": "ok", "keep_ranges": [[0.0, 10.0]]}
+
+            with mock.patch.object(FFmWiz, "_launch_qt_gui", side_effect=fake_launch):
+                self.assertIsNotNone(FFmWiz.open_unified_video_gui(answers))
+                self.assertEqual(captured[-1]["chapters"], chapters)
+                self.assertEqual(FFmWiz.open_cut_gui(answers, fps=30.0, duration=100.0), [(0.0, 10.0)])
+                self.assertEqual(captured[-1]["chapters"], chapters)
+
     def test_atempo_filter_chain_splits_extreme_speed(self):
         self.assertEqual(FFmWiz.atempo_filter_chain(4.0), "atempo=2,atempo=2")
         self.assertEqual(FFmWiz.atempo_filter_chain(0.25), "atempo=0.5,atempo=0.5")
