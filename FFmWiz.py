@@ -9935,6 +9935,7 @@ def run_wizard(answers: dict[str, Any]) -> None:
         Step("output_format", lambda a: True, step_output_format),
         Step("video_codec", output_has_video, step_video_codec),
         Step("use_gpu", output_has_video, step_use_gpu),
+        Step("unified_video_editor", output_has_video, step_unified_video_editor_for_encode),
         Step("crop_enabled", output_has_video, step_crop_enabled),
         Step("crop_top", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_top),
         Step("crop_left", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_left),
