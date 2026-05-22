@@ -3318,11 +3318,13 @@ def format_bytes(value: int | None) -> str:
     if value is None:
         return "unknown"
     size = float(value)
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024 or unit == "TB":
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-        size /= 1024
-    return f"{size:.1f} TB"
+    if size < 1024:
+        return f"{int(size)} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024 * 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024 * 1024):.2f} TB"
 
 
 def format_duration(seconds: float | None) -> str:

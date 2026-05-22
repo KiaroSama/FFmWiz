@@ -64,6 +64,12 @@ class CommandGenerationTests(unittest.TestCase):
         for needle in needles:
             self.assertNotIn(needle, text)
 
+    def test_format_bytes_keeps_media_sizes_in_mb(self):
+        self.assertEqual(FFmWiz.format_bytes(500), "500 B")
+        self.assertEqual(FFmWiz.format_bytes(1536), "1.5 KB")
+        self.assertEqual(FFmWiz.format_bytes(1_073_741_824), "1024.0 MB")
+        self.assertEqual(FFmWiz.format_bytes(1_118_000_000), "1066.2 MB")
+
     def chapter(self, start: float, end: float, title: str) -> dict:
         return {
             "time_base": "1/1000",
