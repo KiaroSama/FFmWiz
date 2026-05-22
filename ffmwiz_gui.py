@@ -298,6 +298,8 @@ QLabel#title {{
 QLabel#headerInfo {{ color: {PALETTE['text_mute']}; font-size: 11px; }}
 QLabel#dim       {{ color: {PALETTE['text_mute']}; font-size: 11px; }}
 QLabel#controlLabel {{ color: {PALETTE['text']}; font-size: 12px; font-weight: 700; }}
+QLabel#timelineControlLabel {{ color: {PALETTE['text']}; font-size: 12px; font-weight: 700; }}
+QLabel#sectionLabel {{ color: {PALETTE['accent_text']}; font-size: 12px; font-weight: 700; }}
 QLabel#tip       {{ color: {PALETTE['text_dim']}; font-size: 11px; font-style: normal; padding: 5px 8px; background-color: {PALETTE['panel_alt']}; border: 1px solid {PALETTE['border_soft']}; border-radius: 6px; }}
 QLabel#status    {{ color: {PALETTE['text']}; font-size: 12px; }}
 
@@ -6473,35 +6475,70 @@ def build_unified_video_editor(request: dict[str, Any]):
             h.addWidget(self.btn_redo)
             root.addWidget(header)
 
-            controls = QHBoxLayout()
-            controls.setSpacing(8)
+            toolbar = QHBoxLayout()
+            toolbar.setSpacing(8)
+
+            playback_panel, playback = self._panel("Playback")
             self.btn_play = QPushButton(self._icon("play", QStyle.SP_MediaPlay), " Play (Space)")
             self.btn_play.setObjectName("primary")
             self.btn_play.clicked.connect(self.toggle_playback)
-            controls.addWidget(self.btn_play)
-            controls.addWidget(self._btn("Home", lambda: self.seek(0.0)))
-            controls.addWidget(self._btn("-5s", lambda: self.seek(self.current_time() - 5.0)))
-            controls.addWidget(self._btn("+5s", lambda: self.seek(self.current_time() + 5.0)))
-            controls.addWidget(self._btn("End", lambda: self.seek(self.duration)))
-            controls.addSpacing(14)
-            controls.addWidget(self._btn("Mark In (I)", self.mark_in))
-            controls.addWidget(self._btn("Mark Out (O)", self.mark_out))
-            add_cut = self._btn("Add Cut(s) (A)", self.add_cut)
-            add_cut.setObjectName("success")
-            controls.addWidget(add_cut)
-            self.btn_delete_cut = self._btn("Delete Selected Cut (Del)", self.delete_selected_cut)
-            self.btn_delete_cut.setObjectName("dangerAlt")
-            controls.addWidget(self.btn_delete_cut)
-            controls.addWidget(self._btn("Invert Cuts (Ctrl+Shift+I)", self.invert_cuts))
-            controls.addSpacing(14)
-            controls.addWidget(self._btn("Reset Crop (Ctrl+R)", self.reset_crop))
-            controls.addWidget(self._btn("Reset View (Ctrl+0)", self.reset_view))
-            controls.addStretch(1)
-            root.addLayout(controls)
+            playback.addWidget(self.btn_play)
+            playback.addWidget(self._btn("Home", lambda: self.seek(0.0)))
+            playback.addWidget(self._btn("-5s", lambda: self.seek(self.current_time() - 5.0)))
+            playback.addWidget(self._btn("+5s", lambda: self.seek(self.current_time() + 5.0)))
+            playback.addWidget(self._btn("End", lambda: self.seek(self.duration)))
+            self.btn_mute = QPushButton(self._icon("volume_meter_3", QStyle.SP_MediaVolume), " Mute (M)")
+            self.btn_mute.setMinimumWidth(104)
+            self.btn_mute.clicked.connect(self.toggle_mute)
+            playback.addWidget(self.btn_mute)
+            self.volume_slider = QSlider(Qt.Horizontal)
+            self.volume_slider.setRange(0, 100)
+            self.volume_slider.setValue(60)
+            self.volume_slider.setFixedWidth(120)
+            self.volume_slider.valueChanged.connect(self._on_volume_changed)
+            playback.addWidget(self.volume_slider)
+            self.volume_label = QLabel("60%")
+            self.volume_label.setObjectName("dim")
+            self.volume_label.setMinimumWidth(36)
+            playback.addWidget(self.volume_label)
+            toolbar.addWidget(playback_panel, 3)
 
-            speed_row = QHBoxLayout()
+            cut_panel, cut = self._panel("Markers / Cuts")
+            self.btn_mark_in = self._btn("Mark In (I)", self.mark_in)
+            self.btn_mark_in.setObjectName("markIn")
+            cut.addWidget(self.btn_mark_in)
+            self.btn_mark_out = self._btn("Mark Out (O)", self.mark_out)
+            self.btn_mark_out.setObjectName("markOut")
+            cut.addWidget(self.btn_mark_out)
+            add_cut = self._btn("Add Cut(s) (A)", self.add_cut)
+            add_cut.setObjectName("green")
+            cut.addWidget(add_cut)
+            self.btn_invert = self._btn("Invert Cuts (Ctrl+Shift+I)", self.invert_cuts)
+            self.btn_invert.setObjectName("purple")
+            cut.addWidget(self.btn_invert)
+            self.btn_delete_cut = self._btn("Delete Selected Cut (Del)", self.delete_selected_cut)
+            self.btn_delete_cut.setObjectName("dangerCut")
+            cut.addWidget(self.btn_delete_cut)
+            self.btn_delete_all = self._btn("Delete All Cuts", self.delete_all_cuts)
+            self.btn_delete_all.setObjectName("danger")
+            cut.addWidget(self.btn_delete_all)
+            toolbar.addWidget(cut_panel, 4)
+
+            view_panel, view = self._panel("Crop / View")
+            view.addWidget(self._btn("Reset Crop (Ctrl+R)", self.reset_crop))
+            view.addWidget(self._btn("Reset View (Ctrl+0)", self.reset_view))
+            toolbar.addWidget(view_panel, 2)
+            root.addLayout(toolbar)
+
+            speed_frame = QFrame()
+            speed_frame.setObjectName("panel")
+            speed_row = QHBoxLayout(speed_frame)
+            speed_row.setContentsMargins(10, 8, 10, 8)
             speed_row.setSpacing(8)
-            speed_row.addWidget(QLabel("Speed"))
+            speed_title = QLabel("Speed / Reverse")
+            speed_title.setObjectName("sectionLabel")
+            speed_row.addWidget(speed_title)
+            speed_row.addWidget(QLabel("Percent"))
             self.speed_combo = QComboBox()
             self.speed_combo.setEditable(True)
             self.speed_combo.addItems(["25%", "50%", "75%", "100%", "125%", "150%", "175%", "200%", "250%", "300%"])
@@ -6526,12 +6563,15 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.include_audio_box.stateChanged.connect(lambda _v: self._commit_history())
             speed_row.addWidget(self.include_audio_box)
             speed_row.addStretch(1)
+            self.summary_label = QLabel("")
+            self.summary_label.setObjectName("status")
+            speed_row.addWidget(self.summary_label, 1)
             self.time_label = QLabel("")
             self.time_label.setObjectName("dim")
             self.time_label.setMinimumWidth(210)
             self.time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             speed_row.addWidget(self.time_label)
-            root.addLayout(speed_row)
+            root.addWidget(speed_frame)
 
             self.preview = UnifiedPreviewCanvas(self.source_w, self.source_h, self.duration)
             self.preview.margins_changed.connect(self._on_crop_changed)
@@ -6544,7 +6584,10 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.timeline.view_changed.connect(self._sync_timeline_controls)
             root.addWidget(self.timeline)
 
-            nav_row = QHBoxLayout()
+            nav_frame = QFrame()
+            nav_frame.setObjectName("panel")
+            nav_row = QHBoxLayout(nav_frame)
+            nav_row.setContentsMargins(10, 8, 10, 8)
             nav_row.setSpacing(8)
             view_label = QLabel("Timeline view")
             view_label.setObjectName("timelineControlLabel")
@@ -6563,7 +6606,12 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.zoom_slider.setMinimumWidth(420)
             self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
             nav_row.addWidget(self.zoom_slider, 1)
-            root.addLayout(nav_row)
+            root.addWidget(nav_frame)
+
+            self.cut_list_label = QLabel("")
+            self.cut_list_label.setObjectName("tip")
+            self.cut_list_label.setWordWrap(False)
+            root.addWidget(self.cut_list_label)
 
             footer = QHBoxLayout()
             self.status = QLabel("Unified timeline: video preview, crop overlay, cut ranges, audio waveform, speed, and reverse are edited together.")
@@ -6588,6 +6636,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             QtGui.QShortcut(QtGui.QKeySequence("Delete"), self, activated=self.delete_selected_cut)
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self, activated=self._undo)
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self, activated=self._redo)
+            QtGui.QShortcut(QtGui.QKeySequence("M"), self, activated=self.toggle_mute)
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+R"), self, activated=self.reset_crop)
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+0"), self, activated=self.reset_view)
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+I"), self, activated=self.invert_cuts)
@@ -6597,10 +6646,21 @@ def build_unified_video_editor(request: dict[str, Any]):
             b.clicked.connect(slot)
             return b
 
+        def _panel(self, title: str):
+            frame = QFrame()
+            frame.setObjectName("panel")
+            layout = QHBoxLayout(frame)
+            layout.setContentsMargins(10, 8, 10, 8)
+            layout.setSpacing(8)
+            label = QLabel(title)
+            label.setObjectName("sectionLabel")
+            layout.addWidget(label)
+            return frame, layout
+
         def _setup_player(self):
             self.player = QtMultimedia.QMediaPlayer(self)
             self.audio = QtMultimedia.QAudioOutput(self)
-            self.audio.setVolume(0.60)
+            self.audio.setVolume(self.volume_slider.value() / 100.0)
             self.player.setAudioOutput(self.audio)
             self.video_sink = QtMultimedia.QVideoSink(self)
             self.player.setVideoSink(self.video_sink)
@@ -6609,6 +6669,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.player.playbackStateChanged.connect(self._on_playback_state_changed)
             self.player.setSource(QtCore.QUrl.fromLocalFile(str(self.input_path)))
             self.player.pause()
+            self._update_volume_icon()
 
         def _on_video_frame(self, frame):
             try:
@@ -6643,6 +6704,38 @@ def build_unified_video_editor(request: dict[str, Any]):
             else:
                 self.btn_play.setText(" Play (Space)")
                 self.btn_play.setIcon(self._icon("play", QStyle.SP_MediaPlay))
+
+        def toggle_mute(self):
+            if not hasattr(self, "audio"):
+                return
+            self.audio.setMuted(not self.audio.isMuted())
+            self._update_volume_icon()
+
+        def _on_volume_changed(self, value):
+            if hasattr(self, "audio"):
+                self.audio.setVolume(max(0, min(100, value)) / 100.0)
+                if value > 0 and self.audio.isMuted():
+                    self.audio.setMuted(False)
+            self.volume_label.setText(f"{int(value)}%")
+            self._update_volume_icon()
+
+        def _update_volume_icon(self):
+            if not hasattr(self, "btn_mute"):
+                return
+            muted = bool(hasattr(self, "audio") and self.audio.isMuted())
+            value = int(self.volume_slider.value()) if hasattr(self, "volume_slider") else 60
+            if muted or value <= 0:
+                icon = "volume_meter_muted"
+            elif value <= 25:
+                icon = "volume_meter_1"
+            elif value <= 50:
+                icon = "volume_meter_2"
+            elif value <= 75:
+                icon = "volume_meter_3"
+            else:
+                icon = "volume_meter_4"
+            self.btn_mute.setIcon(self._icon(icon, QStyle.SP_MediaVolume))
+            self.btn_mute.setText(" Mute (M)" if not muted and value > 0 else " Unmute (M)")
 
         def _on_position_changed(self, ms):
             seconds = max(0.0, min(self.duration, ms / 1000.0))
@@ -6738,6 +6831,16 @@ def build_unified_video_editor(request: dict[str, Any]):
                 self._commit_history()
                 self._refresh_all()
 
+        def delete_all_cuts(self):
+            if not self._cut_ranges:
+                return
+            self._cut_ranges = []
+            self.timeline.selected_cut = -1
+            self._mark_in = None
+            self._mark_out = None
+            self._commit_history()
+            self._refresh_all()
+
         def invert_cuts(self):
             if not self._cut_ranges:
                 self.status.setText("No cut ranges exist to invert.")
@@ -6796,14 +6899,31 @@ def build_unified_video_editor(request: dict[str, Any]):
             self._cut_ranges = normalize_ranges(self._cut_ranges, self.duration)
             self.timeline.set_cut_ranges(self._cut_ranges)
             self.timeline.selected_cut = min(self.timeline.selected_cut, len(self._cut_ranges) - 1)
+            has_cuts = bool(self._cut_ranges)
             self.btn_delete_cut.setEnabled(0 <= self.timeline.selected_cut < len(self._cut_ranges))
+            self.btn_delete_all.setEnabled(has_cuts)
+            self.btn_invert.setEnabled(has_cuts)
             top, left, right, bottom = self.preview.margins
             crop_w = max(1, self.source_w - left - right)
             crop_h = max(1, self.source_h - top - bottom)
-            self.status.setText(
-                f"Crop {crop_w}x{crop_h}  |  Cuts {len(self._cut_ranges)}  |  "
-                f"Speed {self._speed():g}x  |  Reverse {'yes' if self.reverse_box.isChecked() else 'no'}"
+            in_text = seconds_to_timecode(self._mark_in) if self._mark_in is not None else "--"
+            out_text = seconds_to_timecode(self._mark_out) if self._mark_out is not None else "--"
+            summary = (
+                f"Crop {crop_w}x{crop_h}  |  Mark In {in_text}  |  Mark Out {out_text}  |  "
+                f"Cuts {len(self._cut_ranges)}  |  Speed {self._speed():g}x  |  "
+                f"Reverse {'yes' if self.reverse_box.isChecked() else 'no'}"
             )
+            self.summary_label.setText(summary)
+            self.status.setText(summary)
+            if self._cut_ranges:
+                shown = "   ".join(
+                    f"#{idx + 1} {seconds_to_timecode(s)}->{seconds_to_timecode(e)}"
+                    for idx, (s, e) in enumerate(self._cut_ranges[:5])
+                )
+                more = f"   +{len(self._cut_ranges) - 5} more" if len(self._cut_ranges) > 5 else ""
+                self.cut_list_label.setText("Cut ranges: " + shown + more)
+            else:
+                self.cut_list_label.setText("Cut ranges: none. Mark In/Out and press Add Cut(s), or drag the timeline CTI while watching the waveform.")
             self._update_undo_redo()
             self._sync_timeline_controls()
 
