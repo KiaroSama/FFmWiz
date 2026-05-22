@@ -3075,6 +3075,79 @@ def probe_packet_sizes(ffprobe: str, input_path: Path) -> dict[int, int]:
     return sizes
 
 
+VOLUMEDETECT_RE = re.compile(r"\b(mean_volume|max_volume):\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*dB")
+
+
+def parse_volumedetect_output(text: str) -> dict[str, str]:
+    stats: dict[str, str] = {}
+    for key, value in VOLUMEDETECT_RE.findall(text or ""):
+        stats[key] = f"{value} dB"
+    return stats
+
+
+def probe_audio_volume_stats(ffmpeg: str, input_path: Path, audio_index: int) -> dict[str, str]:
+    args = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(input_path),
+        "-map",
+        f"0:a:{int(audio_index)}",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    started_at = time.perf_counter()
+    try:
+        result = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        stdout_text, stdout_encoding = decode_subprocess_bytes(result.stdout, "utf-8")
+        stderr_text, stderr_encoding = decode_subprocess_bytes(result.stderr, "utf-8")
+        combined = stderr_text + "\n" + stdout_text
+        stats = parse_volumedetect_output(combined)
+        log_debug(
+            "Audio volume scan: "
+            f"input={input_path}; audio_index={audio_index}; returncode={result.returncode}; "
+            f"elapsed={time.perf_counter() - started_at:.3f}s; "
+            f"decoded=stdout:{stdout_encoding},stderr:{stderr_encoding}; stats={stats or '{}'}"
+        )
+        if result.returncode != 0 and not stats:
+            log_debug("Audio volume scan stderr:\n" + stderr_text.strip())
+        return stats
+    except Exception:
+        log_exception(f"Audio volume scan failed: input={input_path}; audio_index={audio_index}")
+        return {}
+
+
+def get_audio_volume_stats(answers: dict[str, Any]) -> dict[int, dict[str, str]]:
+    if "audio_volume_stats" in answers:
+        return answers["audio_volume_stats"]
+    ffmpeg = answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg"
+    input_path = answers.get("input_path")
+    streams = list(answers.get("audio_streams") or [])
+    stats: dict[int, dict[str, str]] = {}
+    if input_path and streams:
+        for idx, _stream in enumerate(streams):
+            stats[idx] = probe_audio_volume_stats(str(ffmpeg), Path(input_path), idx)
+    answers["audio_volume_stats"] = stats
+    return stats
+
+
+def audio_volume_field(stats: dict[int, dict[str, str]], index: int, key: str) -> str:
+    value = (stats.get(index) or {}).get(key)
+    return value or "unknown"
+
+
 def stream_has_fast_size_metadata(stream: dict[str, Any], fmt: dict[str, Any] | None) -> bool:
     _ = fmt
     if tag_int(stream, ["NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG"]):
@@ -3737,6 +3810,7 @@ def print_audio_duplicate_report(answers: dict[str, Any], report: dict[str, Any]
     fmt = answers.get("format", {})
     for idx, stream in enumerate(answers["audio_streams"]):
         size, _ = stream_size_bytes(stream, fmt, packet_sizes)
+        volume_stats = get_audio_volume_stats(answers)
         labels = duplicate_labels(idx, report)
         suffix = f" | {' | '.join(labels)}" if labels else ""
         print(
@@ -3747,6 +3821,8 @@ def print_audio_duplicate_report(answers: dict[str, Any], report: dict[str, Any]
             f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
             f"{field_text('layout', stream_metadata_value(stream, 'channel_layout'), Color.WHITE)} | "
             f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)} | "
+            f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
+            f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
             f"{field_text('duration', format_duration(stream_duration_seconds(stream, fmt)), Color.MAGENTA)} | "
             f"{field_text('lang', display_language(stream_tag_value(stream, 'language')), Color.WHITE)} | "
             f"{field_text('title', stream_tag_value(stream, 'title'), Color.WHITE)} | "
@@ -3855,6 +3931,7 @@ def print_source_info(answers: dict[str, Any]) -> None:
 
     if audio_streams:
         print(paint("\nAudio streams", Color.BOLD + Color.BLUE))
+        volume_stats = get_audio_volume_stats(answers)
         report = detect_duplicate_audio(answers) if answers.get("detect_duplicate_audio", True) else None
         for idx, stream in enumerate(audio_streams):
             rate = stream_bitrate_kbps(stream, fmt, packet_sizes)
@@ -3868,6 +3945,8 @@ def print_source_info(answers: dict[str, Any]) -> None:
                 f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
                 f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
+                f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
+                f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
                 f"{field_text('track size', format_bytes(size) + estimate_label, Color.LIME)}{label_text}"
             )
         if report:
@@ -4197,6 +4276,7 @@ def build_media_info_report_lines(
     payload: dict[str, Any],
     text_overview: str,
     info_path: Path,
+    audio_volume_stats: dict[int, dict[str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     lines: list[tuple[str, str]] = []
     fmt = payload.get("format") or {}
@@ -4227,6 +4307,7 @@ def build_media_info_report_lines(
         type_counts[stream_type] = type_counts.get(stream_type, 0) + 1
     if type_counts:
         append_info_kv(lines, "Stream types", ", ".join(f"{k}={v}" for k, v in sorted(type_counts.items())), 1, Color.LIME)
+    audio_relative_index = 0
     for relative_index, stream in enumerate(streams):
         stream_type = str(stream.get("codec_type", "unknown"))
         color = {
@@ -4239,6 +4320,11 @@ def build_media_info_report_lines(
         append_info_line(lines)
         append_info_line(lines, "  " + info_stream_header(stream, relative_index), Color.BOLD + color)
         append_info_line(lines, "  " + "-" * 46, Color.GRAY)
+        if stream_type == "audio":
+            stats = audio_volume_stats or {}
+            append_info_kv(lines, "max_volume", audio_volume_field(stats, audio_relative_index, "max_volume"), 2, Color.ORANGE)
+            append_info_kv(lines, "mean_volume", audio_volume_field(stats, audio_relative_index, "mean_volume"), 2, Color.AQUA)
+            audio_relative_index += 1
         append_nested_info(lines, stream, 2)
 
     append_info_section(lines, "Chapters", Color.ORANGE)
@@ -4301,12 +4387,21 @@ def write_media_info_report(
     log_debug(f"Media Info report size: {len(content)} characters for {input_path}")
 
 
-def create_media_info_report(ffprobe: str, input_path: Path) -> tuple[list[tuple[str, str]], Path]:
+def create_media_info_report(ffprobe: str, input_path: Path, ffmpeg: str | None = None) -> tuple[list[tuple[str, str]], Path]:
     started_at = time.perf_counter()
     info_path = media_info_report_path(input_path)
     payload = ffprobe_full_json(ffprobe, input_path)
     text_overview = ffprobe_text_overview(ffprobe, input_path)
-    lines = build_media_info_report_lines(input_path, payload, text_overview, info_path)
+    audio_streams = [stream for stream in (payload.get("streams") or []) if stream.get("codec_type") == "audio"]
+    audio_volume_stats: dict[int, dict[str, str]] = {}
+    if audio_streams and ffmpeg:
+        volume_answers = {
+            "ffmpeg": ffmpeg,
+            "input_path": input_path,
+            "audio_streams": audio_streams,
+        }
+        audio_volume_stats = get_audio_volume_stats(volume_answers)
+    lines = build_media_info_report_lines(input_path, payload, text_overview, info_path, audio_volume_stats)
     write_media_info_report(input_path, lines, payload, text_overview, info_path)
     log_info(
         f"Media Info report completed for {input_path} -> {info_path} "
@@ -4348,7 +4443,7 @@ def run_media_info_mode(base_answers: dict[str, Any]) -> None:
         input_path = ask_media_info_input_path(answers)
         log_info(f"Media Info mode input: {input_path}")
         if input_path.is_file():
-            lines, info_path = create_media_info_report(answers["ffprobe"], input_path)
+            lines, info_path = create_media_info_report(answers["ffprobe"], input_path, answers.get("ffmpeg"))
             print()
             print(render_info_report(lines, color=True))
             print()
@@ -4370,7 +4465,7 @@ def run_media_info_mode(base_answers: dict[str, Any]) -> None:
         skipped = 0
         for index, path in enumerate(candidates, start=1):
             try:
-                _, info_path = create_media_info_report(answers["ffprobe"], path)
+                _, info_path = create_media_info_report(answers["ffprobe"], path, answers.get("ffmpeg"))
             except FFprobeError:
                 skipped += 1
                 log_debug(f"Media Info skipped unsupported/unreadable file: {path}")
@@ -4417,6 +4512,8 @@ class MuxStreamInfo:
     size_estimated: bool = False
     bit_depth: int | None = None
     color_range: str = ""
+    max_volume: str = ""
+    mean_volume: str = ""
 
     @classmethod
     def from_ffprobe(
@@ -4424,6 +4521,7 @@ class MuxStreamInfo:
         raw: dict[str, Any],
         fmt: dict[str, Any] | None = None,
         packet_sizes: dict[int, int] | None = None,
+        volume_stats: dict[str, str] | None = None,
     ) -> "MuxStreamInfo":
         tags = raw.get("tags") or {}
         disposition = raw.get("disposition") or {}
@@ -4447,6 +4545,8 @@ class MuxStreamInfo:
             size_estimated=estimated,
             bit_depth=video_bit_depth(raw),
             color_range=str(raw.get("color_range") or "unknown"),
+            max_volume=(volume_stats or {}).get("max_volume", ""),
+            mean_volume=(volume_stats or {}).get("mean_volume", ""),
         )
 
 
@@ -4500,7 +4600,7 @@ def mux_find_video_files(input_path: Path) -> list[Path]:
     )
 
 
-def mux_probe_file(ffprobe: str, path: Path) -> MuxMediaFile | None:
+def mux_probe_file(ffprobe: str, path: Path, ffmpeg: str | None = None) -> MuxMediaFile | None:
     try:
         payload = ffprobe_json(ffprobe, path)
     except FFprobeError:
@@ -4525,7 +4625,22 @@ def mux_probe_file(ffprobe: str, path: Path) -> MuxMediaFile | None:
             f"Stream Cleanup packet-size probe: {path}; "
             f"streams={len(packet_sizes)}; elapsed={time.perf_counter() - started_at:.3f}s"
         )
-    streams = [MuxStreamInfo.from_ffprobe(stream, fmt, packet_sizes) for stream in raw_streams]
+    audio_streams = [stream for stream in raw_streams if stream.get("codec_type") == "audio"]
+    audio_volume_stats: dict[int, dict[str, str]] = {}
+    if audio_streams and ffmpeg:
+        audio_volume_stats = get_audio_volume_stats({
+            "ffmpeg": ffmpeg,
+            "input_path": path,
+            "audio_streams": audio_streams,
+        })
+    audio_relative_index = 0
+    streams: list[MuxStreamInfo] = []
+    for stream in raw_streams:
+        stats = None
+        if stream.get("codec_type") == "audio":
+            stats = audio_volume_stats.get(audio_relative_index)
+            audio_relative_index += 1
+        streams.append(MuxStreamInfo.from_ffprobe(stream, fmt, packet_sizes, stats))
     media = MuxMediaFile(path=path, streams=streams, format=fmt)
     log_debug(
         f"Stream Cleanup Remux probe OK: {path}; "
@@ -4535,14 +4650,14 @@ def mux_probe_file(ffprobe: str, path: Path) -> MuxMediaFile | None:
     return media
 
 
-def mux_scan_files(ffprobe: str, files: list[Path]) -> list[MuxMediaFile]:
+def mux_scan_files(ffprobe: str, files: list[Path], ffmpeg: str | None = None) -> list[MuxMediaFile]:
     media_files: list[MuxMediaFile] = []
     for index, path in enumerate(files, start=1):
         print(
             f"{paint('[' + str(index) + '/' + str(len(files)) + ']', Color.LIGHT_BLUE)} "
             f"{paint('Scanning:', Color.CYAN)} {paint(path.name, Color.WHITE)}"
         )
-        media = mux_probe_file(ffprobe, path)
+        media = mux_probe_file(ffprobe, path, ffmpeg)
         if media is not None:
             media_files.append(media)
         else:
@@ -4586,6 +4701,8 @@ def mux_format_stream(stream: MuxStreamInfo, fmt: dict[str, Any] | None = None) 
         duration = stream.duration if stream.duration is not None else stream_duration_seconds({}, fmt)
         parts.append(field_text("duration", format_duration(duration), Color.MAGENTA))
         parts.append(field_text("bitrate", describe_bitrate(stream.bitrate_kbps), Color.YELLOW))
+        parts.append(field_text("max_volume", stream.max_volume or "unknown", Color.ORANGE))
+        parts.append(field_text("mean_volume", stream.mean_volume or "unknown", Color.AQUA))
         estimate_label = " approx" if stream.size_estimated and stream.size_bytes else ""
         parts.append(field_text("track size", format_bytes(stream.size_bytes) + estimate_label, Color.LIME))
     elif stream.codec_type == "subtitle":
@@ -5160,7 +5277,7 @@ def _run_mux_cleanup_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float
             error("No supported video files were found.")
             return None
         note(f"Found {len(files)} supported video file(s).")
-        media_files = mux_scan_files(answers["ffprobe"], files)
+        media_files = mux_scan_files(answers["ffprobe"], files, answers.get("ffmpeg"))
         if not media_files:
             error("No files could be scanned successfully.")
             return None
@@ -5228,6 +5345,7 @@ FOLDER_MEDIA_METADATA_KEYS = (
     "audio_streams",
     "subtitle_streams",
     "packet_sizes",
+    "audio_volume_stats",
 )
 
 
@@ -5405,6 +5523,8 @@ def print_folder_media_summary(items: list[dict[str, Any]], base_answers: dict[s
             )
 
         for audio_idx, stream in enumerate(detail_answers.get("audio_streams", [])):
+            volume_stats = get_audio_volume_stats(detail_answers)
+            item["answers"]["audio_volume_stats"] = volume_stats
             rate = stream_bitrate_kbps(stream, fmt, packet_sizes)
             size, estimated = stream_size_bytes(stream, fmt, packet_sizes)
             estimate_label = " approx" if estimated and size else ""
@@ -5413,6 +5533,8 @@ def print_folder_media_summary(items: list[dict[str, Any]], base_answers: dict[s
                 f"{field_text('codec', stream.get('codec_name', 'unknown'), Color.CYAN)} | "
                 f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
+                f"{field_text('max_volume', audio_volume_field(volume_stats, audio_idx, 'max_volume'), Color.ORANGE)} | "
+                f"{field_text('mean_volume', audio_volume_field(volume_stats, audio_idx, 'mean_volume'), Color.AQUA)} | "
                 f"{field_text('track size', format_bytes(size) + estimate_label, Color.LIME)}"
             )
 
@@ -8845,6 +8967,7 @@ def step_audio_tracks(answers: dict[str, Any]) -> None:
     packet_sizes = get_packet_sizes(answers)
     report = detect_duplicate_audio(answers) if answers.get("detect_duplicate_audio", True) else None
     fmt = answers.get("format", {})
+    volume_stats = get_audio_volume_stats(answers)
     print()
     print(paint("Detected audio tracks:", Color.BOLD + Color.BLUE))
     for idx, stream in enumerate(streams):
@@ -8853,6 +8976,8 @@ def step_audio_tracks(answers: dict[str, Any]) -> None:
         label_text = f" | {' | '.join(labels)}" if labels else ""
         print(
             f"  {paint(stream_title(stream, idx), Color.WHITE)} | "
+            f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
+            f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
             f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
         )
 
@@ -10328,13 +10453,16 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
     print(paint("Audio streams", Color.BOLD + Color.BLUE))
     fmt = answers.get("format", {})
     packet_sizes = get_packet_sizes(answers)
+    volume_stats = get_audio_volume_stats(answers)
     for idx, stream in enumerate(streams):
         print(
             f"  {paint(str(idx), Color.LIGHT_BLUE)}: "
             f"{field_text('codec', stream.get('codec_name', 'unknown'), Color.CYAN)} | "
             f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
             f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
-            f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)}"
+            f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)} | "
+            f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
+            f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)}"
         )
     while True:
         value = ask_raw(
@@ -11610,7 +11738,7 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
     return 0, elapsed
 
 
-def probe_additional_track_file(ffprobe: str, path: Path) -> dict[str, Any]:
+def probe_additional_track_file(ffprobe: str, path: Path, ffmpeg: str | None = None) -> dict[str, Any]:
     probe = ffprobe_json(ffprobe, path)
     streams = probe.get("streams") or []
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
@@ -11618,10 +11746,18 @@ def probe_additional_track_file(ffprobe: str, path: Path) -> dict[str, Any]:
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
     if not audio_streams and not subtitle_streams:
         raise ValueError("Additional files must contain at least one audio or subtitle stream.")
+    audio_volume_stats: dict[int, dict[str, str]] = {}
+    if audio_streams and ffmpeg:
+        audio_volume_stats = get_audio_volume_stats({
+            "ffmpeg": ffmpeg,
+            "input_path": path,
+            "audio_streams": audio_streams,
+        })
     return {
         "path": path,
         "format": probe.get("format", {}),
         "audio_streams": audio_streams,
+        "audio_volume_stats": audio_volume_stats,
         "subtitle_streams": subtitle_streams,
         "video_streams": video_streams,
     }
@@ -11646,6 +11782,7 @@ def print_additional_track_file_info(item: dict[str, Any]) -> None:
 
     if audio_streams:
         print(paint("\nAudio streams to add", Color.BOLD + Color.BLUE))
+        volume_stats = item.get("audio_volume_stats") or {}
         for idx, stream in enumerate(audio_streams):
             rate = stream_bitrate_kbps(stream, fmt)
             print(
@@ -11654,6 +11791,8 @@ def print_additional_track_file_info(item: dict[str, Any]) -> None:
                 f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
                 f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
+                f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
+                f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
             f"{field_text('language', display_language(stream_tag_value(stream, 'language')), Color.WHITE)} | "
                 f"{field_text('title', stream_tag_value(stream, 'title'), Color.WHITE)}"
             )
@@ -11961,7 +12100,7 @@ def ask_additional_track_files(
             error("The additional file cannot be the same as the source video.")
             continue
         try:
-            item = probe_additional_track_file(answers["ffprobe"], path)
+            item = probe_additional_track_file(answers["ffprobe"], path, answers.get("ffmpeg"))
         except FFprobeError as exc:
             error(str(exc))
             continue
