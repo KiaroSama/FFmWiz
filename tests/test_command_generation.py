@@ -546,6 +546,72 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertNotIn("cut_keep_ranges", answers)
         self.assertIn("Returning to the cut question", notes[-1])
 
+    def test_run_wizard_uses_unified_editor_before_legacy_video_edit_prompts(self):
+        calls: list[str] = []
+        originals = {
+            "step_input_path": FFmWiz.step_input_path,
+            "step_output_location": FFmWiz.step_output_location,
+            "step_output_format": FFmWiz.step_output_format,
+            "step_video_codec": FFmWiz.step_video_codec,
+            "step_use_gpu": FFmWiz.step_use_gpu,
+            "step_unified_video_editor_for_encode": FFmWiz.step_unified_video_editor_for_encode,
+            "step_video_bitrate": FFmWiz.step_video_bitrate,
+            "step_resolution": FFmWiz.step_resolution,
+            "step_fps": FFmWiz.step_fps,
+            "step_start_now": FFmWiz.step_start_now,
+            "ask_raw": FFmWiz.ask_raw,
+            "get_video_fps": FFmWiz.get_video_fps,
+            "stream_duration_seconds": FFmWiz.stream_duration_seconds,
+        }
+
+        def fake_unified(answers):
+            calls.append("unified")
+            answers.update({
+                "_unified_video_editor_used": True,
+                "_unified_cut_keep_ranges": [(10.0, 20.0)],
+                "_unified_video_speed": 1.5,
+                "_unified_reverse_video": True,
+                "_unified_include_audio": True,
+                "crop_top": 1,
+                "crop_left": 2,
+                "crop_right": 3,
+                "crop_bottom": 4,
+            })
+
+        try:
+            FFmWiz.step_input_path = lambda answers: calls.append("input")
+            FFmWiz.step_output_location = lambda answers: calls.append("output")
+            FFmWiz.step_output_format = lambda answers: calls.append("format")
+            FFmWiz.step_video_codec = lambda answers: calls.append("codec")
+            FFmWiz.step_use_gpu = lambda answers: calls.append("gpu")
+            FFmWiz.step_unified_video_editor_for_encode = fake_unified
+            FFmWiz.step_video_bitrate = lambda answers: calls.append("bitrate")
+            FFmWiz.step_resolution = lambda answers: calls.append("resolution")
+            FFmWiz.step_fps = lambda answers: calls.append("fps")
+            FFmWiz.step_start_now = lambda answers: calls.append("start")
+            FFmWiz.ask_raw = lambda _prompt: (_ for _ in ()).throw(AssertionError("legacy prompt was shown"))
+            FFmWiz.get_video_fps = lambda _answers: 30.0
+            FFmWiz.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
+            answers = {
+                "output_ext": "mp4",
+                "video_codec": "h264",
+                "video_streams": [{"codec_type": "video", "width": 100, "height": 100}],
+                "audio_streams": [],
+                "subtitle_streams": [],
+                "format": {"duration": "100"},
+            }
+            FFmWiz.run_wizard(answers)
+        finally:
+            for name, original in originals.items():
+                setattr(FFmWiz, name, original)
+
+        self.assertIn("unified", calls)
+        self.assertTrue(answers["crop_enabled"])
+        self.assertEqual(answers["cut_keep_ranges"], [(10.0, 20.0)])
+        self.assertTrue(answers["video_speed_enabled"])
+        self.assertEqual(answers["video_speed_factor"], 1.5)
+        self.assertTrue(answers["reverse_video"])
+
     def test_atempo_filter_chain_splits_extreme_speed(self):
         self.assertEqual(FFmWiz.atempo_filter_chain(4.0), "atempo=2,atempo=2")
         self.assertEqual(FFmWiz.atempo_filter_chain(0.25), "atempo=0.5,atempo=0.5")
