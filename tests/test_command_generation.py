@@ -70,6 +70,37 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(FFmWiz.format_bytes(1_073_741_824), "1024.0 MB")
         self.assertEqual(FFmWiz.format_bytes(1_118_000_000), "1066.2 MB")
 
+    def test_parse_volumedetect_output(self):
+        text = """
+        [Parsed_volumedetect_0 @ 000001] mean_volume: -23.4 dB
+        [Parsed_volumedetect_0 @ 000001] max_volume: -1.2 dB
+        """
+        self.assertEqual(
+            FFmWiz.parse_volumedetect_output(text),
+            {"mean_volume": "-23.4 dB", "max_volume": "-1.2 dB"},
+        )
+
+    def test_media_info_report_includes_audio_volume_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.mkv"
+            input_path.write_bytes(b"dummy")
+            payload = {
+                "format": {"duration": "10", "size": str(len(b"dummy"))},
+                "streams": [
+                    {"codec_type": "audio", "codec_name": "aac", "index": 1},
+                ],
+            }
+            lines = FFmWiz.build_media_info_report_lines(
+                input_path,
+                payload,
+                "",
+                Path(tmp) / "input_info.txt",
+                {0: {"mean_volume": "-20.0 dB", "max_volume": "-1.0 dB"}},
+            )
+            plain = FFmWiz.render_info_report(lines, color=False)
+            self.assertIn("max_volume: -1.0 dB", plain)
+            self.assertIn("mean_volume: -20.0 dB", plain)
+
     def chapter(self, start: float, end: float, title: str) -> dict:
         return {
             "time_base": "1/1000",
