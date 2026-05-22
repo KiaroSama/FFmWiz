@@ -12,7 +12,7 @@ Run directly:
 
 Request JSON contract:
     {
-        "mode": "cut" | "crop" | "video_speed" | "audio_cut" | "audio_speed",
+        "mode": "cut" | "crop" | "video_speed" | "video_unified" | "audio_cut" | "audio_speed",
         "input_path": "<absolute path to the source media>",
         "fps": 30.0,
         "duration": 123.456,
@@ -23,6 +23,7 @@ Reply JSON contract:
     cut         -> {"status": "ok"|"canceled", "keep_ranges": [[start_s, end_s], ...]}
     crop        -> {"status": "ok"|"canceled", "margins": [top, left, right, bottom]}
     video_speed -> {"status": "ok"|"canceled", "speed": 1.25, "reverse": false, "include_audio": true}
+    video_unified -> {"status": "ok"|"canceled", "margins": [...], "keep_ranges": [...], "speed": 1.25, "reverse": false, "include_audio": true}
     audio_cut   -> {"status": "ok"|"canceled", "keep_ranges": [[start_s, end_s], ...]}
     audio_speed -> {"status": "ok"|"canceled", "speed": 1.25, "reverse": false}
 """
@@ -5920,49 +5921,531 @@ def _stop_embedded_editor(editor: Any) -> None:
 
 def build_unified_video_editor(request: dict[str, Any]):
     QtCore, QtGui, QtWidgets, _ = _import_qt()
+    QtMultimedia = _import_qt_multimedia()
     Qt = QtCore.Qt
+    Signal = QtCore.Signal
+    QPointF = QtCore.QPointF
+    QRectF = QtCore.QRectF
     QMainWindow = QtWidgets.QMainWindow
     QWidget = QtWidgets.QWidget
     QVBoxLayout = QtWidgets.QVBoxLayout
     QHBoxLayout = QtWidgets.QHBoxLayout
     QLabel = QtWidgets.QLabel
     QPushButton = QtWidgets.QPushButton
-    QTabWidget = QtWidgets.QTabWidget
+    QSlider = QtWidgets.QSlider
+    QComboBox = QtWidgets.QComboBox
+    QCheckBox = QtWidgets.QCheckBox
+    QScrollBar = QtWidgets.QScrollBar
     QFrame = QtWidgets.QFrame
     QStyle = QtWidgets.QStyle
+    QSizePolicy = QtWidgets.QSizePolicy
+    QAction = QtGui.QAction
+
+    @dataclass
+    class UnifiedSnapshot:
+        margins: tuple[int, int, int, int] = (0, 0, 0, 0)
+        cut_ranges: tuple[tuple[float, float], ...] = ()
+        speed: float = 1.0
+        reverse: bool = False
+        include_audio: bool = True
+
+    class UnifiedPreviewCanvas(QWidget):
+        margins_changed = Signal()
+        seek_requested = Signal(float)
+        toggle_playback_requested = Signal()
+
+        def __init__(self, source_w: int, source_h: int, duration: float):
+            super().__init__()
+            self.source_w = max(1, int(source_w or 1920))
+            self.source_h = max(1, int(source_h or 1080))
+            self.duration = max(0.0, float(duration or 0.0))
+            self.image = None
+            self.margins = [0, 0, 0, 0]
+            self.zoom = 1.0
+            self._scroll = QPointF(0, 0)
+            self._press_pos = None
+            self._pan_origin = None
+            self._scroll_origin = QPointF(0, 0)
+            self._drag_handle = None
+            self._move_origin = None
+            self._move_margins = None
+            self.setMouseTracking(True)
+            self.setMinimumSize(760, 420)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.setStyleSheet(
+                f"background-color: {PALETTE['timeline_bg']};"
+                f"border: 1px solid {PALETTE['border_strong']}; border-radius: 8px;"
+            )
+
+        def set_image(self, image) -> None:
+            self.image = image
+            self.update()
+
+        def set_margins(self, margins) -> None:
+            self.margins = [int(v) for v in margins]
+            self.margins_changed.emit()
+            self.update()
+
+        def reset_crop(self) -> None:
+            self.set_margins([0, 0, 0, 0])
+
+        def reset_view(self) -> None:
+            self.zoom = 1.0
+            self._scroll = QPointF(0, 0)
+            self.update()
+
+        def _display_size(self):
+            scale = min(
+                self.width() / self.source_w,
+                self.height() / self.source_h,
+            ) * self.zoom if self.width() > 0 and self.height() > 0 else 1.0
+            return max(1, int(self.source_w * scale)), max(1, int(self.source_h * scale))
+
+        def _image_rect(self):
+            w, h = self._display_size()
+            return QRectF(
+                self.width() / 2 + self._scroll.x() - w / 2,
+                self.height() / 2 + self._scroll.y() - h / 2,
+                w,
+                h,
+            )
+
+        def _crop_rect_screen(self):
+            img = self._image_rect()
+            w, h = self._display_size()
+            top, left, right, bottom = self.margins
+            x1 = img.left() + left / self.source_w * w
+            y1 = img.top() + top / self.source_h * h
+            x2 = img.right() - right / self.source_w * w
+            y2 = img.bottom() - bottom / self.source_h * h
+            return QRectF(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+
+        def _handle_centers(self):
+            r = self._crop_rect_screen()
+            mx = (r.left() + r.right()) / 2
+            my = (r.top() + r.bottom()) / 2
+            return {
+                "nw": (r.left(), r.top()), "n": (mx, r.top()), "ne": (r.right(), r.top()),
+                "e": (r.right(), my), "se": (r.right(), r.bottom()), "s": (mx, r.bottom()),
+                "sw": (r.left(), r.bottom()), "w": (r.left(), my),
+            }
+
+        def _hit_handle(self, x, y):
+            hit = 18
+            for name, (cx, cy) in self._handle_centers().items():
+                if abs(x - cx) <= hit and abs(y - cy) <= hit:
+                    return name
+            return None
+
+        def paintEvent(self, _event):
+            p = QtGui.QPainter(self)
+            p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+            p.fillRect(self.rect(), QtGui.QColor(PALETTE["timeline_bg"]))
+            img = self._image_rect()
+            if self.image is not None and not self.image.isNull():
+                p.drawImage(img, self.image)
+            else:
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_mute"])))
+                p.setFont(QtGui.QFont("Segoe UI", 12))
+                p.drawText(self.rect(), Qt.AlignCenter, "Loading video preview...")
+            crop = self._crop_rect_screen()
+            dim = QtGui.QColor(0, 0, 0, 150)
+            p.fillRect(QRectF(img.left(), img.top(), img.width(), max(0, crop.top() - img.top())), dim)
+            p.fillRect(QRectF(img.left(), crop.bottom(), img.width(), max(0, img.bottom() - crop.bottom())), dim)
+            p.fillRect(QRectF(img.left(), crop.top(), max(0, crop.left() - img.left()), crop.height()), dim)
+            p.fillRect(QRectF(crop.right(), crop.top(), max(0, img.right() - crop.right()), crop.height()), dim)
+            p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["warn"]), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(crop)
+            p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["warn"]), 1, Qt.DashLine))
+            for i in (1, 2):
+                x = crop.left() + crop.width() * i / 3
+                y = crop.top() + crop.height() * i / 3
+                p.drawLine(QPointF(x, crop.top()), QPointF(x, crop.bottom()))
+                p.drawLine(QPointF(crop.left(), y), QPointF(crop.right(), y))
+            p.setBrush(QtGui.QBrush(QtGui.QColor(PALETTE["warn"])))
+            p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["bg"]), 1))
+            for cx, cy in self._handle_centers().values():
+                p.drawRoundedRect(QRectF(cx - 7, cy - 7, 14, 14), 3, 3)
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.RightButton:
+                self.toggle_playback_requested.emit()
+                return
+            if event.button() != Qt.LeftButton:
+                return
+            pos = event.position()
+            self._press_pos = pos
+            self._drag_handle = self._hit_handle(pos.x(), pos.y())
+            if self._drag_handle:
+                return
+            if event.modifiers() & Qt.ControlModifier:
+                self._drag_handle = "move"
+                self._move_origin = pos
+                self._move_margins = list(self.margins)
+                return
+            self._pan_origin = pos
+            self._scroll_origin = QPointF(self._scroll)
+
+        def mouseMoveEvent(self, event):
+            pos = event.position()
+            if self._drag_handle:
+                if self._drag_handle == "move":
+                    self._move_crop(pos)
+                else:
+                    self._resize_crop(self._drag_handle, pos.x(), pos.y())
+                return
+            if self._pan_origin is not None:
+                self._scroll = self._scroll_origin + (pos - self._pan_origin)
+                self.update()
+
+        def mouseReleaseEvent(self, _event):
+            self._drag_handle = None
+            self._move_origin = None
+            self._move_margins = None
+            self._pan_origin = None
+
+        def wheelEvent(self, event):
+            delta = event.angleDelta().y()
+            if not delta:
+                return
+            factor = 1.18 if delta > 0 else 1 / 1.18
+            old = self.zoom
+            self.zoom = max(0.10, min(32.0, self.zoom * factor))
+            if abs(self.zoom - old) > 1e-6:
+                self.update()
+
+        def _resize_crop(self, handle, x, y):
+            img = self._image_rect()
+            w, h = self._display_size()
+            sx = max(0, min(1, (x - img.left()) / max(1, w))) * self.source_w
+            sy = max(0, min(1, (y - img.top()) / max(1, h))) * self.source_h
+            top, left, right, bottom = self.margins
+            min_size = 16
+            if "w" in handle:
+                left = max(0, min(self.source_w - right - min_size, int(round(sx))))
+            if "e" in handle:
+                right = max(0, min(self.source_w - left - min_size, int(round(self.source_w - sx))))
+            if "n" in handle:
+                top = max(0, min(self.source_h - bottom - min_size, int(round(sy))))
+            if "s" in handle:
+                bottom = max(0, min(self.source_h - top - min_size, int(round(self.source_h - sy))))
+            self.margins = [top, left, right, bottom]
+            self.margins_changed.emit()
+            self.update()
+
+        def _move_crop(self, pos):
+            if self._move_origin is None or self._move_margins is None:
+                return
+            img = self._image_rect()
+            w, h = self._display_size()
+            dx = int(round((pos.x() - self._move_origin.x()) / max(1, w) * self.source_w))
+            dy = int(round((pos.y() - self._move_origin.y()) / max(1, h) * self.source_h))
+            top, left, right, bottom = [int(v) for v in self._move_margins]
+            crop_w = max(1, self.source_w - left - right)
+            crop_h = max(1, self.source_h - top - bottom)
+            new_left = max(0, min(self.source_w - crop_w, left + dx))
+            new_top = max(0, min(self.source_h - crop_h, top + dy))
+            self.margins = [new_top, new_left, self.source_w - crop_w - new_left, self.source_h - crop_h - new_top]
+            self.margins_changed.emit()
+            self.update()
+
+    class UnifiedTimelineWidget(QWidget):
+        seek_requested = Signal(float)
+        cut_selected = Signal(int)
+        view_changed = Signal()
+
+        PAD = 18
+
+        def __init__(self, duration: float, fps: float):
+            super().__init__()
+            self.duration = max(0.001, float(duration or 0.001))
+            self.fps = max(1.0, float(fps or 25.0))
+            self.playhead = 0.0
+            self.view_start = 0.0
+            self.view_span = self.duration
+            self.cut_ranges: list[tuple[float, float]] = []
+            self.selected_cut = -1
+            self.wave_pix = None
+            self._dragging = False
+            self._drag_origin = None
+            self._start_span = self.view_span
+            self.setMinimumHeight(210)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.setMouseTracking(True)
+            self.setStyleSheet(
+                f"background-color: {PALETTE['timeline_bg']};"
+                f"border: 1px solid {PALETTE['border_strong']}; border-radius: 8px;"
+            )
+
+        def set_waveform(self, path: Path) -> None:
+            pix = QtGui.QPixmap(str(path))
+            if not pix.isNull():
+                self.wave_pix = pix
+                self.update()
+
+        def set_playhead(self, seconds: float, follow: bool = False) -> None:
+            self.playhead = max(0.0, min(self.duration, float(seconds)))
+            if follow:
+                self._ensure_visible(self.playhead)
+            self.update()
+
+        def set_cut_ranges(self, ranges) -> None:
+            self.cut_ranges = normalize_ranges(ranges, self.duration)
+            self.selected_cut = min(self.selected_cut, len(self.cut_ranges) - 1)
+            self.update()
+
+        def _timeline_rect(self):
+            return QRectF(self.PAD, 30, max(1, self.width() - self.PAD * 2), 150)
+
+        def _wave_rect(self):
+            r = self._timeline_rect()
+            return QRectF(r.left(), r.top() + 42, r.width(), 82)
+
+        def _clamp_view(self):
+            self.view_span = max(0.05, min(self.duration, self.view_span))
+            self.view_start = max(0.0, min(max(0.0, self.duration - self.view_span), self.view_start))
+
+        def _ensure_visible(self, t):
+            self._clamp_view()
+            if t < self.view_start:
+                self.view_start = t
+            elif t > self.view_start + self.view_span:
+                self.view_start = t - self.view_span
+            self._clamp_view()
+            self.view_changed.emit()
+
+        def _time_to_x(self, t):
+            r = self._timeline_rect()
+            return r.left() + (float(t) - self.view_start) / max(0.001, self.view_span) * r.width()
+
+        def _x_to_time(self, x):
+            r = self._timeline_rect()
+            ratio = max(0.0, min(1.0, (float(x) - r.left()) / max(1, r.width())))
+            return self.view_start + ratio * self.view_span
+
+        def set_zoom_ratio(self, ratio, focus_time=None):
+            old_span = self.view_span
+            ratio = max(1.0, min(128.0, float(ratio)))
+            focus = self.playhead if focus_time is None else max(0.0, min(self.duration, float(focus_time)))
+            focus_ratio = (focus - self.view_start) / max(0.001, old_span)
+            self.view_span = self.duration / ratio
+            self.view_start = focus - focus_ratio * self.view_span
+            self._clamp_view()
+            self.update()
+            self.view_changed.emit()
+
+        def zoom_ratio(self):
+            return max(1.0, self.duration / max(0.001, self.view_span))
+
+        def set_view_start(self, seconds: float) -> None:
+            self.view_start = float(seconds)
+            self._clamp_view()
+            self.update()
+            self.view_changed.emit()
+
+        def scroll_view(self, seconds: float) -> None:
+            self.set_view_start(self.view_start + float(seconds))
+
+        def paintEvent(self, _event):
+            p = QtGui.QPainter(self)
+            p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            p.fillRect(self.rect(), QtGui.QColor(PALETTE["timeline_bg"]))
+            r = self._timeline_rect()
+            wave = self._wave_rect()
+            p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["border"]), 1))
+            p.setBrush(QtGui.QBrush(QtGui.QColor(PALETTE["timeline_track"])))
+            p.drawRoundedRect(r, 6, 6)
+            span = max(0.001, self.view_span)
+            approx = span / 8.0
+            exp = math.floor(math.log10(max(approx, 0.001)))
+            base = 10 ** exp
+            step = base
+            for candidate in (1, 2, 5, 10):
+                step = candidate * base
+                if span / step <= 10:
+                    break
+            start = self.view_start
+            end = start + span
+            p.setFont(QtGui.QFont("Segoe UI Semibold", 9))
+            t = math.ceil(start / step) * step
+            while t <= end + 1e-6:
+                x = self._time_to_x(t)
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["tick_hi"]), 1))
+                p.drawLine(QPointF(x, r.top() + 18), QPointF(x, r.bottom() - 8))
+                p.drawText(QRectF(max(r.left(), min(x - 55, r.right() - 110)), r.top() + 2, 110, 20), Qt.AlignCenter, seconds_to_timecode(t))
+                t += step
+            if self.wave_pix is not None:
+                source_left = int(max(0, self.view_start / self.duration) * self.wave_pix.width())
+                source_width = int(max(1, self.view_span / self.duration * self.wave_pix.width()))
+                source = QRectF(source_left, 0, source_width, self.wave_pix.height())
+                p.drawPixmap(wave, self.wave_pix, source)
+            else:
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_mute"])))
+                p.drawText(wave, Qt.AlignCenter, "Audio waveform loading...")
+            for idx, (s, e) in enumerate(self.cut_ranges):
+                if e < start or s > end:
+                    continue
+                x1 = self._time_to_x(max(s, start))
+                x2 = self._time_to_x(min(e, end))
+                color = QtGui.QColor(PALETTE["cut_red"] if idx == self.selected_cut else PALETTE["cut_red_dim"])
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["danger_text"]), 2 if idx == self.selected_cut else 1))
+                p.setBrush(QtGui.QBrush(color))
+                p.drawRoundedRect(QRectF(x1, r.top() + 30, max(2, x2 - x1), r.height() - 44), 4, 4)
+            ph_x = self._time_to_x(self.playhead)
+            if r.left() - 4 <= ph_x <= r.right() + 4:
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["playhead"]), 2))
+                p.drawLine(QPointF(ph_x, r.top() - 8), QPointF(ph_x, r.bottom() + 8))
+                p.setBrush(QtGui.QBrush(QtGui.QColor(PALETTE["playhead"])))
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["bg"]), 1))
+                p.drawPolygon(QtGui.QPolygonF([
+                    QPointF(ph_x - 7, r.top() - 8),
+                    QPointF(ph_x + 7, r.top() - 8),
+                    QPointF(ph_x, r.top() + 4),
+                ]))
+
+        def _hit_cut(self, x, y):
+            r = self._timeline_rect()
+            if not r.contains(QPointF(x, y)):
+                return -1
+            start = self.view_start
+            end = start + self.view_span
+            for idx, (s, e) in enumerate(self.cut_ranges):
+                if e < start or s > end:
+                    continue
+                if self._time_to_x(max(s, start)) - 3 <= x <= self._time_to_x(min(e, end)) + 3:
+                    return idx
+            return -1
+
+        def mousePressEvent(self, event):
+            pos = event.position()
+            if event.button() == Qt.RightButton:
+                idx = self._hit_cut(pos.x(), pos.y())
+                if idx >= 0:
+                    self.selected_cut = idx
+                    self.cut_selected.emit(idx)
+                    self.update()
+                return
+            if event.button() != Qt.LeftButton:
+                return
+            idx = self._hit_cut(pos.x(), pos.y())
+            if idx >= 0:
+                self.selected_cut = idx
+                self.cut_selected.emit(idx)
+            self._dragging = True
+            self._drag_origin = QPointF(pos.x(), pos.y())
+            self._start_span = self.view_span
+            t = self._x_to_time(pos.x())
+            self.set_playhead(t)
+            self.seek_requested.emit(t)
+
+        def mouseMoveEvent(self, event):
+            if not self._dragging:
+                return
+            pos = event.position()
+            t = self._x_to_time(pos.x())
+            if self._drag_origin is not None and abs(pos.y() - self._drag_origin.y()) >= 4:
+                dy = pos.y() - self._drag_origin.y()
+                focus_ratio = max(0.0, min(1.0, (pos.x() - self._timeline_rect().left()) / max(1, self._timeline_rect().width())))
+                focus = max(0.0, min(self.duration, t))
+                self.view_span = max(0.05, min(self.duration, self._start_span * (2.0 ** (dy / 150.0))))
+                self.view_start = focus - focus_ratio * self.view_span
+                self._clamp_view()
+                self.view_changed.emit()
+            self.set_playhead(t)
+            self.seek_requested.emit(t)
+
+        def mouseReleaseEvent(self, _event):
+            self._dragging = False
+            self._drag_origin = None
+
+        def wheelEvent(self, event):
+            delta = event.angleDelta().y()
+            if not delta:
+                return
+            factor = 1 / 1.16 if delta > 0 else 1.16
+            self.view_span = max(0.05, min(self.duration, self.view_span * factor))
+            focus = self._x_to_time(event.position().x())
+            self.view_start = focus - ((event.position().x() - self._timeline_rect().left()) / max(1, self._timeline_rect().width())) * self.view_span
+            self._clamp_view()
+            self.update()
+            self.view_changed.emit()
 
     class UnifiedVideoEditorWindow(QMainWindow):
         def __init__(self, req):
             super().__init__()
             self.request = req
             self.duration = float(req.get("duration") or 0.0)
+            self.fps = float(req.get("fps") or 25.0)
+            self.source_w = int(req.get("source_w") or 1920)
+            self.source_h = int(req.get("source_h") or 1080)
+            self.input_path = Path(req.get("input_path") or "")
             self.result = {"status": "canceled"}
             self._icon = _icon_loader(self, self.style())
-            self._embedded_editors: list[Any] = []
             self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_unified_waveform_")
             self._wave_path = Path(self._wave_temp.name) / "waveform.png"
             self._wave_proc = None
+            self._cut_ranges: list[tuple[float, float]] = []
+            self._mark_in: float | None = None
+            self._mark_out: float | None = None
+            self._history = HistoryStack(self._snapshot(), max_size=120)
+            self._syncing_zoom = False
+            self._syncing_view = False
+            self._restoring_snapshot = False
             self.setWindowTitle("FFmWiz Unified Video Editor")
             _apply_window_icon(self, self._icon)
-            self.setMinimumSize(1180, 760)
+            self.setMinimumSize(1280, 820)
             self._build_ui()
+            self._setup_player()
+            self._refresh_all()
             QtCore.QTimer.singleShot(80, self._start_waveform)
 
-        def _child_request(self, mode: str) -> dict[str, Any]:
-            child = dict(self.request)
-            child["mode"] = mode
-            return child
+        def _snapshot(self):
+            margins = tuple(int(v) for v in getattr(self, "preview", None).margins) if hasattr(self, "preview") else (0, 0, 0, 0)
+            return UnifiedSnapshot(
+                margins=margins,
+                cut_ranges=tuple((float(s), float(e)) for s, e in normalize_ranges(getattr(self, "_cut_ranges", []), self.duration)),
+                speed=float(self._speed()) if hasattr(self, "speed_combo") else 1.0,
+                reverse=bool(self.reverse_box.isChecked()) if hasattr(self, "reverse_box") else False,
+                include_audio=bool(self.include_audio_box.isChecked()) if hasattr(self, "include_audio_box") else bool(self.request.get("has_audio")),
+            )
 
-        def _embed_editor(self, title: str, editor: Any) -> QWidget:
-            self._embedded_editors.append(editor)
-            widget = editor.takeCentralWidget()
-            if widget is None:
-                widget = QWidget()
-                layout = QVBoxLayout(widget)
-                layout.addWidget(QLabel(f"{title} could not be embedded."))
-            widget.setParent(self)
-            _hide_embedded_editor_actions(widget)
-            return widget
+        def _restore_snapshot(self, snap):
+            self._restoring_snapshot = True
+            try:
+                self.preview.set_margins(list(snap.margins))
+                self._cut_ranges = list(snap.cut_ranges)
+                self.speed_combo.setCurrentText(f"{snap.speed * 100:g}%")
+                self.factor_combo.setCurrentText(f"{snap.speed:g}x")
+                self.reverse_box.setChecked(bool(snap.reverse))
+                self.include_audio_box.setChecked(bool(snap.include_audio))
+                self._apply_speed_to_player()
+                self._refresh_all()
+            finally:
+                self._restoring_snapshot = False
+
+        def _commit_history(self):
+            if getattr(self, "_restoring_snapshot", False):
+                return
+            self._history.push(self._snapshot())
+            self._update_undo_redo()
+
+        def _undo(self):
+            snap = self._history.undo()
+            if snap is not None:
+                self._restore_snapshot(snap)
+            self._update_undo_redo()
+
+        def _redo(self):
+            snap = self._history.redo()
+            if snap is not None:
+                self._restore_snapshot(snap)
+            self._update_undo_redo()
+
+        def _update_undo_redo(self):
+            self.btn_undo.setEnabled(self._history.can_undo())
+            self.btn_redo.setEnabled(self._history.can_redo())
 
         def _build_ui(self):
             central = QWidget()
@@ -5980,22 +6463,110 @@ def build_unified_video_editor(request: dict[str, Any]):
             title.setObjectName("title")
             h.addWidget(title)
             h.addSpacing(16)
-            h.addWidget(QLabel(f"Source  {Path(self.request.get('input_path', '')).name}"))
+            h.addWidget(QLabel(f"Source  {self.input_path.name}"))
             h.addStretch(1)
+            self.btn_undo = QPushButton(self._icon("undo", QStyle.SP_ArrowBack), " Undo (Ctrl+Z)")
+            self.btn_undo.clicked.connect(self._undo)
+            h.addWidget(self.btn_undo)
+            self.btn_redo = QPushButton(self._icon("redo", QStyle.SP_ArrowForward), " Redo (Ctrl+Y)")
+            self.btn_redo.clicked.connect(self._redo)
+            h.addWidget(self.btn_redo)
             root.addWidget(header)
 
-            self.tabs = QTabWidget()
-            self.crop_editor = build_crop_editor(self._child_request("crop"))
-            self.cut_editor = build_cut_editor(self._child_request("cut"))
-            self.speed_editor = build_speed_editor(self._child_request("video_speed"), "video")
-            self.tabs.addTab(self._embed_editor("Crop", self.crop_editor), "Crop")
-            self.tabs.addTab(self._embed_editor("Cut", self.cut_editor), "Cut")
-            self.tabs.addTab(self._embed_editor("Speed / Reverse", self.speed_editor), "Speed / Reverse")
-            self.tabs.addTab(self._build_waveform_tab(), "Audio Waveform")
-            root.addWidget(self.tabs, 1)
+            controls = QHBoxLayout()
+            controls.setSpacing(8)
+            self.btn_play = QPushButton(self._icon("play", QStyle.SP_MediaPlay), " Play (Space)")
+            self.btn_play.setObjectName("primary")
+            self.btn_play.clicked.connect(self.toggle_playback)
+            controls.addWidget(self.btn_play)
+            controls.addWidget(self._btn("Home", lambda: self.seek(0.0)))
+            controls.addWidget(self._btn("-5s", lambda: self.seek(self.current_time() - 5.0)))
+            controls.addWidget(self._btn("+5s", lambda: self.seek(self.current_time() + 5.0)))
+            controls.addWidget(self._btn("End", lambda: self.seek(self.duration)))
+            controls.addSpacing(14)
+            controls.addWidget(self._btn("Mark In (I)", self.mark_in))
+            controls.addWidget(self._btn("Mark Out (O)", self.mark_out))
+            add_cut = self._btn("Add Cut(s) (A)", self.add_cut)
+            add_cut.setObjectName("success")
+            controls.addWidget(add_cut)
+            self.btn_delete_cut = self._btn("Delete Selected Cut (Del)", self.delete_selected_cut)
+            self.btn_delete_cut.setObjectName("dangerAlt")
+            controls.addWidget(self.btn_delete_cut)
+            controls.addWidget(self._btn("Invert Cuts (Ctrl+Shift+I)", self.invert_cuts))
+            controls.addSpacing(14)
+            controls.addWidget(self._btn("Reset Crop (Ctrl+R)", self.reset_crop))
+            controls.addWidget(self._btn("Reset View (Ctrl+0)", self.reset_view))
+            controls.addStretch(1)
+            root.addLayout(controls)
+
+            speed_row = QHBoxLayout()
+            speed_row.setSpacing(8)
+            speed_row.addWidget(QLabel("Speed"))
+            self.speed_combo = QComboBox()
+            self.speed_combo.setEditable(True)
+            self.speed_combo.addItems(["25%", "50%", "75%", "100%", "125%", "150%", "175%", "200%", "250%", "300%"])
+            self.speed_combo.setCurrentText("100%")
+            self.speed_combo.setFixedWidth(110)
+            self.speed_combo.currentTextChanged.connect(self._on_speed_text_changed)
+            speed_row.addWidget(self.speed_combo)
+            speed_row.addWidget(QLabel("Factor"))
+            self.factor_combo = QComboBox()
+            self.factor_combo.setEditable(True)
+            self.factor_combo.addItems(["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "1.75x", "2x", "2.5x", "3x"])
+            self.factor_combo.setCurrentText("1x")
+            self.factor_combo.setFixedWidth(110)
+            self.factor_combo.currentTextChanged.connect(self._on_factor_text_changed)
+            speed_row.addWidget(self.factor_combo)
+            self.reverse_box = QCheckBox("Reverse")
+            self.reverse_box.stateChanged.connect(lambda _v: self._on_transform_changed())
+            speed_row.addWidget(self.reverse_box)
+            self.include_audio_box = QCheckBox("Sync all audio tracks")
+            self.include_audio_box.setChecked(bool(self.request.get("has_audio")))
+            self.include_audio_box.setEnabled(bool(self.request.get("has_audio")))
+            self.include_audio_box.stateChanged.connect(lambda _v: self._commit_history())
+            speed_row.addWidget(self.include_audio_box)
+            speed_row.addStretch(1)
+            self.time_label = QLabel("")
+            self.time_label.setObjectName("dim")
+            self.time_label.setMinimumWidth(210)
+            self.time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            speed_row.addWidget(self.time_label)
+            root.addLayout(speed_row)
+
+            self.preview = UnifiedPreviewCanvas(self.source_w, self.source_h, self.duration)
+            self.preview.margins_changed.connect(self._on_crop_changed)
+            self.preview.toggle_playback_requested.connect(self.toggle_playback)
+            root.addWidget(self.preview, 1)
+
+            self.timeline = UnifiedTimelineWidget(self.duration, self.fps)
+            self.timeline.seek_requested.connect(self.seek)
+            self.timeline.cut_selected.connect(self._on_cut_selected)
+            self.timeline.view_changed.connect(self._sync_timeline_controls)
+            root.addWidget(self.timeline)
+
+            nav_row = QHBoxLayout()
+            nav_row.setSpacing(8)
+            view_label = QLabel("Timeline view")
+            view_label.setObjectName("timelineControlLabel")
+            nav_row.addWidget(view_label)
+            self.view_scroll = QScrollBar(Qt.Horizontal)
+            self.view_scroll.setObjectName("timelineViewScroll")
+            self.view_scroll.setMinimumWidth(420)
+            self.view_scroll.valueChanged.connect(self._on_view_scroll)
+            nav_row.addWidget(self.view_scroll, 1)
+            zoom_label = QLabel("Timeline zoom")
+            zoom_label.setObjectName("timelineControlLabel")
+            nav_row.addWidget(zoom_label)
+            self.zoom_slider = QSlider(Qt.Horizontal)
+            self.zoom_slider.setObjectName("timelineZoomSlider")
+            self.zoom_slider.setRange(0, 100)
+            self.zoom_slider.setMinimumWidth(420)
+            self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
+            nav_row.addWidget(self.zoom_slider, 1)
+            root.addLayout(nav_row)
 
             footer = QHBoxLayout()
-            self.status = QLabel("Use the tabs to edit crop, cuts, speed/reverse, and inspect the audio waveform.")
+            self.status = QLabel("Unified timeline: video preview, crop overlay, cut ranges, audio waveform, speed, and reverse are edited together.")
             self.status.setObjectName("dim")
             footer.addWidget(self.status, 1)
             btn_cancel = QPushButton("Cancel (Esc)")
@@ -6010,25 +6581,240 @@ def build_unified_video_editor(request: dict[str, Any]):
             QtGui.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.cancel)
             QtGui.QShortcut(QtGui.QKeySequence("Return"), self, activated=self.confirm)
             QtGui.QShortcut(QtGui.QKeySequence("Enter"), self, activated=self.confirm)
+            QtGui.QShortcut(QtGui.QKeySequence("Space"), self, activated=self.toggle_playback)
+            QtGui.QShortcut(QtGui.QKeySequence("I"), self, activated=self.mark_in)
+            QtGui.QShortcut(QtGui.QKeySequence("O"), self, activated=self.mark_out)
+            QtGui.QShortcut(QtGui.QKeySequence("A"), self, activated=self.add_cut)
+            QtGui.QShortcut(QtGui.QKeySequence("Delete"), self, activated=self.delete_selected_cut)
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self, activated=self._undo)
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Y"), self, activated=self._redo)
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+R"), self, activated=self.reset_crop)
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+0"), self, activated=self.reset_view)
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+I"), self, activated=self.invert_cuts)
 
-        def _build_waveform_tab(self):
-            panel = QWidget()
-            layout = QVBoxLayout(panel)
-            layout.setContentsMargins(12, 12, 12, 12)
-            self.wave_label = QLabel("Loading audio waveform preview...")
-            self.wave_label.setAlignment(Qt.AlignCenter)
-            self.wave_label.setObjectName("status")
-            layout.addWidget(self.wave_label, 1)
-            return panel
+        def _btn(self, text, slot):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            return b
+
+        def _setup_player(self):
+            self.player = QtMultimedia.QMediaPlayer(self)
+            self.audio = QtMultimedia.QAudioOutput(self)
+            self.audio.setVolume(0.60)
+            self.player.setAudioOutput(self.audio)
+            self.video_sink = QtMultimedia.QVideoSink(self)
+            self.player.setVideoSink(self.video_sink)
+            self.video_sink.videoFrameChanged.connect(self._on_video_frame)
+            self.player.positionChanged.connect(self._on_position_changed)
+            self.player.playbackStateChanged.connect(self._on_playback_state_changed)
+            self.player.setSource(QtCore.QUrl.fromLocalFile(str(self.input_path)))
+            self.player.pause()
+
+        def _on_video_frame(self, frame):
+            try:
+                image = frame.toImage()
+            except Exception:
+                image = None
+            if image is not None and not image.isNull():
+                self.preview.set_image(image)
+
+        def current_time(self):
+            try:
+                return max(0.0, min(self.duration, self.player.position() / 1000.0))
+            except Exception:
+                return 0.0
+
+        def seek(self, seconds):
+            seconds = max(0.0, min(self.duration, float(seconds)))
+            if hasattr(self, "player"):
+                self.player.setPosition(int(round(seconds * 1000)))
+            self.timeline.set_playhead(seconds, follow=True)
+
+        def toggle_playback(self):
+            if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState:
+                self.player.pause()
+            else:
+                self.player.play()
+
+        def _on_playback_state_changed(self, _state):
+            if self.player.playbackState() == QtMultimedia.QMediaPlayer.PlayingState:
+                self.btn_play.setText(" Pause (Space)")
+                self.btn_play.setIcon(self._icon("pause", QStyle.SP_MediaPause))
+            else:
+                self.btn_play.setText(" Play (Space)")
+                self.btn_play.setIcon(self._icon("play", QStyle.SP_MediaPlay))
+
+        def _on_position_changed(self, ms):
+            seconds = max(0.0, min(self.duration, ms / 1000.0))
+            self.timeline.set_playhead(seconds, follow=True)
+            self.time_label.setText(f"{seconds_to_hmsf(seconds, self.fps)} / {seconds_to_hmsf(self.duration, self.fps)}")
+
+        def _speed(self):
+            text = self.speed_combo.currentText().strip().lower()
+            try:
+                if text.endswith("%"):
+                    return max(0.05, min(10.0, float(text[:-1]) / 100.0))
+                if text.endswith("x"):
+                    return max(0.05, min(10.0, float(text[:-1])))
+                return max(0.05, min(10.0, float(text) / 100.0))
+            except Exception:
+                return 1.0
+
+        def _factor(self):
+            text = self.factor_combo.currentText().strip().lower()
+            try:
+                if text.endswith("x"):
+                    return max(0.05, min(10.0, float(text[:-1])))
+                if text.endswith("%"):
+                    return max(0.05, min(10.0, float(text[:-1]) / 100.0))
+                return max(0.05, min(10.0, float(text)))
+            except Exception:
+                return 1.0
+
+        def _on_speed_text_changed(self, _text):
+            if getattr(self, "_syncing_speed_controls", False):
+                return
+            speed = self._speed()
+            self._syncing_speed_controls = True
+            self.factor_combo.setCurrentText(f"{speed:g}x")
+            self._syncing_speed_controls = False
+            self._on_transform_changed()
+
+        def _on_factor_text_changed(self, _text):
+            if getattr(self, "_syncing_speed_controls", False):
+                return
+            speed = self._factor()
+            self._syncing_speed_controls = True
+            self.speed_combo.setCurrentText(f"{speed * 100:g}%")
+            self._syncing_speed_controls = False
+            self._on_transform_changed()
+
+        def _on_transform_changed(self):
+            self._apply_speed_to_player()
+            self._commit_history()
+            self._refresh_all()
+
+        def _apply_speed_to_player(self):
+            try:
+                self.player.setPlaybackRate(self._speed())
+            except Exception:
+                pass
+
+        def _on_crop_changed(self):
+            self._commit_history()
+            self._refresh_all()
+
+        def mark_in(self):
+            self._mark_in = self.current_time()
+            self._refresh_all()
+
+        def mark_out(self):
+            self._mark_out = self.current_time()
+            self._refresh_all()
+
+        def add_cut(self):
+            if self._mark_in is None:
+                self._mark_in = self.current_time()
+                self._refresh_all()
+                return
+            if self._mark_out is None:
+                self._mark_out = self.current_time()
+            s, e = sorted((float(self._mark_in), float(self._mark_out)))
+            if e <= s:
+                self.status.setText("Set different Mark In and Mark Out times before adding a cut.")
+                return
+            self._cut_ranges = normalize_ranges(self._cut_ranges + [(s, e)], self.duration)
+            self.timeline.selected_cut = len(self._cut_ranges) - 1
+            self._mark_in = None
+            self._mark_out = None
+            self._commit_history()
+            self._refresh_all()
+
+        def delete_selected_cut(self):
+            idx = self.timeline.selected_cut
+            if 0 <= idx < len(self._cut_ranges):
+                self._cut_ranges.pop(idx)
+                self.timeline.selected_cut = -1
+                self._commit_history()
+                self._refresh_all()
+
+        def invert_cuts(self):
+            if not self._cut_ranges:
+                self.status.setText("No cut ranges exist to invert.")
+                return
+            self._cut_ranges = invert_cut_ranges(self._cut_ranges, self.duration)
+            self.timeline.selected_cut = -1
+            self._commit_history()
+            self._refresh_all()
+
+        def reset_crop(self):
+            self.preview.reset_crop()
+            self._commit_history()
+            self._refresh_all()
+
+        def reset_view(self):
+            self.preview.reset_view()
+            self.timeline.view_start = 0.0
+            self.timeline.view_span = self.timeline.duration
+            self._sync_timeline_controls()
+            self.timeline.update()
+
+        def _on_cut_selected(self, idx):
+            self.btn_delete_cut.setEnabled(0 <= idx < len(self._cut_ranges))
+
+        def _on_zoom_slider(self, value):
+            if self._syncing_zoom:
+                return
+            ratio = 1.0 + (float(value) / 100.0) ** 2.2 * 63.0
+            self.timeline.set_zoom_ratio(ratio)
+            self._sync_timeline_controls()
+
+        def _on_view_scroll(self, value):
+            if self._syncing_view:
+                return
+            self.timeline.set_view_start(float(value) / 1000.0)
+
+        def _sync_timeline_controls(self):
+            if not hasattr(self, "zoom_slider"):
+                return
+            ratio = self.timeline.zoom_ratio()
+            value = int(round(((ratio - 1.0) / 63.0) ** (1.0 / 2.2) * 100.0))
+            self._syncing_zoom = True
+            self.zoom_slider.setValue(max(0, min(100, value)))
+            self._syncing_zoom = False
+            duration_ms = max(1, int(round(self.timeline.duration * 1000.0)))
+            span_ms = max(1, int(round(self.timeline.view_span * 1000.0)))
+            max_start = max(0, duration_ms - span_ms)
+            self._syncing_view = True
+            self.view_scroll.setRange(0, max_start)
+            self.view_scroll.setPageStep(span_ms)
+            self.view_scroll.setSingleStep(max(1, span_ms // 10))
+            self.view_scroll.setValue(max(0, min(max_start, int(round(self.timeline.view_start * 1000.0)))))
+            self._syncing_view = False
+
+        def _refresh_all(self):
+            self._cut_ranges = normalize_ranges(self._cut_ranges, self.duration)
+            self.timeline.set_cut_ranges(self._cut_ranges)
+            self.timeline.selected_cut = min(self.timeline.selected_cut, len(self._cut_ranges) - 1)
+            self.btn_delete_cut.setEnabled(0 <= self.timeline.selected_cut < len(self._cut_ranges))
+            top, left, right, bottom = self.preview.margins
+            crop_w = max(1, self.source_w - left - right)
+            crop_h = max(1, self.source_h - top - bottom)
+            self.status.setText(
+                f"Crop {crop_w}x{crop_h}  |  Cuts {len(self._cut_ranges)}  |  "
+                f"Speed {self._speed():g}x  |  Reverse {'yes' if self.reverse_box.isChecked() else 'no'}"
+            )
+            self._update_undo_redo()
+            self._sync_timeline_controls()
 
         def _start_waveform(self):
             if not bool(self.request.get("has_audio")):
-                self.wave_label.setText("No audio stream is available for waveform preview.")
+                self.status.setText("No audio stream is available for waveform preview.")
                 return
             args = [
                 "-hide_banner", "-loglevel", "error", "-y",
                 "-i", str(self.request.get("input_path") or ""),
-                "-filter_complex", "[0:a:0]aformat=channel_layouts=mono,showwavespic=s=1800x320:colors=388bfd[wave]",
+                "-filter_complex", "[0:a:0]aformat=channel_layouts=mono,showwavespic=s=2200x360:colors=79c0ff[wave]",
                 "-map", "[wave]",
                 "-frames:v", "1",
                 "-c:v", "png",
@@ -6040,44 +6826,21 @@ def build_unified_video_editor(request: dict[str, Any]):
 
         def _waveform_finished(self, *_args):
             if not self._wave_path.exists():
-                self.wave_label.setText("Waveform preview could not be generated.")
+                self.status.setText("Waveform preview could not be generated.")
                 return
-            pix = QtGui.QPixmap(str(self._wave_path))
-            if pix.isNull():
-                self.wave_label.setText("Waveform preview could not be loaded.")
-                return
-            self.wave_label.setPixmap(pix.scaled(
-                self.wave_label.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            ))
+            self.timeline.set_waveform(self._wave_path)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
-            if hasattr(self, "wave_label") and self._wave_path.exists():
-                self._waveform_finished()
+            self.timeline.update()
 
         def confirm(self):
-            margins = [0, 0, 0, 0]
-            try:
-                margins = [int(v) for v in self.crop_editor.canvas.margins]
-            except Exception:
-                pass
-            keep_ranges: list[list[float]] = []
-            try:
-                cuts = self.cut_editor._cuts()
-                keep_ranges = [[float(s), float(e)] for s, e in (invert_cuts_to_keep(cuts, self.duration) if cuts else [])]
-            except Exception:
-                keep_ranges = []
-            speed = 1.0
-            reverse = False
-            include_audio = False
-            try:
-                speed = float(self.speed_editor._speed())
-                reverse = bool(self.speed_editor.reverse_box.isChecked())
-                include_audio = bool(getattr(self.speed_editor, "include_audio_box", None) and self.speed_editor.include_audio_box.isChecked())
-            except Exception:
-                pass
+            margins = [int(v) for v in self.preview.margins]
+            cuts = normalize_ranges(self._cut_ranges, self.duration)
+            keep_ranges = [[float(s), float(e)] for s, e in (invert_cuts_to_keep(cuts, self.duration) if cuts else [])]
+            speed = float(self._speed())
+            reverse = bool(self.reverse_box.isChecked())
+            include_audio = bool(self.include_audio_box.isChecked())
             self.result = {
                 "status": "ok",
                 "margins": margins,
@@ -6093,8 +6856,10 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.close()
 
         def closeEvent(self, event):
-            for editor in self._embedded_editors:
-                _stop_embedded_editor(editor)
+            try:
+                self.player.stop()
+            except Exception:
+                pass
             try:
                 if self._wave_proc is not None:
                     if self._wave_proc.state() != QtCore.QProcess.NotRunning:

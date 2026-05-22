@@ -123,7 +123,7 @@ The installer adds the local `Commands` folder to your User PATH and also adds o
 10 = Audio Cut / Speed / Reverse
 ```
 
-Mode `1` is the default and asks every question. On the `feature/unified-editors` branch it can open the experimental Unified Video Editor, which combines crop, video cuts, video speed/reverse, and audio waveform preview in one maximized Qt window. If you skip the unified editor, the archived standalone GUI prompts still work.
+Mode `1` is the default and asks every question. On the `feature/unified-editors` branch it can open the experimental Unified Video Editor: one Premiere-style workspace with a video preview and crop overlay, a shared timeline with audio waveform preview, cut ranges, timeline pan/zoom controls, and speed/reverse controls in the same window. If you skip the unified editor, the archived standalone GUI prompts still work.
 
 Mode `2` reads settings from `config.json`, then asks only the crop question. Use this when encode settings stay the same but crop changes per file.
 
