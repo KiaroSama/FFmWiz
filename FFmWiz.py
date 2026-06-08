@@ -12777,7 +12777,7 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
     mode_prompt = question_prompt(
         answers,
         "Video quality mode",
-        f"bitrate=target average kbps; rf=constant quality (CRF/CQ)",
+        f"{example_text('bitrate')}=target average kbps; {example_text('rf')}=constant quality (CRF/CQ)",
         "bitrate",
     )
     while True:
@@ -12853,16 +12853,16 @@ def _step_video_constant_quality(answers: dict[str, Any]) -> None:
         default = "23"
 
     note(
-        f"Constant Quality ({label}) mode: the encoder targets a perceptual quality level.\n"
-        f"  Range: {range_text}\n"
+        f"Constant Quality ({paint(label, Color.CYAN)}) mode: the encoder targets a perceptual quality level.\n"
+        f"  Range: {paint(range_text, Color.HINT_YELLOW)}\n"
         f"  Lower = higher quality + larger file. Higher = lower quality + smaller file.\n"
-        f"  Decimal values accepted (e.g. 22.5). Typical range for good quality: 18-28."
+        f"  Decimal values accepted (e.g. {paint('22.5', Color.LIME)}). Typical range for good quality: {paint('18-28', Color.GREEN)}."
     )
 
     prompt = question_prompt(
         answers,
         f"Enter {label} value",
-        f"range 0-51; examples: 18, 23, 28, 22.5",
+        f"range {example_text('0-51')}; examples: {example_text('18, 23, 28, 22.5')}",
         default,
     )
     while True:
@@ -13163,7 +13163,7 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         question_prompt(
             answers,
             "Measure current audio loudness for two-pass normalization?",
-            "y=measure (more accurate); n=skip to manual target (faster)",
+            f"{example_text('y')}=measure (more accurate); {example_text('n')}=skip to manual target (faster)",
             "y",
         ),
         True,
