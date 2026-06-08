@@ -3884,7 +3884,46 @@ def run_ffmpeg_with_progress(
             try:
                 line = stdout_queue.get(timeout=0.25)
             except queue.Empty:
-                if progress_events == 0:
+                if progress_events == 0 and split_part_durations and output_paths and total_duration and total_duration > 0:
+                    # Multi-output FFmpeg may write Part 1 entirely before
+                    # emitting any progress events. Estimate Part 1 progress
+                    # from its output file size growth.
+                    try:
+                        part1_size = output_paths[0].stat().st_size if output_paths[0].exists() else 0
+                    except OSError:
+                        part1_size = 0
+                    if part1_size > 0:
+                        # Part 1 is being written. Estimate progress using the
+                        # target bitrate or a linear assumption within Part 1.
+                        part1_duration = split_part_durations[0]
+                        target_kbps = float(state.get("_ffmwiz_target_bitrate_kbps", "0") or 0)
+                        if target_kbps > 0:
+                            estimated_total_bytes = target_kbps * 1000.0 / 8.0 * part1_duration
+                            part1_pct = min(1.0, part1_size / max(1, estimated_total_bytes))
+                        else:
+                            # Without a bitrate target, assume linear write.
+                            part1_pct = min(0.95, part1_size / max(1, part1_size + 1024 * 1024))
+                        estimated_s = part1_pct * part1_duration
+                        state["_ffmwiz_current_s"] = str(estimated_s)
+                        state["_ffmwiz_prefer_elapsed_speed"] = "1"
+                        state["_ffmwiz_split_part_label"] = f"Part 1/{len(split_part_durations)}"
+                        elapsed_now = max(0.001, time.perf_counter() - started_at)
+                        if estimated_s > 0.5:
+                            state["_ffmwiz_speed_text"] = f"{estimated_s / elapsed_now:.3g}x"
+                        state["_ffmwiz_size_text"] = (
+                            _human_size(part1_size)
+                            .replace("KiB", "KB").replace("MiB", "MB")
+                            .replace("GiB", "GB").replace("TiB", "TB")
+                        )
+                        if estimated_s > 0.5:
+                            state["_ffmwiz_bitrate_text"] = f"{part1_size * 8.0 / 1000.0 / estimated_s:.1f}kbits/s"
+                        rendered = _render_progress_line(state, total_duration, started_at)
+                        _write_progress_line(rendered)
+                        last_render = rendered
+                    else:
+                        last_render = _render_initial_progress_line(label, initial_detail, started_at)
+                        _write_progress_line(last_render)
+                elif progress_events == 0:
                     last_render = _render_initial_progress_line(label, initial_detail, started_at)
                     _write_progress_line(last_render)
                 elif state:

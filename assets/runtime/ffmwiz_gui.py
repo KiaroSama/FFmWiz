@@ -7242,26 +7242,32 @@ def build_unified_video_editor(request: dict[str, Any]):
                 p.setPen(QtGui.QPen(marker_color, 1))
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 9 if selected else 8))
                 p.drawText(QRectF(x + 5, ruler.bottom() + 2, 42, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
-            # Center-of-view guide: a subtle dashed line at the exact centre of the
-            # visible range, labelled with its timecode — a precise reference point
-            # when zoomed in (it tracks the middle of whatever you are looking at).
+            # Center-of-view guide: a short indicator above the waveform with a
+            # timecode label, marking the exact centre of the visible range.
+            # Positioned above timeline tracks to avoid visual clutter.
             center_time = max(0.0, min(self.duration, self.view_start + self.view_span / 2.0))
             cx = self._time_to_x(center_time)
-            p.setPen(QtGui.QPen(QtGui.QColor(150, 225, 255, 120), 1, Qt.DashLine))
-            p.drawLine(QPointF(cx, ruler.bottom() + 2), QPointF(cx, wave.bottom()))
-            p.setBrush(QtGui.QBrush(QtGui.QColor(150, 225, 255, 235)))
+            # Draw a short vertical line above the waveform area only (in the ruler space).
+            guide_color = QtGui.QColor(255, 180, 80, 160)  # Orange, distinct from blue timeline.
+            p.setPen(QtGui.QPen(guide_color, 1, Qt.DashLine))
+            guide_top = ruler.bottom() + 2
+            guide_bottom = ruler.bottom() + 14
+            p.drawLine(QPointF(cx, guide_top), QPointF(cx, guide_bottom))
+            # Diamond indicator at the guide top.
+            p.setBrush(QtGui.QBrush(QtGui.QColor(255, 180, 80, 220)))
             p.setPen(Qt.NoPen)
             p.drawPolygon(QtGui.QPolygonF([
-                QPointF(cx, wave.top() - 5), QPointF(cx + 5, wave.top()),
-                QPointF(cx, wave.top() + 5), QPointF(cx - 5, wave.top()),
+                QPointF(cx, guide_top - 4), QPointF(cx + 4, guide_top),
+                QPointF(cx, guide_top + 4), QPointF(cx - 4, guide_top),
             ]))
+            # Timecode pill below the guide.
             _ctc = seconds_to_timecode(center_time)
             p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
-            _pill = QRectF(cx - 54, wave.bottom() - 19, 108, 16)
+            _pill = QRectF(cx - 54, guide_bottom + 2, 108, 16)
             p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 205)))
-            p.setPen(QtGui.QPen(QtGui.QColor(150, 225, 255, 160), 1))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 160), 1))
             p.drawRoundedRect(_pill, 4, 4)
-            p.setPen(QtGui.QPen(QtGui.QColor(195, 236, 255), 1))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
             p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
             ph_x = self._time_to_x(self.playhead)
             if wave.left() - 4 <= ph_x <= wave.right() + 4:
