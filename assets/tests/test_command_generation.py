@@ -2196,12 +2196,12 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertIn("_Part01.mp4", text)
         self.assertIn("_Part02.mp4", text)
 
-    def test_step_nvenc_multipass_defaults_to_fullres_for_bitrate_nvenc(self):
+    def test_step_nvenc_multipass_defaults_to_qres_for_bitrate_nvenc(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
             with mock.patch.object(FFmWiz, "ask_raw", return_value=""):
                 FFmWiz.step_nvenc_multipass(answers)
-        self.assertEqual(answers["nvenc_multipass"], "fullres")
+        self.assertEqual(answers["nvenc_multipass"], "qres")
 
     def test_nvenc_multipass_prompt_skips_cpu_encoder(self):
         with tempfile.TemporaryDirectory() as tmp:
