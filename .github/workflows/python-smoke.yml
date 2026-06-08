@@ -28,7 +28,7 @@ jobs:
           python -m pip install --upgrade -r requirements.txt
 
       - name: Compile Python files
-        run: python -m py_compile FFmWiz.py ffmwiz_gui.py
+        run: python -m py_compile FFmWiz.py assets/runtime/ffmwiz_gui.py assets/runtime/MuxCls.py
 
       - name: Validate config JSON
         run: python -c "import json; json.load(open('config.json', encoding='utf-8'))"
@@ -37,4 +37,4 @@ jobs:
         run: python -c "import FFmWiz; assert hasattr(FFmWiz, 'build_add_files_to_video_command'); assert hasattr(FFmWiz, 'run_media_info_mode'); assert hasattr(FFmWiz, 'run_mux_cleanup_mode'); assert hasattr(FFmWiz, 'run_hardsub_encode_mode'); assert hasattr(FFmWiz, 'build_hardsub_command'); assert hasattr(FFmWiz, 'confirm_numeric_target_not_above_source'); assert hasattr(FFmWiz, 'confirm_resolution_not_above_source'); assert hasattr(FFmWiz, 'analyze_copy_cut_chapter_plan'); assert hasattr(FFmWiz, 'add_files_stream_copy_compatibility_errors'); assert '.webvtt' in FFmWiz.HARDSUB_SUBTITLE_EXTS; assert FFmWiz.display_language('und') == 'unknown'; assert FFmWiz.describe_video_bit_depth({'pix_fmt':'yuv420p10le'}) == '10-bit'; s=FFmWiz.MuxStreamInfo.from_ffprobe({'index':1,'codec_type':'audio','codec_name':'aac','tags':{'language':'und'},'duration':'10'}, {}, {1:160000}); assert s.language == 'unknown' and s.bitrate_kbps == 128 and s.size_bytes == 160000; assert 'MB' in FFmWiz.media_info_value_with_units('size', '1048576'); assert 'bit/s' in FFmWiz.media_info_value_with_units('bit_rate', '128000'); assert 's)' in FFmWiz.media_info_value_with_units('duration', '12.5'); assert FFmWiz.default_media_reports_dir().name == 'MediaReports'"
 
       - name: Command generation tests
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s assets/tests -v

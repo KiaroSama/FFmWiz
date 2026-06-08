@@ -2,7 +2,7 @@
 
 FFmWiz is a Windows-focused interactive FFmpeg command builder. It inspects a source file, asks practical encode questions, builds a PowerShell-safe command, shows a final summary, and can run FFmpeg immediately.
 
-It is designed for repeated local encoding work with NVIDIA/NVENC support, config-driven presets, audio-track cleanup helpers, and a graphical crop editor tool.
+It is designed for repeated local encoding work with NVIDIA/NVENC support, config-driven presets, audio-track cleanup helpers, and a unified graphical video editor.
 
 ## Features
 
@@ -10,8 +10,9 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 - Supports video inputs and audio-only inputs.
 - Includes Folder Encode mode for sequentially encoding every supported audio/video file in a folder with one shared settings pass.
 - Includes Add files to video mode for adding external audio/subtitle files as extra soft tracks without re-encoding.
+- Includes Extract Stream mode for extracting one video/audio/subtitle stream by ffprobe stream index.
 - Includes Media info report mode for exporting detailed ffprobe reports for a file or every ffprobe-readable file in a folder.
-- Includes Stream Cleanup Remux mode for keeping selected audio/subtitle streams without re-encoding.
+- Includes Stream Cleanup Remux mode for keeping selected audio/subtitle streams, editing kept stream metadata, copying unchanged videos directly, and copying non-video side files without re-encoding.
 - Includes Hard Sub Encode mode for burning internal or external subtitles into video with HDR/Dolby handling options.
 - Includes Video Speed / Reverse and combined Audio Cut / Speed / Reverse GUI modes.
 - Accepts pasted paths and terminal drag-and-drop paths for the input file, including Unicode/Persian paths.
@@ -26,7 +27,7 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 - Detects empty, near-empty, possible duplicate, and confirmed duplicate audio tracks.
 - Can drop confirmed duplicate audio tracks and empty/near-empty tracks with explicit choices.
 - Can remove or keep subtitle tracks.
-- Includes a graphical crop editor with zoom, timeline, pan, audio preview, and local UI assets.
+- Includes a unified graphical video editor with crop, cuts, Split points, timeline zoom/pan, waveform preview, speed/reverse, and local UI assets.
 - Includes config mode for repeatable jobs.
 
 ## Requirements
@@ -34,21 +35,20 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 - Windows 11 is the primary target.
 - Python 3 must be available as `py -3` or `python`.
 - FFmpeg and ffprobe must be installed and available in PATH. On startup, FFmWiz checks for them and can offer to install the full FFmpeg package with a supported package manager such as winget or Chocolatey.
-- ffplay is optional. The legacy Tk crop preview uses it for audio scrubbing; the new PySide6 GUI plays audio natively via Qt Multimedia.
+- ffplay is optional for archived legacy GUI helpers. The active PySide6 GUI plays audio natively via Qt Multimedia.
 - NVIDIA GPU acceleration requires an FFmpeg build with CUDA/NVENC support.
-- **PySide6 is recommended** for the new dedicated Cut Editor and Crop Editor windows. Install the Python runtime dependencies once with:
+- **PySide6 is recommended** for the active unified editor and speed/audio GUI windows. Install the Python runtime dependencies once with:
 
   ```powershell
   py -3 -m pip install --upgrade -r requirements.txt
   ```
 
-  Without PySide6, FFmWiz still works — it silently falls back to the legacy Tk preview windows. The CLI workflow is identical either way.
+  Without PySide6, FFmWiz still works in terminal/manual mode. Active graphical editor windows require PySide6; the old standalone Tk Cut/Crop helpers are archived and are not exposed by normal CLI prompts.
 
 ## Project Layout
 
 ```text
 FFmWiz.py             # main CLI / wizard
-ffmwiz_gui.py         # PySide6 GUI (Cut/Crop/Speed/Waveform editors)
 config.json
 requirements.txt
 pyproject.toml
@@ -62,11 +62,15 @@ MediaReports/          # generated media info reports (gitignored)
   workflows/
 README.md
 assets/
+  runtime/
+    ffmwiz_gui.py     # PySide6 GUI (Unified/Speed/Waveform editors; standalone Cut/Crop are archived)
+    MuxCls.py         # embedded Stream Cleanup Remux runtime
   icons/
   cursors/
+  tests/
 ```
 
-`FFmWiz.py` launches `ffmwiz_gui.py` as a subprocess via small JSON request/reply files whenever a GUI is needed. This keeps the Qt event loop fully isolated from the CLI process and from the legacy Tk fallback.
+`FFmWiz.py` launches `assets/runtime/ffmwiz_gui.py` as a subprocess via small JSON request/reply files whenever an active GUI is needed. This keeps the Qt event loop fully isolated from the CLI process. The old standalone Cut/Crop GUI helpers remain archived in code but are no longer exposed by CLI prompts.
 
 Keep the `assets` folder next to `FFmWiz.py`. The local `assets/icons/ffmwiz_app.png`, `ffmwiz_app.ico`, and `ffmwiz_app.svg` files provide the application/window/taskbar icon for the Qt and Tk GUI windows.
 
@@ -116,27 +120,33 @@ The installer adds the local `Commands` folder to your User PATH and also adds o
 3 = Cut video only with copy
 4 = Folder Encode
 5 = Add files to video
-6 = Media info report
-7 = Stream Cleanup Remux
-8 = Hard Sub Encode
-9 = Video Speed / Reverse
-10 = Audio Cut / Speed / Reverse
+6 = Extract Stream
+7 = Media info report
+8 = Stream Cleanup Remux
+9 = Hard Sub Encode
+10 = Video Speed / Reverse
+11 = Audio Cut / Speed / Reverse
+12 = Join Videos
+13 = Metadata Editor
 ```
 
-Mode `1` is the default and asks every question. On the `feature/unified-editors` branch it can open the experimental Unified Video Editor: one Premiere-style workspace with a video preview and crop overlay, a shared timeline with audio waveform preview, cut ranges, timeline pan/zoom controls, and speed/reverse controls in the same window. If you skip the unified editor, the archived standalone GUI prompts still work.
+Mode `1` is the default and asks every question. For video inputs it can open the Unified Video Editor: one Premiere-style workspace with a video preview and crop overlay, a shared timeline with audio waveform preview, cut ranges, Split points, timeline pan/zoom controls, and speed/reverse controls in the same window. If you skip the unified editor, FFmWiz stays in terminal mode for crop, cuts, and video speed/reverse; the archived standalone Cut/Crop GUIs are not offered.
+
+For encode/re-encode workflows, FFmWiz asks whether to keep source metadata and extra streams when they exist. Choosing keep preserves source container/stream metadata and chapters, keeps extra source video/data streams by stream copy when the timeline is not being cut/split/speed-changed, allows subtitle stream selection, and can copy MKV embedded font/attachment streams when the output container supports them. Choosing remove writes explicit `-map_metadata -1` and `-map_chapters -1`, drops extra source video streams and source subtitle/data streams, and does not map embedded font/attachment streams.
 
 Mode `2` reads settings from `config.json`, then asks only the crop question. Use this when encode settings stay the same but crop changes per file.
 
 Mode `3` is a dedicated stream-copy cut tool. No re-encoding happens, so cuts are very fast and lossless, but cut points snap to nearby keyframes. Inside Mode 3 you can pick:
 
 ```text
-1 = GUI cut editor  (default — press Enter)
-2 = Manual cut using h:m:s:frame
+1 = Manual cut using h:m:s:frame  (default — press Enter)
 ```
 
-Cancelling the GUI cut editor returns to this cut-method menu (not the main menu), so you can switch to manual entry without restarting the workflow.
+The archived standalone GUI cut editor is no longer offered in Mode 3. Use the manual layout prompts for stream-copy cutting.
 
 Mode `4` encodes every supported audio/video file in one folder. FFmWiz scans the folder, shows a compact per-file media summary with video codec/size/fps/bit depth/color range/bitrate/video-only size plus every audio track's codec/sample rate/bitrate/track size, asks one shared set of settings, then runs FFmpeg sequentially for each file. Duplicate and empty audio tracks are checked silently; only actual issues are reported at the end of the folder summary. Graphical crop/cut editors are intentionally disabled in this mode so the same settings can be applied safely to every file. If the output folder prompt is left empty, FFmWiz creates a sibling folder named `<input-folder>_Encode`.
+
+Mode `13` is the Metadata Editor. It uses ffprobe to inspect streams, chapters, tags, dispositions, attached pictures, and video bitstream metadata, then applies targeted stream-copy metadata changes with `-map 0 -c copy` where possible. It can edit per-stream title/language/custom tags, stream dispositions, chapter metadata, attached pictures, H.264/HEVC bitstream color/SAR metadata, and metadata reports. It does not provide a global file-level metadata editor.
 
 Non-media files in the folder are ignored.
 
@@ -144,11 +154,15 @@ Mode `5` adds external audio and subtitle files to a source video without re-enc
 
 Mode 5 maps all streams from the source video, then maps audio/subtitle streams from each extra file with `-c copy`. Because this is a pure stream-copy/remux mode, the output extension always matches the source video extension. FFmWiz does not silently switch MP4 to MKV, MKV to MP4, transcode audio, or convert subtitles here. If an added stream cannot be safely muxed into the original container, FFmWiz prints a clear error and stops before running FFmpeg.
 
-Mode `6` writes a detailed media information report using ffprobe. For a single file, FFmWiz prints the organized report in the console and also saves it to `MediaReports/<original filename>_info.txt`. For a folder, FFmWiz scans files recursively, skips unsupported/unreadable files, and writes one report per readable file into the `MediaReports/` folder without printing every full report to the console. Each report includes organized format/stream/chapter/program/version sections with readable units for sizes, durations, bitrates, FPS, pixels, samples, frames, packets, ticks, and counts, plus raw ffprobe JSON and the raw ffprobe text overview for later inspection.
+Mode `6` extracts one stream from a media file by ffprobe stream index. FFmWiz shows the source media information, lists extractable video/audio/subtitle streams with their real ffprobe indexes, then builds a command using `-map 0:<index>`. Audio/video streams are stream-copied when possible. Text subtitles that need a portable text output, such as `mov_text`, are exported as `.srt`.
 
-Mode `7` remuxes video files with `ffmpeg -c copy` while keeping only selected audio and subtitle streams. It scans one file or a folder recursively, prints audio/subtitle stream indexes, languages, titles, codecs, channel counts, default flags, and a unique stream summary, then lets you select streams by exact ffprobe index or by language/title rules. Video streams are preserved, optional MKV font attachments can be kept, metadata and chapters can be kept or removed, and outputs are written with a safe selection suffix so the source file is not overwritten. The output suffix always matches each input file suffix; this mode does not perform container conversion, subtitle conversion, or audio transcoding.
+Mode `7` writes a detailed media information report using ffprobe and optional read-only ffmpeg analysis. For a single file, FFmWiz prints the organized report in the console and saves TXT and dark-mode HTML reports to `MediaReports/<original filename>_info.txt` / `.html`. It also writes sidecar files such as raw ffprobe JSON and a stream-summary CSV. If you keep the default deep analysis enabled, it also creates per-second video bitrate and frame/GOP analysis CSV files. Optional prompts can compare the file against a reference/source file for PSNR/SSIM/VMAF when supported, and can extract sample PNG screenshots at fixed duration percentages. For a folder, FFmWiz scans files recursively, skips unsupported/unreadable files, and writes one report per readable file into `MediaReports/` without printing every full report to the console. Reports include technical diagnosis, encoder metadata notes, stream size analysis, BPPPF, extended color metadata, audio/subtitle/attachment technical detail, chapters/programs, raw ffprobe JSON, and the raw ffprobe text overview.
 
-Mode `8` burns subtitles into the video image and therefore re-encodes video. If internal subtitle streams are present, FFmWiz lets you choose internal or external subtitles; if no internal subtitles exist, it skips that question and asks directly for an external `.srt`, `.ass`, `.ssa`, `.vtt`, or `.webvtt` file. Internal HardSub accepts text subtitle codecs such as ASS/SSA/SRT/WebVTT and rejects bitmap subtitle streams such as PGS, VobSub, and DVDSub because the `subtitles=`/libass filter path is not valid for those image-based streams. ASS/SSA files are scanned for embedded `[Fonts]` data; `fontsdir` is optional and is added to the FFmpeg subtitle filter only when you provide a valid directory. Audio is copied by default when the output container matches the input container. If you choose a different HardSub output container, FFmWiz asks whether to copy audio anyway, transcode selected/copied audio to AAC stereo, change the output format to match the source container, or remove audio. HDR and Dolby Vision are detected before the HDR prompt is shown: HDR metadata can be preserved best-effort, HDR/Dolby sources can be tone-mapped to SDR, or the file can be encoded normally. Dolby Vision dynamic metadata cannot be reliably preserved after hard-sub re-encoding, so FFmWiz prints a warning when it detects it.
+Mode `8` remuxes video files with `ffmpeg -c copy` while keeping only selected audio and subtitle streams. It scans one file or a folder recursively, prints audio/subtitle stream indexes, languages, titles, codecs, channel counts, default flags, stream size estimates, and a unique stream summary, then lets you select streams by exact ffprobe index or by language/title rules. Video streams are preserved, optional MKV font attachments can be kept, metadata and chapters can be kept or removed, and outputs are written with a safe selection suffix so the source file is not overwritten. The output suffix always matches each input file suffix; this mode does not perform container conversion, subtitle conversion, or audio transcoding.
+
+Mode `8` can also edit language/title metadata for kept output audio and subtitle streams without modifying the source file. If the selected streams, metadata, attachment, chapter, and disposition rules already match the source, FFmWiz copies the video unchanged with `robocopy` instead of running FFmpeg. Folder processing can also copy non-video files into the output folder while preserving relative paths. The final summary reports remuxed files, unchanged copies, skipped files, no-audio-match skips, extra-file copy counts, elapsed time, and output size difference.
+
+Mode `9` burns subtitles into the video image and therefore re-encodes video. If internal subtitle streams are present, FFmWiz lets you choose internal or external subtitles; if no internal subtitles exist, it skips that question and asks directly for an external `.srt`, `.ass`, `.ssa`, `.vtt`, or `.webvtt` file. Internal HardSub accepts text subtitle codecs such as ASS/SSA/SRT/WebVTT and rejects bitmap subtitle streams such as PGS, VobSub, and DVDSub because the `subtitles=`/libass filter path is not valid for those image-based streams. ASS/SSA files are scanned for embedded `[Fonts]` data; `fontsdir` is optional and is added to the FFmpeg subtitle filter only when you provide a valid directory. Audio is copied by default when the output container matches the input container. If you choose a different HardSub output container, FFmWiz asks whether to copy audio anyway, transcode selected/copied audio to AAC stereo, change the output format to match the source container, or remove audio. HDR and Dolby Vision are detected before the HDR prompt is shown: HDR metadata can be preserved best-effort, HDR/Dolby sources can be tone-mapped to SDR, or the file can be encoded normally. Dolby Vision dynamic metadata cannot be reliably preserved after hard-sub re-encoding, so FFmWiz prints a warning when it detects it.
 
 ## Source-Value Warnings
 
@@ -181,79 +195,13 @@ Stream-copy cuts:
 - Chapters are handled safely: if no source chapters intersect removed ranges, FFmWiz keeps the source chapter mapping; if any chapter intersects a removed range, it rebuilds the remaining non-overlapping chapters with remapped timestamps; if all chapters are removed, it writes no chapters.
 - Warning: stream-copy is keyframe-bound. Use Mode 1 for frame-accurate cuts.
 
-Temporary GUI cut editor (Mode 3 option 2 / `g=Show Graphical Cut Editor`):
+Archived standalone Cut/Crop GUI helpers:
 
-- Dark-themed window with a dark Windows title bar.
-- Asynchronous, debounced, cached preview frame extraction so scrubbing stays smooth.
-- Large zoomable timeline. Click or drag to seek, drag markers and cut ranges directly.
-- Timeline follows the CTI/playhead during playback and seeking, keeping it visible without forcing manual scrolling.
-- Timeline zoom slider under the timeline controls global timeline scale. Mouse wheel over that bar zooms the timeline in/out; Shift zooms faster and Ctrl zooms more finely.
-- Use `Add Cut(s) (A)` to activate all valid adjacent In/Out marker pairs, or create a quick one-second pair when no pair exists. Selected ranges are shown in bright red.
-- Built-in audio preview with a volume slider and `Mute` button (uses ffplay).
-
-Cut Editor keyboard shortcuts (layout-independent — works on Persian, Arabic, and other non-Latin keyboard layouts):
-
-```text
-Space          Play / Pause   (rewinds to start if at end of clip)
-Home           Jump to the beginning of the timeline
-End            Jump to the end of the timeline
-← / →          Seek -1s / +1s
-Shift + ← / →  Seek -5s / +5s
-Ctrl + ← / →   Snap the playhead to the previous / next marker
-Ctrl + Z       Undo last GUI edit
-Ctrl + Y       Redo last undone GUI edit  (Ctrl+Shift+Z also works)
-I              Mark In at the current time (or convert selected Out → In)
-O              Mark Out at the current time (or convert selected In → Out)
-A              Add Cut(s): activate valid In/Out pairs, or create a quick pair at the playhead
-Ctrl + Shift + I  Invert Cuts: keep the current cut ranges and remove everything else
-Delete         Delete selected marker(s), or the selected cut when no marker is selected
-+ / -          Zoom timeline in / out around the playhead
-Ctrl + R       Reset Zoom: fit timeline to full duration
-Wheel on timeline           Seek -5s / +5s
-Shift + wheel on timeline   Seek -10s / +10s
-Ctrl + wheel on timeline    Zoom timeline around the cursor
-Wheel on timeline zoom bar  Zoom timeline in/out
-Wheel on volume slider      Volume up / down (does NOT interrupt playback)
-M              Mute / unmute audio preview
-Enter          Confirm (return cuts to the terminal)
-Esc            Cancel and return to the cut-method menu
-```
-
-**Cut Editor mouse behavior**
-
-The Cut Editor separates two common gestures so neither accidentally fires the other:
-
-- **Left-click a cut region** moves the playhead/CTI to the clicked time. Left-click never selects the cut region on its own.
-- **Right-click a cut region** selects it (highlighted in bright red) and opens a small context menu with `Seek playhead here` and `Delete this cut`.
-- **Left-click an In/Out marker handle** above the track selects that marker. `Ctrl+click` toggles markers into a multi-selection. Selected markers are drawn thicker and are affected by `Delete Selected Marker(s)` / Delete.
-
-**Marker type conversion**
-
-Each marker is either `In` (green) or `Out` (yellow). Cut ranges are derived automatically by pairing consecutive `In → Out` markers in time order, so you can edit them as individual markers without worrying about ranges:
-
-- Select an `In` marker and click `Mark Out` (or press `O`) → the same marker becomes an `Out` marker at the same time.
-- Select an `Out` marker and click `Mark In` (or press `I`) → the marker becomes `In`.
-- The marker's position never changes; only its type does.
-- Newly created markers are not kept selected, so a later `Mark In` / `Mark Out` click does not accidentally convert them. If no marker is explicitly selected, `Mark In` / `Mark Out` create a new marker at the current playhead.
-- Marker type conversion is fully undoable with `Ctrl + Z`.
-
-**Undo / Redo history**
-
-The undo stack only tracks output-affecting edits:
-
-- adding, moving, deleting markers,
-- inverting cut ranges,
-- converting marker type,
-- deleting all markers,
-- crop rectangle changes (in the Crop GUI).
-
-Tool selection, zoom, pan, scroll, playback, and volume changes are view/playback state and are **not** part of the undo history.
-
-**Button colors**
-
-- `Add Cut(s)` is a slightly darker green for the dark UI.
-- `Delete Selected Marker(s)` and `Delete Selected Cut` are dark red and are enabled only when their target selection exists.
-- `Delete All Markers` is a different dark red (warmer/amber tone) so it's clearly distinct from the per-marker delete.
+- The old standalone Cut Editor and Crop Editor code is kept in the repository for archive/debug reference.
+- Normal CLI prompts no longer expose `g=Show Graphical Cut Editor` or `g=Show Graphical Crop Editor`.
+- Mode 1 uses the Unified Video Editor as the only video GUI. If you answer `n` there, later crop/cut/speed questions stay terminal/manual only.
+- Mode 3 stream-copy cut is manual-only.
+- Use the Unified Video Editor for graphical crop, frame-accurate cuts, Split points, waveform preview, and video speed/reverse in one workspace.
 
 Confirmation prompt for both modes is `Continue? [Y/n] {0=back, quit=exit}:` — pressing Enter continues, `n` cancels, `0` goes back to the previous step, `quit` exits.
 
@@ -302,7 +250,7 @@ That comment block is near the top of the file and contains visible reference li
 
 ## Dedicated GUI (PySide6)
 
-When PySide6 is available, FFmWiz automatically opens a polished Qt-based GUI for the Cut and Crop workflows instead of the legacy Tk windows. Both editors share a single design system inspired by Adobe Premiere Pro:
+When PySide6 is available, FFmWiz can open polished Qt-based editors. The active video workflow is the Unified Video Editor, which combines crop, cuts, Split points, waveform preview, timeline controls, and speed/reverse in one Premiere-style workspace:
 
 - Dark workspace (`#0e1217` background, slate panels, blue `#5b9eff` accent).
 - Real-time video playback via Qt Multimedia (`QMediaPlayer` + `QVideoSink` + `QAudioOutput`). Changing the volume during playback does **not** interrupt or seek.
@@ -311,55 +259,9 @@ When PySide6 is available, FFmWiz automatically opens a polished Qt-based GUI fo
 - Layout-independent keyboard shortcuts: all bindings match by the Windows virtual-key code (`QKeyEvent.nativeVirtualKey()`) so they fire correctly on Persian, Arabic, and other non-Latin keyboard layouts.
 - Window is fully responsive via Qt layouts.
 
-The GUI launches as a separate process via JSON IPC. Cancelling the GUI returns the caller to the previous CLI menu (e.g. cancelling the Cut Editor returns to the cut-method menu, not the main menu).
+The GUI launches as a separate process via JSON IPC. Cancelling the Unified Video Editor returns to the unified-editor question; answering `n` keeps the rest of Mode 1 in terminal/manual mode and does not offer archived standalone Cut/Crop GUI prompts.
 
-### Cut Editor (Mode 3 ▸ GUI cut editor)
-
-Click directly on the video preview to toggle play/pause. The timeline runs the full width of the window and resizes responsively.
-
-Cut Editor keyboard shortcuts:
-
-```text
-Space             Play / Pause   (rewinds to start if at end of clip)
-Home / End        Jump to the beginning / end of the clip
-← / →             Seek -1s / +1s
-Shift + ← / →     Seek -5s / +5s
-Ctrl + ← / →      Snap CTI to the previous / next marker (IN, OUT, or cut edge)
-I                 Mark In at the current time
-O                 Mark Out at the current time
-A                 Add Cut(s): activate valid In/Out pairs, or create a quick pair at the playhead
-Ctrl + Shift + I  Invert Cuts: keep the current cut ranges and remove everything else
-Delete            Delete selected marker(s), or the selected cut when no marker is selected
-+ / -             Zoom the timeline in / out around the playhead
-Ctrl + R          Reset Zoom: fit the timeline to the full duration
-Wheel on timeline       Seek -5s / +5s
-Shift + wheel on timeline Seek -10s / +10s
-Ctrl + wheel on timeline Zoom timeline around the cursor
-Wheel on timeline zoom bar  Zoom timeline in/out
-Wheel on volume slider  Volume up / down (does NOT interrupt playback)
-M                 Mute / unmute audio preview
-Enter             Confirm (return cut ranges to the CLI)
-Esc               Cancel (return to the cut-method menu)
-```
-
-Marker controls (also exposed as buttons in the transport row):
-
-- `Mark In (I)` / `Mark Out (O)` — set the current playhead as the IN / OUT marker.
-- IN and OUT markers are not shown until you create them. Setting IN does not create OUT, and setting OUT does not create IN.
-- `Add Cut(s) (A)` — activates all valid adjacent `In -> Out` marker pairs, or creates a quick one-second pair at the playhead if there is no valid pair yet.
-- `Invert Cuts (Ctrl+Shift+I)` — normalizes the current cut ranges, keeps those ranges, and changes everything outside them into the removed ranges. This is undoable with `Ctrl+Z` and redoable with `Ctrl+Y`.
-- `Delete Selected Marker(s)` — removes all selected markers and is undoable. `Delete Selected Cut` removes the selected cut range.
-- `Zoom In (+)` / `Zoom Out (-)` — changes timeline zoom around the playhead. `Reset Zoom` (`Ctrl+R`) fits the full timeline again and resets the view position.
-- The timeline zoom slider below the timeline changes timeline scale only; it does not change video crop/preview zoom. Mouse wheel over that bar zooms the timeline in/out.
-- During playback and seeking, the timeline follows the CTI/playhead so Home, End, and normal playback keep the playhead visible.
-- `Delete All Markers` — clears every cut range after a confirmation dialog.
-- Click a cut range, its edge area, or a row in the cut list to select it; the selected range is highlighted in bright red. Ctrl+click marker handles toggles marker multi-selection. Clicking empty timeline space clears marker selection and moves the playhead.
-
-### Crop Editor (interactive wizard ▸ crop question ▸ `g`)
-
-Type `g` (`g=Show Graphical Crop Editor`, highlighted in aqua) at the crop prompt to open the Crop Editor window. The preview re-renders asynchronously via FFmpeg.
-
-Crop Editor keyboard shortcuts:
+Unified Video Editor keyboard shortcuts:
 
 ```text
 H                 Hand Tool (drag to pan when zoomed)
@@ -386,11 +288,11 @@ Enter             Apply crop and return to the CLI
 Esc               Cancel and discard the GUI selection
 ```
 
-The Zoom Tool always zooms in by default. Holding `Alt` temporarily switches click-zoom to zoom out, and pressing or releasing `Alt` immediately changes the magnifier cursor/button icon between plus and minus. Drag mostly upward with the Zoom Tool to zoom in smoothly, and drag mostly downward to zoom out smoothly; zoom stays focused around the click/drag origin. Hand Tool panning uses left-click drag; right-click toggles playback in both Hand Tool and Zoom Tool. Crop rectangle editing works from the visible square handles and from a larger invisible hit area around the crop edges, so precise edge grabs do not require pixel-perfect mouse placement and crop resizing takes priority over the active tool. Hold `Ctrl` and drag inside the crop box to move it without changing its size. The Crop Editor displays positions as `hh:mm:ss:frame`. Undo and redo shortcuts are shown on the buttons as `Undo (Ctrl+Z)` and `Redo (Ctrl+Y)`.
+The Zoom Tool always zooms in by default. Holding `Alt` temporarily switches click-zoom to zoom out, and pressing or releasing `Alt` immediately changes the magnifier cursor/button icon between plus and minus. Drag mostly upward with the Zoom Tool to zoom in smoothly, and drag mostly downward to zoom out smoothly; zoom stays focused around the click/drag origin. Hand Tool panning uses left-click drag; right-click toggles playback. Crop rectangle editing works from visible square handles and larger invisible hit areas around the crop edges, so precise edge grabs do not require pixel-perfect mouse placement. Hold `Ctrl` and drag inside the crop box to move it without changing its size.
 
 ### Speed / Reverse Editors
 
-Mode 9 opens the Video Speed / Reverse workflow. At the speed question, Enter defaults to `n` and `g=Show Graphical Video Speed Editor` opens the dark Qt editor. The GUI has live percent and multiplier speed controls, percent/factor presets, a timeline, preview volume, undo/redo, a reverse toggle, click-to-play preview, and an option to transform the first audio track with the video. Export uses FFmpeg timestamp filters:
+Mode 10 opens the Video Speed / Reverse workflow. At the speed question, Enter defaults to `n` and `g=Show Graphical Video Speed Editor` opens the dark Qt editor. The GUI has live percent and multiplier speed controls, percent/factor presets, a timeline, preview volume, undo/redo, a reverse toggle, click-to-play preview, and an option to transform the first audio track with the video. Export uses FFmpeg timestamp filters:
 
 - video speed: `setpts=(PTS-STARTPTS)/speed`
 - video reverse: `reverse,setpts=(PTS-STARTPTS)/speed`
@@ -401,27 +303,27 @@ FFmpeg's `reverse` and `areverse` filters buffer the whole filtered clip in memo
 
 The same speed/reverse options are also available inside the normal Interactive wizard (Mode 1) and Folder Encode (Mode 4). Video speed/reverse is used when the output contains video. In Folder Encode, graphical editors are disabled by design, so shared settings are entered in the terminal and applied to every file in the folder.
 
-### Audio Cut / Speed / Reverse Editor (Mode 10)
+### Audio Cut / Speed / Reverse Editor (Mode 11)
 
-Mode 10 opens the experimental combined audio editor. It embeds the waveform cut editor and the audio Speed / Reverse editor in one maximized Qt window. Mark the ranges you want removed with `Mark In`, `Mark Out`, and `Add Cut`; the output keeps everything outside those marked ranges. The editor includes waveform view/zoom controls, time ticks, cut selection by right-click, invert cuts, undo/redo, and red delete actions. Audio speed/reverse can be applied in the same workflow.
+Mode 11 opens the experimental combined audio editor. It embeds the waveform cut editor and the audio Speed / Reverse editor in one maximized Qt window. Mark the ranges you want removed with `Mark In`, `Mark Out`, and `Add Cut`; the output keeps everything outside those marked ranges. The editor includes waveform view/zoom controls, time ticks, cut selection by right-click, invert cuts, undo/redo, and red delete actions. Audio speed/reverse can be applied in the same workflow.
 
 Audio cuts and audio speed/reverse are also available in Mode 1 and Mode 4 for audio-only outputs. They are not shown for video outputs; use the normal video cut/speed steps or the Unified Video Editor for files where the output contains video.
 
 ### Troubleshooting the new GUI
 
-If the GUI runtime is unavailable before launch, FFmWiz prints a message and falls back to the legacy Tk windows. If the Qt GUI starts and then reports an internal bug, FFmWiz does not hide it behind the fallback; set `FFMWIZ_DEBUG=1` before running to print the full traceback.
+If the GUI runtime is unavailable before launch, FFmWiz prints a message and keeps the active workflow in terminal/manual mode. If the Qt GUI starts and then reports an internal bug, FFmWiz does not hide it behind an archived fallback; set `FFMWIZ_DEBUG=1` before running to print the full traceback.
 
 Common causes:
 
 - PySide6 not installed → run `py -3 -m pip install --upgrade -r requirements.txt`.
-- Codec not supported by Qt Multimedia → the timeline still works (frame extraction via FFmpeg), but native playback may be limited. For media that Qt cannot decode directly, use the manual `h:m:s:frame` mode in Mode 3 option 2.
-- `ffmwiz_gui.py` missing from the project folder.
+- Codec not supported by Qt Multimedia → the timeline still works (frame extraction via FFmpeg), but native playback may be limited. For media that Qt cannot decode directly, use the manual `h:m:s:frame` flow in Mode 3.
+- `assets/runtime/ffmwiz_gui.py` missing from the project folder.
 
-## Legacy Graphical Crop Tool (Tk fallback)
+## Archived Legacy Crop Tool
 
-The legacy Tk crop preview is preserved as an automatic fallback when PySide6 is not installed. At the crop question, enter `g` or `gui`.
+The legacy standalone Tk crop preview is preserved in code for archive/debug reference only. Normal CLI prompts no longer expose it; use the Unified Video Editor for graphical crop or enter crop margins inline in the terminal.
 
-Crop controls:
+Archived controls:
 
 - Drag crop edges.
 - Drag crop corners.
@@ -433,7 +335,7 @@ Crop controls:
 - Use Ctrl + mouse wheel to zoom the preview canvas.
 - Use `Reset Crop` to restore the full frame.
 - Use `Apply` to return crop margins to the terminal.
-- Use `Cancel` to discard GUI crop selection.
+- Use `Cancel` to discard the archived crop selection.
 
 Keyboard shortcuts (layout-independent — works on Persian, Arabic, and other non-Latin keyboard layouts):
 
@@ -523,7 +425,9 @@ Minimal core:
     "audio_tracks": "de",
     "audio_codec": "aac",
     "audio_bitrate_kbps": 128,
+    "keep_source_metadata": "y",
     "subtitle_tracks": "none",
+    "keep_embedded_attachments": "n",
     "detect_duplicate_audio": "y"
   }
 }
@@ -601,7 +505,7 @@ mov_text
 
 Non-text subtitles are skipped for MP4/MOV compatibility.
 
-Pure copy/remux modes do not convert subtitles. Mode 5 and Mode 7 keep the original container and use `-c copy`; if a requested subtitle stream is not compatible with that container, the operation is rejected instead of silently changing container or transcoding.
+Pure copy/remux modes do not convert subtitles. Mode 5 and Mode 8 keep the original container and use `-c copy`; if a requested subtitle stream is not compatible with that container, the operation is rejected instead of silently changing container or transcoding.
 
 ## GPU And Encoding Notes
 
@@ -627,13 +531,13 @@ The repository is prepared for normal GitHub use:
 - `requirements.txt` pins the runtime Python dependency used by the dedicated Qt GUI.
 - `pyproject.toml` records project metadata and the same runtime dependency for modern Python tooling.
 - The core CLI uses only the Python standard library. PySide6 is the only runtime Python package and is pinned consistently in `requirements.txt`, `pyproject.toml`, and the runtime auto-install check.
-- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and `ffmwiz_gui.py`, validates `config.json`, runs a lightweight import/API smoke check, and runs command-generation regression tests on Windows with Python 3.10, 3.11, 3.12, and 3.13.
+- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py`, `assets/runtime/ffmwiz_gui.py`, and `assets/runtime/MuxCls.py`, validates `config.json`, runs a lightweight import/API smoke check, and runs command-generation regression tests from `assets/tests` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
 - `.github/dependabot.yml` checks for Python dependency and GitHub Actions updates weekly.
 - `.gitattributes` normalizes text line endings and marks image/icon assets as binary.
 - `.editorconfig` keeps indentation, UTF-8, and final-newline rules consistent across editors.
 - `.gitignore` excludes runtime logs, generated media info reports, Python caches, generated command shims, virtual environments, build outputs, and the local `ffmwiz-ffmpeg-reference.txt` capability snapshot.
 
-Keep `config.json`, `assets/`, `FFmWiz.py`, `ffmwiz_gui.py`, `run.ps1`, `install-command.ps1`, `requirements.txt`, `pyproject.toml`, `.github/`, `.gitattributes`, `.gitignore`, and `.editorconfig` in the repository.
+Keep `config.json`, `assets/`, `FFmWiz.py`, `run.ps1`, `install-command.ps1`, `requirements.txt`, `pyproject.toml`, `.github/`, `.gitattributes`, `.gitignore`, and `.editorconfig` in the repository.
 
 ## Logs
 
@@ -664,7 +568,7 @@ While FFmpeg is running in a real terminal, FFmWiz shows a single in-place statu
 42.7%  •  time 00:30:46 / 01:12:04  •  fps 63.70  •  q 9.0  •  speed 15.9x  •  size 18.8 MB  •  bitrate 137.8kbits/s  •  elapsed 01.02  •  ETA 03:49
 ```
 
-This applies equally to encode mode, crop+encode mode, stream-copy cut mode (Mode 3), Folder Encode (Mode 4), Add files to video (Mode 5), Stream Cleanup Remux (Mode 7), Hard Sub Encode (Mode 8), Video Speed / Reverse (Mode 9), and Audio Cut / Speed / Reverse (Mode 10). Raw FFmpeg output is captured to the log file; normal console output only shows the single in-place status line plus the final summary.
+This applies equally to encode mode, crop+encode mode, stream-copy cut mode (Mode 3), Folder Encode (Mode 4), Add files to video (Mode 5), Extract Stream (Mode 6), Stream Cleanup Remux (Mode 8), Hard Sub Encode (Mode 9), Video Speed / Reverse (Mode 10), Audio Cut / Speed / Reverse (Mode 11), Join Videos (Mode 12), and Metadata Editor FFmpeg operations (Mode 13). Raw FFmpeg output is captured to the log file; normal console output only shows the single in-place status line plus the final summary.
 
 Sizes are shown with automatic units (`B`, `KB`, `MB`, `GB`, ...). Progress time and total duration are shown as `hh:mm:ss`; elapsed time is shown as `mm.ss` until it reaches one hour. If duration information is not yet available, you'll see `ETA calculating` until enough frames have been processed. The old `finish` field is intentionally not shown.
 
