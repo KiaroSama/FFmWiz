@@ -7064,6 +7064,10 @@ def build_unified_video_editor(request: dict[str, Any]):
                 t += step
             for edge_t in (start, end):
                 x = self._time_to_x(edge_t)
+                # Skip edge label if it would overlap with existing tick labels.
+                too_close = any(abs(x - tx) < tick_label_width * 0.7 for tx in tick_positions)
+                if too_close:
+                    continue
                 p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["tick_hi"]), 1))
                 p.drawLine(QPointF(x, ruler.bottom() - 12), QPointF(x, ruler.bottom() - 2))
                 label_rect = QRectF(
@@ -7263,19 +7267,23 @@ def build_unified_video_editor(request: dict[str, Any]):
                 guide_top = ruler.top() + 4
                 guide_bottom = ruler.bottom()
                 p.drawLine(QPointF(cx, guide_top), QPointF(cx, guide_bottom))
-                # Diamond indicator at the top.
+                # Diamond indicator at the guide top.
                 p.setBrush(QtGui.QBrush(QtGui.QColor(255, 180, 80, 220)))
                 p.setPen(Qt.NoPen)
                 p.drawPolygon(QtGui.QPolygonF([
                     QPointF(cx, guide_top - 4), QPointF(cx + 4, guide_top),
                     QPointF(cx, guide_top + 4), QPointF(cx - 4, guide_top),
                 ]))
-                # Timecode pill above the waveform (inside ruler area).
+                # Timecode pill inside the ruler area, clamped to stay within bounds.
                 _ctc = seconds_to_timecode(center_time)
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
-                _pill = QRectF(cx - 54, ruler.top() - 18, 108, 16)
-                p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 205)))
-                p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 160), 1))
+                pill_w = 108
+                pill_h = 16
+                pill_x = max(ruler.left() + 2, min(cx - pill_w / 2, ruler.right() - pill_w - 2))
+                pill_y = ruler.top() + 4
+                _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
+                p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 225)))
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 200), 1))
                 p.drawRoundedRect(_pill, 4, 4)
                 p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
                 p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")

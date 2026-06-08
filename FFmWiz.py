@@ -12777,7 +12777,8 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
     mode_prompt = question_prompt(
         answers,
         "Video quality mode",
-        f"{example_text('bitrate')}=target average kbps; {example_text('rf')}=constant quality (CRF/CQ)",
+        f"{example_text('bitrate')}{paint('=target average kbps', Color.HINT_YELLOW)}; "
+        f"{example_text('CRF')}{paint('=constant quality (RF/CQ)', Color.HINT_YELLOW)}",
         "bitrate",
     )
     while True:
@@ -12787,10 +12788,10 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
         if not mode_value or mode_value in {"bitrate", "b", "1"}:
             mode_value = "bitrate"
             break
-        if mode_value in {"rf", "crf", "cq", "2"}:
+        if mode_value in {"rf", "crf", "cq", "2", "quality"}:
             mode_value = "rf"
             break
-        error("Enter 'bitrate' or 'rf'.")
+        error("Enter 'bitrate' or 'CRF'.")
 
     if mode_value == "rf":
         _step_video_constant_quality(answers)
@@ -13163,7 +13164,8 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         question_prompt(
             answers,
             "Measure current audio loudness for two-pass normalization?",
-            f"{example_text('y')}=measure (more accurate); {example_text('n')}=skip to manual target (faster)",
+            f"{example_text('y')}{paint('=measure (more accurate)', Color.HINT_YELLOW)}; "
+            f"{example_text('n')}{paint('=skip to manual target (faster)', Color.HINT_YELLOW)}",
             "y",
         ),
         True,
