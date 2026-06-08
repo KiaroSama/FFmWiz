@@ -3376,8 +3376,12 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
 
     verbose_segments = [
         (pct_text, PROGRESS_COLORS["percent"]),
-        (time_total_text, ""),
     ]
+    # Show active split part indicator if available.
+    part_label = state.get("_ffmwiz_split_part_label")
+    if part_label:
+        verbose_segments.append((part_label, Color.LIGHT_BLUE))
+    verbose_segments.append((time_total_text, ""))
     fps_text = fps_value()
     if has_real_value(fps_text):
         verbose_segments.append((f"fps {fps_text}", PROGRESS_COLORS["fps"]))
@@ -3868,6 +3872,9 @@ def run_ffmpeg_with_progress(
     stderr_thread = threading.Thread(target=_capture_stderr, daemon=True)
     stderr_thread.start()
     initial_detail = initial_detail or "starting process / initializing filters / decoding first frames"
+    if split_part_durations:
+        initial_detail = f"Part 1/{len(split_part_durations)} — " + (initial_detail or "starting process / initializing filters / decoding first frames")
+        state["_ffmwiz_split_part_label"] = f"Part 1/{len(split_part_durations)}"
     initial_render = _render_initial_progress_line(label, initial_detail, started_at)
     _write_progress_line(initial_render)
     last_render = initial_render
@@ -3925,6 +3932,8 @@ def run_ffmpeg_with_progress(
                     )
                     split_previous_output_sizes = output_sizes
                     split_previous_raw_s = raw_current_s
+                    # Show which part is currently encoding.
+                    state["_ffmwiz_split_part_label"] = f"Part {split_active_part + 1}/{len(split_part_durations)}"
                 elif frame_seconds > 0.0:
                     # Fallback for callers that only provide FPS. This avoids
                     # double-counting but cannot infer later Split parts.
@@ -12591,11 +12600,11 @@ def step_unified_video_editor_for_encode(answers: dict[str, Any]) -> None:
             keep_ranges = normalize_cut_ranges(result.get("keep_ranges") or [], unified_duration)
             answers["cut_keep_ranges"] = keep_ranges
             if keep_ranges:
-                print(paint(format_cut_ranges_for_summary(keep_ranges, get_video_fps(answers), "Unified cuts (keep ranges)"), Color.LIME))
+                print(paint(format_cut_ranges_for_summary(keep_ranges, get_video_fps(answers), "Cuts (keep ranges)"), Color.LIME))
             _unified_seps = answers.get("_unified_separator_points") or []
             if _unified_seps:
-                print(paint(format_split_points_for_summary(_unified_seps, get_video_fps(answers), "Unified split points"), Color.LIME))
-            print(paint("Unified graphical edits captured.", Color.LIME))
+                print(paint(format_split_points_for_summary(_unified_seps, get_video_fps(answers), "Split points"), Color.LIME))
+            print(paint("Graphical edits captured.", Color.LIME))
             if answers["video_speed_enabled"]:
                 print(
                     paint(
@@ -14991,8 +15000,14 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             print(paint(format_split_points_for_summary(answers.get("separator_points") or [], get_video_fps(answers), "Split points"), Color.LIGHT_BLUE))
         if answers.get("split_output_paths"):
             print("  " + field_text("Split output parts", len(answers.get("split_output_paths") or []), Color.LIGHT_BLUE))
+            split_intervals = list(answers.get("split_part_intervals") or [])
             for idx, part_path in enumerate(answers.get("split_output_paths") or [], start=1):
-                print("    " + field_text(f"Part {idx:02d}", part_path, Color.LIME))
+                interval_text = ""
+                if idx - 1 < len(split_intervals):
+                    start, end = split_intervals[idx - 1]
+                    duration = max(0.0, end - start)
+                    interval_text = f"  [{seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}, duration {format_elapsed(duration)}]"
+                print("    " + field_text(f"Part {idx:02d}", str(part_path) + interval_text, Color.LIME))
     if answers.get("audio_streams"):
         print("  " + field_text("audio tracks", answers.get("audio_tracks"), Color.LIGHT_BLUE))
         print("  " + field_text("audio codec", answers.get("audio_codec"), Color.CYAN))
@@ -17339,7 +17354,7 @@ def step_cuts(answers: dict[str, Any]) -> None:
         if keep_ranges and not (len(keep_ranges) == 1 and keep_ranges[0][0] <= 1e-6 and keep_ranges[0][1] >= duration - 1e-6):
             answers["cut_keep_ranges"] = keep_ranges
             print(paint(
-                format_cut_ranges_for_summary(keep_ranges, fps, "Unified cuts (keep ranges)"),
+                format_cut_ranges_for_summary(keep_ranges, fps, "Cuts (keep ranges)"),
                 Color.LIME,
             ))
         return
