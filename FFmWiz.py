@@ -4200,6 +4200,8 @@ def calculate_scale_dimensions(answers: dict[str, Any], resolution: Any) -> tupl
     if isinstance(resolution, dict):
         mode = resolution.get("mode")
         if mode == "preset":
+            # Preset mode: compute AR-preserving dimensions that fit within
+            # the preset box. The scale+pad filter handles final canvas.
             width, height, axis = closest_edge_scale_dimensions(
                 disp_w,
                 disp_h,
@@ -4207,12 +4209,13 @@ def calculate_scale_dimensions(answers: dict[str, Any], resolution: Any) -> tupl
                 int(resolution.get("height", disp_h) or disp_h),
             )
         elif mode == "box":
-            width, height, axis = closest_edge_scale_dimensions(
-                disp_w,
-                disp_h,
-                int(resolution.get("width", disp_w) or disp_w),
-                int(resolution.get("height", disp_h) or disp_h),
-            )
+            # Box mode: target the exact requested canvas dimensions.
+            # The scale filter uses force_original_aspect_ratio=decrease to
+            # fit the content, then pad fills the canvas. This ensures the
+            # output is exactly the requested size without distortion.
+            width = even_dimension(int(resolution.get("width", disp_w) or disp_w))
+            height = even_dimension(int(resolution.get("height", disp_h) or disp_h))
+            axis = "box"
         elif mode == "height":
             height = even_dimension(resolution.get("height", disp_h))
             width = even_dimension(height * disp_w / max(1, disp_h))
@@ -13356,24 +13359,19 @@ def can_use_cuda_fast_path(answers: dict[str, Any], video_encoder: str | None) -
 
 
 def _cuda_fast_path_needs_ar_padding(answers: dict[str, Any]) -> bool:
-    """Return True when the requested resize would require padding (AR mismatch)
-    and therefore cannot use the pure scale_cuda fast path."""
+    """Return True when the requested resize requires a pad filter
+    and therefore cannot use the pure scale_cuda fast path.
+    Only 'box' mode needs padding because the target canvas may differ from the
+    AR-preserving scaled dimensions. Preset/height/width modes already compute
+    AR-preserving dimensions where pad is a no-op."""
     resolution = answers.get("resolution", "n")
     if resolution is None or resolution == "n":
         return False
     if resize_mode_is_stretch(answers):
         return False
-    try:
-        display_w, display_h = cropped_display_size(answers)
-    except (ValueError, KeyError, IndexError):
-        return False
-    dimensions, _ = calculate_scale_dimensions(answers, resolution)
-    if dimensions is None:
-        return False
-    width, height = dimensions
-    display_ar = display_w / max(1, display_h)
-    target_ar = width / max(1, height)
-    return abs(display_ar - target_ar) / max(display_ar, 1e-9) > 0.01
+    if isinstance(resolution, dict) and resolution.get("mode") == "box":
+        return True
+    return False
 
 
 def should_use_cuda_decode_for_complex_graph(
@@ -13440,36 +13438,25 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
             filters.append(f"scale={width}:{height}")
             log_info(f"Resize mode: Stretch; scale={width}:{height}")
         else:
-            # AR-preserving: scale to fit within the box, then pad if needed.
+            # AR-preserving: always use force_original_aspect_ratio=decrease so
+            # the content fits inside the target canvas without distortion, then
+            # pad to the exact canvas dimensions. When the source AR matches
+            # the target, FFmpeg produces the exact dimensions and the pad is a
+            # no-op. This approach handles all cases uniformly.
             sar = source_sar(answers)
             crop_w, crop_h = cropped_source_size(answers)
             display_w, display_h = cropped_display_size(answers)
-
-            # Calculate the scaled size preserving display AR within the target box.
-            display_ar = display_w / max(1, display_h)
-            target_ar = width / max(1, height)
-            ar_tolerance = 0.01  # 1% tolerance
-
-            if abs(display_ar - target_ar) / max(display_ar, 1e-9) <= ar_tolerance:
-                # AR matches target within tolerance – no padding needed.
-                filters.append(f"scale={width}:{height}")
-                log_info(
-                    f"Resize mode: Preserve (AR matches target); "
-                    f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
-                    f"display={display_w}x{display_h}; target={width}x{height}; no padding"
-                )
-            else:
-                # Use force_original_aspect_ratio=decrease to fit, then pad.
-                filters.append(
-                    f"scale={width}:{height}:"
-                    f"force_original_aspect_ratio=decrease:force_divisible_by=2"
-                )
-                filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
-                log_info(
-                    f"Resize mode: Preserve (AR mismatch, padding applied); "
-                    f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
-                    f"display={display_w}x{display_h}; target={width}x{height}"
-                )
+            filters.append(
+                f"scale={width}:{height}:"
+                f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+            )
+            filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
+            log_info(
+                f"Resize mode: Preserve; "
+                f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
+                f"display={display_w}x{display_h}; target={width}x{height}; "
+                f"upscaling={'yes' if max(width, height) > max(display_w, display_h) else 'no'}"
+            )
 
     if video_speed_transform_enabled(answers):
         filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))

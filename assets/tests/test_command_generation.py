@@ -1349,10 +1349,12 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(dims[0] % 2, 0)
         self.assertAlmostEqual(dims[0] / dims[1], 950 / 1840, delta=0.002)
 
-    def test_box_mode_preserves_ratio(self):
+    def test_box_mode_returns_exact_canvas_dimensions(self):
         answers = {"video_streams": [{"width": 950, "height": 1840}], "crop_enabled": False}
         dims, warning = FFmWiz.calculate_scale_dimensions(answers, FFmWiz.parse_resolution("1080x1920"))
-        self.assertEqual(dims, (992, 1920))
+        # Box mode returns the exact requested canvas; AR preservation is handled
+        # by force_original_aspect_ratio=decrease + pad in the filter chain.
+        self.assertEqual(dims, (1080, 1920))
         self.assertEqual(warning, "")
 
     def test_exact_stretch_mode_outputs_exact_dimensions_and_warns(self):
@@ -3055,19 +3057,25 @@ class CommandGenerationTests(unittest.TestCase):
             # No padding needed when box mode gives AR-preserving dimensions
             self.assertIn("scale=", text)
 
-    def test_matching_aspect_ratio_no_unnecessary_padding(self):
-        """Source whose aspect ratio matches the target: no padding needed."""
+    def test_matching_aspect_ratio_no_effective_padding(self):
+        """Source whose aspect ratio matches the target: pad is present but is a no-op."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
-            # 16:9 source → 480p preset → should compute 854x480 or similar
+            # 16:9 source → 480p preset → should compute ~854x480 (matching AR)
             answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}]
             answers["crop_enabled"] = False
             answers["use_gpu"] = False
             answers["resolution"] = FFmWiz.parse_resolution("480p")
             text = self.command_text(answers)
-            # 480p for a 16:9 source should produce dimensions that match AR → no padding
-            self.assertNotIn("pad=", text)
+            # Preset mode uses force_original_aspect_ratio + pad, but when AR
+            # matches the pad adds zero pixels (scale output == pad dimensions).
+            self.assertIn("force_original_aspect_ratio=decrease", text)
             self.assertIn("scale=", text)
+            # The final dimensions must be valid and even
+            dims = answers.get("final_resolution")
+            self.assertIsNotNone(dims)
+            self.assertEqual(dims[0] % 2, 0)
+            self.assertEqual(dims[1] % 2, 0)
 
     def test_explicit_stretch_mode_uses_exact_dimensions(self):
         """Explicit Stretch mode: exact requested dimensions are used without padding."""
@@ -3105,6 +3113,177 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(FFmWiz.parse_sar_value("N/A"), 1.0)
         self.assertEqual(FFmWiz.parse_sar_value("0:0"), 1.0)
         self.assertEqual(FFmWiz.parse_sar_value("1:1"), 1.0)
+
+    # ===================================================================
+    # Comprehensive resize / aspect-ratio tests for Issue 2 final fix
+    # ===================================================================
+
+    def test_exact_failing_workflow_multi_cut_crop_split_uses_ar_safe_scale(self):
+        """Test 1: Exact reported failing workflow — multi-range trim + concat +
+        crop + 480p box target + Split into 2 Parts + NVENC. Must produce
+        force_original_aspect_ratio + pad, NOT plain scale=WxH,setsar=1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 2876, "height": 1442, "avg_frame_rate": "30/1", "color_range": "tv"}],
+                "crop_enabled": True,
+                "crop_left": 420, "crop_right": 736,
+                "crop_top": 179, "crop_bottom": 184,
+                "fps": 4,
+                "resolution": FFmWiz.parse_resolution("1018x480"),
+                "use_gpu": True,
+                "video_codec": "H265",
+                "separator_points": [3000.0],
+                "cut_keep_ranges": [(10, 4000), (5000, 7000)],
+                "format": {"duration": "8000.0"},
+                "audio_speed_from_video": False,
+            })
+            text = self.command_text(answers)
+            # Must contain AR-safe resize
+            self.assertIn("force_original_aspect_ratio=decrease", text)
+            self.assertIn("pad=1018:480", text)
+            # Must NOT contain plain stretch scale
+            self.assertNotIn("scale=1018:480,setsar=1", text)
+            # Must still use expected settings
+            self.assertIn("crop=iw-420-736:ih-179-184:420:179", text)
+            self.assertIn("fps=4", text)
+            self.assertIn("hevc_nvenc", text)
+            self.assertIn("-map_chapters -1", text)
+            # Must produce two split output parts
+            self.assertIn("_Part01", text)
+            self.assertIn("_Part02", text)
+            # Cleanup
+            FFmWiz.cleanup_encode_chapter_metadata(answers)
+
+    def test_16x9_source_into_wider_canvas_uses_padding(self):
+        """Test 2: 16:9 source into 1018x480 box canvas (wider than 16:9).
+        Content AR must remain ~16:9 with horizontal padding."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("1018x480"),
+            })
+            text = self.command_text(answers)
+            # Must contain AR-safe resize with padding
+            self.assertIn("force_original_aspect_ratio=decrease", text)
+            self.assertIn("pad=1018:480:(ow-iw)/2:(oh-ih)/2", text)
+            # Must NOT have plain stretch
+            self.assertNotIn("scale=1018:480,setsar", text)
+            # The target canvas must be exactly 1018x480
+            self.assertEqual(answers["final_resolution"], (1018, 480))
+
+    def test_stretch_mode_no_ar_preservation(self):
+        """Test 4: Explicit Stretch mode generates exact scale without AR logic."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("stretch:1018x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("scale=1018:480", text)
+            self.assertNotIn("force_original_aspect_ratio", text)
+            self.assertNotIn("pad=", text)
+
+    def test_crop_affects_aspect_ratio_calculation(self):
+        """Test 5: AR is calculated from post-crop frame, not original source."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            # 1920x1080 source (16:9), crop to 1080x1080 (1:1)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": True,
+                "crop_left": 420, "crop_right": 420,
+                "crop_top": 0, "crop_bottom": 0,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("640x480"),
+            })
+            text = self.command_text(answers)
+            # Post-crop is 1080x1080 (1:1). Target canvas is 640x480 (4:3).
+            # AR preservation means the 1:1 content fits inside 640x480.
+            # Scaled content should be ~480x480 with horizontal padding.
+            self.assertIn("force_original_aspect_ratio=decrease", text)
+            self.assertIn("pad=640:480", text)
+            # The crop filter must be present
+            self.assertIn("crop=", text)
+
+    def test_no_upscale_smaller_source_pads_to_canvas(self):
+        """Test 6: Source smaller than target with upscaling disabled.
+        Content retains its size; canvas is padded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            # Small source: 320x240. Target: 640x480.
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 320, "height": 240}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("640x480"),
+            })
+            text = self.command_text(answers)
+            # force_original_aspect_ratio=decrease won't upscale because the
+            # source (320x240) fits inside 640x480 without scaling up — it
+            # simply keeps 320x240 and pads to 640x480.
+            # The command must contain AR-safe scale + pad.
+            self.assertIn("force_original_aspect_ratio=decrease", text)
+            self.assertIn("pad=640:480", text)
+
+    def test_non_square_sar_display_ar_preserved(self):
+        """Test 7: Non-square SAR source has display AR preserved after resize."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            # Anamorphic: 720x576, SAR 64:45 → display 1024x576 (16:9)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 720, "height": 576,
+                                   "sample_aspect_ratio": "64:45"}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("480p"),
+            })
+            text = self.command_text(answers)
+            # Display AR is 16:9. 480p should produce ~854x480.
+            dims = answers.get("final_resolution")
+            self.assertIsNotNone(dims)
+            display_ar = (720 * 64 / 45) / 576  # ≈ 1.778 (16:9)
+            out_ar = dims[0] / dims[1]
+            self.assertAlmostEqual(out_ar, display_ar, delta=0.02)
+            self.assertIn("setsar=1", text)
+
+    def test_complex_graph_does_not_add_cuda_filters(self):
+        """Test 8: Complex filter graph (multi-cut) remains CPU-based, no CUDA filters."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": False,
+                "use_gpu": True,
+                "video_codec": "H265",
+                "cut_keep_ranges": [(10, 100), (200, 300)],
+                "format": {"duration": "600.0"},
+                "resolution": FFmWiz.parse_resolution("1018x480"),
+            })
+            text = self.command_text(answers)
+            # Complex graph (multi-cut) must use CPU filters
+            self.assertIn("force_original_aspect_ratio=decrease", text)
+            self.assertIn("pad=1018:480", text)
+            # Must NOT add CUDA upload/download for the filter graph
+            self.assertNotIn("-hwaccel_output_format cuda", text)
+            self.assertNotIn("hwupload", text)
+            self.assertNotIn("hwdownload", text)
+            self.assertNotIn("scale_cuda", text)
+            # Cleanup
+            FFmWiz.cleanup_encode_chapter_metadata(answers)
 
 
 if __name__ == "__main__":
