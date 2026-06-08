@@ -3052,9 +3052,8 @@ class CommandGenerationTests(unittest.TestCase):
             out_ar = dims[0] / dims[1]
             display_ar = 768 / 576  # 4:3
             self.assertAlmostEqual(out_ar, display_ar, delta=0.02)
-            # setsar=1 must still be present
-            self.assertIn("setsar=1", text)
-            # No padding needed when box mode gives AR-preserving dimensions
+            # reset_sar=1 is inside scale filter; no trailing setsar=1
+            self.assertIn("reset_sar=1", text)
             self.assertIn("scale=", text)
 
     def test_matching_aspect_ratio_no_effective_padding(self):
@@ -3257,7 +3256,8 @@ class CommandGenerationTests(unittest.TestCase):
             display_ar = (720 * 64 / 45) / 576  # ≈ 1.778 (16:9)
             out_ar = dims[0] / dims[1]
             self.assertAlmostEqual(out_ar, display_ar, delta=0.02)
-            self.assertIn("setsar=1", text)
+            # SAR is reset inside the scale filter, output uses square pixels.
+            self.assertIn("reset_sar=1", text)
 
     def test_complex_graph_does_not_add_cuda_filters(self):
         """Test 8: Complex filter graph (multi-cut) remains CPU-based, no CUDA filters."""
@@ -3282,6 +3282,121 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertNotIn("hwupload", text)
             self.assertNotIn("hwdownload", text)
             self.assertNotIn("scale_cuda", text)
+            # Cleanup
+            FFmWiz.cleanup_encode_chapter_metadata(answers)
+
+    # ===================================================================
+    # Tests for crop exact=1 and scale reset_sar=1
+    # ===================================================================
+
+    def test_crop_with_odd_coordinates_includes_exact_flag(self):
+        """Crop with odd values must include exact=1 to prevent FFmpeg rounding."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 2876, "height": 1442}],
+                "crop_enabled": True,
+                "crop_left": 421, "crop_right": 730,
+                "crop_top": 176, "crop_bottom": 182,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("1016x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("crop=iw-421-730:ih-176-182:421:176:exact=1", text)
+
+    def test_preserve_mode_scale_includes_reset_sar(self):
+        """Preserve-mode scale must include reset_sar=1 and no trailing setsar=1 after pad."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("1016x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("reset_sar=1", text)
+            # There must be no trailing setsar=1 after pad
+            self.assertNotIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
+
+    def test_non_square_sar_preserved_after_reset_sar(self):
+        """Non-square SAR input: display AR is preserved, output uses square pixels via reset_sar."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            # 720x576 SAR 64:45 → display 1024x576 (16:9)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 720, "height": 576,
+                                   "sample_aspect_ratio": "64:45"}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("854x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("reset_sar=1", text)
+            # Output canvas is 854x480
+            self.assertIn("pad=854:480", text)
+            # No trailing setsar=1 after pad
+            self.assertNotIn("pad=854:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
+
+    def test_stretch_mode_not_affected_by_reset_sar(self):
+        """Stretch mode does not add force_original_aspect_ratio or reset_sar."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": False,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("stretch:1016x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("scale=1016:480", text)
+            self.assertNotIn("force_original_aspect_ratio", text)
+            self.assertNotIn("reset_sar=1", text)
+            self.assertNotIn("pad=", text)
+            # Stretch mode still uses setsar from FORCE_SAR
+            self.assertIn("setsar=1", text)
+
+    def test_exact_reported_workflow_crop_exact_and_reset_sar(self):
+        """Exact reported workflow: multi-range trim + crop + 4fps + 1016x480 + NVENC + split.
+        Must contain crop=...:exact=1 and scale=...:reset_sar=1, no trailing setsar=1 after pad."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 2876, "height": 1442, "avg_frame_rate": "30/1", "color_range": "tv"}],
+                "crop_enabled": True,
+                "crop_left": 421, "crop_right": 730,
+                "crop_top": 176, "crop_bottom": 182,
+                "fps": 4,
+                "resolution": FFmWiz.parse_resolution("1016x480"),
+                "use_gpu": True,
+                "video_codec": "H265",
+                "separator_points": [3000.0],
+                "cut_keep_ranges": [(10, 4000), (5000, 7000)],
+                "format": {"duration": "8000.0"},
+                "audio_speed_from_video": False,
+            })
+            text = self.command_text(answers)
+            # Must contain exact=1 in crop
+            self.assertIn("crop=iw-421-730:ih-176-182:421:176:exact=1", text)
+            # Must contain reset_sar=1 in scale
+            self.assertIn("scale=1016:480:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1", text)
+            # Must contain pad
+            self.assertIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2", text)
+            # Must NOT have trailing setsar=1 after pad
+            self.assertNotIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
+            # Must NOT have plain crop without exact=1
+            self.assertNotIn("crop=iw-421-730:ih-176-182:421:176,", text)
+            # Other settings preserved
+            self.assertIn("fps=4", text)
+            self.assertIn("hevc_nvenc", text)
+            self.assertIn("-map_chapters -1", text)
+            self.assertIn("_Part01", text)
+            self.assertIn("_Part02", text)
             # Cleanup
             FFmWiz.cleanup_encode_chapter_metadata(answers)
 
