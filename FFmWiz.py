@@ -13423,13 +13423,14 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
         right = answers["crop_right"]
         top = answers["crop_top"]
         bottom = answers["crop_bottom"]
-        filters.append(f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}")
+        filters.append(f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1")
 
     if answers.get("fps") is not None:
         filters.append(f"fps={answers['fps']}")
 
     resolution = answers.get("resolution", "n")
     scale_dimensions = resolve_scale_dimensions(answers, resolution)
+    scale_resets_sar = False
     if scale_dimensions:
         width, height = scale_dimensions
         is_stretch = resize_mode_is_stretch(answers)
@@ -13443,14 +13444,17 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
             # pad to the exact canvas dimensions. When the source AR matches
             # the target, FFmpeg produces the exact dimensions and the pad is a
             # no-op. This approach handles all cases uniformly.
+            # reset_sar=1 inside the scale filter ensures output pixels are
+            # square, making a trailing setsar=1 unnecessary.
             sar = source_sar(answers)
             crop_w, crop_h = cropped_source_size(answers)
             display_w, display_h = cropped_display_size(answers)
             filters.append(
                 f"scale={width}:{height}:"
-                f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+                f"force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1"
             )
             filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
+            scale_resets_sar = True
             log_info(
                 f"Resize mode: Preserve; "
                 f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
@@ -13461,7 +13465,7 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     if video_speed_transform_enabled(answers):
         filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
 
-    if FORCE_SAR:
+    if FORCE_SAR and not scale_resets_sar:
         filters.append(f"setsar={FORCE_SAR}")
 
     filters.append(f"format={cpu_pixel_format_for_output(answers)}")
@@ -19590,9 +19594,9 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     for idx, item in enumerate(items):
         filters.append(
             f"[{idx}:v:0]fps={target_fps:g},"
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:reset_sar=1,"
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-            f"setsar=1,format={output_pix_fmt},setpts=PTS-STARTPTS[v{idx}]"
+            f"format={output_pix_fmt},setpts=PTS-STARTPTS[v{idx}]"
         )
         inputs.append(f"[v{idx}]")
         if any_audio and item.get("audio_streams"):
@@ -19717,7 +19721,7 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     left = int(join_answers.get("crop_left", 0) or 0)
     right = int(join_answers.get("crop_right", 0) or 0)
     bottom = int(join_answers.get("crop_bottom", 0) or 0)
-    crop_filter = f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}" if join_answers.get("crop_enabled") and any((top, left, right, bottom)) else ""
+    crop_filter = f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1" if join_answers.get("crop_enabled") and any((top, left, right, bottom)) else ""
     output_pix_fmt = cpu_pixel_format_for_output(join_answers)
 
     for input_idx, _item in enumerate(items):
@@ -19726,9 +19730,8 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             chain.append(crop_filter)
         chain.extend([
             f"fps={target_fps:g}",
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:reset_sar=1",
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2",
-            "setsar=1",
             output_pix_fmt and f"format={output_pix_fmt}",
             "setpts=PTS-STARTPTS",
         ])
