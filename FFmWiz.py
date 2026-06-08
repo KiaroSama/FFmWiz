@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import datetime
 import concurrent.futures
+import csv
+import html
 import json
 import logging
 import math
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
@@ -15,7 +18,7 @@ import tempfile
 import threading
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
@@ -85,6 +88,11 @@ DEFAULT_AUDIO_CODEC = "aac"
 DEFAULT_AUDIO_BITRATE_KBPS = 128
 AUDIO_CHANNELS = 2
 AUDIO_SAMPLE_RATE: int | None = None
+LOUDNORM_DEFAULT_TARGET_I = -16.0
+LOUDNORM_TARGET_TP = -1.5
+LOUDNORM_TARGET_LRA = 11.0
+LOUDNORM_MIN_TARGET_I = -30.0
+LOUDNORM_MAX_TARGET_I = -5.0
 
 # Speed/reverse editor defaults. These modes always re-encode the affected
 # stream because timestamp reversal and tempo changes cannot be stream-copied.
@@ -262,7 +270,7 @@ DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS = 400
 COMMON_VIDEO_FORMATS = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "ts"]
 COMMON_AUDIO_FORMATS = ["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"]
 COMMON_VIDEO_CODECS = ["H265", "H264", "AV1", "VP9", "MPEG4", "copy"]
-COMMON_AUDIO_CODECS = ["aac", "libopus", "libmp3lame", "flac", "pcm_s16le", "copy"]
+COMMON_AUDIO_CODECS = ["aac", "libopus", "opus", "libmp3lame", "flac", "pcm_s16le", "copy"]
 CONFIG_FILE_NAME = "config.json"
 LAUNCHER_FILE_NAME = "run.ps1"
 ASSET_DIR_NAME = "assets"
@@ -293,6 +301,7 @@ PACKET_SIZE_PROBE_MAX_MB = env_int("FFMWIZ_PACKET_SCAN_MAX_MB", 64)
 PACKET_SIZE_PROBE_MAX_BYTES = max(0, PACKET_SIZE_PROBE_MAX_MB) * 1024 * 1024
 DUPLICATE_AUDIO_HASH_SECONDS = env_float("FFMWIZ_DUP_HASH_SECONDS", 8.0)
 DUPLICATE_AUDIO_HASH_WORKERS = max(1, env_int("FFMWIZ_DUP_HASH_WORKERS", 2))
+VOLUME_SCAN_WORKERS = max(1, env_int("FFMWIZ_VOLUME_SCAN_WORKERS", 3))
 FOLDER_PROBE_WORKERS = max(1, env_int("FFMWIZ_FOLDER_PROBE_WORKERS", 4))
 
 # Container-aware safe defaults. Full support depends on your FFmpeg build and
@@ -310,6 +319,31 @@ AUDIO_CODEC_DEFAULTS_BY_FORMAT = {
     "weba": "libopus",
     "flac": "flac",
     "wav": "pcm_s16le",
+}
+
+STREAM_STAT_METADATA_TAGS = (
+    "BPS",
+    "BPS-eng",
+    "BPS-ENG",
+    "DURATION",
+    "DURATION-eng",
+    "DURATION-ENG",
+    "NUMBER_OF_FRAMES",
+    "NUMBER_OF_FRAMES-eng",
+    "NUMBER_OF_FRAMES-ENG",
+    "NUMBER_OF_BYTES",
+    "NUMBER_OF_BYTES-eng",
+    "NUMBER_OF_BYTES-ENG",
+    "_STATISTICS_WRITING_APP",
+    "_STATISTICS_WRITING_DATE_UTC",
+    "_STATISTICS_TAGS",
+)
+
+AUDIO_CODEC_ALIASES = {
+    "opus": "libopus",
+    "mp3": "libmp3lame",
+    "mp3lame": "libmp3lame",
+    "vorbis": "libvorbis",
 }
 
 BITRATE_AUDIO_CODECS = {
@@ -355,7 +389,7 @@ CONFIG_TEMPLATE = """{
         "windows_paths": "Forward slashes also work on Windows for FFmpeg input/output paths and are easier inside JSON. Quoted paths with spaces and Unicode characters are supported in any case.",
         "unicode": "FFmWiz uses UTF-8 throughout. Save this file as UTF-8 (no BOM is required) if you put Unicode characters in paths or titles.",
         "ffmpeg_capabilities": "Available formats, codecs, encoders, filters, etc. are build-specific. Generate a snapshot of what your installed ffmpeg.exe supports into the companion file 'ffmwiz-ffmpeg-reference.txt'. FFmWiz creates it next to this config on first run and refreshes it any time you delete it.",
-        "modes": "Mode 1 = full interactive wizard (every question asked; can use the experimental Unified Video Editor on the feature/unified-editors branch). Mode 2 = read this file, then only ask the crop question. Mode 3 = stream-copy cut tool (does not read this file). Mode 4 = folder encode. Mode 5 = add audio/subtitle files to a video without re-encoding and optionally set language/title metadata for added streams. Mode 6 = write detailed ffprobe media info reports for a file or folder. Mode 7 = stream-cleanup remux for keeping selected audio/subtitle streams without re-encoding. Mode 8 = hard-sub encode for burning an internal or external subtitle into the video. Mode 9 = video speed/reverse editor. Mode 10 = audio cut/speed/reverse editor.",
+        "modes": "Mode 1 = full interactive wizard (every question asked; can use the Premiere-style Unified Video Editor for crop, cuts, Split points, waveform preview, and speed/reverse in one workspace). Mode 2 = read this file, then only ask the crop question. Mode 3 = stream-copy cut tool (does not read this file). Mode 4 = folder encode. Mode 5 = add audio/subtitle files to a video without re-encoding and optionally set language/title metadata for added streams. Mode 6 = extract one video/audio/subtitle stream by ffprobe stream index. Mode 7 = write detailed ffprobe media info reports for a file or folder. Mode 8 = stream-cleanup remux for keeping selected audio/subtitle streams without re-encoding, optionally editing kept stream metadata, copying unchanged videos directly, and copying non-video files in folder mode. Mode 9 = hard-sub encode for burning an internal or external subtitle into the video. Mode 10 = video speed/reverse editor. Mode 11 = audio cut/speed/reverse editor. Mode 12 = join videos with stream copy when possible or re-encode when needed. Mode 13 = metadata editor for stream tags, dispositions, chapters, cover art, bitstream metadata, and metadata reports.",
         "safety": "FFmWiz never modifies the input file. The final FFmpeg command is shown before it runs and you can cancel."
     },
     "_capability_reference": {
@@ -385,9 +419,11 @@ CONFIG_TEMPLATE = """{
         "resolution": "Output scale target. Presets/plain numbers like 480p or 480 preserve aspect ratio using closest-edge scaling against the standard preset box. Use w720/720w for explicit width, h480/480h for explicit height, WIDTHxHEIGHT for a preserve-aspect target box, and stretch:WIDTHxHEIGHT only when intentional distortion is wanted. Use 'n' to keep source/cropped size. SAR is forced to 1 by default.",
         "fps": "Output frames-per-second as an integer. Use 'n' to keep the source rate. Examples: 24, 25, 30, 50, 60. Interactive prompts warn before accepting an FPS above the detected source FPS. Float rates (e.g. 23.976) are not exposed here; if you need fractional rates, prefer the interactive wizard or edit the FFmpeg command before running.",
         "audio_tracks": "Selection for which audio streams to keep. Accepts: '0' or '0,1,2' (stream indices among audio streams), 'all', 'd' (drop confirmed duplicates), 'e' (drop empty / near-empty), 'de' (both). Empty defaults to 'de'.",
-        "audio_codec": "aac | libopus | libmp3lame | flac | pcm_s16le | copy | <any encoder name from ffmpeg -encoders>. Container compatibility is enforced: WebM forces libopus; pcm_*/flac ignore bitrate; 'copy' skips re-encoding.",
+        "audio_codec": "aac | libopus | opus | libmp3lame | flac | pcm_s16le | copy | <any encoder name from ffmpeg -encoders>. The opus alias is normalized to libopus to avoid FFmpeg's experimental native opus encoder. Container compatibility is enforced: WebM forces libopus; pcm_*/flac ignore bitrate; 'copy' skips re-encoding.",
         "audio_bitrate_kbps": "Target audio bitrate per stream in kbps. Used only for bitrate-based codecs (aac/libopus/libmp3lame/etc.). Use 'n' to keep the source bitrate. Interactive prompts warn before accepting a target above the detected selected source audio bitrate. Common values: 64, 96, 128, 160, 192, 256, 320.",
-        "subtitle_tracks": "Selection for which subtitle streams to keep. Same syntax as audio_tracks plus 'none' / 'clear' / 'delete' to drop all subtitles. MP4/MOV outputs convert text subtitles to mov_text and drop non-text (PGS, VobSub).",
+        "keep_source_metadata": "y/n. y keeps source container/stream metadata, chapters, extra source video/data streams, and allows subtitle stream selection. n removes metadata, chapters, extra source video streams, source subtitle/data streams, and embedded font/attachment streams from encode outputs.",
+        "subtitle_tracks": "Selection for which subtitle streams to keep when keep_source_metadata is y. Same syntax as audio_tracks plus 'none' / 'clear' / 'delete' to drop all subtitles. MP4/MOV outputs convert text subtitles to mov_text and drop non-text (PGS, VobSub).",
+        "keep_embedded_attachments": "y/n. y copies MKV attachment streams such as embedded subtitle fonts when keep_source_metadata is y and the output container supports attachments. Non-MKV outputs cannot keep attachment streams reliably here.",
         "detect_duplicate_audio": "y/n. When y, FFmWiz uses stream metadata plus exact packet sizes when needed to flag empty/near-empty tracks. Likely duplicate tracks are prechecked with short sampled hashes, then confirmed with a full audio hash. Used by the 'd' / 'e' / 'de' shortcuts.",
         "logging_enabled": "y/n. Logging is enabled by default and writes dated UTF-8 logs into the Logs folder next to FFmWiz.py. Set to n only when you intentionally want no log file for future runs.",
         "log_retention_days": "Optional integer. 0 keeps logs forever. Any positive value deletes FFmWiz log files older than that many days when logging starts."
@@ -410,7 +446,9 @@ CONFIG_TEMPLATE = """{
         "audio_tracks": "de",
         "audio_codec": "aac",
         "audio_bitrate_kbps": "n",
+        "keep_source_metadata": "y",
         "subtitle_tracks": "none",
+        "keep_embedded_attachments": "n",
         "detect_duplicate_audio": "y",
         "logging_enabled": "y",
         "log_retention_days": 0
@@ -520,10 +558,21 @@ FOLDER_VIDEO_EXTS = {
 FOLDER_MEDIA_EXTS = FOLDER_VIDEO_EXTS | AUDIO_ONLY_EXTS | set(COMMON_VIDEO_FORMATS) | set(COMMON_AUDIO_FORMATS)
 
 MP4_LIKE_EXTS = {"mp4", "m4a", "m4v", "mov", "ismv"}
+ATTACHMENT_COMPATIBLE_EXTS = {"mkv"}
 ADD_FILES_OUTPUT_SUFFIX = "_with_tracks"
+EXTRACT_STREAM_OUTPUT_SUFFIX = "_stream"
 MEDIA_REPORTS_DIR_NAME = "MediaReports"
 MUX_CLEANUP_VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".webm", ".mov", ".avi"}
+ROBOCOPY_BIN = "robocopy"
 HARDSUB_OUTPUT_SUFFIX = "_HardSub"
+GENERATED_OUTPUT_SUFFIXES = (
+    "_Encode",
+    "_Final",
+    HARDSUB_OUTPUT_SUFFIX,
+    "_cut",
+    ADD_FILES_OUTPUT_SUFFIX,
+    EXTRACT_STREAM_OUTPUT_SUFFIX,
+)
 HARDSUB_SUBTITLE_EXTS = {".ass", ".ssa", ".srt", ".vtt", ".webvtt"}
 HARDSUB_QUALITY_PRESETS = {
     "near-lossless": {"cpu": 14, "cpu_hevc": 16, "nvenc": 13},
@@ -555,6 +604,8 @@ VIDEO_CODEC_ALIASES = {
     "vp9": {"cpu": "libvpx-vp9", "gpu": None, "tag": None, "profile": None},
     "mpeg4": {"cpu": "mpeg4", "gpu": None, "tag": "mp4v", "profile": None},
 }
+
+NVENC_MULTIPASS_MODES = {"disabled", "qres", "fullres"}
 
 CUDA_CUVID_DECODER_BY_CODEC = {
     "av1": "av1_cuvid",
@@ -619,7 +670,54 @@ class Color:
     PROGRESS_ETA_LABEL = "\033[38;2;255;78;178m"
     PROGRESS_ETA_VALUE = "\033[38;2;255;132;206m"
     COLOR_RANGE_VALUE = "\033[38;2;90;210;255m"
+    MAX_VOLUME = "\033[38;2;255;142;86m"
+    MEAN_VOLUME = "\033[38;2;132;220;255m"
+    CHAPTERS_YES = "\033[38;2;119;255;163m"
+    CHAPTERS_NO = "\033[38;2;255;198;92m"
+    UNIFIED_CAP_CROP = "\033[38;2;118;213;255m"
+    UNIFIED_CAP_CUTS = "\033[38;2;255;122;122m"
+    UNIFIED_CAP_SPEED = "\033[38;2;210;156;255m"
+    UNIFIED_CAP_WAVEFORM = "\033[38;2;118;255;191m"
     WIZARD_TITLE = "\033[38;2;255;50;115m"
+    MUX_GOLD = "\033[38;5;220m"
+    MUX_AMBER = "\033[38;5;214m"
+    MUX_MINT = "\033[38;5;121m"
+    MUX_EMERALD = "\033[38;5;48m"
+    MUX_TEAL = "\033[38;5;37m"
+    MUX_AQUA = "\033[38;5;51m"
+    MUX_SKY = "\033[38;5;117m"
+    MUX_AZURE = "\033[38;5;75m"
+    MUX_INDIGO = "\033[38;5;99m"
+    MUX_VIOLET = "\033[38;5;135m"
+    MUX_PURPLE = "\033[38;5;141m"
+    MUX_LAVENDER = "\033[38;5;183m"
+    MUX_ROSE = "\033[38;5;204m"
+    MUX_CORAL = "\033[38;5;209m"
+    MUX_SALMON = "\033[38;5;210m"
+    MUX_STEEL = "\033[38;5;110m"
+    MUX_SILVER = "\033[38;5;250m"
+    MUX_HEADER = "\033[1m\033[38;2;255;50;115m"
+    MUX_SCAN_HEADER = "\033[1m\033[38;2;68;221;255m"
+    MUX_SUMMARY_HEADER = "\033[1m\033[38;2;170;255;82m"
+    MUX_VERIFY_HEADER = "\033[1m\033[38;2;255;115;225m"
+    MUX_CONFIRM_HEADER = "\033[1m\033[38;2;255;155;60m"
+    MUX_PROCESS_HEADER = "\033[1m\033[38;2;80;255;205m"
+    MUX_DONE_HEADER = "\033[1m\033[38;2;145;255;95m"
+    MUX_SEPARATOR = "\033[1m\033[38;2;75;130;190m"
+    MUX_FILE_LINE = "\033[1m\033[38;2;255;20;20m"
+    MUX_SETTING_LABEL = "\033[1m\033[38;2;110;210;255m"
+    MUX_SETTING_VALUE = "\033[38;2;245;245;245m"
+    MUX_INPUT_PATH = "\033[38;2;70;255;210m"
+    MUX_OUTPUT_BASE = "\033[38;2;255;105;180m"
+    MUX_OUTPUT_ROOT = "\033[38;2;190;255;70m"
+    MUX_MODE = "\033[1m\033[38;2;180;145;255m"
+    MUX_AUDIO = "\033[38;2;120;255;170m"
+    MUX_SUBTITLE = "\033[38;2;255;150;220m"
+    MUX_TRUE = "\033[1m\033[38;2;95;255;120m"
+    MUX_FALSE = "\033[1m\033[38;2;255;95;95m"
+    MUX_UNKNOWN_LANGUAGE = "\033[38;5;244m"
+    MUX_SIZE_DIFF = "\033[38;2;0;170;125m"
+    MUX_ELAPSED = "\033[38;2;205;122;42m"
 
 
 USE_COLOR = os.environ.get("NO_COLOR") is None
@@ -646,6 +744,18 @@ class Step:
     name: str
     applicable: Callable[[dict[str, Any]], bool]
     run: Callable[[dict[str, Any]], None]
+
+
+def step_is_auto_back_skip(step: Step, answers: dict[str, Any]) -> bool:
+    """Return True for steps that may complete without showing a prompt."""
+    if step.name == "audio_track" and len(answers.get("audio_streams") or []) <= 1:
+        return True
+    if step.name == "hardsub_audio_container":
+        input_path = answers.get("input_path")
+        input_ext = Path(input_path).suffix.lstrip(".").lower() if input_path else ""
+        output_ext = str(answers.get("output_ext") or "").lstrip(".").lower()
+        return answers.get("hardsub_audio_mode") == "none" or bool(input_ext and output_ext and input_ext == output_ext)
+    return False
 
 
 def paint(text: str, color_code: str) -> str:
@@ -729,6 +839,30 @@ PROGRESS_COLORS: dict[str, str] = {
 }
 
 
+MUX_LANGUAGE_COLORS = (
+    Color.GREEN,
+    Color.CYAN,
+    Color.MAGENTA,
+    Color.YELLOW,
+    Color.BLUE,
+    Color.ORANGE,
+    Color.MUX_GOLD,
+    Color.LIME,
+    Color.MUX_MINT,
+    Color.MUX_EMERALD,
+    Color.MUX_TEAL,
+    Color.MUX_AQUA,
+    Color.MUX_SKY,
+    Color.MUX_AZURE,
+    Color.MUX_INDIGO,
+    Color.MUX_VIOLET,
+    Color.MUX_PURPLE,
+    Color.MUX_LAVENDER,
+    Color.PINK,
+    Color.MUX_ROSE,
+)
+
+
 def back_text(text: str = "back=0, quit=exit") -> str:
     parts = []
     for part in text.split(", "):
@@ -744,6 +878,15 @@ def back_text(text: str = "back=0, quit=exit") -> str:
 
 def field_text(name: str, value: Any, value_color: str = Color.WHITE) -> str:
     return f"{paint(name + ':', Color.GRAY)} {paint(str(value), value_color)}"
+
+
+def chapter_presence(payload_or_answers: dict[str, Any] | None) -> tuple[str, str]:
+    data = payload_or_answers or {}
+    chapters = data.get("chapters")
+    if chapters is None and isinstance(data.get("probe"), dict):
+        chapters = data["probe"].get("chapters")
+    has_chapters = bool(chapters)
+    return ("yes" if has_chapters else "no", Color.CHAPTERS_YES if has_chapters else Color.CHAPTERS_NO)
 
 
 def format_elapsed(seconds: float) -> str:
@@ -910,6 +1053,883 @@ def total_keep_duration(keep_ranges: list[tuple[float, float]]) -> float:
     return sum(max(0.0, end - start) for start, end in keep_ranges)
 
 
+def normalize_separator_points(points: Any, duration: float) -> list[float]:
+    duration = max(0.0, float(duration or 0.0))
+    cleaned: list[float] = []
+    if duration <= 0:
+        return cleaned
+    for value in points or []:
+        try:
+            point = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 1e-6 < point < duration - 1e-6:
+            cleaned.append(point)
+    return sorted(set(round(point, 6) for point in cleaned))
+
+
+def separator_ranges(points: Any, duration: float) -> list[tuple[float, float]]:
+    duration = max(0.0, float(duration or 0.0))
+    if duration <= 0:
+        return []
+    normalized = normalize_separator_points(points, duration)
+    boundaries = [0.0, *normalized, duration]
+    ranges: list[tuple[float, float]] = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end > start + 1e-6:
+            ranges.append((start, end))
+    return ranges
+
+
+def intersect_keep_ranges_with_segment(
+    keep_ranges: list[tuple[float, float]],
+    segment: tuple[float, float],
+    duration: float,
+) -> list[tuple[float, float]]:
+    segment_start, segment_end = segment
+    source_keeps = normalize_cut_ranges(keep_ranges, duration)
+    if not source_keeps:
+        source_keeps = [(segment_start, segment_end)]
+    intersections: list[tuple[float, float]] = []
+    for start, end in source_keeps:
+        clipped_start = max(float(start), segment_start)
+        clipped_end = min(float(end), segment_end)
+        if clipped_end > clipped_start + 1e-6:
+            intersections.append((clipped_start, clipped_end))
+    return normalize_cut_ranges(intersections, duration)
+
+
+def final_processed_duration_for_splits(answers: dict[str, Any], source_duration: float) -> float:
+    duration = max(0.0, float(source_duration or 0.0))
+    keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
+    if keep_ranges:
+        duration = total_keep_duration(keep_ranges)
+    if video_speed_transform_enabled(answers):
+        duration = duration / max(0.001, encode_video_speed_factor(answers))
+    return max(0.0, duration)
+
+
+def ffmpeg_progress_duration_for_answers(answers: dict[str, Any], source_duration: float) -> float:
+    final_duration = final_processed_duration_for_splits(answers, source_duration)
+    split_points = normalize_separator_points(answers.get("separator_points"), final_duration)
+    if split_points:
+        # FFmpeg's -progress out_time is per active output in multi-output Split
+        # commands. FFmWiz reconstructs aggregate Split progress from part
+        # durations plus the active output timestamp, so the progress duration
+        # must be the full processed program duration rather than only the last
+        # part.
+        return final_duration
+    return final_duration
+
+
+def split_part_output_paths(
+    output_path: Path,
+    part_count: int,
+    input_paths: list[Path] | None = None,
+) -> list[Path]:
+    input_paths = input_paths or []
+    stem = sanitize_output_stem(output_path.stem)
+    suffix = output_path.suffix or ".mp4"
+    paths: list[Path] = []
+    for index in range(1, int(part_count) + 1):
+        candidate = output_path.with_name(f"{stem}_Part{index:02d}{suffix}")
+        candidate = resolve_output_collision_against_inputs(candidate, input_paths, "_Final")
+        candidate = unique_numbered_path(candidate)
+        paths.append(candidate)
+    return paths
+
+
+def append_final_split_filters(
+    filters: list[str],
+    video_label: str,
+    audio_labels: list[str],
+    split_points: Any,
+    final_duration: float,
+    prefix: str,
+    fps: float = 0.0,
+) -> tuple[list[str], list[list[str]], list[tuple[float, float]]]:
+    intervals = separator_ranges(split_points, final_duration)
+    if len(intervals) <= 1:
+        return [video_label], [[label for label in audio_labels]], intervals
+    # Snap each interior split boundary to the OUTPUT frame grid so every part
+    # starts/ends exactly on a frame after any fps change (no fractional first
+    # frame). The clip's own start (0) and end (final_duration) are left as-is.
+    if fps and float(fps) > 0:
+        frame = 1.0 / float(fps)
+        bounds = (
+            [intervals[0][0]]
+            + [round(round(iv[1] / frame) * frame, 6) for iv in intervals[:-1]]
+            + [intervals[-1][1]]
+        )
+        snapped = [(s, e) for s, e in zip(bounds, bounds[1:]) if e > s + 1e-6]
+        if snapped and snapped != intervals:
+            log_info(f"Split boundaries snapped to {float(fps):g} fps frame grid: {intervals} -> {snapped}")
+            intervals = snapped
+    part_count = len(intervals)
+    video_sources = [f"{prefix}vpart{idx}_src" for idx in range(part_count)]
+    filters.append(f"[{video_label}]split={part_count}{''.join(f'[{label}]' for label in video_sources)}")
+    log_info(f"Filter graph decision: final Split enabled; video split={part_count}; intervals={intervals}")
+    video_outputs: list[str] = []
+    for idx, (start, end) in enumerate(intervals):
+        out_label = f"{prefix}vout{idx}"
+        video_outputs.append(out_label)
+        filters.append(
+            f"[{video_sources[idx]}]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[{out_label}]"
+        )
+    audio_outputs_by_part: list[list[str]] = [[] for _ in intervals]
+    for audio_pos, audio_label in enumerate(audio_labels):
+        audio_sources = [f"{prefix}apart{idx}_{audio_pos}_src" for idx in range(part_count)]
+        filters.append(f"[{audio_label}]asplit={part_count}{''.join(f'[{label}]' for label in audio_sources)}")
+        log_info(f"Filter graph decision: final Split enabled; audio label [{audio_label}] asplit={part_count}.")
+        for idx, (start, end) in enumerate(intervals):
+            out_label = f"{prefix}aout{idx}_{audio_pos}"
+            audio_outputs_by_part[idx].append(out_label)
+            filters.append(
+                f"[{audio_sources[idx]}]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[{out_label}]"
+            )
+    return video_outputs, audio_outputs_by_part, intervals
+
+
+def append_video_encode_options(
+    cmd: list[str],
+    answers: dict[str, Any],
+    video_encoder: str,
+    tag: str | None,
+    profile: str | None,
+) -> None:
+    cmd.extend(["-c:v", video_encoder])
+    if str(video_encoder).endswith("_nvenc"):
+        cmd.extend(["-preset", NVENC_PRESET, "-tune", NVENC_TUNE, "-rc", NVENC_RC])
+        append_nvenc_multipass_args(cmd, answers, video_encoder)
+        if "hevc" in str(video_encoder):
+            cmd.extend(["-profile:v", hevc_profile_for_output(answers, profile)])
+    elif video_encoder in {"libx264", "libx265"}:
+        cmd.extend(["-preset", CPU_PRESET])
+        if video_encoder == "libx265":
+            cmd.extend(["-profile:v", hevc_profile_for_output(answers, "main")])
+    video_bitrate = answers.get("video_bitrate_kbps")
+    if video_bitrate:
+        append_video_bitrate_args(cmd, answers, int(video_bitrate))
+    cmd.extend(["-color_range:v:0", COLOR_RANGE])
+    if tag and str(answers.get("output_ext", "")).lower() in MP4_LIKE_EXTS:
+        cmd.extend(["-tag:v", tag])
+
+
+def is_nvenc_multipass_encoder(video_encoder: Any) -> bool:
+    return str(video_encoder or "").strip().lower() in {"hevc_nvenc", "h264_nvenc"}
+
+
+def normalize_nvenc_multipass_mode(value: Any) -> str:
+    mode = str(value or "disabled").strip().lower()
+    return mode if mode in NVENC_MULTIPASS_MODES else "disabled"
+
+
+def nvenc_multipass_default_mode(answers: dict[str, Any], quality_oriented: bool = True) -> str:
+    if not quality_oriented:
+        return "disabled"
+    # Default to qres (quarter-resolution first pass): a good quality/speed balance
+    # and noticeably faster than fullres, which most users do not need by default.
+    return "qres"
+
+
+def nvenc_multipass_args(mode: Any) -> list[str]:
+    normalized = normalize_nvenc_multipass_mode(mode)
+    if normalized in {"qres", "fullres"}:
+        return ["-multipass", normalized]
+    return []
+
+
+def append_nvenc_multipass_args(cmd: list[str], answers: dict[str, Any], video_encoder: Any) -> None:
+    if not is_nvenc_multipass_encoder(video_encoder):
+        return
+    mode = normalize_nvenc_multipass_mode(answers.get("nvenc_multipass"))
+    args = nvenc_multipass_args(mode)
+    if args:
+        log_info(f"NVENC multipass option inserted: encoder={video_encoder}; mode={mode}; args={args}")
+    else:
+        log_info(f"NVENC multipass disabled for encoder={video_encoder}; no -multipass option inserted.")
+    cmd.extend(args)
+
+
+def set_nvenc_multipass_skip_reason(answers: dict[str, Any], reason: str) -> None:
+    answers["nvenc_multipass_skip_reason"] = reason
+    log_info(f"NVENC multipass skipped: {reason}")
+
+
+def nvenc_multipass_applicable_for_encoder(
+    answers: dict[str, Any],
+    video_encoder: Any,
+    *,
+    video_reencode: bool = True,
+    pure_copy: bool = False,
+    workflow_name: str = "video encode",
+) -> bool:
+    if not video_reencode:
+        set_nvenc_multipass_skip_reason(answers, "no video re-encode")
+        return False
+    if pure_copy:
+        set_nvenc_multipass_skip_reason(answers, "pure copy/remux workflow")
+        return False
+    encoder = str(video_encoder or "").strip().lower()
+    if encoder in {"", "copy"}:
+        set_nvenc_multipass_skip_reason(answers, "video codec is copy")
+        return False
+    if not is_nvenc_multipass_encoder(encoder):
+        reason = "CPU encoder selected" if not encoder.endswith("_nvenc") else f"unsupported NVENC encoder {encoder}"
+        set_nvenc_multipass_skip_reason(answers, reason)
+        return False
+    answers.pop("nvenc_multipass_skip_reason", None)
+    log_info(f"NVENC multipass applicable for {workflow_name}: encoder={encoder}")
+    return True
+
+
+def resolved_video_encoder_for_nvenc_multipass(answers: dict[str, Any]) -> str:
+    if not output_has_video(answers):
+        return ""
+    video_encoder, tag, profile = resolve_video_encoder(answers)
+    if video_encoder == "copy" and video_filters_required(answers):
+        fallback_answers = dict(answers)
+        fallback_answers["video_codec"] = DEFAULT_VIDEO_CODEC
+        video_encoder, tag, profile = resolve_video_encoder(fallback_answers)
+    video_encoder, _tag, _profile = enforce_bit_depth_compatible_video_encoder(
+        answers,
+        video_encoder,
+        tag,
+        profile,
+    )
+    return video_encoder
+
+
+def nvenc_multipass_prompt_applicable(answers: dict[str, Any]) -> bool:
+    if answers.get("nvenc_multipass") in NVENC_MULTIPASS_MODES:
+        return False
+    if not output_has_video(answers):
+        set_nvenc_multipass_skip_reason(answers, "audio-only workflow")
+        return False
+    if str(answers.get("video_codec") or "").strip().lower() in {"copy", "n"}:
+        set_nvenc_multipass_skip_reason(answers, "video codec is copy")
+        return False
+    video_encoder = resolved_video_encoder_for_nvenc_multipass(answers)
+    return nvenc_multipass_applicable_for_encoder(answers, video_encoder, workflow_name="main encode")
+
+
+def ask_nvenc_multipass_if_applicable(
+    answers: dict[str, Any],
+    *,
+    video_encoder: Any | None = None,
+    workflow_name: str = "video encode",
+    video_reencode: bool = True,
+    quality_oriented: bool = True,
+    pure_copy: bool = False,
+) -> str:
+    if answers.get("nvenc_multipass") in NVENC_MULTIPASS_MODES:
+        return normalize_nvenc_multipass_mode(answers.get("nvenc_multipass"))
+    encoder = video_encoder if video_encoder is not None else resolved_video_encoder_for_nvenc_multipass(answers)
+    if not nvenc_multipass_applicable_for_encoder(
+        answers,
+        encoder,
+        video_reencode=video_reencode,
+        pure_copy=pure_copy,
+        workflow_name=workflow_name,
+    ):
+        return "disabled"
+    default_mode = nvenc_multipass_default_mode(answers, quality_oriented)
+    default_choice = {"disabled": "0", "qres": "1", "fullres": "2"}[default_mode]
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Use NVENC multipass?",
+                "0=Disabled / fastest; 1=qres / quarter-resolution first pass; 2=fullres / best quality, slower",
+                default_choice,
+                back="back=b, quit=exit",
+            )
+        )
+        lowered = value.strip().lower()
+        if lowered in {"b", "back"}:
+            raise Back()
+        if not lowered:
+            lowered = default_choice
+            default_used = True
+        else:
+            default_used = False
+        mapping = {"0": "disabled", "۱": "qres", "١": "qres", "1": "qres", "۲": "fullres", "٢": "fullres", "2": "fullres"}
+        if lowered in {"۰", "٠"}:
+            lowered = "0"
+        mode = mapping.get(lowered)
+        if mode:
+            answers["nvenc_multipass"] = mode
+            answers.pop("nvenc_multipass_skip_reason", None)
+            log_info(
+                f"User choice: nvenc_multipass={mode}; workflow={workflow_name}; "
+                f"default_used={'yes' if default_used else 'no'}"
+            )
+            return mode
+        error("Enter 0, 1, or 2. Use b to go back.")
+
+
+def step_nvenc_multipass(answers: dict[str, Any]) -> None:
+    ask_nvenc_multipass_if_applicable(answers, workflow_name="main encode", quality_oriented=True)
+
+
+def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_audio: bool) -> None:
+    if not has_audio:
+        cmd.append("-an")
+        return
+    audio_codec = normalize_audio_codec(
+        answers.get("audio_codec"),
+        default_audio_codec_for_ext(answers.get("output_ext", "")),
+    )
+    answers["audio_codec"] = audio_codec
+    if audio_codec == "copy":
+        note("Audio copy cannot be used after Split/filter processing. AAC was selected for audio.")
+        audio_codec = DEFAULT_AUDIO_CODEC
+        answers["audio_codec"] = audio_codec
+    cmd.extend(["-c:a", audio_codec])
+    audio_bitrate = answers.get("audio_bitrate_kbps")
+    if audio_bitrate and audio_codec_uses_bitrate(str(audio_codec)):
+        cmd.extend(["-b:a", f"{audio_bitrate}k"])
+    if AUDIO_CHANNELS:
+        cmd.extend(["-ac", str(AUDIO_CHANNELS)])
+    if AUDIO_SAMPLE_RATE:
+        cmd.extend(["-ar", str(AUDIO_SAMPLE_RATE)])
+
+
+def append_container_options(cmd: list[str], output_ext: str) -> None:
+    if output_ext.lower() in MP4_LIKE_EXTS and MOVFLAGS:
+        cmd.extend(["-movflags", MOVFLAGS])
+
+
+def timeline_is_modified(answers: dict[str, Any]) -> bool:
+    """Return True when the output timeline differs from the source timeline.
+
+    Timeline-modifying operations include multi-range cuts, speed changes,
+    video reversal, split into multiple parts, and join of multiple inputs.
+    A single-range cut (trim) also modifies the timeline because chapter
+    timestamps must be offset to begin at zero.
+    """
+    if answers.get("cut_keep_ranges"):
+        return True
+    if video_speed_transform_enabled(answers):
+        return True
+    if answers.get("reverse_video"):
+        return True
+    if answers.get("separator_points"):
+        return True
+    if answers.get("join_input_items"):
+        return True
+    return False
+
+
+def remap_chapters_for_encode(
+    answers: dict[str, Any],
+    speed_factor: float = 1.0,
+    part_interval: tuple[float, float] | None = None,
+) -> dict[str, Any]:
+    """Remap source chapters to the processed output timeline.
+
+    Returns a plan dict compatible with `copy_cut_chapter_map_args`:
+      mode="copy"     – use -map_chapters 0 (no timeline change, chapters valid)
+      mode="drop"     – use -map_chapters -1 (no chapters survive)
+      mode="metadata" – use a generated FFmetadata file
+      mode="disable"  – use -map_chapters -1 (remapping unavailable)
+
+    Parameters
+    ----------
+    answers : dict
+        The standard wizard answers dict containing probe data.
+    speed_factor : float
+        The video speed multiplier (>1 = faster, <1 = slower).
+    part_interval : tuple[float, float] | None
+        If the output is split into parts, the (start, end) interval of this
+        part in the *processed* timeline (after cuts + speed). Chapters are
+        clipped to this interval and timestamps offset to start at zero.
+    """
+    probe = answers.get("probe") if isinstance(answers.get("probe"), dict) else {}
+    chapters = (probe or {}).get("chapters") or []
+    chapters = [ch for ch in chapters if isinstance(ch, dict)]
+    if not chapters:
+        log_info("Chapters: source contains no chapters")
+        return {"mode": "copy", "chapters": [], "overlap_count": 0}
+
+    if not timeline_is_modified(answers):
+        log_info("Chapters: preserved from source")
+        return {"mode": "copy", "chapters": [], "overlap_count": 0}
+
+    # Determine keep ranges; default to full source duration.
+    source_duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    for ch in chapters:
+        end = copy_cut_chapter_seconds(ch, "end")
+        if end is not None:
+            source_duration = max(source_duration, end)
+    source_duration = max(0.0, source_duration)
+
+    keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), source_duration)
+    if not keep_ranges:
+        keep_ranges = [(0.0, source_duration)]
+
+    # Remap each chapter through retained ranges.
+    remapped: list[dict[str, Any]] = []
+    for ch in chapters:
+        start = copy_cut_chapter_seconds(ch, "start")
+        end = copy_cut_chapter_seconds(ch, "end")
+        if start is None or end is None or end <= start:
+            continue
+
+        # Compute output position by accumulating kept ranges.
+        output_offset = 0.0
+        ch_new_start: float | None = None
+        ch_new_end: float | None = None
+
+        for keep_start, keep_end in keep_ranges:
+            keep_duration = keep_end - keep_start
+            # Chapter must overlap this kept range to survive.
+            overlap_start = max(start, keep_start)
+            overlap_end = min(end, keep_end)
+            if overlap_end > overlap_start + 1e-6:
+                seg_start = output_offset + (overlap_start - keep_start)
+                seg_end = output_offset + (overlap_end - keep_start)
+                if ch_new_start is None:
+                    ch_new_start = seg_start
+                ch_new_end = seg_end
+            output_offset += keep_duration
+
+        if ch_new_start is None or ch_new_end is None:
+            continue
+
+        # Apply speed factor.
+        if speed_factor > 0 and abs(speed_factor - 1.0) > 1e-9:
+            ch_new_start = ch_new_start / speed_factor
+            ch_new_end = ch_new_end / speed_factor
+
+        if ch_new_end <= ch_new_start + 1e-6:
+            continue
+
+        remapped.append({
+            "start": ch_new_start,
+            "end": ch_new_end,
+            "metadata": dict(ch.get("tags") or {}),
+        })
+
+    # Clip to part interval if splitting.
+    if part_interval is not None:
+        part_start, part_end = part_interval
+        part_chapters: list[dict[str, Any]] = []
+        for ch in remapped:
+            clip_start = max(ch["start"], part_start)
+            clip_end = min(ch["end"], part_end)
+            if clip_end > clip_start + 1e-6:
+                part_chapters.append({
+                    "start": clip_start - part_start,
+                    "end": clip_end - part_start,
+                    "metadata": dict(ch.get("metadata") or {}),
+                })
+        remapped = part_chapters
+
+    if not remapped:
+        log_info("Chapters: disabled because timeline changed and all chapters were removed")
+        return {"mode": "drop", "chapters": [], "overlap_count": 0}
+
+    log_info(f"Chapters: remapped to processed timeline ({len(remapped)} chapter(s) retained)")
+    return {"mode": "metadata", "chapters": remapped, "overlap_count": 0}
+
+
+def write_encode_chapter_metadata(plan: dict[str, Any], temp_dir: Path, suffix: str = "") -> Path:
+    """Write an FFmetadata file for remapped encode chapters."""
+    metadata_path = temp_dir / f"chapters_encode{suffix}.ffmetadata"
+    lines = [";FFMETADATA1", ""]
+    for chapter in plan.get("chapters") or []:
+        start_ms = max(0, int(round(float(chapter["start"]) * 1000)))
+        end_ms = max(start_ms + 1, int(round(float(chapter["end"]) * 1000)))
+        lines.extend([
+            "[CHAPTER]",
+            "TIMEBASE=1/1000",
+            f"START={start_ms}",
+            f"END={end_ms}",
+        ])
+        for key, value in (chapter.get("metadata") or {}).items():
+            if value is None:
+                continue
+            lines.append(f"{ffmetadata_escape(key)}={ffmetadata_escape(value)}")
+        lines.append("")
+    metadata_path.write_text("\n".join(lines), encoding="utf-8")
+    return metadata_path
+
+
+def append_source_metadata_chapter_options(cmd: list[str], answers: dict[str, Any]) -> None:
+    if not output_has_video(answers):
+        return
+    cmd.extend(["-map_metadata", "0" if source_metadata_keep_enabled(answers) else "-1"])
+
+    # Chapter handling: if user disabled chapters, always drop.
+    if not source_chapters_keep_enabled(answers):
+        cmd.extend(["-map_chapters", "-1"])
+        return
+
+    # If the timeline is not modified, preserve source chapters directly.
+    if not timeline_is_modified(answers):
+        cmd.extend(["-map_chapters", "0"])
+        return
+
+    # If a chapter metadata input was injected, use its index.
+    chapter_input_index = answers.get("_chapter_metadata_input_index")
+    if chapter_input_index is not None:
+        cmd.extend(["-map_chapters", str(chapter_input_index)])
+        log_info(f"Chapters: remapped to processed timeline (metadata input {chapter_input_index})")
+        return
+
+    # Timeline is modified but no metadata was prepared – disable chapters.
+    cmd.extend(["-map_chapters", "-1"])
+    log_info("Chapters: disabled because timeline changed and remapping was unavailable")
+
+
+def append_clear_stream_stat_metadata(cmd: list[str], stream_spec: str) -> None:
+    for key in STREAM_STAT_METADATA_TAGS:
+        cmd.extend([f"-metadata:s:{stream_spec}", f"{key}="])
+
+
+def append_clear_reencoded_stream_stat_metadata(
+    cmd: list[str],
+    answers: dict[str, Any],
+    *,
+    video_output_count: int = 0,
+    audio_output_count: int = 0,
+    subtitle_output_count: int = 0,
+) -> None:
+    if not source_metadata_keep_enabled(answers):
+        return
+    cleared: list[str] = []
+    if int(video_output_count or 0) > 0:
+        append_clear_stream_stat_metadata(cmd, "v")
+        cleared.append("v:*")
+    if int(audio_output_count or 0) > 0:
+        append_clear_stream_stat_metadata(cmd, "a")
+        cleared.append("a:*")
+    if int(subtitle_output_count or 0) > 0:
+        append_clear_stream_stat_metadata(cmd, "s")
+        cleared.append("s:*")
+    if cleared:
+        log_info(
+            "Cleared copied stream statistics metadata for processed output streams: "
+            + ", ".join(cleared)
+        )
+
+
+def source_metadata_keep_enabled(answers: dict[str, Any]) -> bool:
+    return bool(answers.get("keep_source_metadata", True))
+
+
+def source_chapters_keep_enabled(answers: dict[str, Any]) -> bool:
+    return bool(answers.get("keep_source_chapters", True))
+
+
+def source_subtitles_keep_enabled(answers: dict[str, Any]) -> bool:
+    return bool(answers.get("keep_source_subtitles", True))
+
+
+def source_data_keep_enabled(answers: dict[str, Any]) -> bool:
+    return bool(answers.get("keep_source_data_streams", source_metadata_keep_enabled(answers)))
+
+
+def source_extra_video_keep_enabled(answers: dict[str, Any]) -> bool:
+    return bool(answers.get("keep_source_extra_video_streams", source_metadata_keep_enabled(answers)))
+
+
+def source_chapter_streams(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    probe = answers.get("probe") if isinstance(answers.get("probe"), dict) else {}
+    chapters = probe.get("chapters") if isinstance(probe, dict) else []
+    return [chapter for chapter in (chapters or []) if isinstance(chapter, dict)]
+
+
+def source_metadata_tags_present(answers: dict[str, Any]) -> bool:
+    fmt = answers.get("format") if isinstance(answers.get("format"), dict) else {}
+    if isinstance(fmt, dict) and fmt.get("tags"):
+        return True
+    streams: list[dict[str, Any]] = []
+    for key in ("video_streams", "audio_streams", "subtitle_streams", "attachment_streams", "data_streams"):
+        streams.extend(stream for stream in (answers.get(key) or []) if isinstance(stream, dict))
+    return any(bool(stream.get("tags")) for stream in streams)
+
+
+def streams_for_statistics_from_answers(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    probe = answers.get("probe") if isinstance(answers.get("probe"), dict) else {}
+    probe_streams = probe.get("streams") if isinstance(probe, dict) else None
+    if isinstance(probe_streams, list) and probe_streams:
+        return [stream for stream in probe_streams if isinstance(stream, dict)]
+    streams: list[dict[str, Any]] = []
+    for key in ("video_streams", "audio_streams", "subtitle_streams", "attachment_streams", "data_streams"):
+        streams.extend(stream for stream in (answers.get(key) or []) if isinstance(stream, dict))
+    return streams
+
+
+def source_extra_preservation_features(answers: dict[str, Any]) -> list[str]:
+    features: list[str] = []
+    if source_metadata_tags_present(answers):
+        features.append("container/stream metadata")
+    if source_chapter_streams(answers):
+        features.append("chapters")
+    if answers.get("subtitle_streams"):
+        features.append("subtitle streams")
+    if embedded_attachment_streams(answers):
+        features.append("embedded font/attachment streams")
+    if source_data_streams(answers):
+        features.append("data streams")
+    if additional_source_video_streams(answers):
+        features.append("additional video streams")
+    return features
+
+
+def source_extra_policy_applicable(answers: dict[str, Any]) -> bool:
+    return output_has_video(answers) and bool(source_extra_preservation_features(answers))
+
+
+def source_video_stream(answers: dict[str, Any]) -> dict[str, Any] | None:
+    streams = answers.get("video_streams") or []
+    return streams[0] if streams else None
+
+
+def additional_source_video_streams(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    streams = answers.get("video_streams") or []
+    return list(streams[1:]) if len(streams) > 1 else []
+
+
+def source_video_bit_depth(answers: dict[str, Any]) -> int | None:
+    stream = source_video_stream(answers)
+    return video_bit_depth(stream) if stream else None
+
+
+def output_video_bit_depth(answers: dict[str, Any]) -> int:
+    depth = source_video_bit_depth(answers)
+    if not depth or depth <= 8:
+        return 8
+    return min(depth, 16)
+
+
+def cpu_pixel_format_for_output(answers: dict[str, Any]) -> str:
+    depth = output_video_bit_depth(answers)
+    if depth <= 8:
+        return CPU_FORMAT
+    if depth <= 10:
+        return "yuv420p10le"
+    if depth <= 12:
+        return "yuv420p12le"
+    if depth <= 14:
+        return "yuv420p14le"
+    return "yuv420p16le"
+
+
+def cuda_pixel_format_for_output(answers: dict[str, Any]) -> str:
+    return "p010le" if output_video_bit_depth(answers) > 8 else CUDA_FORMAT
+
+
+def hevc_profile_for_output(answers: dict[str, Any], default_profile: str | None = None) -> str:
+    depth = output_video_bit_depth(answers)
+    if depth <= 8:
+        return default_profile or NVENC_HEVC_PROFILE
+    if depth <= 10:
+        return "main10"
+    if depth <= 12:
+        return "main12"
+    return "rext"
+
+
+def high_bit_depth_requires_cpu_encoder(answers: dict[str, Any], video_encoder: str) -> bool:
+    return output_video_bit_depth(answers) > 10 and str(video_encoder).endswith("_nvenc")
+
+
+def cpu_encoder_for_high_bit_depth(answers: dict[str, Any], video_encoder: str) -> tuple[str, str | None, str | None]:
+    requested = str(answers.get("video_codec") or DEFAULT_VIDEO_CODEC).lower()
+    info = VIDEO_CODEC_ALIASES.get(requested)
+    if info and info.get("cpu"):
+        cpu_encoder = str(info["cpu"])
+        tag = info.get("tag")
+        profile = info.get("profile")
+    elif "hevc" in str(video_encoder) or "h265" in requested:
+        cpu_encoder, tag, profile = "libx265", "hvc1", NVENC_HEVC_PROFILE
+    elif "av1" in str(video_encoder) or requested == "av1":
+        cpu_encoder, tag, profile = "libaom-av1", None, None
+    else:
+        cpu_encoder, tag, profile = "libx265", "hvc1", NVENC_HEVC_PROFILE
+    if cpu_encoder == "libx264" and output_video_bit_depth(answers) > 10:
+        note("H.264/NVENC cannot safely preserve source bit depth above 10-bit here. H.265 CPU encoding was selected to preserve high bit depth.")
+        cpu_encoder, tag, profile = "libx265", "hvc1", NVENC_HEVC_PROFILE
+        answers["video_codec"] = "H265"
+    return cpu_encoder, tag, profile
+
+
+def enforce_bit_depth_compatible_video_encoder(
+    answers: dict[str, Any],
+    video_encoder: str,
+    tag: str | None,
+    profile: str | None,
+) -> tuple[str, str | None, str | None]:
+    if high_bit_depth_requires_cpu_encoder(answers, video_encoder):
+        source_depth = source_video_bit_depth(answers)
+        target_depth = output_video_bit_depth(answers)
+        cpu_encoder, cpu_tag, cpu_profile = cpu_encoder_for_high_bit_depth(answers, video_encoder)
+        note(
+            f"Source video is {source_depth}-bit. NVENC output is limited to 10-bit here, "
+            f"so {cpu_encoder} was selected to preserve {target_depth}-bit output."
+        )
+        return cpu_encoder, cpu_tag if cpu_tag is not None else tag, cpu_profile if cpu_profile is not None else profile
+    return video_encoder, tag, profile
+
+
+def output_supports_embedded_attachments(answers: dict[str, Any]) -> bool:
+    return str(answers.get("output_ext") or "").lower().lstrip(".") in ATTACHMENT_COMPATIBLE_EXTS
+
+
+def embedded_attachment_streams(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(answers.get("attachment_streams") or [])
+
+
+def source_data_streams(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(answers.get("data_streams") or [])
+
+
+def embedded_attachment_keep_enabled(answers: dict[str, Any]) -> bool:
+    return bool(
+        answers.get("keep_embedded_attachments")
+        and embedded_attachment_streams(answers)
+        and output_supports_embedded_attachments(answers)
+    )
+
+
+def append_embedded_attachment_maps(cmd: list[str], answers: dict[str, Any]) -> bool:
+    if not answers.get("keep_embedded_attachments"):
+        return False
+    streams = embedded_attachment_streams(answers)
+    if not streams:
+        return False
+    if not output_supports_embedded_attachments(answers):
+        log_info(
+            "Embedded attachments were requested but not mapped because the output "
+            f"container does not support MKV attachment streams reliably: {answers.get('output_ext')}"
+        )
+        return False
+    cmd.extend(["-map", "0:t?"])
+    log_info(f"Embedded attachment streams mapped for copy: count={len(streams)}")
+    return True
+
+
+def append_source_data_maps(cmd: list[str], answers: dict[str, Any]) -> bool:
+    streams = source_data_streams(answers)
+    if not streams:
+        return False
+    if not source_data_keep_enabled(answers):
+        return False
+    for index, _stream in enumerate(streams):
+        cmd.extend(["-map", f"0:d:{index}"])
+    log_info(f"Source data streams mapped for copy: count={len(streams)}")
+    return True
+
+
+def can_map_additional_source_video_streams(answers: dict[str, Any]) -> bool:
+    if not additional_source_video_streams(answers) or not source_extra_video_keep_enabled(answers):
+        return False
+    if answers.get("separator_points") or video_speed_transform_enabled(answers):
+        log_info("Additional source video streams were not mapped because final timeline Split/speed processing is active.")
+        return False
+    if answers.get("cut_keep_ranges"):
+        log_info("Additional source video streams were not mapped because frame-accurate cuts are active.")
+        return False
+    return True
+
+
+def append_additional_source_video_maps(cmd: list[str], answers: dict[str, Any]) -> int:
+    if not can_map_additional_source_video_streams(answers):
+        return 0
+    count = 0
+    for relative_index, _stream in enumerate(additional_source_video_streams(answers), start=1):
+        cmd.extend(["-map", f"0:v:{relative_index}"])
+        count += 1
+    if count:
+        log_info(f"Additional source video streams mapped for copy: count={count}")
+    return count
+
+
+def append_additional_source_video_codec_options(cmd: list[str], count: int) -> None:
+    for relative_index in range(1, count + 1):
+        cmd.extend([f"-c:v:{relative_index}", "copy"])
+
+
+def _all_stream_indexes_selected(selected: Any, count: int) -> bool:
+    if count <= 0:
+        return True
+    if selected == "all":
+        return True
+    if isinstance(selected, list):
+        try:
+            return sorted(int(item) for item in selected) == list(range(count))
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _explicit_all_streams_selected(selected: Any, count: int) -> bool:
+    if count <= 0:
+        return True
+    return selected == "all"
+
+
+def can_use_full_source_map_for_simple_encode(
+    answers: dict[str, Any],
+    audio_indices: list[int],
+    audio_transform_active: bool,
+    multi_cut: bool,
+) -> bool:
+    if not output_has_video(answers):
+        return False
+    if answers.get("join_input_items"):
+        return False
+    if multi_cut or audio_transform_active:
+        return False
+    if answers.get("separator_points") or video_speed_transform_enabled(answers):
+        return False
+    if not (
+        source_metadata_keep_enabled(answers)
+        and source_chapters_keep_enabled(answers)
+        and source_extra_video_keep_enabled(answers)
+        and source_subtitles_keep_enabled(answers)
+        and source_data_keep_enabled(answers)
+    ):
+        return False
+    if not _explicit_all_streams_selected(answers.get("audio_tracks"), len(answers.get("audio_streams") or [])):
+        return False
+    if not _explicit_all_streams_selected(answers.get("subtitle_tracks"), len(answers.get("subtitle_streams") or [])):
+        return False
+    if embedded_attachment_streams(answers) and not embedded_attachment_keep_enabled(answers):
+        return False
+    if answers.get("output_ext", "").lower() in MP4_LIKE_EXTS and answers.get("subtitle_streams"):
+        return False
+    return True
+
+
+def append_source_data_codec_options(cmd: list[str], answers: dict[str, Any]) -> None:
+    if source_data_streams(answers) and source_data_keep_enabled(answers):
+        cmd.extend(["-c:d", "copy"])
+
+
+def append_negative_stream_options(
+    cmd: list[str],
+    answers: dict[str, Any],
+    has_video: bool,
+    subtitle_indices: list[int],
+    data_mapped: bool,
+) -> None:
+    if not has_video:
+        cmd.append("-vn")
+    if answers.get("subtitle_streams") and not subtitle_indices:
+        cmd.append("-sn")
+    if source_data_streams(answers) and not data_mapped:
+        cmd.append("-dn")
+
+
+def append_embedded_attachment_codec_options(cmd: list[str], answers: dict[str, Any]) -> None:
+    if embedded_attachment_keep_enabled(answers):
+        cmd.extend(["-c:t", "copy"])
+
+
 # ------------------------------------------------------------------
 # Speed / reverse helpers.
 # ------------------------------------------------------------------
@@ -973,8 +1993,79 @@ def build_audio_speed_filter(speed: float, reverse: bool) -> str:
     if reverse:
         filters.append("areverse")
     filters.append("asetpts=PTS-STARTPTS")
-    filters.append(atempo_filter_chain(speed))
+    if abs(speed - 1.0) > 1e-6:
+        filters.append(atempo_filter_chain(speed))
     return ",".join(filters)
+
+
+def loudnorm_transform_enabled(answers: dict[str, Any]) -> bool:
+    return bool(answers.get("loudnorm_enabled"))
+
+
+def loudnorm_number(value: Any) -> str:
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def parse_loudnorm_target(value: str) -> float:
+    try:
+        target = float(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("Enter a numeric LUFS value.")
+    if target < LOUDNORM_MIN_TARGET_I or target > LOUDNORM_MAX_TARGET_I:
+        raise ValueError(
+            f"Target I must be between {LOUDNORM_MIN_TARGET_I:g} and {LOUDNORM_MAX_TARGET_I:g} LUFS."
+        )
+    return target
+
+
+def build_loudnorm_filter(answers: dict[str, Any]) -> str:
+    target_i = float(answers.get("loudnorm_target_i", LOUDNORM_DEFAULT_TARGET_I))
+    measured = answers.get("loudnorm_measured") if isinstance(answers.get("loudnorm_measured"), dict) else {}
+    required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+    if measured and all(measured.get(key) not in {None, ""} for key in required):
+        log_info(
+            "Using two-pass loudnorm filter: "
+            f"target_i={target_i:g}; input_i={measured['input_i']}; input_tp={measured['input_tp']}; "
+            f"input_lra={measured['input_lra']}; input_thresh={measured['input_thresh']}; "
+            f"target_offset={measured['target_offset']}"
+        )
+        return (
+            "loudnorm="
+            f"I={loudnorm_number(target_i)}:"
+            f"TP={loudnorm_number(LOUDNORM_TARGET_TP)}:"
+            f"LRA={loudnorm_number(LOUDNORM_TARGET_LRA)}:"
+            f"measured_I={loudnorm_number(measured['input_i'])}:"
+            f"measured_TP={loudnorm_number(measured['input_tp'])}:"
+            f"measured_LRA={loudnorm_number(measured['input_lra'])}:"
+            f"measured_thresh={loudnorm_number(measured['input_thresh'])}:"
+            f"offset={loudnorm_number(measured['target_offset'])}:"
+            "linear=true:print_format=summary"
+        )
+    log_info(f"Using single-pass loudnorm filter because measured values are unavailable: target_i={target_i:g}")
+    return (
+        "loudnorm="
+        f"I={loudnorm_number(target_i)}:"
+        f"TP={loudnorm_number(LOUDNORM_TARGET_TP)}:"
+        f"LRA={loudnorm_number(LOUDNORM_TARGET_LRA)}:"
+        "print_format=summary"
+    )
+
+
+def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
+    filters: list[str] = []
+    if encode_audio_reverse_enabled(answers):
+        filters.append("areverse")
+    speed = encode_audio_speed_factor(answers)
+    if abs(speed - 1.0) > 1e-6:
+        filters.append(atempo_filter_chain(speed))
+    if loudnorm_transform_enabled(answers):
+        filters.append(build_loudnorm_filter(answers))
+    filters.append("asetpts=PTS-STARTPTS")
+    chain = ",".join(filters)
+    if loudnorm_transform_enabled(answers):
+        log_info(f"LoudNorm audio filter segment inserted: {chain}")
+        log_info(f"LoudNorm applied tracks: {answers.get('audio_tracks')}")
+    return chain
 
 
 def video_speed_transform_enabled(answers: dict[str, Any]) -> bool:
@@ -982,7 +2073,17 @@ def video_speed_transform_enabled(answers: dict[str, Any]) -> bool:
 
 
 def audio_speed_transform_enabled(answers: dict[str, Any]) -> bool:
-    return bool(answers.get("audio_speed_enabled") or answers.get("audio_speed_from_video"))
+    if answers.get("audio_speed_enabled"):
+        return bool(
+            answers.get("reverse_audio")
+            or abs(clamp_speed_factor(answers.get("audio_speed_factor", DEFAULT_SPEED_FACTOR)) - 1.0) > 1e-6
+        )
+    if answers.get("audio_speed_from_video"):
+        return bool(
+            answers.get("reverse_video")
+            or abs(encode_video_speed_factor(answers) - 1.0) > 1e-6
+        )
+    return False
 
 
 def audio_cut_transform_enabled(answers: dict[str, Any]) -> bool:
@@ -990,7 +2091,7 @@ def audio_cut_transform_enabled(answers: dict[str, Any]) -> bool:
 
 
 def audio_transform_enabled(answers: dict[str, Any]) -> bool:
-    return audio_speed_transform_enabled(answers) or audio_cut_transform_enabled(answers)
+    return audio_speed_transform_enabled(answers) or audio_cut_transform_enabled(answers) or loudnorm_transform_enabled(answers)
 
 
 def encode_video_speed_factor(answers: dict[str, Any]) -> float:
@@ -1014,7 +2115,7 @@ def encode_audio_reverse_enabled(answers: dict[str, Any]) -> bool:
 
 
 def build_encode_audio_speed_filter(answers: dict[str, Any]) -> str:
-    return build_audio_speed_filter(encode_audio_speed_factor(answers), encode_audio_reverse_enabled(answers))
+    return build_encode_audio_processing_filter(answers)
 
 
 def default_audio_output_ext(input_path: Path) -> str:
@@ -1088,7 +2189,7 @@ def write_concat_list(paths: list[Path], concat_list: Path) -> None:
 
 
 # ------------------------------------------------------------------
-# Shared GUI helpers used by both the Crop Editor and Cut Editor:
+# Shared GUI helpers used by archived Crop/Cut helpers and active editors:
 #  - _apply_dark_title_bar: enable Windows DWM immersive dark mode
 #    on the window's native frame so the system title bar stops
 #    looking bright/system-default.
@@ -1129,7 +2230,7 @@ def _apply_dark_title_bar(window: Any) -> None:
 
 # ============================================================
 # Shared professional dark UI palette + helpers used by both
-# the Cut Editor and the Crop Editor GUIs. Colors inspired by
+# the archived Cut/Crop helpers and active GUI windows. Colors inspired by
 # common Premiere Pro style guides: very dark workspace, soft
 # panel surfaces, a single accent (blue) for primary actions,
 # and high-contrast text on top.
@@ -1625,14 +2726,16 @@ class _PreviewScheduler:
 # ============================================================
 # PySide6 GUI bridge.
 #
-# The new dedicated GUI lives in ffmwiz_gui.py and is launched as a
+# The dedicated GUI lives in assets/runtime/ffmwiz_gui.py and is launched as a
 # subprocess so the Qt and Tk worlds never share an event loop. Input
 # and output use small JSON files via two --request / --reply CLI args.
 #
-# If PySide6 is not installed, _launch_qt_gui returns None and the
-# caller falls back to the legacy Tk preview window.
+# If PySide6 is not installed, _launch_qt_gui returns None. Active CLI
+# workflows stay in terminal/manual mode; archived helpers may still use
+# their legacy Tk implementations when called directly.
 # ============================================================
 
+FFMWIZ_RUNTIME_DIR_NAME = "runtime"
 FFMWIZ_GUI_FILE_NAME = "ffmwiz_gui.py"
 REQUIREMENTS_FILE_NAME = "requirements.txt"
 PYSIDE6_DISPLAY_NAME = "PySide6"
@@ -1645,7 +2748,7 @@ _PYSIDE6_AVAILABLE_CACHE: bool | None = None
 
 
 def _ffmwiz_gui_path() -> Path:
-    return script_dir() / FFMWIZ_GUI_FILE_NAME
+    return script_dir() / "assets" / FFMWIZ_RUNTIME_DIR_NAME / FFMWIZ_GUI_FILE_NAME
 
 
 def _requirements_path() -> Path:
@@ -1682,8 +2785,8 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
     automatically with pip. Returns True if PySide6 is available afterwards.
 
     Environment overrides:
-        FFMWIZ_NO_AUTO_INSTALL=1   Skip the install prompt entirely; just
-                                    fall back to the legacy Tk GUI.
+        FFMWIZ_NO_AUTO_INSTALL=1   Skip the install prompt entirely; active
+                                    GUI prompts remain unavailable.
         FFMWIZ_AUTO_INSTALL=1      Skip the confirmation and install
                                     without asking (good for unattended
                                     setups, CI, scripts).
@@ -1707,8 +2810,8 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
 
     print()
     note(
-        f"{PYSIDE6_DISPLAY_NAME} is not installed. The dedicated Cut Editor and "
-        f"Crop Editor GUIs need it for smooth playback and a professional UI."
+        f"{PYSIDE6_DISPLAY_NAME} is not installed. The active FFmWiz graphical "
+        f"editors need it for smooth playback and a professional UI."
     )
 
     proceed = auto
@@ -1724,7 +2827,7 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
 
     if not proceed:
         note(
-            f"Skipping. FFmWiz will use the legacy Tk GUI for now. "
+            f"Skipping. FFmWiz will keep graphical editor prompts unavailable for now. "
             f"Install later with:  py -3 -m pip install -r {REQUIREMENTS_FILE_NAME}"
         )
         return False
@@ -1750,7 +2853,7 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
             # The install can be ~150 MB and the user needs visibility.
             result = subprocess.run(cmd, check=False)
         except FileNotFoundError as exc:
-            error(f"Could not run pip ({exc}). Falling back to the legacy Tk GUI.")
+            error(f"Could not run pip ({exc}). Graphical editor prompts will remain unavailable.")
             return False
         except Exception as exc:
             error(f"Pip install failed: {exc}.")
@@ -1766,8 +2869,8 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
 
     if not install_ok:
         error(
-            f"{PYSIDE6_DISPLAY_NAME} install failed. Falling back to the legacy Tk "
-            f"GUI. You can retry manually with:  py -3 -m pip install --user -r {REQUIREMENTS_FILE_NAME}"
+            f"{PYSIDE6_DISPLAY_NAME} install failed. Graphical editor prompts will remain unavailable. "
+            f"You can retry manually with:  py -3 -m pip install --user -r {REQUIREMENTS_FILE_NAME}"
         )
         return False
 
@@ -1778,19 +2881,19 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
         return True
     error(
         f"{PYSIDE6_DISPLAY_NAME} install completed but the package still cannot "
-        "be imported. Falling back to the legacy Tk GUI."
+        "be imported. Graphical editor prompts will remain unavailable."
     )
     return False
 
 
 def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Launch ffmwiz_gui.py as a subprocess, hand it the request via a
+    """Launch assets/runtime/ffmwiz_gui.py as a subprocess, hand it the request via a
     temp JSON file, and return the parsed reply dict.
 
     Returns None only when the dedicated GUI is unavailable before launch
-    (missing PySide6, missing ffmwiz_gui.py, etc.). Once the Qt GUI starts,
+    (missing PySide6, missing assets/runtime/ffmwiz_gui.py, etc.). Once the Qt GUI starts,
     internal GUI errors are returned as {"status": "error", ...} so callers
-    do not hide real bugs behind the legacy Tk fallback.
+    do not hide real bugs behind archived fallback helpers.
     """
     gui_path = _ffmwiz_gui_path()
     if not gui_path.exists():
@@ -1831,7 +2934,10 @@ def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
         if result.stdout:
             log_debug("Qt GUI stdout: " + result.stdout.rstrip())
         if result.stderr:
-            log_error("Qt GUI stderr: " + result.stderr.rstrip())
+            if result.returncode == 0:
+                log_debug("Qt GUI stderr: " + result.stderr.rstrip())
+            else:
+                log_error("Qt GUI stderr: " + result.stderr.rstrip())
         if result.returncode != 0:
             try:
                 payload = json.loads(rep_path.read_text(encoding="utf-8"))
@@ -1948,12 +3054,20 @@ def setup_logging() -> Path | None:
             logger.removeHandler(h)
         handler = logging.FileHandler(_LOG_PATH, encoding="utf-8")
         handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)-7s] %(message)s",
-            datefmt="%H:%M:%S",
+            "%(asctime)s | %(levelname)-7s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         ))
         logger.addHandler(handler)
         logger.propagate = False
         _LOGGER = logger
+        log_info("FFmWiz started")
+        log_info(f"Python: {sys.version.replace(chr(10), ' ')}")
+        try:
+            log_info(f"OS: {platform.platform()}")
+        except Exception:
+            pass
+        log_info(f"Log file: {_LOG_PATH}")
+        log_info(f"Command line: {command_to_text(sys.argv)}")
         return _LOG_PATH
     except Exception:
         # Logging must never break the wizard.
@@ -2023,9 +3137,48 @@ def log_environment(extra: dict[str, Any] | None = None) -> None:
             log_info(f"{k}: {v}")
 
 
+def command_to_text(args: Any) -> str:
+    try:
+        return subprocess.list2cmdline([str(arg) for arg in args])
+    except Exception:
+        try:
+            return " ".join(str(arg) for arg in args)
+        except Exception:
+            return str(args)
+
+
 def log_command(label: str, cmd: list[str]) -> None:
-    quoted = " ".join(c if " " not in c else f'"{c}"' for c in cmd)
-    log_info(f"{label} command: {quoted}")
+    log_info(f"{label} display command: {command_to_text(cmd)}")
+    log_info(f"{label} actual argv: {json.dumps([str(part) for part in cmd], ensure_ascii=False)}")
+
+
+def _compact_ffmpeg_progress_state(state: dict[str, str]) -> str:
+    """Format FFmpeg -progress key/value output as one compact log line."""
+    keys = [
+        "frame",
+        "fps",
+        "stream_0_0_q",
+        "bitrate",
+        "total_size",
+        "out_time",
+        "speed",
+        "progress",
+    ]
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        value = str(state.get(key, "") or "").strip()
+        if value:
+            parts.append(f"{key}={value}")
+            seen.add(key)
+    for key, value in state.items():
+        if key in seen or key.startswith("_ffmwiz_"):
+            continue
+        if key.endswith("_q") and key != "stream_0_0_q":
+            text = str(value or "").strip()
+            if text:
+                parts.append(f"{key}={text}")
+    return ", ".join(parts) if parts else "no progress fields"
 
 
 # =====================================================================
@@ -2035,7 +3188,8 @@ def log_command(label: str, cmd: list[str]) -> None:
 # binary writes machine-readable key=value lines to stdout while the
 # console gets a single, in-place updating status line that shows
 # FFmpeg-style frame/fps/q/size/time/bitrate/speed/elapsed/ETA fields.
-# Raw FFmpeg stderr is captured into the log file.
+# Raw FFmpeg stderr and compact FFmpeg progress events are captured into the
+# main log file.
 # =====================================================================
 
 
@@ -2048,7 +3202,7 @@ def _inject_progress_args(cmd: list[str]) -> list[str]:
     # -nostats suppresses noisy stderr summary lines, -progress pipe:1
     # streams structured key=value progress to stdout, -loglevel warning
     # keeps real warnings/errors flowing into our captured stderr.
-    new.extend(["-nostats", "-progress", "pipe:1", "-loglevel", "warning"])
+    new.extend(["-nostats", "-stats_period", "0.5", "-progress", "pipe:1", "-loglevel", "warning"])
     new.extend(cmd[1:])
     return new
 
@@ -2122,10 +3276,19 @@ def _join_progress_segments(
 def _render_progress_line(state: dict[str, str], total_duration: float | None,
                           started_at: float, max_width: int | None = None) -> str:
     """Format a single FFmpeg progress status line."""
-    try:
-        current_s = int(state.get("out_time_ms", "0")) / 1_000_000.0
-    except (ValueError, TypeError):
-        current_s = 0.0
+    current_s = _progress_seconds_from_state(state)
+    if state.get("progress") == "end" and total_duration and total_duration > 0:
+        current_s = max(current_s, float(total_duration))
+
+    def parsed_speed_ratio() -> float | None:
+        raw = str(state.get("speed", "") or "").strip().lower()
+        if raw.endswith("x"):
+            raw = raw[:-1].strip()
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0.01 and math.isfinite(value) else None
 
     def q_value() -> str:
         for key in ("stream_0_0_q", "q"):
@@ -2137,7 +3300,17 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
                 return value
         return "N/A"
 
+    def visible_value(value: Any) -> str:
+        return str(value or "").strip()
+
+    def has_real_value(value: Any) -> bool:
+        text = visible_value(value)
+        return bool(text) and text.upper() not in {"N/A", "NA", "NONE", "NULL", "-", "-1", "-1.0"}
+
     def output_size() -> str:
+        override = state.get("_ffmwiz_size_text")
+        if override:
+            return override
         value = state.get("total_size", "")
         if value.isdigit():
             return (
@@ -2151,17 +3324,32 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
 
     def bitrate_value() -> str:
         value = state.get("bitrate", "N/A") or "N/A"
+        if state.get("_ffmwiz_bitrate_text") and (
+            state.get("_ffmwiz_prefer_elapsed_speed") or state.get("_ffmwiz_size_source") == "file"
+        ):
+            return str(state["_ffmwiz_bitrate_text"])
+        if value == "N/A" and state.get("_ffmwiz_bitrate_text"):
+            return str(state["_ffmwiz_bitrate_text"])
         return value
 
     def fps_value() -> str:
         value = state.get("fps", "N/A") or "N/A"
         return "N/A" if value in {"0", "0.0", "0.00"} else value
 
+    def speed_value() -> str:
+        override = state.get("_ffmwiz_speed_text")
+        if override:
+            return override
+        return state.get("speed", "N/A") or "N/A"
+
     elapsed = max(0.0, time.perf_counter() - started_at)
     if total_duration and total_duration > 0 and current_s >= total_duration * 0.995:
         eta_s = 0.0
     elif total_duration and current_s > 0.5 and elapsed > 0.5:
-        speed_ratio = current_s / elapsed
+        if state.get("_ffmwiz_prefer_elapsed_speed"):
+            speed_ratio = current_s / elapsed
+        else:
+            speed_ratio = parsed_speed_ratio() or (current_s / elapsed)
         eta_s = max(0.0, (total_duration - current_s) / speed_ratio) if speed_ratio > 0.01 else None
     else:
         eta_s = None
@@ -2189,15 +3377,122 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
     verbose_segments = [
         (pct_text, PROGRESS_COLORS["percent"]),
         (time_total_text, ""),
-        (f"fps {fps_value()}", PROGRESS_COLORS["fps"]),
-        (f"q {q_value()}", PROGRESS_COLORS["q"]),
-        (f"speed {state.get('speed', 'N/A') or 'N/A'}", PROGRESS_COLORS["speed"]),
-        (f"size {output_size()}", PROGRESS_COLORS["size"]),
-        (f"bitrate {bitrate_value()}", PROGRESS_COLORS["bitrate"]),
+    ]
+    fps_text = fps_value()
+    if has_real_value(fps_text):
+        verbose_segments.append((f"fps {fps_text}", PROGRESS_COLORS["fps"]))
+    q_text = q_value()
+    if has_real_value(q_text):
+        verbose_segments.append((f"q {q_text}", PROGRESS_COLORS["q"]))
+    speed_text = speed_value()
+    if has_real_value(speed_text):
+        verbose_segments.append((f"speed {speed_text}", PROGRESS_COLORS["speed"]))
+    size_text = output_size()
+    if has_real_value(size_text):
+        verbose_segments.append((f"size {size_text}", PROGRESS_COLORS["size"]))
+    bitrate_text = bitrate_value()
+    if has_real_value(bitrate_text):
+        verbose_segments.append((f"bitrate {bitrate_text}", PROGRESS_COLORS["bitrate"]))
+    verbose_segments.extend([
         (f"elapsed {elapsed_text}", PROGRESS_COLORS["elapsed"]),
         (eta_segment, ""),
-    ]
+    ])
     return _join_progress_segments(verbose_segments, colorize)
+
+
+def _progress_seconds_from_state(state: dict[str, str]) -> float:
+    value = state.get("_ffmwiz_current_s")
+    if value:
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            pass
+    return _progress_raw_seconds_from_state(state)
+
+
+def _progress_raw_seconds_from_state(state: dict[str, str]) -> float:
+    for key in ("out_time_ms", "out_time_us"):
+        value = state.get(key)
+        if value:
+            try:
+                return max(0.0, float(value) / 1_000_000.0)
+            except (TypeError, ValueError):
+                pass
+    text = state.get("out_time")
+    if text:
+        try:
+            parts = text.split(":")
+            if len(parts) == 3:
+                return max(0.0, int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2]))
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _split_progress_seconds(
+    raw_current_s: float,
+    frame_seconds: float,
+    part_durations: list[float],
+    output_sizes: list[int] | None,
+    previous_output_sizes: list[int] | None,
+    active_part: int,
+    previous_raw_s: float | None = None,
+) -> tuple[float, int]:
+    durations: list[float] = []
+    for value in part_durations:
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            durations.append(duration)
+    if not durations:
+        return max(0.0, max(raw_current_s, frame_seconds)), 0
+    active = max(0, min(len(durations) - 1, int(active_part or 0)))
+    sizes = list(output_sizes or [])
+    previous_sizes = list(previous_output_sizes or [])
+    growing_part: int | None = None
+    max_delta = 0
+    if sizes and previous_sizes:
+        deltas: list[int] = []
+        for idx, size in enumerate(sizes[:len(durations)]):
+            previous = previous_sizes[idx] if idx < len(previous_sizes) else 0
+            deltas.append(max(0, int(size) - int(previous)))
+        if deltas:
+            max_delta = max(deltas)
+        if max_delta > 0:
+            growing_part = deltas.index(max_delta)
+            # Split outputs are written sequentially. Use the output file that
+            # is currently growing, but never move backwards if an earlier MP4
+            # part grows later while its moov atom is finalized.
+            active = max(active, growing_part)
+    elif previous_raw_s is not None and raw_current_s + 0.25 < previous_raw_s and active + 1 < len(durations):
+        active += 1
+
+    offset = sum(durations[:active])
+    part_duration = durations[active]
+    if (
+        active + 1 < len(durations)
+        and growing_part != active
+        and frame_seconds >= offset + part_duration - 0.25
+        and 0.0 < raw_current_s < part_duration - 0.25
+    ):
+        # Multi-output FFmpeg progress commonly freezes frame at the first
+        # part's frame count while out_time restarts from zero for the next
+        # output. Detect that handoff even before the next output file has
+        # flushed enough bytes for file-size delta detection.
+        active += 1
+        offset = sum(durations[:active])
+        part_duration = durations[active]
+    if active == 0:
+        local_s = max(raw_current_s, min(frame_seconds, part_duration))
+    else:
+        local_s = raw_current_s
+        if local_s <= 0.0 and frame_seconds > offset:
+            local_s = frame_seconds - offset
+    local_s = max(0.0, min(part_duration, local_s))
+    current_s = max(0.0, min(sum(durations), offset + local_s))
+    return current_s, active
 
 
 def preview_console_colors() -> None:
@@ -2328,10 +3623,166 @@ def _finish_progress_line(rendered: str | None) -> None:
     _PROGRESS_LAST_ROWS = 0
 
 
+def _render_initial_progress_line(label: str, detail: str, started_at: float) -> str:
+    elapsed = time.perf_counter() - started_at
+    segments = [
+        (label, PROGRESS_COLORS["percent"]),
+        (detail, Color.GRAY),
+        (f"elapsed {format_progress_elapsed_dot(elapsed)}", PROGRESS_COLORS["elapsed"]),
+    ]
+    return _join_progress_segments(segments, USE_COLOR)
+
+
+def _progress_output_paths_from_command(cmd: list[str]) -> list[Path]:
+    """Infer the final output path for simple single-output FFmpeg commands."""
+    if not cmd:
+        return []
+    candidate = str(cmd[-1] or "").strip()
+    if not candidate or candidate.startswith("-"):
+        return []
+    lowered = candidate.lower()
+    blocked = {"-", "nul", "null", os.devnull.lower()}
+    if lowered in blocked or lowered.startswith("pipe:"):
+        return []
+    try:
+        path = Path(candidate)
+    except (TypeError, ValueError):
+        return []
+    return [path] if path.suffix else []
+
+
+def _parse_ffmpeg_bitrate_kbps(value: Any) -> float | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    multiplier = 1.0 / 1000.0
+    if text.endswith("k"):
+        multiplier = 1.0
+        text = text[:-1].strip()
+    elif text.endswith("m"):
+        multiplier = 1000.0
+        text = text[:-1].strip()
+    try:
+        parsed = float(text) * multiplier
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 and math.isfinite(parsed) else None
+
+
+def _progress_target_mux_bitrate_kbps_from_command(cmd: list[str]) -> float | None:
+    """Estimate the intended mux bitrate from the first video/audio -b options."""
+    video_kbps: float | None = None
+    audio_kbps: float | None = None
+    for index, token in enumerate(cmd[:-1]):
+        option = str(token or "").strip().lower()
+        if not option.startswith("-b:"):
+            continue
+        value = _parse_ffmpeg_bitrate_kbps(cmd[index + 1])
+        if value is None:
+            continue
+        if option.startswith("-b:v") and video_kbps is None:
+            video_kbps = value
+        elif option.startswith("-b:a") and audio_kbps is None:
+            audio_kbps = value
+    values = [value for value in (video_kbps, audio_kbps) if value is not None]
+    return sum(values) if values else None
+
+
+def _apply_output_file_size_progress(
+    state: dict[str, str],
+    output_paths: list[Path],
+    current_s: float,
+) -> bool:
+    """Refresh progress size/bitrate from output files when FFmpeg total_size lags."""
+    if not output_paths:
+        return False
+    total_size_bytes = 0
+    for output_path in output_paths:
+        try:
+            if output_path.exists():
+                total_size_bytes += max(0, output_path.stat().st_size)
+        except OSError:
+            continue
+    if total_size_bytes <= 0:
+        return False
+    previous_size_text = state.get("_ffmwiz_size_text")
+    last_size = 0
+    last_size_s = 0.0
+    previous_size = 0
+    previous_size_s = 0.0
+    try:
+        last_size = int(float(state.get("_ffmwiz_last_file_size_bytes", "0") or 0))
+        last_size_s = float(state.get("_ffmwiz_last_file_size_seconds", "0") or 0.0)
+        previous_size = int(float(state.get("_ffmwiz_previous_file_size_bytes", "0") or 0))
+        previous_size_s = float(state.get("_ffmwiz_previous_file_size_seconds", "0") or 0.0)
+    except (TypeError, ValueError):
+        last_size = 0
+        last_size_s = 0.0
+        previous_size = 0
+        previous_size_s = 0.0
+
+    if total_size_bytes > last_size:
+        if last_size > 0:
+            state["_ffmwiz_previous_file_size_bytes"] = str(last_size)
+            state["_ffmwiz_previous_file_size_seconds"] = f"{last_size_s:.6f}"
+            previous_size = last_size
+            previous_size_s = last_size_s
+        state["_ffmwiz_last_file_size_bytes"] = str(total_size_bytes)
+        state["_ffmwiz_last_file_size_seconds"] = f"{max(0.0, current_s):.6f}"
+        last_size = total_size_bytes
+        last_size_s = max(0.0, current_s)
+
+    display_size_bytes = total_size_bytes
+    size_source = "file"
+    if (
+        state.get("progress") != "end"
+        and last_size > 0
+        and current_s > last_size_s + 0.01
+        and total_size_bytes <= last_size
+    ):
+        rate_bytes_per_s: float | None = None
+        if previous_size > 0 and last_size > previous_size and last_size_s > previous_size_s + 0.01:
+            rate_bytes_per_s = (last_size - previous_size) / (last_size_s - previous_size_s)
+        if rate_bytes_per_s is None:
+            try:
+                target_kbps = float(state.get("_ffmwiz_target_bitrate_kbps", "") or 0.0)
+            except (TypeError, ValueError):
+                target_kbps = 0.0
+            if target_kbps > 0:
+                rate_bytes_per_s = target_kbps * 1000.0 / 8.0
+        if rate_bytes_per_s and rate_bytes_per_s > 0:
+            extrapolated_seconds = min(4.0, max(0.0, current_s - last_size_s))
+            estimated = int(last_size + rate_bytes_per_s * extrapolated_seconds)
+            if estimated > display_size_bytes:
+                display_size_bytes = estimated
+                size_source = "estimated-file"
+    size_text = (
+        _human_size(display_size_bytes)
+        .replace("KiB", "KB")
+        .replace("MiB", "MB")
+        .replace("GiB", "GB")
+        .replace("TiB", "TB")
+    )
+    changed = size_text != previous_size_text
+    state["_ffmwiz_size_text"] = size_text
+    state["_ffmwiz_size_source"] = size_source
+    if current_s > 0.001:
+        bitrate_kbps = display_size_bytes * 8.0 / 1000.0 / current_s
+        bitrate_text = f"{bitrate_kbps:.1f}kbits/s"
+        changed = changed or bitrate_text != state.get("_ffmwiz_bitrate_text")
+        state["_ffmwiz_bitrate_text"] = bitrate_text
+    return changed
+
+
 def run_ffmpeg_with_progress(
     cmd: list[str],
     total_duration: float | None = None,
     label: str = "FFmpeg",
+    *,
+    split_progress_fps: float | None = None,
+    split_progress_part_durations: list[float] | None = None,
+    initial_detail: str | None = None,
+    progress_output_paths: list[Path] | None = None,
 ) -> tuple[int, float]:
     """Run an FFmpeg command and render an in-place progress line.
 
@@ -2346,13 +3797,35 @@ def run_ffmpeg_with_progress(
     """
     progress_cmd = _inject_progress_args(cmd)
     log_command(label, cmd)
+    log_info(f"{label} executed command with progress: {command_to_text(progress_cmd)}")
+    log_info(f"{label} executed argv with progress: {json.dumps([str(part) for part in progress_cmd], ensure_ascii=False)}")
 
     started_at = time.perf_counter()
     state: dict[str, str] = {}
+    target_mux_bitrate_kbps = _progress_target_mux_bitrate_kbps_from_command(cmd)
+    if target_mux_bitrate_kbps:
+        state["_ffmwiz_target_bitrate_kbps"] = f"{target_mux_bitrate_kbps:.6f}"
+        log_info(f"{label} progress target mux bitrate estimate: {target_mux_bitrate_kbps:.1f} kbits/s")
     last_render = ""
     stderr_lines: list[str] = []
     final_emitted = False
     progress_events = 0
+    output_paths = [Path(path) for path in (progress_output_paths or [])]
+    if not output_paths:
+        output_paths = _progress_output_paths_from_command(cmd)
+    if output_paths:
+        log_info(f"{label} progress output size paths: {[str(path) for path in output_paths]}")
+    split_part_durations: list[float] = []
+    for value in split_progress_part_durations or []:
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            split_part_durations.append(duration)
+    split_previous_output_sizes = [0 for _ in output_paths]
+    split_active_part = 0
+    split_previous_raw_s: float | None = None
 
     try:
         process = subprocess.Popen(
@@ -2368,6 +3841,15 @@ def run_ffmpeg_with_progress(
         error(f"Failed to start {label}: {exc}")
         return 1, 0.0
 
+    stdout_queue: queue.Queue[str] = queue.Queue()
+
+    def _capture_stdout() -> None:
+        try:
+            for raw_line in process.stdout:  # type: ignore[union-attr]
+                stdout_queue.put(raw_line)
+        except Exception:
+            pass
+
     # Capture stderr into the log in a worker so the main thread can
     # render progress without blocking on stderr drain.
     def _capture_stderr() -> None:
@@ -2381,21 +3863,98 @@ def run_ffmpeg_with_progress(
         except Exception:
             pass
 
+    stdout_thread = threading.Thread(target=_capture_stdout, daemon=True)
+    stdout_thread.start()
     stderr_thread = threading.Thread(target=_capture_stderr, daemon=True)
     stderr_thread.start()
+    initial_detail = initial_detail or "starting process / initializing filters / decoding first frames"
+    initial_render = _render_initial_progress_line(label, initial_detail, started_at)
+    _write_progress_line(initial_render)
+    last_render = initial_render
 
     try:
-        for line in process.stdout:  # type: ignore[union-attr]
+        while process.poll() is None or not stdout_queue.empty() or stdout_thread.is_alive():
+            try:
+                line = stdout_queue.get(timeout=0.25)
+            except queue.Empty:
+                if progress_events == 0:
+                    last_render = _render_initial_progress_line(label, initial_detail, started_at)
+                    _write_progress_line(last_render)
+                elif state:
+                    current_s = _progress_seconds_from_state(state)
+                    _apply_output_file_size_progress(state, output_paths, current_s)
+                    rendered = _render_progress_line(state, total_duration, started_at)
+                    _write_progress_line(rendered)
+                    last_render = rendered
+                continue
             line = line.strip()
-            if line:
-                log_debug(f"{label} stdout: {line}")
             if "=" not in line:
+                if line:
+                    log_debug(f"{label} stdout: {line}")
                 continue
             key, _, value = line.partition("=")
             state[key.strip()] = value.strip()
             if key.strip() != "progress":
                 continue
+            log_debug(f"{label} stdout progress: {_compact_ffmpeg_progress_state(state)}")
             progress_events += 1
+            raw_current_s = _progress_raw_seconds_from_state(state)
+            current_s = raw_current_s
+            if split_progress_fps and split_progress_fps > 0:
+                frame_text = str(state.get("frame", "") or "").strip()
+                try:
+                    frame_seconds = max(0.0, float(frame_text) / float(split_progress_fps))
+                except (TypeError, ValueError):
+                    frame_seconds = 0.0
+                output_sizes: list[int] = []
+                if output_paths:
+                    for output_path in output_paths:
+                        try:
+                            output_sizes.append(output_path.stat().st_size)
+                        except OSError:
+                            output_sizes.append(0)
+                if split_part_durations:
+                    current_s, split_active_part = _split_progress_seconds(
+                        raw_current_s,
+                        frame_seconds,
+                        split_part_durations,
+                        output_sizes,
+                        split_previous_output_sizes,
+                        split_active_part,
+                        split_previous_raw_s,
+                    )
+                    split_previous_output_sizes = output_sizes
+                    split_previous_raw_s = raw_current_s
+                elif frame_seconds > 0.0:
+                    # Fallback for callers that only provide FPS. This avoids
+                    # double-counting but cannot infer later Split parts.
+                    current_s = max(raw_current_s, frame_seconds)
+                if current_s > 0.0:
+                    if total_duration and total_duration > 0:
+                        current_s = min(current_s, float(total_duration))
+                    state["_ffmwiz_prefer_elapsed_speed"] = "1"
+                    elapsed_now = max(0.001, time.perf_counter() - started_at)
+                    if current_s > 0.001:
+                        aggregate_speed = current_s / elapsed_now
+                        state["_ffmwiz_speed_text"] = f"{aggregate_speed:.3g}x"
+                        total_size_bytes = sum(output_sizes)
+                        total_size_text = str(state.get("total_size", "") or "").strip()
+                        if total_size_bytes > 0:
+                            state["_ffmwiz_size_text"] = (
+                                _human_size(total_size_bytes)
+                                .replace("KiB", "KB")
+                                .replace("MiB", "MB")
+                                .replace("GiB", "GB")
+                                .replace("TiB", "TB")
+                            )
+                            bitrate_kbps = total_size_bytes * 8.0 / 1000.0 / current_s
+                            state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
+                        elif total_size_text.isdigit():
+                            bitrate_kbps = int(total_size_text) * 8.0 / 1000.0 / current_s
+                            state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
+            previous_s = float(state.get("_ffmwiz_current_s", "0") or 0.0)
+            state["_ffmwiz_current_s"] = str(max(previous_s, current_s))
+            _apply_output_file_size_progress(state, output_paths, max(previous_s, current_s))
             rendered = _render_progress_line(state, total_duration, started_at)
             _write_progress_line(rendered)
             last_render = rendered
@@ -2408,12 +3967,14 @@ def run_ffmpeg_with_progress(
         log_exception(f"{label} progress reader crashed")
 
     process.wait()
+    stdout_thread.join(timeout=2.0)
     stderr_thread.join()
     elapsed = time.perf_counter() - started_at
 
     if not final_emitted:
         _finish_progress_line(last_render or None)
     log_debug(f"{label} progress parser events: {progress_events}")
+    log_info(f"{label} raw FFmpeg progress/stderr captured in the main log; no stdout/stderr sidecar files were created.")
 
     if process.returncode != 0:
         log_error(f"{label} exited with code {process.returncode}")
@@ -2464,8 +4025,10 @@ def format_resolution_summary(value: Any) -> str:
 
 
 def even_dimension(value: float | int) -> int:
-    number = max(2, int(round(float(value))))
-    return number if number % 2 == 0 else number + 1
+    # Round to the NEAREST even number (codecs need even dimensions). Nearest-even
+    # keeps the computed edge as close as possible to the ideal aspect-ratio-
+    # preserving value, instead of always rounding up (which skewed the AR).
+    return max(2, int(round(float(value) / 2.0)) * 2)
 
 
 def cropped_source_size(answers: dict[str, Any]) -> tuple[int, int]:
@@ -2480,6 +4043,58 @@ def cropped_source_size(answers: dict[str, Any]) -> tuple[int, int]:
     if message:
         raise ValueError(message)
     return source_w - left - right, source_h - top - bottom
+
+
+def parse_sar_value(sar_str: str | None) -> float:
+    """Parse a sample aspect ratio string (e.g. '4:3', '16/9', '1.333') to a float.
+    Returns 1.0 for unknown, empty, or invalid values."""
+    if not sar_str or str(sar_str).strip().lower() in {"", "n/a", "unknown", "0:0", "0/0", "0:1"}:
+        return 1.0
+    text = str(sar_str).strip()
+    # Handle ratio notation: "N:M" or "N/M"
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)", text)
+    if match:
+        num = float(match.group(1))
+        den = float(match.group(2))
+        if den > 0:
+            return num / den
+        return 1.0
+    # Handle plain float
+    try:
+        val = float(text)
+        return val if val > 0 else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def source_sar(answers: dict[str, Any]) -> float:
+    """Return the source video sample aspect ratio as a float (>0). Default 1.0."""
+    stream = answers.get("video_streams", [{}])[0] if answers.get("video_streams") else {}
+    sar_str = stream.get("sample_aspect_ratio")
+    return parse_sar_value(sar_str)
+
+
+def cropped_display_size(answers: dict[str, Any]) -> tuple[int, int]:
+    """Return the effective display dimensions after crop, accounting for SAR.
+    These are the dimensions as seen on screen (DAR-adjusted)."""
+    crop_w, crop_h = cropped_source_size(answers)
+    sar = source_sar(answers)
+    if abs(sar - 1.0) < 0.001:
+        return crop_w, crop_h
+    # SAR > 1 means pixels are wider than tall → display width is larger.
+    display_w = crop_w * sar
+    display_h = float(crop_h)
+    return max(2, even_dimension(display_w)), max(2, even_dimension(display_h))
+
+
+def resize_mode_is_stretch(answers: dict[str, Any]) -> bool:
+    """Return True if the user explicitly selected a stretch/exact mode."""
+    resolution = answers.get("resolution", "n")
+    if isinstance(resolution, dict):
+        return resolution.get("mode") == "exact_stretch"
+    if isinstance(resolution, tuple) and len(resolution) == 2:
+        return True  # Legacy tuple mode is always stretch.
+    return False
 
 
 def crop_margins_validation_message(
@@ -2573,31 +4188,38 @@ def calculate_scale_dimensions(answers: dict[str, Any], resolution: Any) -> tupl
     crop_w, crop_h = cropped_source_size(answers)
     answers["crop_box_dimensions"] = (crop_w, crop_h)
     answers["cropped_aspect_ratio"] = crop_w / max(1, crop_h)
+
+    # Use display dimensions (accounting for SAR) for AR-preserving modes.
+    # Output pixels are square (setsar=1), so scaled dimensions must reflect
+    # the display aspect ratio, not the coded pixel grid.
+    sar = source_sar(answers)
+    disp_w, disp_h = cropped_display_size(answers)
+
     warning_parts: list[str] = []
     axis = ""
     if isinstance(resolution, dict):
         mode = resolution.get("mode")
         if mode == "preset":
             width, height, axis = closest_edge_scale_dimensions(
-                crop_w,
-                crop_h,
-                int(resolution.get("width", crop_w) or crop_w),
-                int(resolution.get("height", crop_h) or crop_h),
+                disp_w,
+                disp_h,
+                int(resolution.get("width", disp_w) or disp_w),
+                int(resolution.get("height", disp_h) or disp_h),
             )
         elif mode == "box":
             width, height, axis = closest_edge_scale_dimensions(
-                crop_w,
-                crop_h,
-                int(resolution.get("width", crop_w) or crop_w),
-                int(resolution.get("height", crop_h) or crop_h),
+                disp_w,
+                disp_h,
+                int(resolution.get("width", disp_w) or disp_w),
+                int(resolution.get("height", disp_h) or disp_h),
             )
         elif mode == "height":
-            height = even_dimension(resolution.get("height", crop_h))
-            width = even_dimension(height * crop_w / max(1, crop_h))
+            height = even_dimension(resolution.get("height", disp_h))
+            width = even_dimension(height * disp_w / max(1, disp_h))
             axis = "height"
         elif mode == "width":
-            width = even_dimension(resolution.get("width", crop_w))
-            height = even_dimension(width * crop_h / max(1, crop_w))
+            width = even_dimension(resolution.get("width", disp_w))
+            height = even_dimension(width * disp_h / max(1, disp_w))
             axis = "width"
         elif mode == "exact_stretch":
             requested_w = int(resolution.get("width", crop_w) or crop_w)
@@ -2609,7 +4231,7 @@ def calculate_scale_dimensions(answers: dict[str, Any], resolution: Any) -> tupl
                 warning_parts.append(
                     f"exact stretch resolution adjusted to codec-safe even dimensions: {width}x{height}"
                 )
-            crop_ar = crop_w / max(1, crop_h)
+            crop_ar = disp_w / max(1, disp_h)
             out_ar = width / max(1, height)
             if abs(crop_ar - out_ar) / max(crop_ar, 1e-9) > 0.01:
                 warning_parts.append(
@@ -2627,6 +4249,14 @@ def calculate_scale_dimensions(answers: dict[str, Any], resolution: Any) -> tupl
 
     answers["resolution_scale_axis"] = axis
     answers["final_resolution"] = (width, height)
+    log_info(
+        "Resolution calculation: "
+        f"source={first_video_size(answers)}; SAR={sar:.4f}; "
+        f"crop_margins={format_crop_margins(answers)}; "
+        f"cropped_coded={crop_w}x{crop_h}; cropped_display={disp_w}x{disp_h}; "
+        f"mode={resolution}; axis={axis}; "
+        f"final={width}x{height}; exact_stretch={'yes' if axis == 'stretch' else 'no'}"
+    )
     return (width, height), "; ".join(warning_parts)
 
 
@@ -2932,6 +4562,15 @@ def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
         log_debug(
             f"ffprobe JSON decoded successfully for {input_path}; "
             f"stdout length={len(stdout_text)} stderr length={len(stderr_text)}")
+        if os.environ.get("FFMWIZ_DEBUG"):
+            try:
+                safe_name = sanitize_output_stem(input_path.name)
+                stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+                json_path = _logs_dir() / f"ffprobe_{stamp}_{safe_name}.json"
+                json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                log_info(f"Full ffprobe JSON saved to: {json_path}")
+            except Exception as exc:
+                log_warn(f"Could not save ffprobe JSON debug file: {exc}")
         if stderr_text.strip():
             log_debug("ffprobe stderr:\n" + stderr_text.rstrip())
         return payload
@@ -2948,16 +4587,16 @@ def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
 def ffprobe_full_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
     args = [
         ffprobe,
+        "-hide_banner",
         "-v",
         "error",
-        "-print_format",
-        "json",
-        "-show_program_version",
-        "-show_library_versions",
         "-show_format",
         "-show_streams",
         "-show_chapters",
         "-show_programs",
+        "-show_private_data",
+        "-print_format",
+        "json",
         str(input_path),
     ]
     stdout_text = ""
@@ -3085,6 +4724,147 @@ def parse_volumedetect_output(text: str) -> dict[str, str]:
     return stats
 
 
+def parse_loudnorm_measurement_output(text: str) -> dict[str, float] | None:
+    for match in reversed(list(re.finditer(r"\{[\s\S]*?\}", text or ""))):
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+        if not all(key in payload for key in required):
+            continue
+        try:
+            values = {key: float(payload[key]) for key in required}
+        except (TypeError, ValueError):
+            continue
+        if all(math.isfinite(value) for value in values.values()):
+            return values
+    return None
+
+
+def probe_loudnorm_measurement(
+    ffmpeg: str,
+    input_path: Path,
+    audio_index: int,
+    target_i: float = LOUDNORM_DEFAULT_TARGET_I,
+    total_duration: float | None = None,
+) -> dict[str, float] | None:
+    loudnorm = (
+        f"loudnorm=I={loudnorm_number(target_i)}:"
+        f"TP={loudnorm_number(LOUDNORM_TARGET_TP)}:"
+        f"LRA={loudnorm_number(LOUDNORM_TARGET_LRA)}:"
+        "print_format=json"
+    )
+    args = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostats",
+        "-stats_period",
+        "0.5",
+        "-progress",
+        "pipe:1",
+        "-i",
+        str(input_path),
+        "-map",
+        f"0:a:{int(audio_index)}",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        loudnorm,
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    log_info("LoudNorm measurement command: " + command_to_powershell(args))
+    log_command("LoudNorm measurement", args)
+    started_at = time.perf_counter()
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    state: dict[str, str] = {}
+    log_info(
+        "LoudNorm measurement uses null output; size/bitrate progress fields "
+        "are omitted unless FFmpeg reports real output values."
+    )
+    last_render = ""
+    progress_events = 0
+    try:
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        def _capture_stderr() -> None:
+            try:
+                for line in process.stderr:  # type: ignore[union-attr]
+                    stripped = line.rstrip()
+                    if stripped:
+                        stderr_lines.append(stripped)
+                        log_debug(f"LoudNorm measurement stderr: {stripped}")
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=_capture_stderr, daemon=True)
+        stderr_thread.start()
+        initial_render = paint("LoudNorm measurement: analyzing audio loudness...", Color.GRAY) if USE_COLOR else "LoudNorm measurement: analyzing audio loudness..."
+        _write_progress_line(initial_render)
+        last_render = initial_render
+        for line in process.stdout:  # type: ignore[union-attr]
+            line = line.strip()
+            if line:
+                stdout_lines.append(line)
+            if "=" not in line:
+                if line:
+                    log_debug(f"LoudNorm measurement stdout: {line}")
+                continue
+            key, _, value = line.partition("=")
+            state[key.strip()] = value.strip()
+            if key.strip() != "progress":
+                continue
+            log_debug(f"LoudNorm measurement stdout progress: {_compact_ffmpeg_progress_state(state)}")
+            progress_events += 1
+            current_s = _progress_raw_seconds_from_state(state)
+            previous_s = float(state.get("_ffmwiz_current_s", "0") or 0.0)
+            state["_ffmwiz_current_s"] = str(max(previous_s, current_s))
+            rendered = _render_progress_line(state, total_duration, started_at)
+            _write_progress_line(rendered)
+            last_render = rendered
+            if value.strip() == "end":
+                _finish_progress_line(rendered)
+                last_render = ""
+        process.wait()
+        stderr_thread.join()
+        if last_render:
+            _finish_progress_line(last_render)
+        combined = "\n".join(stderr_lines + stdout_lines)
+        stats = parse_loudnorm_measurement_output(combined)
+        log_info(
+            "LoudNorm measurement finished: "
+            f"input={input_path}; audio_index={audio_index}; returncode={process.returncode}; "
+            f"elapsed={time.perf_counter() - started_at:.3f}s; "
+            f"progress_events={progress_events}; stats={stats or '{}'}"
+        )
+        if process.returncode != 0 or stats is None:
+            log_error("LoudNorm measurement output:\n" + _text_preview(combined, 4000))
+        return stats
+    except Exception:
+        log_exception(f"LoudNorm measurement failed: input={input_path}; audio_index={audio_index}")
+        return None
+
+
+def print_loudnorm_stats(stats: dict[str, float]) -> None:
+    print()
+    print(paint("Current audio loudnorm measurement:", Color.BOLD + Color.LIGHT_BLUE))
+    print("  " + field_text("Integrated loudness", f"{stats['input_i']:.1f} LUFS", Color.MEAN_VOLUME))
+    print("  " + field_text("True peak", f"{stats['input_tp']:.1f} dBTP", Color.CYAN))
+    print("  " + field_text("Loudness range", f"{stats['input_lra']:.1f} LU", Color.MAGENTA))
+    print("  " + field_text("Threshold", f"{stats['input_thresh']:.1f} LUFS", Color.YELLOW))
+    print("  " + field_text("Target offset", f"{stats['target_offset']:.1f} LU", Color.ORANGE))
+
+
 def probe_audio_volume_stats(ffmpeg: str, input_path: Path, audio_index: int) -> dict[str, str]:
     args = [
         ffmpeg,
@@ -3137,8 +4917,26 @@ def get_audio_volume_stats(answers: dict[str, Any]) -> dict[int, dict[str, str]]
     streams = list(answers.get("audio_streams") or [])
     stats: dict[int, dict[str, str]] = {}
     if input_path and streams:
-        for idx, _stream in enumerate(streams):
-            stats[idx] = probe_audio_volume_stats(str(ffmpeg), Path(input_path), idx)
+        worker_count = min(VOLUME_SCAN_WORKERS, len(streams))
+        log_debug(
+            f"Audio volume scan batch: input={input_path}; streams={len(streams)}; workers={worker_count}"
+        )
+        if worker_count > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(probe_audio_volume_stats, str(ffmpeg), Path(input_path), idx): idx
+                    for idx, _stream in enumerate(streams)
+                }
+                for future in concurrent.futures.as_completed(future_map):
+                    idx = future_map[future]
+                    try:
+                        stats[idx] = future.result()
+                    except Exception:
+                        log_exception(f"Audio volume scan worker failed: input={input_path}; audio_index={idx}")
+                        stats[idx] = {}
+        else:
+            for idx, _stream in enumerate(streams):
+                stats[idx] = probe_audio_volume_stats(str(ffmpeg), Path(input_path), idx)
     answers["audio_volume_stats"] = stats
     return stats
 
@@ -3148,11 +4946,91 @@ def audio_volume_field(stats: dict[int, dict[str, str]], index: int, key: str) -
     return value or "unknown"
 
 
-def stream_has_fast_size_metadata(stream: dict[str, Any], fmt: dict[str, Any] | None) -> bool:
-    _ = fmt
-    if tag_int(stream, ["NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG"]):
+def audio_mean_max_volume_field(stats: dict[int, dict[str, str]], index: int) -> str:
+    mean_value = audio_volume_field(stats, index, "mean_volume")
+    max_value = audio_volume_field(stats, index, "max_volume")
+    if mean_value.endswith(" dB") and max_value.endswith(" dB"):
+        return f"{mean_value[:-3]} / {max_value[:-3]} dB"
+    return f"{mean_value} / {max_value}"
+
+
+def stream_tag_size_bytes(stream: dict[str, Any]) -> int | None:
+    return tag_int(stream, ["NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG"])
+
+
+def stream_statistics_siblings(stream: dict[str, Any], sibling_streams: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    streams = [item for item in (sibling_streams or []) if isinstance(item, dict)]
+    stream_index = stream.get("index")
+    if stream_index is not None and all(item.get("index") != stream_index for item in streams):
+        streams.append(stream)
+    elif stream_index is None and not streams:
+        streams.append(stream)
+    return streams
+
+
+def stream_statistics_tags_conflict_with_container(
+    stream: dict[str, Any],
+    fmt: dict[str, Any] | None,
+    sibling_streams: list[dict[str, Any]] | None = None,
+) -> bool:
+    total_size = format_size_bytes_from_metadata(fmt)
+    if not total_size:
+        return False
+    streams = stream_statistics_siblings(stream, sibling_streams)
+    tagged_sizes: list[int] = []
+    for item in streams:
+        size = stream_tag_size_bytes(item)
+        if size is None or size <= 0:
+            continue
+        if size > int(total_size * 1.02):
+            return True
+        tagged_sizes.append(size)
+    if len(tagged_sizes) > 1 and sum(tagged_sizes) > int(total_size * 1.02):
         return True
     return False
+
+
+def stream_statistics_tags_trustworthy(
+    stream: dict[str, Any],
+    fmt: dict[str, Any] | None,
+    sibling_streams: list[dict[str, Any]] | None = None,
+) -> bool:
+    size_bytes = stream_tag_size_bytes(stream)
+    if size_bytes is not None and not stream_size_plausible(size_bytes, fmt):
+        return False
+    if stream_statistics_tags_conflict_with_container(stream, fmt, sibling_streams):
+        return False
+    return True
+
+
+def stream_size_plausible(size_bytes: int | None, fmt: dict[str, Any] | None) -> bool:
+    if size_bytes is None or size_bytes <= 0:
+        return False
+    total_size = format_size_bytes_from_metadata(fmt)
+    if total_size and size_bytes > int(total_size * 1.02):
+        return False
+    return True
+
+
+def stream_bitrate_plausible(kbps: int | None, stream: dict[str, Any] | None,
+                             fmt: dict[str, Any] | None) -> bool:
+    if kbps is None or kbps <= 0:
+        return False
+    duration = stream_duration_seconds(stream or {}, fmt)
+    total_size = format_size_bytes_from_metadata(fmt)
+    if duration and total_size:
+        implied_size = kbps * 1000 * duration / 8
+        if implied_size > total_size * 1.02:
+            return False
+    return True
+
+
+def stream_has_fast_size_metadata(
+    stream: dict[str, Any],
+    fmt: dict[str, Any] | None,
+    sibling_streams: list[dict[str, Any]] | None = None,
+) -> bool:
+    return stream_size_plausible(stream_tag_size_bytes(stream), fmt) and stream_statistics_tags_trustworthy(stream, fmt, sibling_streams)
 
 
 def packet_size_probe_needed(answers: dict[str, Any]) -> bool:
@@ -3160,7 +5038,12 @@ def packet_size_probe_needed(answers: dict[str, Any]) -> bool:
     streams = list(answers.get("video_streams", [])) + list(answers.get("audio_streams", []))
     if not streams:
         return False
-    return any(not stream_has_fast_size_metadata(stream, fmt) for stream in streams)
+    total_size = format_size_bytes_from_metadata(fmt)
+    tag_sizes = [stream_tag_size_bytes(stream) for stream in streams]
+    if total_size and all(size and size > 0 for size in tag_sizes):
+        if sum(int(size or 0) for size in tag_sizes) > int(total_size * 1.02):
+            return True
+    return any(not stream_has_fast_size_metadata(stream, fmt, streams) for stream in streams)
 
 
 def packet_size_probe_allowed(answers: dict[str, Any]) -> bool:
@@ -3213,16 +5096,39 @@ def rational_to_float(value: str | None) -> float | None:
         return None
 
 
-def bitrate_kbps(stream: dict[str, Any] | None, fmt: dict[str, Any] | None = None) -> int | None:
-    for source in (stream, fmt):
+def bitrate_kbps(
+    stream: dict[str, Any] | None,
+    fmt: dict[str, Any] | None = None,
+    sibling_streams: list[dict[str, Any]] | None = None,
+) -> int | None:
+    sources = (("stream", stream),) if stream is not None else (("format", fmt),)
+    for source_name, source in sources:
         if not source:
             continue
         bit_rate = source.get("bit_rate")
         if bit_rate:
             try:
-                return max(1, round(int(bit_rate) / 1000))
+                value = max(1, round(int(bit_rate) / 1000))
+                if source_name == "format" or stream_bitrate_plausible(value, stream, fmt):
+                    return value
             except ValueError:
                 pass
+        tags = source.get("tags") if isinstance(source, dict) else None
+        if isinstance(tags, dict):
+            normalized = {str(key).upper(): value for key, value in tags.items()}
+            for key in ("BPS", "BPS-ENG"):
+                tagged_bps = normalized.get(key)
+                if tagged_bps:
+                    try:
+                        value = max(1, round(int(float(tagged_bps)) / 1000))
+                        if source_name == "format" or (
+                            stream_bitrate_plausible(value, stream, fmt)
+                            and stream is not None
+                            and stream_statistics_tags_trustworthy(stream, fmt, sibling_streams)
+                        ):
+                            return value
+                    except (TypeError, ValueError):
+                        pass
     return None
 
 
@@ -3314,7 +5220,7 @@ def estimate_stream_bitrate_kbps(
     stream_index = stream.get("index")
     for other in siblings:
         other_type = other.get("codec_type")
-        direct = bitrate_kbps(other)
+        direct = bitrate_kbps(other, fmt, siblings)
         if other_type == "video":
             if direct:
                 known_or_estimated_other += direct
@@ -3353,16 +5259,16 @@ def stream_size_bytes(
     packet_sizes: dict[int, int] | None = None,
     sibling_streams: list[dict[str, Any]] | None = None,
 ) -> tuple[int | None, bool]:
-    exact = tag_int(stream, ["NUMBER_OF_BYTES", "NUMBER_OF_BYTES-ENG"])
-    if exact:
-        return exact, False
-
     stream_index = stream.get("index")
     if packet_sizes and stream_index in packet_sizes:
         return packet_sizes[stream_index], False
 
+    exact = stream_tag_size_bytes(stream)
+    if stream_size_plausible(exact, fmt) and stream_statistics_tags_trustworthy(stream, fmt, sibling_streams):
+        return exact, False
+
     duration = stream_duration_seconds(stream, fmt)
-    rate = bitrate_kbps(stream)
+    rate = bitrate_kbps(stream, fmt, sibling_streams)
     if os.environ.get("FFMWIZ_ALLOW_ESTIMATED_STREAM_SIZES") and duration and rate:
         return round(rate * 1000 * duration / 8), True
     return None, True
@@ -3374,14 +5280,13 @@ def stream_bitrate_kbps(
     packet_sizes: dict[int, int] | None = None,
     sibling_streams: list[dict[str, Any]] | None = None,
 ) -> int | None:
-    direct = bitrate_kbps(stream)
-    if direct:
-        return direct
-
     stream_index = stream.get("index")
     duration = stream_duration_seconds(stream, fmt)
     if packet_sizes and stream_index in packet_sizes and duration:
         return max(1, round(packet_sizes[stream_index] * 8 / duration / 1000))
+    direct = bitrate_kbps(stream, fmt, sibling_streams)
+    if direct:
+        return direct
     size, estimated = stream_size_bytes(stream, fmt, packet_sizes, sibling_streams)
     if size and duration and not estimated:
         return max(1, round(size * 8 / duration / 1000))
@@ -3808,8 +5713,9 @@ def print_audio_duplicate_report(answers: dict[str, Any], report: dict[str, Any]
     print(paint("Audio duplicate report", Color.BOLD + Color.ORANGE))
     packet_sizes = get_packet_sizes(answers)
     fmt = answers.get("format", {})
+    sibling_streams = streams_for_statistics_from_answers(answers)
     for idx, stream in enumerate(answers["audio_streams"]):
-        size, _ = stream_size_bytes(stream, fmt, packet_sizes)
+        size, _ = stream_size_bytes(stream, fmt, packet_sizes, sibling_streams)
         volume_stats = get_audio_volume_stats(answers)
         labels = duplicate_labels(idx, report)
         suffix = f" | {' | '.join(labels)}" if labels else ""
@@ -3820,9 +5726,8 @@ def print_audio_duplicate_report(answers: dict[str, Any], report: dict[str, Any]
             f"{field_text('sample_rate', stream_metadata_value(stream, 'sample_rate'), Color.GREEN)} | "
             f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
             f"{field_text('layout', stream_metadata_value(stream, 'channel_layout'), Color.WHITE)} | "
-            f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)} | "
-            f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
-            f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
+            f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes, sibling_streams)), Color.YELLOW)} | "
+            f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)} | "
             f"{field_text('duration', format_duration(stream_duration_seconds(stream, fmt)), Color.MAGENTA)} | "
             f"{field_text('lang', display_language(stream_tag_value(stream, 'language')), Color.WHITE)} | "
             f"{field_text('title', stream_tag_value(stream, 'title'), Color.WHITE)} | "
@@ -3896,9 +5801,11 @@ def print_source_info(answers: dict[str, Any]) -> None:
     subtitle_streams = answers.get("subtitle_streams", [])
     file_size = input_path.stat().st_size if input_path.exists() else None
     packet_sizes = get_packet_sizes(answers)
+    title = str(answers.get("_source_info_title") or "Source file info")
+    sibling_streams = streams_for_statistics_from_answers(answers)
 
     print()
-    print(paint("Source file info", Color.BOLD + Color.LIGHT_BLUE))
+    print(paint(title, Color.BOLD + Color.LIGHT_BLUE))
     print(paint("-" * 48, Color.GRAY))
     print(field_text("Path", input_path, Color.WHITE))
     print(field_text("Container", fmt.get("format_name", "unknown"), Color.CYAN))
@@ -3908,9 +5815,10 @@ def print_source_info(answers: dict[str, Any]) -> None:
 
     if video_streams:
         print(paint("\nVideo streams", Color.BOLD + Color.MAGENTA))
+        chapters_value, chapters_color = chapter_presence(answers)
         for idx, stream in enumerate(video_streams):
-            rate = stream_bitrate_kbps(stream, fmt, packet_sizes)
-            size, estimated = stream_size_bytes(stream, fmt, packet_sizes)
+            rate = stream_bitrate_kbps(stream, fmt, packet_sizes, sibling_streams)
+            size, estimated = stream_size_bytes(stream, fmt, packet_sizes, sibling_streams)
             duration = format_duration(stream_duration_seconds(stream, fmt))
             fps = rational_to_float(stream.get("avg_frame_rate"))
             width = stream.get("width", "?")
@@ -3926,6 +5834,7 @@ def print_source_info(answers: dict[str, Any]) -> None:
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
                 f"{field_text('video-only size', format_bytes(size) + estimate_label, Color.GREEN)} | "
                 f"{field_text('total bitrate', describe_total_bitrate(fmt), Color.AQUA)} | "
+                f"{field_text('chapters', chapters_value, chapters_color)} | "
                 f"{field_text('Color range', display_color_range(stream.get('color_range')), Color.COLOR_RANGE_VALUE)}"
             )
 
@@ -3934,8 +5843,8 @@ def print_source_info(answers: dict[str, Any]) -> None:
         volume_stats = get_audio_volume_stats(answers)
         report = detect_duplicate_audio(answers) if answers.get("detect_duplicate_audio", True) else None
         for idx, stream in enumerate(audio_streams):
-            rate = stream_bitrate_kbps(stream, fmt, packet_sizes)
-            size, estimated = stream_size_bytes(stream, fmt, packet_sizes)
+            rate = stream_bitrate_kbps(stream, fmt, packet_sizes, sibling_streams)
+            size, estimated = stream_size_bytes(stream, fmt, packet_sizes, sibling_streams)
             estimate_label = " approx" if estimated and size else ""
             labels = duplicate_labels(idx, report) if report else []
             label_text = f" | {' | '.join(labels)}" if labels else ""
@@ -3945,8 +5854,7 @@ def print_source_info(answers: dict[str, Any]) -> None:
                 f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
                 f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
-                f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
-                f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
+                f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)} | "
                 f"{field_text('track size', format_bytes(size) + estimate_label, Color.LIME)}{label_text}"
             )
         if report:
@@ -4206,6 +6114,312 @@ def media_info_display_key(key: str) -> str:
     return key
 
 
+@dataclass
+class MediaInfoOptions:
+    deep_analysis: bool = True
+    extract_screenshots: bool = False
+    reference_path: Path | None = None
+
+
+@dataclass
+class MediaInfoReportResult:
+    lines: list[tuple[str, str]]
+    info_path: Path
+    sidecar_paths: list[Path] = field(default_factory=list)
+    screenshot_dir: Path | None = None
+    skipped_sections: list[str] = field(default_factory=list)
+
+
+def media_info_sidecar_path(info_path: Path, suffix: str, extension: str) -> Path:
+    extension = extension if extension.startswith(".") else "." + extension
+    return info_path.with_name(f"{info_path.stem}_{suffix}{extension}")
+
+
+def media_info_stream_name(stream: dict[str, Any]) -> str:
+    index = stream.get("index", "?")
+    codec_type = stream.get("codec_type", "unknown")
+    codec = stream.get("codec_name", "unknown")
+    return f"stream #{index} {codec_type} {codec}"
+
+
+def media_info_stream_tags(stream: dict[str, Any]) -> dict[str, Any]:
+    tags = stream.get("tags")
+    return tags if isinstance(tags, dict) else {}
+
+
+def media_info_disposition(stream: dict[str, Any], name: str) -> str:
+    disposition = stream.get("disposition")
+    if not isinstance(disposition, dict):
+        return "unknown"
+    value = disposition.get(name)
+    if value in {1, "1", True}:
+        return "yes"
+    if value in {0, "0", False}:
+        return "no"
+    return "unknown"
+
+
+def media_info_video_fps(stream: dict[str, Any]) -> float | None:
+    return rational_to_float(stream.get("avg_frame_rate")) or rational_to_float(stream.get("r_frame_rate"))
+
+
+def media_info_stream_size_rows(
+    input_path: Path,
+    payload: dict[str, Any],
+    packet_sizes: dict[int, int] | None = None,
+) -> list[dict[str, Any]]:
+    fmt = payload.get("format") or {}
+    streams = payload.get("streams") or []
+    total_size = input_path.stat().st_size if input_path.exists() else format_size_bytes_from_metadata(fmt)
+    rows: list[dict[str, Any]] = []
+    for stream in streams:
+        tags = media_info_stream_tags(stream)
+        size_bytes, estimated = stream_size_bytes(stream, fmt, packet_sizes, streams)
+        bitrate = stream_bitrate_kbps(stream, fmt, packet_sizes, streams)
+        percent = (size_bytes / total_size * 100.0) if size_bytes is not None and total_size else None
+        rows.append({
+            "stream_index": stream.get("index", "unknown"),
+            "type": stream.get("codec_type", "unknown"),
+            "codec": stream.get("codec_name", "unknown"),
+            "language": display_language(tags.get("language")),
+            "title": tags.get("title") or "unknown",
+            "duration": format_duration(stream_duration_seconds(stream, fmt)),
+            "bitrate": describe_bitrate(bitrate),
+            "size_bytes": size_bytes if size_bytes is not None else "unknown",
+            "size_mb": f"{size_bytes / (1024 * 1024):.2f}" if size_bytes is not None else "unknown",
+            "percent_of_file": f"{percent:.2f}" if percent is not None else "unknown",
+            "estimated": "yes" if estimated else "no",
+        })
+    return rows
+
+
+def write_media_info_stream_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "stream_index", "type", "codec", "language", "title", "duration",
+        "bitrate", "size_bytes", "size_mb", "percent_of_file", "estimated",
+    ]
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def calculate_bpppf_rows(payload: dict[str, Any], packet_sizes: dict[int, int] | None = None) -> list[dict[str, Any]]:
+    fmt = payload.get("format") or {}
+    streams = payload.get("streams") or []
+    rows: list[dict[str, Any]] = []
+    for stream in streams:
+        if stream.get("codec_type") != "video":
+            continue
+        width = int_metadata_value(stream, "width")
+        height = int_metadata_value(stream, "height")
+        fps = media_info_video_fps(stream)
+        bitrate = stream_bitrate_kbps(stream, fmt, packet_sizes, streams)
+        bpppf = None
+        if width and height and fps and bitrate:
+            bpppf = (bitrate * 1000.0) / (width * height * fps)
+        rows.append({
+            "stream_index": stream.get("index", "unknown"),
+            "width": width or "unknown",
+            "height": height or "unknown",
+            "fps": f"{fps:.5g}" if fps else "unknown",
+            "video_bitrate": describe_bitrate(bitrate),
+            "bpppf": f"{bpppf:.6f}" if bpppf is not None else "unknown",
+        })
+    return rows
+
+
+def media_info_percentile(values: list[float], percentile: float) -> float | None:
+    cleaned = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+    position = (len(cleaned) - 1) * percentile / 100.0
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return cleaned[lower]
+    fraction = position - lower
+    return cleaned[lower] * (1.0 - fraction) + cleaned[upper] * fraction
+
+
+def run_media_info_text_command(args: list[str], label: str) -> tuple[int, str, str]:
+    log_debug(f"{label} command: {json.dumps(args, ensure_ascii=False)}")
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    stdout_text, stdout_encoding = decode_subprocess_bytes(result.stdout, "utf-8")
+    stderr_text, stderr_encoding = decode_subprocess_bytes(result.stderr, "utf-8")
+    log_debug(
+        f"{label} returncode={result.returncode}; "
+        f"stdout_encoding={stdout_encoding}; stderr_encoding={stderr_encoding}; "
+        f"stdout_len={len(stdout_text)}; stderr_len={len(stderr_text)}"
+    )
+    if stderr_text.strip():
+        log_debug(f"{label} stderr:\n{stderr_text.rstrip()}")
+    return result.returncode, stdout_text, stderr_text
+
+
+def analyze_packet_bitrate(ffprobe: str, input_path: Path, csv_path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    args = [
+        ffprobe,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_packets",
+        "-show_entries", "packet=pts_time,dts_time,duration_time,size,flags",
+        "-of", "csv=p=0",
+        str(input_path),
+    ]
+    returncode, stdout_text, _stderr_text = run_media_info_text_command(args, "Media Info per-second bitrate analysis")
+    if returncode != 0:
+        return None, "ffprobe packet analysis failed"
+    buckets: dict[int, int] = {}
+    for row in csv.reader(stdout_text.splitlines()):
+        if not row:
+            continue
+        timestamp: float | None = None
+        for item in row[:2]:
+            try:
+                timestamp = float(item)
+                break
+            except (TypeError, ValueError):
+                continue
+        size: int | None = None
+        for item in row:
+            try:
+                number = int(float(item))
+            except (TypeError, ValueError):
+                continue
+            if number > 1:
+                size = number
+        if timestamp is None or size is None:
+            continue
+        second = max(0, int(math.floor(timestamp)))
+        buckets[second] = buckets.get(second, 0) + size
+    if not buckets:
+        return None, "packet timestamps or sizes were not available"
+    rows = [
+        {"second": second, "kbps": bytes_value * 8.0 / 1000.0, "bytes": bytes_value}
+        for second, bytes_value in sorted(buckets.items())
+    ]
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["second", "kbps", "bytes"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "second": row["second"],
+                "kbps": f"{row['kbps']:.3f}",
+                "bytes": row["bytes"],
+            })
+    kbps_values = [float(row["kbps"]) for row in rows]
+    summary = {
+        "csv_path": csv_path,
+        "rows": rows,
+        "average_kbps": sum(kbps_values) / len(kbps_values),
+        "minimum_kbps": min(kbps_values),
+        "maximum_kbps": max(kbps_values),
+        "p05_kbps": media_info_percentile(kbps_values, 5),
+        "median_kbps": media_info_percentile(kbps_values, 50),
+        "p95_kbps": media_info_percentile(kbps_values, 95),
+        "seconds": len(rows),
+    }
+    return summary, None
+
+
+def media_info_csv_time(value: str) -> float | None:
+    try:
+        if value and value.upper() != "N/A":
+            return float(value)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def analyze_frame_types_and_gop(ffprobe: str, input_path: Path, csv_path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    args = [
+        ffprobe,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_frames",
+        "-show_entries", "frame=best_effort_timestamp_time,pkt_pts_time,pict_type,key_frame,pkt_size",
+        "-of", "csv=p=0",
+        str(input_path),
+    ]
+    returncode, stdout_text, _stderr_text = run_media_info_text_command(args, "Media Info frame type analysis")
+    if returncode != 0:
+        return None, "ffprobe frame analysis failed"
+    frame_rows: list[dict[str, Any]] = []
+    type_counts: dict[str, int] = {"I": 0, "P": 0, "B": 0}
+    keyframe_indices: list[int] = []
+    keyframe_times: list[float] = []
+    for row in csv.reader(stdout_text.splitlines()):
+        if not row:
+            continue
+        pict_type = next((item.strip().upper() for item in row if item.strip().upper() in {"I", "P", "B"}), "unknown")
+        key_frame = "1" if any(item.strip() == "1" for item in row[:3]) else "0"
+        time_value = next((media_info_csv_time(item) for item in row if media_info_csv_time(item) is not None), None)
+        pkt_size = None
+        for item in reversed(row):
+            try:
+                number = int(float(item))
+            except (TypeError, ValueError):
+                continue
+            if number > 1:
+                pkt_size = number
+                break
+        frame_index = len(frame_rows)
+        if pict_type in type_counts:
+            type_counts[pict_type] += 1
+        if key_frame == "1":
+            keyframe_indices.append(frame_index)
+            if time_value is not None:
+                keyframe_times.append(time_value)
+        frame_rows.append({
+            "time": f"{time_value:.6f}" if time_value is not None else "",
+            "pict_type": pict_type,
+            "key_frame": key_frame,
+            "pkt_size": pkt_size if pkt_size is not None else "",
+        })
+    if not frame_rows:
+        return None, "no frame rows were available"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["time", "pict_type", "key_frame", "pkt_size"])
+        writer.writeheader()
+        writer.writerows(frame_rows)
+    total = len(frame_rows)
+    gop_lengths = [
+        keyframe_indices[index] - keyframe_indices[index - 1]
+        for index in range(1, len(keyframe_indices))
+    ]
+    keyframe_intervals = [
+        keyframe_times[index] - keyframe_times[index - 1]
+        for index in range(1, len(keyframe_times))
+        if keyframe_times[index] >= keyframe_times[index - 1]
+    ]
+    summary = {
+        "csv_path": csv_path,
+        "total_frames": total,
+        "i_frames": type_counts.get("I", 0),
+        "p_frames": type_counts.get("P", 0),
+        "b_frames": type_counts.get("B", 0),
+        "keyframes": len(keyframe_indices),
+        "average_gop_frames": (sum(gop_lengths) / len(gop_lengths)) if gop_lengths else None,
+        "minimum_gop_frames": min(gop_lengths) if gop_lengths else None,
+        "maximum_gop_frames": max(gop_lengths) if gop_lengths else None,
+        "first_keyframe_time": keyframe_times[0] if keyframe_times else None,
+        "last_keyframe_time": keyframe_times[-1] if keyframe_times else None,
+        "average_keyframe_interval": (sum(keyframe_intervals) / len(keyframe_intervals)) if keyframe_intervals else None,
+        "minimum_keyframe_interval": min(keyframe_intervals) if keyframe_intervals else None,
+        "maximum_keyframe_interval": max(keyframe_intervals) if keyframe_intervals else None,
+    }
+    return summary, None
+
+
 def append_info_line(lines: list[tuple[str, str]], text: str = "", color: str = Color.WHITE) -> None:
     lines.append((text, color))
 
@@ -4253,7 +6467,7 @@ def append_nested_info(
     append_info_kv(lines, key_name or "value", value, indent)
 
 
-def info_stream_header(stream: dict[str, Any], relative_index: int) -> str:
+def info_stream_header(stream: dict[str, Any], relative_index: int, chapter_count: int = 0) -> str:
     codec_type = stream.get("codec_type", "unknown")
     codec_name = stream.get("codec_name", "unknown")
     global_index = stream.get("index", "?")
@@ -4263,6 +6477,7 @@ def info_stream_header(stream: dict[str, Any], relative_index: int) -> str:
     if codec_type == "video":
         suffix.append(f"bit_depth={describe_video_bit_depth(stream)}")
         suffix.append(f"Color range={display_color_range(stream.get('color_range'))}")
+        suffix.append(f"chapters={'yes' if chapter_count else 'no'}")
     if language:
         suffix.append(f"language={language}")
     if title:
@@ -4271,20 +6486,276 @@ def info_stream_header(stream: dict[str, Any], relative_index: int) -> str:
     return f"Stream {relative_index} / #{global_index}: {codec_type} | codec={codec_name}{suffix_text}"
 
 
+def media_info_video_codec_family(codec: str) -> str:
+    normalized = str(codec or "").lower()
+    if normalized in {"h264", "avc1"}:
+        return "H.264/AVC"
+    if normalized in {"hevc", "h265", "hev1", "hvc1"}:
+        return "H.265/HEVC"
+    if normalized == "av1":
+        return "AV1"
+    if normalized in {"vp9", "vp8"}:
+        return normalized.upper()
+    return codec or "unknown"
+
+
+def media_info_audio_coding_type(codec: str) -> str:
+    normalized = str(codec or "").lower()
+    if normalized in {"flac", "alac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "truehd"}:
+        return "lossless"
+    if normalized:
+        return "lossy or compressed"
+    return "unknown"
+
+
+def media_info_subtitle_kind(codec: str) -> str:
+    normalized = str(codec or "").lower()
+    if normalized in TEXT_SUBTITLE_CODECS:
+        return "text subtitle"
+    if normalized in BITMAP_SUBTITLE_CODECS:
+        return "bitmap subtitle"
+    return "unknown"
+
+
+def media_info_attachment_kind(stream: dict[str, Any]) -> str:
+    tags = media_info_stream_tags(stream)
+    filename = str(tags.get("filename") or tags.get("FileName") or "").lower()
+    mimetype = str(tags.get("mimetype") or tags.get("MIME_TYPE") or "").lower()
+    if any(filename.endswith(ext) for ext in (".ttf", ".otf", ".ttc")) or "font" in mimetype:
+        return "font attachment"
+    if any(token in mimetype for token in ("image/", "jpeg", "png")) or "cover" in filename:
+        return "cover art attachment"
+    return "attachment"
+
+
+def media_info_main_video_stream(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for stream in payload.get("streams") or []:
+        if stream.get("codec_type") == "video":
+            return stream
+    return None
+
+
+def build_media_info_technical_diagnosis(
+    input_path: Path,
+    payload: dict[str, Any],
+    stream_rows: list[dict[str, Any]],
+) -> list[str]:
+    fmt = payload.get("format") or {}
+    streams = payload.get("streams") or []
+    chapters = payload.get("chapters") or []
+    observations: list[str] = []
+    total_size = input_path.stat().st_size if input_path.exists() else format_size_bytes_from_metadata(fmt)
+    numeric_rows = [row for row in stream_rows if isinstance(row.get("size_bytes"), int)]
+    if numeric_rows:
+        dominant = max(numeric_rows, key=lambda row: int(row["size_bytes"]))
+        observations.append(
+            f"The largest measured stream is stream #{dominant.get('stream_index')} "
+            f"({dominant.get('type')} {dominant.get('codec')}) at {format_bytes(int(dominant['size_bytes']))}."
+        )
+    elif total_size:
+        observations.append(f"The file size is {format_bytes(total_size)}; per-stream sizes were not fully available.")
+
+    main_video = media_info_main_video_stream(payload)
+    if main_video:
+        codec = str(main_video.get("codec_name") or "unknown")
+        width = main_video.get("width", "unknown")
+        height = main_video.get("height", "unknown")
+        main_index = main_video.get("index")
+        main_row = next((row for row in stream_rows if row.get("stream_index") == main_index), None)
+        bitrate = str(main_row.get("bitrate")) if main_row else describe_bitrate(stream_bitrate_kbps(main_video, fmt, None, streams))
+        observations.append(
+            f"The main video stream uses {media_info_video_codec_family(codec)} at {width}x{height} with bitrate {bitrate}."
+        )
+        if main_video.get("color_range") in {None, "", "unknown"}:
+            observations.append("Color range is not declared in metadata.")
+
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if audio_streams:
+        audio_types = sorted({media_info_audio_coding_type(str(stream.get("codec_name") or "")) for stream in audio_streams})
+        observations.append(f"Audio streams appear to be: {', '.join(audio_types)}.")
+
+    cover_like = [
+        stream for stream in streams
+        if stream.get("codec_type") == "video"
+        and (stream.get("disposition", {}) or {}).get("attached_pic")
+    ]
+    if cover_like:
+        observations.append(f"{len(cover_like)} extra video stream(s) look like attached cover art.")
+    observations.append("Chapters are present." if chapters else "No chapters were reported by ffprobe.")
+    return observations
+
+
+def append_media_info_table(lines: list[tuple[str, str]], rows: list[dict[str, Any]], indent: int = 1) -> None:
+    if not rows:
+        append_info_line(lines, "  " * indent + "(none)", Color.GRAY)
+        return
+    for row in rows:
+        text = " | ".join(f"{key}: {value}" for key, value in row.items())
+        append_info_line(lines, "  " * indent + text, media_info_color_for_key(str(row.get("type") or row.get("codec") or "row")))
+
+
+def append_media_info_advanced_sections(
+    lines: list[tuple[str, str]],
+    input_path: Path,
+    payload: dict[str, Any],
+    analysis: dict[str, Any] | None,
+    audio_volume_stats: dict[int, dict[str, str]] | None,
+) -> None:
+    analysis = analysis or {}
+    fmt = payload.get("format") or {}
+    streams = payload.get("streams") or []
+    stream_rows = analysis.get("stream_size_rows") or media_info_stream_size_rows(input_path, payload, analysis.get("packet_sizes"))
+
+    append_info_section(lines, "Technical Diagnosis", Color.PINK)
+    for observation in build_media_info_technical_diagnosis(input_path, payload, stream_rows):
+        append_info_line(lines, "  " + observation, Color.WHITE)
+
+    append_info_section(lines, "Encoder Metadata / Encoding Settings", Color.AQUA)
+    append_info_line(
+        lines,
+        "  Encoder metadata may be unavailable if it was stripped or never written.",
+        Color.YELLOW,
+    )
+    append_info_line(
+        lines,
+        "  CRF, preset, tune, AQ, keyint, and other encoder settings cannot be reliably detected unless stored in metadata or bitstream information.",
+        Color.YELLOW,
+    )
+    for stream in streams:
+        if stream.get("codec_type") not in {"video", "audio"}:
+            continue
+        append_info_line(lines, "  " + media_info_stream_name(stream), Color.BOLD + Color.CYAN)
+        size, estimated = stream_size_bytes(stream, fmt, analysis.get("packet_sizes"), streams)
+        bitrate = stream_bitrate_kbps(stream, fmt, analysis.get("packet_sizes"), streams)
+        append_info_kv(lines, "computed bitrate", describe_bitrate(bitrate), 2, Color.YELLOW)
+        append_info_kv(lines, "computed stream size", f"{format_bytes(size)}{' estimated' if estimated else ''}", 2, Color.LIME)
+        for key in ("codec_name", "codec_long_name", "profile", "level", "pix_fmt", "color_range", "color_space", "color_transfer", "color_primaries"):
+            if stream.get(key) not in {None, ""}:
+                append_info_kv(lines, key, stream.get(key), 2)
+        tags = media_info_stream_tags(stream)
+        encoder_tags = {key: value for key, value in tags.items() if "encod" in str(key).lower() or str(key).upper() in {"BPS", "NUMBER_OF_BYTES"}}
+        if encoder_tags:
+            append_nested_info(lines, encoder_tags, 2, "encoder-related tags")
+        for side_index, side_data in enumerate(stream.get("side_data_list") or []):
+            append_nested_info(lines, side_data, 2, f"side data {side_index}")
+
+    append_info_section(lines, "Stream Size Analysis", Color.LIME)
+    append_media_info_table(lines, stream_rows)
+
+    append_info_section(lines, "Bits Per Pixel Per Frame", Color.ORANGE)
+    bpppf_rows = analysis.get("bpppf_rows") or calculate_bpppf_rows(payload, analysis.get("packet_sizes"))
+    append_media_info_table(lines, bpppf_rows)
+    append_info_line(lines, "  Very low bpppf may indicate heavy compression.", Color.GRAY)
+    append_info_line(lines, "  Very high bpppf may indicate large file size, near-source encode, inefficient encode, or overkill bitrate.", Color.GRAY)
+    append_info_line(lines, "  This metric is only a rough technical indicator, not a final visual quality score.", Color.GRAY)
+
+    append_info_section(lines, "Per-Second Bitrate Analysis", Color.CYAN)
+    packet_summary = analysis.get("packet_bitrate")
+    if packet_summary:
+        for key in ("average_kbps", "minimum_kbps", "maximum_kbps", "p05_kbps", "median_kbps", "p95_kbps"):
+            value = packet_summary.get(key)
+            append_info_kv(lines, key, f"{value:.3f} kbps" if isinstance(value, (int, float)) else "unknown", 1)
+        append_info_kv(lines, "analyzed seconds", packet_summary.get("seconds", "unknown"), 1)
+        append_info_kv(lines, "CSV", packet_summary.get("csv_path", "unknown"), 1)
+    else:
+        append_info_line(lines, "  Skipped: " + str(analysis.get("packet_bitrate_skip") or "packet timestamps were unavailable"), Color.YELLOW)
+
+    append_info_section(lines, "Frame Type / I-P-B Analysis", Color.MAGENTA)
+    frame_summary = analysis.get("frame_analysis")
+    if frame_summary:
+        total = int(frame_summary.get("total_frames") or 0)
+        for label, key in (("I frames", "i_frames"), ("P frames", "p_frames"), ("B frames", "b_frames")):
+            count = int(frame_summary.get(key) or 0)
+            percent = (count / total * 100.0) if total else 0.0
+            append_info_kv(lines, label, f"{count} ({percent:.2f}%)", 1)
+        append_info_kv(lines, "total analyzed frames", total, 1)
+        append_info_kv(lines, "keyframes", frame_summary.get("keyframes", "unknown"), 1)
+        append_info_kv(lines, "average GOP length", frame_summary.get("average_gop_frames") or "unknown", 1)
+        append_info_kv(lines, "minimum GOP length", frame_summary.get("minimum_gop_frames") or "unknown", 1)
+        append_info_kv(lines, "maximum GOP length", frame_summary.get("maximum_gop_frames") or "unknown", 1)
+        append_info_kv(lines, "CSV", frame_summary.get("csv_path", "unknown"), 1)
+        append_info_line(lines, "  Very long GOP can improve compression but may reduce seeking accuracy.", Color.GRAY)
+        append_info_line(lines, "  More B-frames usually improves compression efficiency.", Color.GRAY)
+        append_info_line(lines, "  Frame type distribution is technical information and does not directly prove visual quality.", Color.GRAY)
+    else:
+        append_info_line(lines, "  Skipped: " + str(analysis.get("frame_analysis_skip") or "frame data was unavailable"), Color.YELLOW)
+
+    append_info_section(lines, "GOP / Keyframe Summary", Color.YELLOW)
+    if frame_summary and int(frame_summary.get("keyframes") or 0) >= 2:
+        for key in ("first_keyframe_time", "last_keyframe_time", "average_keyframe_interval", "minimum_keyframe_interval", "maximum_keyframe_interval", "average_gop_frames"):
+            value = frame_summary.get(key)
+            if isinstance(value, (int, float)):
+                text = f"{value:.3f} s" if "time" in key or "interval" in key else f"{value:.2f} frames"
+            else:
+                text = "unknown"
+            append_info_kv(lines, key, text, 1)
+    else:
+        append_info_line(lines, "  GOP statistics are limited because too few keyframes were available.", Color.YELLOW)
+
+    append_info_section(lines, "Color Metadata Extended", Color.LIGHT_BLUE)
+    for stream in streams:
+        if stream.get("codec_type") != "video":
+            continue
+        append_info_line(lines, "  " + media_info_stream_name(stream), Color.BOLD + Color.LIGHT_BLUE)
+        for key in ("color_range", "color_space", "color_transfer", "color_primaries", "chroma_location", "pix_fmt", "bits_per_raw_sample", "field_order", "sample_aspect_ratio", "display_aspect_ratio"):
+            append_info_kv(lines, key, stream.get(key, "unknown"), 2)
+        if stream.get("color_range") in {None, "", "unknown"}:
+            append_info_line(lines, "    Color range is not declared in metadata. This does not always mean the actual range is unknown; it means it was not signaled clearly in the file metadata.", Color.YELLOW)
+
+    append_info_section(lines, "Audio Technical Detail", Color.BLUE)
+    audio_relative = 0
+    for stream in streams:
+        if stream.get("codec_type") != "audio":
+            continue
+        append_info_line(lines, "  " + media_info_stream_name(stream), Color.BOLD + Color.BLUE)
+        for key in ("codec_name", "profile", "sample_fmt", "sample_rate", "channels", "channel_layout", "bits_per_raw_sample", "bit_rate"):
+            if key == "bit_rate" and stream.get(key) in {None, "", "N/A", "unknown"}:
+                continue
+            append_info_kv(lines, key, stream.get(key, "unknown"), 2)
+        size, estimated = stream_size_bytes(stream, fmt, analysis.get("packet_sizes"), streams)
+        bitrate = stream_bitrate_kbps(stream, fmt, analysis.get("packet_sizes"), streams)
+        append_info_kv(lines, "computed bitrate", describe_bitrate(bitrate), 2, Color.YELLOW)
+        append_info_kv(lines, "size", f"{format_bytes(size)}{' estimated' if estimated else ''}", 2)
+        append_info_kv(lines, "language", display_language(media_info_stream_tags(stream).get("language")), 2)
+        append_info_kv(lines, "default", media_info_disposition(stream, "default"), 2)
+        append_info_kv(lines, "original", media_info_disposition(stream, "original"), 2)
+        stats = audio_volume_stats or {}
+        append_info_kv(lines, "mean / max volume", audio_mean_max_volume_field(stats, audio_relative), 2, Color.MEAN_VOLUME)
+        audio_relative += 1
+
+    append_info_section(lines, "Subtitle and Attachment Detail", Color.ORANGE)
+    for stream in streams:
+        if stream.get("codec_type") == "subtitle":
+            append_info_line(lines, "  " + media_info_stream_name(stream), Color.BOLD + Color.ORANGE)
+            append_info_kv(lines, "language", display_language(media_info_stream_tags(stream).get("language")), 2)
+            append_info_kv(lines, "title", media_info_stream_tags(stream).get("title") or "unknown", 2)
+            append_info_kv(lines, "default", media_info_disposition(stream, "default"), 2)
+            append_info_kv(lines, "forced", media_info_disposition(stream, "forced"), 2)
+            append_info_kv(lines, "hearing impaired", media_info_disposition(stream, "hearing_impaired"), 2)
+            append_info_kv(lines, "subtitle kind", media_info_subtitle_kind(str(stream.get("codec_name") or "")), 2)
+        elif stream.get("codec_type") == "attachment":
+            tags = media_info_stream_tags(stream)
+            append_info_line(lines, "  " + media_info_stream_name(stream), Color.BOLD + Color.PINK)
+            append_info_kv(lines, "filename", tags.get("filename") or "unknown", 2)
+            append_info_kv(lines, "mimetype", tags.get("mimetype") or tags.get("MIME_TYPE") or "unknown", 2)
+            size, estimated = stream_size_bytes(stream, fmt, analysis.get("packet_sizes"), streams)
+            append_info_kv(lines, "size", f"{format_bytes(size)}{' estimated' if estimated else ''}", 2)
+            append_info_kv(lines, "attachment kind", media_info_attachment_kind(stream), 2)
+
+
 def build_media_info_report_lines(
     input_path: Path,
     payload: dict[str, Any],
     text_overview: str,
     info_path: Path,
     audio_volume_stats: dict[int, dict[str, str]] | None = None,
+    analysis: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     lines: list[tuple[str, str]] = []
     fmt = payload.get("format") or {}
     streams = payload.get("streams") or []
     chapters = payload.get("chapters") or []
     programs = payload.get("programs") or []
-    program_version = payload.get("program_version") or {}
-    library_versions = payload.get("library_versions") or []
 
     append_info_section(lines, "Media Info Report", Color.LIGHT_BLUE)
     append_info_kv(lines, "Generated", datetime.datetime.now().isoformat(timespec="seconds"), 1, Color.WHITE)
@@ -4295,6 +6766,8 @@ def build_media_info_report_lines(
     append_info_kv(lines, "Duration", format_duration(stream_duration_seconds({}, fmt)), 1, Color.MAGENTA)
     append_info_kv(lines, "Total bitrate", describe_total_bitrate(fmt), 1, Color.YELLOW)
     append_info_kv(lines, "Report file", info_path, 1, Color.AQUA)
+
+    append_media_info_advanced_sections(lines, input_path, payload, analysis, audio_volume_stats)
 
     append_info_section(lines, "Container / Format", Color.CYAN)
     append_nested_info(lines, fmt, 1)
@@ -4318,12 +6791,11 @@ def build_media_info_report_lines(
             "data": Color.YELLOW,
         }.get(stream_type, Color.WHITE)
         append_info_line(lines)
-        append_info_line(lines, "  " + info_stream_header(stream, relative_index), Color.BOLD + color)
+        append_info_line(lines, "  " + info_stream_header(stream, relative_index, len(chapters)), Color.BOLD + color)
         append_info_line(lines, "  " + "-" * 46, Color.GRAY)
         if stream_type == "audio":
             stats = audio_volume_stats or {}
-            append_info_kv(lines, "max_volume", audio_volume_field(stats, audio_relative_index, "max_volume"), 2, Color.ORANGE)
-            append_info_kv(lines, "mean_volume", audio_volume_field(stats, audio_relative_index, "mean_volume"), 2, Color.AQUA)
+            append_info_kv(lines, "mean / max volume", audio_mean_max_volume_field(stats, audio_relative_index), 2, Color.MEAN_VOLUME)
             audio_relative_index += 1
         append_nested_info(lines, stream, 2)
 
@@ -4334,12 +6806,6 @@ def build_media_info_report_lines(
     append_info_section(lines, "Programs", Color.YELLOW)
     append_info_kv(lines, "Program count", len(programs), 1, Color.LIGHT_BLUE)
     append_nested_info(lines, programs, 1)
-
-    append_info_section(lines, "FFprobe Version", Color.AQUA)
-    append_nested_info(lines, program_version, 1)
-    append_info_line(lines)
-    append_info_line(lines, "  Library versions:", Color.BOLD + Color.AQUA)
-    append_nested_info(lines, library_versions, 2)
 
     append_info_section(lines, "FFprobe Text Overview", Color.LIME)
     for line in text_overview.splitlines() or ["(empty)"]:
@@ -4352,6 +6818,95 @@ def render_info_report(lines: list[tuple[str, str]], color: bool = True) -> str:
     for text, color_code in lines:
         rendered.append(paint(text, color_code) if color and text else text)
     return "\n".join(rendered)
+
+
+def media_info_payload_for_report(payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(payload)
+    cleaned.pop("program_version", None)
+    cleaned.pop("library_versions", None)
+    return cleaned
+
+
+def media_info_html_color(index: int) -> str:
+    hue = (index * 137) % 360
+    phase = index % 5
+    saturation = 74 + phase * 4
+    light = 58 + ((index * 3) % 18)
+    chroma = saturation / 100.0
+    x = chroma * (1 - abs((hue / 60.0) % 2 - 1))
+    m = light / 100.0 - chroma / 2
+    if hue < 60:
+        r, g, b = chroma, x, 0
+    elif hue < 120:
+        r, g, b = x, chroma, 0
+    elif hue < 180:
+        r, g, b = 0, chroma, x
+    elif hue < 240:
+        r, g, b = 0, x, chroma
+    elif hue < 300:
+        r, g, b = x, 0, chroma
+    else:
+        r, g, b = chroma, 0, x
+    return f"rgb({max(0, min(255, int((r + m) * 255)))}, {max(0, min(255, int((g + m) * 255)))}, {max(0, min(255, int((b + m) * 255)))})"
+
+
+def render_info_report_html(lines: list[tuple[str, str]], input_path: Path, plain_report: str, raw_json: str, text_overview: str) -> str:
+    rendered_lines: list[str] = []
+    for index, (text, _color_code) in enumerate(lines):
+        if text:
+            rendered_lines.append(
+                f'<div class="line" style="color: {media_info_html_color(index)}">{html.escape(text)}</div>'
+            )
+        else:
+            rendered_lines.append('<div class="line blank">&nbsp;</div>')
+    palette_preview = "\n".join(
+        f'<span style="background:{media_info_html_color(i)}"></span>' for i in range(200)
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{html.escape(input_path.name)} media report</title>
+<style>
+:root {{ color-scheme: dark; }}
+body {{ margin: 0; background: #070b10; color: #dbeafe; font-family: Consolas, 'Cascadia Mono', monospace; }}
+main {{ max-width: 1500px; margin: 0 auto; padding: 24px; }}
+h1 {{ margin: 0 0 6px; color: #7dd3fc; font-family: 'Segoe UI', sans-serif; }}
+.path {{ color: #c4b5fd; margin-bottom: 18px; word-break: break-all; }}
+.report {{ background: #0c121a; border: 1px solid #263447; border-radius: 10px; padding: 16px 18px; box-shadow: 0 16px 36px rgba(0,0,0,.35); }}
+.line {{ white-space: pre-wrap; line-height: 1.42; font-size: 13px; }}
+.blank {{ line-height: .7; }}
+.palette {{ display: grid; grid-template-columns: repeat(50, 1fr); gap: 2px; margin: 14px 0 22px; }}
+.palette span {{ height: 6px; border-radius: 2px; }}
+details {{ margin-top: 16px; background: #0f1722; border: 1px solid #243244; border-radius: 8px; padding: 10px 12px; }}
+summary {{ cursor: pointer; color: #fbbf24; font-weight: 700; }}
+pre {{ white-space: pre-wrap; word-break: break-word; color: #d1d5db; }}
+</style>
+</head>
+<body>
+<main>
+<h1>Media Info Report</h1>
+<div class="path">{html.escape(str(input_path))}</div>
+<div class="palette">{palette_preview}</div>
+<section class="report">
+{''.join(rendered_lines)}
+</section>
+<details>
+<summary>Plain text report</summary>
+<pre>{html.escape(plain_report)}</pre>
+</details>
+<details>
+<summary>Raw ffprobe JSON</summary>
+<pre>{html.escape(raw_json)}</pre>
+</details>
+<details>
+<summary>Raw ffprobe text overview</summary>
+<pre>{html.escape(text_overview.strip())}</pre>
+</details>
+</main>
+</body>
+</html>
+"""
 
 
 def media_info_report_path(input_path: Path) -> Path:
@@ -4367,9 +6922,10 @@ def write_media_info_report(
     payload: dict[str, Any],
     text_overview: str,
     info_path: Path,
-) -> None:
+) -> list[Path]:
     plain_report = render_info_report(lines, color=False)
-    raw_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    report_payload = media_info_payload_for_report(payload)
+    raw_json = json.dumps(report_payload, ensure_ascii=False, indent=2)
     content = (
         plain_report
         + "\n\nRaw ffprobe JSON\n"
@@ -4383,15 +6939,216 @@ def write_media_info_report(
         + "\n"
     )
     info_path.write_text(content, encoding="utf-8")
+    html_path = info_path.with_suffix(".html")
+    html_report = render_info_report_html(lines, input_path, plain_report, raw_json, text_overview)
+    html_path.write_text(html_report, encoding="utf-8")
+    raw_json_path = media_info_sidecar_path(info_path, "raw_ffprobe", ".json")
+    raw_json_path.write_text(raw_json, encoding="utf-8")
     log_info(f"Media Info report written: {info_path}")
+    log_info(f"Media Info HTML report written: {html_path}")
+    log_info(f"Media Info raw ffprobe JSON written: {raw_json_path}")
     log_debug(f"Media Info report size: {len(content)} characters for {input_path}")
+    return [html_path, raw_json_path]
 
 
-def create_media_info_report(ffprobe: str, input_path: Path, ffmpeg: str | None = None) -> tuple[list[tuple[str, str]], Path]:
+def ffmpeg_filter_available(ffmpeg: str, filter_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-filters"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        text, _ = decode_subprocess_bytes(result.stdout, "utf-8")
+        return filter_name in text
+    except Exception:
+        log_exception(f"Could not inspect FFmpeg filters for {filter_name}")
+        return False
+
+
+def optional_reference_metrics(
+    ffprobe: str,
+    ffmpeg: str | None,
+    input_path: Path,
+    reference_path: Path | None,
+    payload: dict[str, Any],
+    info_path: Path,
+    skipped: list[str],
+) -> list[Path]:
+    if not ffmpeg or reference_path is None:
+        return []
+    try:
+        reference_payload = ffprobe_full_json(ffprobe, reference_path)
+        main_video = media_info_main_video_stream(payload) or {}
+        ref_video = media_info_main_video_stream(reference_payload) or {}
+        warnings: list[str] = []
+        if stream_duration_seconds({}, payload.get("format") or {}) != stream_duration_seconds({}, reference_payload.get("format") or {}):
+            warnings.append("duration differs")
+        if (main_video.get("width"), main_video.get("height")) != (ref_video.get("width"), ref_video.get("height")):
+            warnings.append("resolution differs")
+        if media_info_video_fps(main_video) != media_info_video_fps(ref_video):
+            warnings.append("frame rate differs")
+        if warnings:
+            skipped.append("Reference metric warning: " + ", ".join(warnings) + ". Metrics only make sense when files are aligned.")
+    except Exception as exc:
+        skipped.append(f"Reference metric warning: could not inspect reference file metadata ({exc}).")
+    generated: list[Path] = []
+    metric_specs = [
+        ("psnr", ["[0:v][1:v]psnr=stats_file={path}"], media_info_sidecar_path(info_path, "psnr", ".log")),
+        ("ssim", ["[0:v][1:v]ssim=stats_file={path}"], media_info_sidecar_path(info_path, "ssim", ".log")),
+    ]
+    if ffmpeg_filter_available(ffmpeg, "libvmaf"):
+        metric_specs.append(("vmaf", ["[0:v][1:v]libvmaf=log_fmt=json:log_path={path}"], media_info_sidecar_path(info_path, "vmaf", ".json")))
+    else:
+        skipped.append("VMAF skipped: this FFmpeg build does not report libvmaf support.")
+    for label, filter_templates, output_path in metric_specs:
+        lavfi = filter_templates[0].format(path=str(output_path).replace("\\", "/").replace(":", "\\:"))
+        args = [
+            ffmpeg,
+            "-hide_banner",
+            "-i", str(input_path),
+            "-i", str(reference_path),
+            "-lavfi", lavfi,
+            "-f", "null",
+            "-",
+        ]
+        log_info(f"Media Info {label.upper()} command: {json.dumps(args, ensure_ascii=False)}")
+        print(f"Running {label.upper()} reference metric...")
+        result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        stdout_text, _ = decode_subprocess_bytes(result.stdout, "utf-8")
+        stderr_text, _ = decode_subprocess_bytes(result.stderr, "utf-8")
+        metric_output = media_info_sidecar_path(info_path, f"{label}_ffmpeg_output", ".log")
+        metric_output.write_text((stdout_text + "\n" + stderr_text).strip() + "\n", encoding="utf-8")
+        generated.append(metric_output)
+        if output_path.exists():
+            generated.append(output_path)
+        if result.returncode != 0:
+            skipped.append(f"{label.upper()} failed; FFmpeg output saved to {metric_output}.")
+    return generated
+
+
+def optional_extract_screenshots(
+    ffmpeg: str | None,
+    input_path: Path,
+    payload: dict[str, Any],
+    info_path: Path,
+    skipped: list[str],
+) -> Path | None:
+    if not ffmpeg:
+        skipped.append("Screenshot extraction skipped: ffmpeg path is unavailable.")
+        return None
+    duration = stream_duration_seconds({}, payload.get("format") or {})
+    if not duration or duration <= 0:
+        skipped.append("Screenshot extraction skipped: duration is unknown.")
+        return None
+    screenshot_dir = info_path.with_name(f"{info_path.stem}_samples")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    created = 0
+    for percent in (10, 25, 50, 75, 90):
+        timestamp = duration * percent / 100.0
+        if timestamp <= 0 or timestamp >= duration:
+            continue
+        output_png = screenshot_dir / f"sample_{percent:02d}pct.png"
+        args = [
+            ffmpeg,
+            "-hide_banner",
+            "-ss", f"{timestamp:.3f}",
+            "-i", str(input_path),
+            "-frames:v", "1",
+            "-q:v", "1",
+            str(output_png),
+        ]
+        log_info(f"Media Info screenshot command: {json.dumps(args, ensure_ascii=False)}")
+        result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode == 0 and output_png.exists():
+            created += 1
+        else:
+            log_warn(f"Screenshot extraction failed at {percent}% for {input_path}")
+    if created <= 0:
+        skipped.append("Screenshot extraction produced no files.")
+    return screenshot_dir if created else None
+
+
+def build_media_info_analysis(
+    ffprobe: str,
+    input_path: Path,
+    payload: dict[str, Any],
+    info_path: Path,
+    deep_analysis: bool,
+    sidecars: list[Path],
+    skipped: list[str],
+) -> dict[str, Any]:
+    analysis: dict[str, Any] = {}
+    packet_sizes: dict[int, int] = {}
+    print("Calculating exact stream sizes...")
+    log_info(f"Media Info exact stream-size packet scan started for {input_path}")
+    packet_sizes = probe_packet_sizes(ffprobe, input_path)
+    log_info(
+        f"Media Info exact stream-size packet scan completed for {input_path}; "
+        f"streams={len(packet_sizes)}"
+    )
+    if deep_analysis:
+        log_info(f"Media Info deep analysis enabled for {input_path}")
+    else:
+        log_info(
+            f"Media Info deep analysis disabled by user for {input_path}; "
+            "exact stream sizes were still calculated, but CSV sidecars will not be generated."
+        )
+        skipped.append("Deep packet/frame analysis skipped by user.")
+    analysis["packet_sizes"] = packet_sizes
+    stream_rows = media_info_stream_size_rows(input_path, payload, packet_sizes)
+    analysis["stream_size_rows"] = stream_rows
+    analysis["bpppf_rows"] = calculate_bpppf_rows(payload, packet_sizes)
+    if deep_analysis:
+        stream_csv = media_info_sidecar_path(info_path, "stream_summary", ".csv")
+        write_media_info_stream_summary_csv(stream_csv, stream_rows)
+        sidecars.append(stream_csv)
+        log_info(f"Media Info stream summary CSV written: {stream_csv}")
+        print("Running per-second bitrate analysis...")
+        packet_csv = media_info_sidecar_path(info_path, "per_second_bitrate", ".csv")
+        packet_summary, packet_skip = analyze_packet_bitrate(ffprobe, input_path, packet_csv)
+        if packet_summary:
+            analysis["packet_bitrate"] = packet_summary
+            sidecars.append(packet_csv)
+            log_info(f"Media Info per-second bitrate CSV written: {packet_csv}")
+        else:
+            analysis["packet_bitrate_skip"] = packet_skip
+            skipped.append(f"Per-second bitrate analysis skipped: {packet_skip}.")
+            log_warn(f"Media Info per-second bitrate analysis skipped for {input_path}: {packet_skip}")
+        print("Running frame type / GOP analysis...")
+        frame_csv = media_info_sidecar_path(info_path, "frame_analysis", ".csv")
+        frame_summary, frame_skip = analyze_frame_types_and_gop(ffprobe, input_path, frame_csv)
+        if frame_summary:
+            analysis["frame_analysis"] = frame_summary
+            sidecars.append(frame_csv)
+            log_info(f"Media Info frame analysis CSV written: {frame_csv}")
+        else:
+            analysis["frame_analysis_skip"] = frame_skip
+            skipped.append(f"Frame type / GOP analysis skipped: {frame_skip}.")
+            log_warn(f"Media Info frame type / GOP analysis skipped for {input_path}: {frame_skip}")
+    return analysis
+
+
+def create_media_info_report(
+    ffprobe: str,
+    input_path: Path,
+    ffmpeg: str | None = None,
+    options: MediaInfoOptions | None = None,
+) -> MediaInfoReportResult:
     started_at = time.perf_counter()
+    options = options or MediaInfoOptions()
     info_path = media_info_report_path(input_path)
+    log_info(
+        "Media Info report options: "
+        f"input={input_path}; deep_analysis={options.deep_analysis}; "
+        f"extract_screenshots={options.extract_screenshots}; "
+        f"reference_path={options.reference_path if options.reference_path else 'none'}"
+    )
     payload = ffprobe_full_json(ffprobe, input_path)
     text_overview = ffprobe_text_overview(ffprobe, input_path)
+    sidecars: list[Path] = []
+    skipped: list[str] = []
+    analysis = build_media_info_analysis(ffprobe, input_path, payload, info_path, options.deep_analysis, sidecars, skipped)
     audio_streams = [stream for stream in (payload.get("streams") or []) if stream.get("codec_type") == "audio"]
     audio_volume_stats: dict[int, dict[str, str]] = {}
     if audio_streams and ffmpeg:
@@ -4401,13 +7158,37 @@ def create_media_info_report(ffprobe: str, input_path: Path, ffmpeg: str | None 
             "audio_streams": audio_streams,
         }
         audio_volume_stats = get_audio_volume_stats(volume_answers)
-    lines = build_media_info_report_lines(input_path, payload, text_overview, info_path, audio_volume_stats)
-    write_media_info_report(input_path, lines, payload, text_overview, info_path)
+    metric_sidecars = optional_reference_metrics(ffprobe, ffmpeg, input_path, options.reference_path, payload, info_path, skipped)
+    sidecars.extend(metric_sidecars)
+    screenshot_dir = optional_extract_screenshots(ffmpeg, input_path, payload, info_path, skipped) if options.extract_screenshots else None
+    lines = build_media_info_report_lines(input_path, payload, text_overview, info_path, audio_volume_stats, analysis)
+    append_info_section(lines, "Sidecar Files", Color.AQUA)
+    display_sidecars = [*sidecars, info_path.with_suffix(".html"), media_info_sidecar_path(info_path, "raw_ffprobe", ".json")]
+    for path in display_sidecars:
+        append_info_line(lines, "  " + str(path), Color.WHITE)
+    if screenshot_dir:
+        append_info_line(lines, "  screenshots: " + str(screenshot_dir), Color.WHITE)
+    if skipped:
+        append_info_section(lines, "Skipped Sections", Color.YELLOW)
+        for reason in skipped:
+            append_info_line(lines, "  " + reason, Color.YELLOW)
+    written_sidecars = write_media_info_report(input_path, lines, payload, text_overview, info_path)
+    sidecars.extend(written_sidecars)
+    if screenshot_dir:
+        log_info(f"Media Info screenshot folder generated: {screenshot_dir}")
+    if skipped:
+        for reason in skipped:
+            log_info(f"Media Info skipped section: {reason}")
+    log_info(
+        "Media Info generated outputs: "
+        f"txt={info_path}; sidecars={[str(path) for path in sidecars]}; "
+        f"screenshot_dir={screenshot_dir if screenshot_dir else 'none'}"
+    )
     log_info(
         f"Media Info report completed for {input_path} -> {info_path} "
         f"in {time.perf_counter() - started_at:.3f}s"
     )
-    return lines, info_path
+    return MediaInfoReportResult(lines, info_path, sidecars, screenshot_dir, skipped)
 
 
 def ask_media_info_input_path(answers: dict[str, Any]) -> Path:
@@ -4427,6 +7208,87 @@ def ask_media_info_input_path(answers: dict[str, Any]) -> Path:
         return path
 
 
+def media_info_next_prompt(
+    answers: dict[str, Any],
+    title: str,
+    details: str | None = None,
+    default: str | None = None,
+    back: str = "back=0, quit=exit",
+) -> str:
+    current = int(answers.get("_question_number", 0) or 0)
+    if current < 1:
+        current = 1
+    answers["_question_number"] = current
+    prompt = question_prompt(answers, title, details, default, back)
+    answers["_question_number"] = current + 1
+    return prompt
+
+
+def ask_media_info_options(answers: dict[str, Any], input_path: Path) -> MediaInfoOptions:
+    deep_analysis = ask_yes_no(
+        media_info_next_prompt(
+            answers,
+            "Run deep packet/frame analysis?",
+            "can be slower on large files; generates bitrate/frame CSV sidecars",
+            "n",
+        ),
+        False,
+    )
+    reference_path: Path | None = None
+    if input_path.is_file() and ask_yes_no(
+        media_info_next_prompt(
+            answers,
+            "Compare this file with a reference/source file for PSNR/SSIM/VMAF?",
+            "quality metrics only make sense when both files are aligned and represent the same content",
+            "n",
+        ),
+        False,
+    ):
+        while True:
+            value = ask_required(
+                media_info_next_prompt(
+                    answers,
+                    "Enter reference/source file path",
+                    "drag and drop a file or paste a path; example: " + example_text(r"D:\Videos\source.mkv"),
+                )
+            )
+            candidate = terminal_path(value)
+            if not candidate.exists() or not candidate.is_file():
+                error("Reference file not found. Enter an existing file path.")
+                continue
+            reference_path = candidate
+            break
+    screenshot_prompt = "Extract sample screenshots?" if input_path.is_file() else "Extract sample screenshots for each file?"
+    extract_screenshots = ask_yes_no(
+        media_info_next_prompt(
+            answers,
+            screenshot_prompt,
+            "saves PNG samples at 10%,25%,50%,75%,90% without modifying the video",
+            "n",
+        ),
+        False,
+    )
+    return MediaInfoOptions(
+        deep_analysis=deep_analysis,
+        extract_screenshots=extract_screenshots,
+        reference_path=reference_path,
+    )
+
+
+def print_media_info_result(result: MediaInfoReportResult, print_lines: bool) -> None:
+    if print_lines:
+        print()
+        print(render_info_report(result.lines, color=True))
+    note(f"Media info TXT report written to: {result.info_path}")
+    for path in result.sidecar_paths:
+        suffix = path.suffix.lower().lstrip(".").upper()
+        note(f"Media info {suffix} sidecar written to: {path}")
+    if result.screenshot_dir:
+        note(f"Media info screenshots written to: {result.screenshot_dir}")
+    for reason in result.skipped_sections:
+        note(f"Media info skipped section: {reason}")
+
+
 def media_info_folder_candidates(folder_path: Path) -> list[Path]:
     reports_dir = default_media_reports_dir()
     files = [
@@ -4441,13 +7303,11 @@ def run_media_info_mode(base_answers: dict[str, Any]) -> None:
         answers = dict(base_answers)
         answers["_question_number"] = 1
         input_path = ask_media_info_input_path(answers)
+        options = ask_media_info_options(answers, input_path)
         log_info(f"Media Info mode input: {input_path}")
         if input_path.is_file():
-            lines, info_path = create_media_info_report(answers["ffprobe"], input_path, answers.get("ffmpeg"))
-            print()
-            print(render_info_report(lines, color=True))
-            print()
-            note(f"Media info report written to: {info_path}")
+            result = create_media_info_report(answers["ffprobe"], input_path, answers.get("ffmpeg"), options)
+            print_media_info_result(result, print_lines=False)
             return
 
         candidates = media_info_folder_candidates(input_path)
@@ -4463,9 +7323,10 @@ def run_media_info_mode(base_answers: dict[str, Any]) -> None:
 
         written = 0
         skipped = 0
+        sidecar_count = 0
         for index, path in enumerate(candidates, start=1):
             try:
-                _, info_path = create_media_info_report(answers["ffprobe"], path, answers.get("ffmpeg"))
+                result = create_media_info_report(answers["ffprobe"], path, answers.get("ffmpeg"), options)
             except FFprobeError:
                 skipped += 1
                 log_debug(f"Media Info skipped unsupported/unreadable file: {path}")
@@ -4475,15 +7336,19 @@ def run_media_info_mode(base_answers: dict[str, Any]) -> None:
                 log_exception(f"Media Info failed for file: {path}")
                 continue
             written += 1
+            sidecar_count += len(result.sidecar_paths) + (1 if result.screenshot_dir else 0)
             print(
                 f"  {paint(str(index) + '.', Color.LIGHT_BLUE)} "
                 f"{paint('wrote', Color.LIME)} {paint(path.name, Color.WHITE)} "
-                f"{paint('->', Color.GRAY)} {paint(str(info_path), Color.AQUA)}"
+                f"{paint('->', Color.GRAY)} {paint(str(result.info_path), Color.AQUA)}"
             )
+            for reason in result.skipped_sections:
+                note(f"  skipped section for {path.name}: {reason}")
 
         print()
         if written:
             note(f"Media info reports written to: {default_media_reports_dir()}")
+            note(f"Media info sidecar files/folders generated: {sidecar_count}")
         if skipped:
             note(f"Skipped {skipped} unsupported or unreadable file(s). See log file: {_log_file_text()}")
         if not written:
@@ -4522,10 +7387,11 @@ class MuxStreamInfo:
         fmt: dict[str, Any] | None = None,
         packet_sizes: dict[int, int] | None = None,
         volume_stats: dict[str, str] | None = None,
+        sibling_streams: list[dict[str, Any]] | None = None,
     ) -> "MuxStreamInfo":
         tags = raw.get("tags") or {}
         disposition = raw.get("disposition") or {}
-        size, estimated = stream_size_bytes(raw, fmt, packet_sizes)
+        size, estimated = stream_size_bytes(raw, fmt, packet_sizes, sibling_streams)
         return cls(
             index=int(raw.get("index", -1)),
             codec_type=str(raw.get("codec_type", "")),
@@ -4540,7 +7406,7 @@ class MuxStreamInfo:
             height=raw.get("height"),
             fps=rational_to_float(raw.get("avg_frame_rate")),
             duration=stream_duration_seconds(raw, fmt),
-            bitrate_kbps=stream_bitrate_kbps(raw, fmt, packet_sizes),
+            bitrate_kbps=stream_bitrate_kbps(raw, fmt, packet_sizes, sibling_streams),
             size_bytes=size,
             size_estimated=estimated,
             bit_depth=video_bit_depth(raw),
@@ -4555,6 +7421,7 @@ class MuxMediaFile:
     path: Path
     streams: list[MuxStreamInfo]
     format: dict[str, Any]
+    chapter_count: int = 0
 
     @property
     def video_streams(self) -> list[MuxStreamInfo]:
@@ -4574,6 +7441,15 @@ class MuxMediaFile:
 
 
 @dataclass
+class MuxStreamMetadataEdit:
+    codec_type: str
+    match_indexes: list[int] = field(default_factory=list)
+    match_languages: list[str] = field(default_factory=list)
+    language: str = ""
+    title: str = ""
+
+
+@dataclass
 class MuxCleanupRules:
     audio_mode: str
     audio_languages: list[str]
@@ -4587,6 +7463,9 @@ class MuxCleanupRules:
     keep_metadata: bool
     keep_chapters: bool
     overwrite: bool
+    copy_non_video_files: bool = True
+    selection_style: str = "advanced"
+    metadata_edits: list[MuxStreamMetadataEdit] = field(default_factory=list)
 
 
 def mux_find_video_files(input_path: Path) -> list[Path]:
@@ -4640,8 +7519,8 @@ def mux_probe_file(ffprobe: str, path: Path, ffmpeg: str | None = None) -> MuxMe
         if stream.get("codec_type") == "audio":
             stats = audio_volume_stats.get(audio_relative_index)
             audio_relative_index += 1
-        streams.append(MuxStreamInfo.from_ffprobe(stream, fmt, packet_sizes, stats))
-    media = MuxMediaFile(path=path, streams=streams, format=fmt)
+        streams.append(MuxStreamInfo.from_ffprobe(stream, fmt, packet_sizes, stats, raw_streams))
+    media = MuxMediaFile(path=path, streams=streams, format=fmt, chapter_count=len(payload.get("chapters") or []))
     log_debug(
         f"Stream Cleanup Remux probe OK: {path}; "
         f"video={len(media.video_streams)} audio={len(media.audio_streams)} "
@@ -4652,63 +7531,69 @@ def mux_probe_file(ffprobe: str, path: Path, ffmpeg: str | None = None) -> MuxMe
 
 def mux_scan_files(ffprobe: str, files: list[Path], ffmpeg: str | None = None) -> list[MuxMediaFile]:
     media_files: list[MuxMediaFile] = []
+    log_info(f"Stream Cleanup scan started: files={len(files)}")
     for index, path in enumerate(files, start=1):
         print(
-            f"{paint('[' + str(index) + '/' + str(len(files)) + ']', Color.LIGHT_BLUE)} "
-            f"{paint('Scanning:', Color.CYAN)} {paint(path.name, Color.WHITE)}"
+            f"{paint('[' + str(index) + '/' + str(len(files)) + ']', Color.MUX_GOLD)} "
+            f"{paint('Scanning:', Color.MUX_SCAN_HEADER)} {paint(path.name, Color.WHITE)}"
         )
         media = mux_probe_file(ffprobe, path, ffmpeg)
         if media is not None:
             media_files.append(media)
         else:
             note(f"Skipped unreadable file: {path.name}. See log file: {_log_file_text()}")
+    log_info(f"Stream Cleanup scan complete: ok={len(media_files)}/{len(files)}")
     return media_files
 
 
-def mux_format_stream(stream: MuxStreamInfo, fmt: dict[str, Any] | None = None) -> str:
+def mux_format_stream(stream: MuxStreamInfo, fmt: dict[str, Any] | None = None, chapter_count: int = 0) -> str:
     type_color = {
-        "audio": Color.BLUE,
-        "subtitle": Color.ORANGE,
+        "audio": Color.BOLD + Color.MUX_AZURE,
+        "subtitle": Color.BOLD + Color.MUX_VIOLET,
         "video": Color.MAGENTA,
         "attachment": Color.PINK,
     }.get(stream.codec_type, Color.WHITE)
     parts = [
-        field_text("index", stream.index, Color.LIGHT_BLUE),
-        field_text("type", stream.codec_type, type_color),
-        field_text("lang", display_language(stream.language), Color.LIME),
-        field_text("title", stream.title or "-", Color.WHITE),
-        field_text("codec", stream.codec_name or "-", Color.CYAN),
+        mux_pair_text("index", stream.index, Color.BOLD + Color.MUX_GOLD),
+        mux_pair_text("type", stream.codec_type, type_color),
+        mux_pair_text("lang", display_language(stream.language), mux_language_color(stream.language)),
+        mux_pair_text("title", stream.title or "-", Color.MUX_SKY),
+        mux_pair_text("codec", stream.codec_name or "-", Color.MUX_MINT),
     ]
     if stream.codec_type == "video":
         if stream.width and stream.height:
-            parts.append(field_text("size", f"{stream.width}x{stream.height}", Color.LIME))
+            parts.append(mux_pair_text("size", f"{stream.width}x{stream.height}", Color.LIME))
         if stream.fps:
-            parts.append(field_text("fps", format(stream.fps, ".3g"), Color.MAGENTA))
-        parts.append(field_text("bit depth", f"{stream.bit_depth}-bit" if stream.bit_depth else "unknown", Color.PINK))
-        parts.append(field_text("Color range", display_color_range(stream.color_range), Color.COLOR_RANGE_VALUE))
+            parts.append(mux_pair_text("fps", format(stream.fps, ".3g"), Color.MAGENTA))
+        parts.append(mux_pair_text("bit depth", f"{stream.bit_depth}-bit" if stream.bit_depth else "unknown", Color.PINK))
+        parts.append(mux_pair_text("Color range", display_color_range(stream.color_range), Color.COLOR_RANGE_VALUE))
         duration = stream.duration if stream.duration is not None else stream_duration_seconds({}, fmt)
-        parts.append(field_text("duration", format_duration(duration), Color.MAGENTA))
-        parts.append(field_text("bitrate", describe_bitrate(stream.bitrate_kbps), Color.YELLOW))
+        parts.append(mux_pair_text("duration", format_duration(duration), Color.MAGENTA))
+        parts.append(mux_pair_text("bitrate", describe_bitrate(stream.bitrate_kbps), Color.YELLOW))
         estimate_label = " approx" if stream.size_estimated and stream.size_bytes else ""
-        parts.append(field_text("video-only size", format_bytes(stream.size_bytes) + estimate_label, Color.GREEN))
+        parts.append(mux_pair_text("video-only size", format_bytes(stream.size_bytes) + estimate_label, Color.GREEN))
+        chapters_value = "yes" if chapter_count else "no"
+        chapters_color = Color.CHAPTERS_YES if chapter_count else Color.CHAPTERS_NO
+        parts.append(mux_pair_text("chapters", chapters_value, chapters_color))
     if stream.codec_type == "audio":
         if stream.channels is not None:
-            parts.append(field_text("channels", stream.channels, Color.GREEN))
+            parts.append(mux_pair_text("channels", stream.channels, Color.ORANGE))
         if stream.channel_layout:
-            parts.append(field_text("layout", stream.channel_layout, Color.WHITE))
+            parts.append(mux_pair_text("layout", stream.channel_layout, Color.WHITE))
         if stream.sample_rate:
-            parts.append(field_text("sample_rate", stream.sample_rate, Color.MAGENTA))
+            parts.append(mux_pair_text("sample_rate", stream.sample_rate, Color.MAGENTA))
         duration = stream.duration if stream.duration is not None else stream_duration_seconds({}, fmt)
-        parts.append(field_text("duration", format_duration(duration), Color.MAGENTA))
-        parts.append(field_text("bitrate", describe_bitrate(stream.bitrate_kbps), Color.YELLOW))
-        parts.append(field_text("max_volume", stream.max_volume or "unknown", Color.ORANGE))
-        parts.append(field_text("mean_volume", stream.mean_volume or "unknown", Color.AQUA))
+        parts.append(mux_pair_text("duration", format_duration(duration), Color.MAGENTA))
+        parts.append(mux_pair_text("bitrate", describe_bitrate(stream.bitrate_kbps), Color.YELLOW))
+        stats = {0: {"mean_volume": stream.mean_volume or "unknown", "max_volume": stream.max_volume or "unknown"}}
+        parts.append(mux_pair_text("mean / max volume", audio_mean_max_volume_field(stats, 0), Color.MEAN_VOLUME))
         estimate_label = " approx" if stream.size_estimated and stream.size_bytes else ""
-        parts.append(field_text("track size", format_bytes(stream.size_bytes) + estimate_label, Color.LIME))
+        parts.append(mux_pair_text("track size", format_bytes(stream.size_bytes) + estimate_label, Color.MUX_SILVER))
     elif stream.codec_type == "subtitle":
         duration = stream.duration if stream.duration is not None else stream_duration_seconds({}, fmt)
-        parts.append(field_text("duration", format_duration(duration), Color.MAGENTA))
-    parts.append(field_text("default", stream.disposition_default, Color.YELLOW if stream.disposition_default else Color.GRAY))
+        parts.append(mux_pair_text("duration", format_duration(duration), Color.MAGENTA))
+    default_value = "yes" if stream.disposition_default else "no"
+    parts.append(mux_pair_text("default", default_value, Color.BOLD + Color.GREEN if stream.disposition_default else Color.GRAY))
     return " | ".join(parts)
 
 
@@ -4722,31 +7607,31 @@ def mux_display_path(input_root: Path, input_file: Path) -> Path:
 
 
 def mux_print_scan_report(media_files: list[MuxMediaFile], input_root: Path) -> None:
-    print()
-    print(paint("Stream Cleanup Scan Report", Color.BOLD + Color.AQUA))
-    print(paint("=" * 72, Color.GRAY))
-    for media in media_files:
+    mux_print_header("Stream Cleanup Scan Report", Color.MUX_SCAN_HEADER)
+    for index, media in enumerate(media_files, start=1):
         print()
+        if index > 1:
+            print(mux_separator_line(Color.MUX_SEPARATOR))
         print(
-            f"{paint('File:', Color.BOLD + Color.WHITE)} "
-            f"{paint(str(mux_display_path(input_root, media.path)), Color.WHITE)} | "
-            f"{field_text('duration', format_duration(stream_duration_seconds({}, media.format)), Color.MAGENTA)} | "
-            f"{field_text('total bitrate', describe_total_bitrate(media.format), Color.YELLOW)}"
+            f"{paint('File:', Color.MUX_FILE_LINE)} "
+            f"{paint(str(mux_display_path(input_root, media.path)), Color.MUX_FILE_LINE)} | "
+            f"{mux_pair_text('duration', format_duration(stream_duration_seconds({}, media.format)), Color.MAGENTA)} | "
+            f"{mux_pair_text('total bitrate', describe_total_bitrate(media.format), Color.YELLOW)}"
         )
         if media.video_streams:
             print(paint("  Video:", Color.BOLD + Color.MAGENTA))
             for stream in media.video_streams:
-                print("    " + mux_format_stream(stream, media.format))
+                print("    " + mux_format_stream(stream, media.format, media.chapter_count))
         else:
             print(paint("  Video: none", Color.GRAY))
         if media.audio_streams:
-            print(paint("  Audio:", Color.BOLD + Color.BLUE))
+            print(paint("  Audio:", Color.BOLD + Color.MUX_AZURE))
             for stream in media.audio_streams:
                 print("    " + mux_format_stream(stream, media.format))
         else:
             print(paint("  Audio: none", Color.GRAY))
         if media.subtitle_streams:
-            print(paint("  Subtitles:", Color.BOLD + Color.ORANGE))
+            print(paint("  Subtitles:", Color.BOLD + Color.MUX_VIOLET))
             for stream in media.subtitle_streams:
                 print("    " + mux_format_stream(stream, media.format))
         else:
@@ -4775,27 +7660,150 @@ def mux_stream_indexes(media_files: list[MuxMediaFile], codec_type: str) -> list
     return sorted(indexes)
 
 
-def mux_print_unique_summary(media_files: list[MuxMediaFile]) -> None:
+def mux_normalize_language(value: str) -> str:
+    text = str(value or "").strip().lower()
+    return "unknown" if text in {"", "und", "undefined"} else text
+
+
+def mux_streams_for_type(media_files: list[MuxMediaFile], codec_type: str) -> list[MuxStreamInfo]:
+    return [
+        stream
+        for media in media_files
+        for stream in media.streams
+        if stream.codec_type == codec_type
+    ]
+
+
+def mux_kept_streams_for_metadata(
+    media_files: list[MuxMediaFile],
+    codec_type: str,
+    rules: MuxCleanupRules | None,
+) -> list[MuxStreamInfo]:
+    if rules is None:
+        return mux_streams_for_type(media_files, codec_type)
+    kept: list[MuxStreamInfo] = []
+    for media in media_files:
+        if codec_type == "audio":
+            kept.extend(mux_selected_audio_streams(media, rules))
+        elif codec_type == "subtitle":
+            kept.extend(mux_selected_subtitle_streams(media, rules))
+    return kept
+
+
+def mux_kept_languages_for_metadata(
+    media_files: list[MuxMediaFile],
+    codec_type: str,
+    rules: MuxCleanupRules | None,
+) -> list[str]:
+    return sorted({mux_normalize_language(stream.language) for stream in mux_kept_streams_for_metadata(media_files, codec_type, rules)})
+
+
+def mux_kept_indexes_for_metadata(
+    media_files: list[MuxMediaFile],
+    codec_type: str,
+    rules: MuxCleanupRules | None,
+) -> list[int]:
+    return sorted({stream.index for stream in mux_kept_streams_for_metadata(media_files, codec_type, rules)})
+
+
+def mux_format_index_list(indexes: list[int]) -> str:
+    return ", ".join(str(index) for index in indexes) if indexes else "none"
+
+
+def mux_metadata_edit_match_text(edit: MuxStreamMetadataEdit) -> str:
+    if edit.match_indexes:
+        return "indexes=" + ",".join(str(index) for index in edit.match_indexes)
+    if edit.match_languages:
+        return "languages=" + ",".join(display_language(value) for value in edit.match_languages)
+    return "all"
+
+
+def mux_metadata_edit_change_text(edit: MuxStreamMetadataEdit) -> str:
+    changes: list[str] = []
+    if edit.language:
+        changes.append(f"language={display_language(edit.language)}")
+    if edit.title:
+        changes.append(f"title={edit.title}")
+    return ", ".join(changes) if changes else "no changes"
+
+
+def mux_format_metadata_edit(edit: MuxStreamMetadataEdit) -> str:
+    return f"{edit.codec_type} {mux_metadata_edit_match_text(edit)} -> {mux_metadata_edit_change_text(edit)}"
+
+
+def mux_format_metadata_edits(edits: list[MuxStreamMetadataEdit]) -> str:
+    return "; ".join(mux_format_metadata_edit(edit) for edit in edits) if edits else "none"
+
+
+def mux_terminal_width() -> int:
+    try:
+        return max(72, shutil.get_terminal_size((100, 20)).columns)
+    except Exception:
+        return 100
+
+
+def mux_separator_line(color_code: str = Color.MUX_SEPARATOR, char: str = "=") -> str:
+    return paint(char * mux_terminal_width(), color_code)
+
+
+def mux_center_text(text: str) -> str:
+    return text.center(mux_terminal_width())
+
+
+def mux_print_header(text: str, color_code: str = Color.MUX_HEADER, char: str = "=") -> None:
     print()
-    print(paint("Unique Stream Summary", Color.BOLD + Color.LIME))
-    print(paint("-" * 72, Color.GRAY))
-    for codec_type, color_code in (("audio", Color.BLUE), ("subtitle", Color.ORANGE)):
+    print(paint(mux_center_text(text), color_code))
+    print(mux_separator_line(color_code, char))
+
+
+def mux_language_color(language: str) -> str:
+    normalized = mux_normalize_language(language)
+    if normalized == "unknown":
+        return Color.MUX_UNKNOWN_LANGUAGE
+    return MUX_LANGUAGE_COLORS[sum(ord(ch) for ch in normalized) % len(MUX_LANGUAGE_COLORS)]
+
+
+def mux_pair_text(name: str, value: Any, value_color: str = Color.MUX_SETTING_VALUE) -> str:
+    return f"{paint(name + ':', Color.GRAY)} {paint(str(value), value_color)}"
+
+
+def mux_setting_text(name: str, value: Any, value_color: str = Color.MUX_SETTING_VALUE) -> str:
+    return f"{paint(name + ':', Color.MUX_SETTING_LABEL)} {paint(str(value), value_color)}"
+
+
+def mux_format_value_list(values: Any, value_color: str = Color.MUX_SETTING_VALUE) -> str:
+    if isinstance(values, (list, tuple, set)):
+        if not values:
+            return paint("-", Color.GRAY)
+        return paint(",".join(str(value) for value in values), value_color)
+    if values in (None, "", []):
+        return paint("-", Color.GRAY)
+    return paint(str(values), value_color)
+
+
+def mux_print_setting(name: str, value: Any, value_color: str = Color.MUX_SETTING_VALUE) -> None:
+    print("  " + mux_setting_text(name, value, value_color))
+
+
+def mux_print_unique_summary(media_files: list[MuxMediaFile]) -> None:
+    mux_print_header("Unique Stream Summary", Color.MUX_SUMMARY_HEADER, "-")
+    for codec_type, color_code in (("audio", Color.MUX_AUDIO), ("subtitle", Color.MUX_SUBTITLE)):
         print(paint(codec_type.capitalize() + " streams found:", Color.BOLD + color_code))
         summary: dict[tuple[str, str, str], int] = {}
         for media in media_files:
             streams = media.audio_streams if codec_type == "audio" else media.subtitle_streams
             for stream in streams:
-                key = (display_language(stream.language), stream.title or "-", stream.codec_name or "-")
+                key = (mux_normalize_language(stream.language), stream.title or "-", stream.codec_name or "-")
                 summary[key] = summary.get(key, 0) + 1
         if not summary:
             print(paint("  none", Color.GRAY))
             continue
         for (language, title, codec), count in sorted(summary.items()):
             print(
-                f"  {field_text('count', count, Color.LIME)} | "
-                f"{field_text('lang', language, Color.CYAN)} | "
-                f"{field_text('title', title, Color.WHITE)} | "
-                f"{field_text('codec', codec, Color.MAGENTA)}"
+                f"  {mux_pair_text('count', count, Color.BOLD + Color.MUX_GOLD)} | "
+                f"{mux_pair_text('lang', display_language(language), mux_language_color(language))} | "
+                f"{mux_pair_text('title', title, Color.MUX_SKY)} | "
+                f"{mux_pair_text('codec', codec, Color.MUX_MINT)}"
             )
         print()
 
@@ -4817,10 +7825,19 @@ def mux_parse_csv_int(raw: str) -> list[int]:
     return indexes
 
 
+def mux_assign_prompt_number(answers: dict[str, Any]) -> int:
+    number = int(answers.get("_mux_next_question_number") or answers.get("_question_number") or 1)
+    answers["_question_number"] = number
+    answers["_mux_next_question_number"] = number + 1
+    return number
+
+
 def mux_ask_choice(answers: dict[str, Any], title: str, details: str, valid: set[str], default: str) -> str:
+    prompt_number = mux_assign_prompt_number(answers)
     while True:
+        answers["_question_number"] = prompt_number
         value = ask_raw(question_prompt(answers, title, details, default))
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = default
@@ -4831,31 +7848,162 @@ def mux_ask_choice(answers: dict[str, Any], title: str, details: str, valid: set
 
 
 def mux_ask_yes_no(answers: dict[str, Any], title: str, default: bool) -> bool:
+    prompt_number = mux_assign_prompt_number(answers)
+    answers["_question_number"] = prompt_number
     return ask_yes_no(question_prompt(answers, title, "y/n", "y" if default else "n"), default)
 
 
-def mux_ask_text(answers: dict[str, Any], title: str, details: str) -> str:
+def mux_ask_text(answers: dict[str, Any], title: str, details: str, *, zero_is_value: bool = False) -> str:
+    prompt_number = mux_assign_prompt_number(answers)
+    back = "back=b, quit=exit" if zero_is_value else "back=0, quit=exit"
     while True:
-        value = ask_raw(question_prompt(answers, title, details))
-        if value == "0":
+        answers["_question_number"] = prompt_number
+        value = ask_raw(question_prompt(answers, title, details, back=back))
+        if zero_is_value:
+            if value.lower().strip() in {"b", "back"}:
+                raise Back()
+        elif is_back_value(value):
             raise Back()
         if value:
             return value
         error("This value cannot be empty.")
 
 
+def mux_ask_csv_int_required(answers: dict[str, Any], title: str, available: list[int]) -> list[int]:
+    available_set = set(available)
+    while True:
+        raw = mux_ask_text(
+            answers,
+            title,
+            f"available: {example_text(mux_format_index_list(available))}; use b to go back",
+            zero_is_value=True,
+        )
+        indexes = mux_parse_csv_int(raw)
+        if not indexes:
+            error("Enter at least one stream index.")
+            continue
+        unknown = sorted(set(indexes) - available_set)
+        if unknown:
+            error("These indexes were not found: " + mux_format_index_list(unknown))
+            continue
+        return indexes
+
+
+def mux_ask_language_codes_required(answers: dict[str, Any], title: str, available: list[str] | None = None) -> list[str]:
+    details = "example: jpn,eng,fas"
+    if available:
+        details += f"; available: {example_text(','.join(available))}"
+    while True:
+        values = [mux_normalize_language(value) for value in mux_parse_csv_text(mux_ask_text(answers, title, details))]
+        if values:
+            return values
+        error("Enter at least one language code.")
+
+
+def mux_ask_metadata_edits(
+    answers: dict[str, Any],
+    media_files: list[MuxMediaFile],
+    current_rules: MuxCleanupRules,
+) -> list[MuxStreamMetadataEdit]:
+    edits: list[MuxStreamMetadataEdit] = []
+    audio_languages = mux_kept_languages_for_metadata(media_files, "audio", current_rules)
+    subtitle_languages = mux_kept_languages_for_metadata(media_files, "subtitle", current_rules)
+    default = "1" if "unknown" in audio_languages else "2" if "unknown" in subtitle_languages else "8"
+
+    if not mux_ask_yes_no(answers, "Edit output stream metadata?", False):
+        return edits
+
+    while True:
+        answers["_question_number"] += 1
+        if edits:
+            note("Current metadata edits: " + mux_format_metadata_edits(edits))
+        action = mux_ask_choice(
+            answers,
+            "Metadata edit action",
+            (
+                "1=set audio language by current language; "
+                "2=set subtitle language by current language; "
+                "3=set audio language by exact stream indexes; "
+                "4=set subtitle language by exact stream indexes; "
+                "5=set audio title by exact stream indexes; "
+                "6=set subtitle title by exact stream indexes; "
+                "7=clear edits; 8=done"
+            ),
+            {"1", "2", "3", "4", "5", "6", "7", "8"},
+            default if not edits else "8",
+        )
+        if action == "8":
+            return edits
+        if action == "7":
+            edits = []
+            note("Metadata edits cleared.")
+            continue
+        if action in {"1", "2"}:
+            codec_type = "audio" if action == "1" else "subtitle"
+            available = audio_languages if codec_type == "audio" else subtitle_languages
+            if not available:
+                note(f"No kept {codec_type} streams are available for metadata editing.")
+                continue
+            answers["_question_number"] += 1
+            current_languages = mux_ask_language_codes_required(
+                answers,
+                f"Current {codec_type} language code(s) to edit",
+                available,
+            )
+            answers["_question_number"] += 1
+            new_language = mux_normalize_language(mux_ask_text(answers, f"New {codec_type} language code", "example: jpn"))
+            edits.append(MuxStreamMetadataEdit(codec_type=codec_type, match_languages=current_languages, language=new_language))
+            note("Added metadata edit: " + mux_format_metadata_edit(edits[-1]))
+            continue
+
+        codec_type = "audio" if action in {"3", "5"} else "subtitle"
+        available_indexes = mux_kept_indexes_for_metadata(media_files, codec_type, current_rules)
+        if not available_indexes:
+            note(f"No kept {codec_type} streams are available for metadata editing.")
+            continue
+        answers["_question_number"] += 1
+        indexes = mux_ask_csv_int_required(answers, f"{codec_type.capitalize()} stream indexes to edit", available_indexes)
+        if action in {"3", "4"}:
+            answers["_question_number"] += 1
+            new_language = mux_normalize_language(mux_ask_text(answers, f"New {codec_type} language code", "example: jpn"))
+            edits.append(MuxStreamMetadataEdit(codec_type=codec_type, match_indexes=indexes, language=new_language))
+        else:
+            answers["_question_number"] += 1
+            new_title = mux_ask_text(answers, f"New {codec_type} title", "text title for the kept output stream")
+            edits.append(MuxStreamMetadataEdit(codec_type=codec_type, match_indexes=indexes, title=new_title))
+        note("Added metadata edit: " + mux_format_metadata_edit(edits[-1]))
+
+
 def mux_ask_output_base(answers: dict[str, Any], input_root: Path) -> Path:
     default_text = "Enter=input parent folder"
+    prompt_number = mux_assign_prompt_number(answers)
     while True:
+        answers["_question_number"] = prompt_number
         value = ask_raw(question_prompt(answers, "Enter output folder path", default_text))
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             return input_root.parent
+        if value.lower() in {"y", "yes", "n", "no", "y/n", "yes/no", "n/y", "no/yes"}:
+            error("Please enter a folder path, or press Enter to use the input parent folder.")
+            continue
         path = terminal_path(value)
         if path.exists() and not path.is_dir():
             error("Output path exists but is not a folder. Enter another path.")
             continue
+        if path.suffix.lower() in MUX_CLEANUP_VIDEO_EXTS:
+            error("Output path must be a folder, not a media file name.")
+            continue
+        if path.suffix and not path.exists():
+            note(f"This output folder name has an extension: {path.name}")
+            if not mux_ask_yes_no(answers, "Use this as a folder path?", False):
+                continue
+        if not path.is_absolute():
+            resolved = (Path.cwd() / path).resolve()
+            note(f"Relative output folder will resolve to: {resolved}")
+            if not mux_ask_yes_no(answers, "Use this relative output folder?", False):
+                continue
+            return resolved
         return path
 
 
@@ -4863,13 +8011,17 @@ def mux_configure_rules(answers: dict[str, Any], media_files: list[MuxMediaFile]
     audio_languages = mux_unique_stream_values(media_files, "audio", "language")
     subtitle_languages = mux_unique_stream_values(media_files, "subtitle", "language")
     answers["_question_number"] = 2
-    selection_style = mux_ask_choice(
-        answers,
-        "Choose stream selection style",
-        "1=exact stream indexes; 2=advanced rules by language/title/index",
-        {"1", "2"},
-        "2",
-    )
+    if len(audio_languages) <= 1:
+        selection_style = "2"
+        log_info("Stream Cleanup selection style skipped: one or zero audio languages found.")
+    else:
+        selection_style = mux_ask_choice(
+            answers,
+            "Choose stream selection style",
+            "1=exact stream indexes; 2=advanced rules by language/title/index",
+            {"1", "2"},
+            "2",
+        )
 
     audio_mode = "4"
     audio_language_values: list[str] = []
@@ -4885,7 +8037,8 @@ def mux_configure_rules(answers: dict[str, Any], media_files: list[MuxMediaFile]
         audio_value = mux_ask_text(
             answers,
             "Audio stream indexes to keep",
-            f"examples: {example_text('1,2')}; all; none; available: {example_text(','.join(map(str, mux_stream_indexes(media_files, 'audio'))) or 'none')}",
+            f"examples: {example_text('0,1,2')}; all; none; available: {example_text(','.join(map(str, mux_stream_indexes(media_files, 'audio'))) or 'none')}; use b to go back",
+            zero_is_value=True,
         ).lower()
         if audio_value in {"all", "a", "*"}:
             audio_mode = "4"
@@ -4896,54 +8049,74 @@ def mux_configure_rules(answers: dict[str, Any], media_files: list[MuxMediaFile]
             audio_indexes = mux_parse_csv_int(audio_value)
 
         answers["_question_number"] = 4
-        subtitle_value = mux_ask_text(
-            answers,
-            "Subtitle stream indexes to keep",
-            f"examples: {example_text('3,4')}; all; none; available: {example_text(','.join(map(str, mux_stream_indexes(media_files, 'subtitle'))) or 'none')}",
-        ).lower()
-        if subtitle_value in {"all", "a", "*"}:
-            subtitle_mode = "5"
-        elif subtitle_value in {"none", "n", "no", "remove", "-"}:
+        subtitle_indexes_available = mux_stream_indexes(media_files, "subtitle")
+        if not subtitle_indexes_available:
             subtitle_mode = "1"
+            note("No subtitle streams found; selecting none.")
         else:
-            subtitle_mode = "4"
-            subtitle_indexes = mux_parse_csv_int(subtitle_value)
+            subtitle_value = mux_ask_text(
+                answers,
+                "Subtitle stream indexes to keep",
+                f"examples: {example_text('0,3,4')}; all; none; available: {example_text(','.join(map(str, subtitle_indexes_available)) or 'none')}; use b to go back",
+                zero_is_value=True,
+            ).lower()
+            if subtitle_value in {"all", "a", "*"}:
+                subtitle_mode = "5"
+            elif subtitle_value in {"none", "n", "no", "remove", "-"}:
+                subtitle_mode = "1"
+            else:
+                subtitle_mode = "4"
+                subtitle_indexes = mux_parse_csv_int(subtitle_value)
     else:
-        answers["_question_number"] = 3
-        audio_mode = mux_ask_choice(
-            answers,
-            "Choose audio mode",
-            f"1=by language; 2=by title; 3=by exact stream indexes; 4=keep all; 5=remove all; found languages: {example_text(','.join(audio_languages) or 'none')}",
-            {"1", "2", "3", "4", "5"},
-            "1",
-        )
-        if audio_mode == "1":
-            answers["_question_number"] = 4
-            audio_language_values = mux_parse_csv_text(mux_ask_text(answers, "Audio language codes to keep", "example: jpn,eng,fas"))
-        elif audio_mode == "2":
-            answers["_question_number"] = 4
-            audio_titles = mux_parse_csv_text(mux_ask_text(answers, "Audio title text to keep", "example: japanese,commentary"))
-        elif audio_mode == "3":
-            answers["_question_number"] = 4
-            audio_indexes = mux_parse_csv_int(mux_ask_text(answers, "Audio stream indexes to keep", "example: 2,3"))
+        if len(audio_languages) <= 1:
+            answers["_question_number"] = 3
+            if audio_languages:
+                audio_mode = "1"
+                audio_language_values = list(audio_languages)
+                note(f"Only one audio language found; keeping audio language: {', '.join(audio_language_values)}")
+            else:
+                audio_mode = "5"
+                note("No audio streams found; selecting no audio.")
+        else:
+            answers["_question_number"] = 3
+            audio_mode = mux_ask_choice(
+                answers,
+                "Choose audio mode",
+                f"1=by language; 2=by title; 3=by exact stream indexes; 4=keep all; 5=remove all; found languages: {example_text(','.join(audio_languages) or 'none')}",
+                {"1", "2", "3", "4", "5"},
+                "1",
+            )
+            if audio_mode == "1":
+                answers["_question_number"] = 4
+                audio_language_values = mux_parse_csv_text(mux_ask_text(answers, "Audio language codes to keep", "example: jpn,eng,fas"))
+            elif audio_mode == "2":
+                answers["_question_number"] = 4
+                audio_titles = mux_parse_csv_text(mux_ask_text(answers, "Audio title text to keep", "example: japanese,commentary"))
+            elif audio_mode == "3":
+                answers["_question_number"] = 4
+                audio_indexes = mux_parse_csv_int(mux_ask_text(answers, "Audio stream indexes to keep", "example: 0,2,3; use b to go back", zero_is_value=True))
 
         answers["_question_number"] = 5
-        subtitle_mode = mux_ask_choice(
-            answers,
-            "Choose subtitle mode",
-            f"1=remove all; 2=by language; 3=by title; 4=by exact stream indexes; 5=keep all; found languages: {example_text(','.join(subtitle_languages) or 'none')}",
-            {"1", "2", "3", "4", "5"},
-            "1",
-        )
-        if subtitle_mode == "2":
-            answers["_question_number"] = 6
-            subtitle_language_values = mux_parse_csv_text(mux_ask_text(answers, "Subtitle language codes to keep", "example: eng,fas"))
-        elif subtitle_mode == "3":
-            answers["_question_number"] = 6
-            subtitle_titles = mux_parse_csv_text(mux_ask_text(answers, "Subtitle title text to keep", "example: signs,full"))
-        elif subtitle_mode == "4":
-            answers["_question_number"] = 6
-            subtitle_indexes = mux_parse_csv_int(mux_ask_text(answers, "Subtitle stream indexes to keep", "example: 3,4"))
+        if not subtitle_languages:
+            subtitle_mode = "1"
+            note("No subtitle streams found; selecting none.")
+        else:
+            subtitle_mode = mux_ask_choice(
+                answers,
+                "Choose subtitle mode",
+                f"1=remove all; 2=by language; 3=by title; 4=by exact stream indexes; 5=keep all; found languages: {example_text(','.join(subtitle_languages) or 'none')}",
+                {"1", "2", "3", "4", "5"},
+                "5",
+            )
+            if subtitle_mode == "2":
+                answers["_question_number"] = 6
+                subtitle_language_values = mux_parse_csv_text(mux_ask_text(answers, "Subtitle language codes to keep", "example: eng,fas"))
+            elif subtitle_mode == "3":
+                answers["_question_number"] = 6
+                subtitle_titles = mux_parse_csv_text(mux_ask_text(answers, "Subtitle title text to keep", "example: signs,full"))
+            elif subtitle_mode == "4":
+                answers["_question_number"] = 6
+                subtitle_indexes = mux_parse_csv_int(mux_ask_text(answers, "Subtitle stream indexes to keep", "example: 0,3,4; use b to go back", zero_is_value=True))
 
     answers["_question_number"] = 7
     if subtitle_mode == "1":
@@ -4954,9 +8127,29 @@ def mux_configure_rules(answers: dict[str, Any], media_files: list[MuxMediaFile]
 
     answers["_question_number"] = 8
     keep_metadata = mux_ask_yes_no(answers, "Keep input metadata?", True)
+    metadata_context = MuxCleanupRules(
+        audio_mode=audio_mode,
+        audio_languages=audio_language_values,
+        audio_titles=audio_titles,
+        audio_indexes=audio_indexes,
+        subtitle_mode=subtitle_mode,
+        subtitle_languages=subtitle_language_values,
+        subtitle_titles=subtitle_titles,
+        subtitle_indexes=subtitle_indexes,
+        keep_attachments=keep_attachments,
+        keep_metadata=keep_metadata,
+        keep_chapters=True,
+        overwrite=False,
+        copy_non_video_files=True,
+        selection_style="exact" if selection_style == "1" else "advanced",
+    )
     answers["_question_number"] = 9
+    metadata_edits = mux_ask_metadata_edits(answers, media_files, metadata_context)
+    answers["_question_number"] = int(answers.get("_question_number", 9)) + 1
     keep_chapters = mux_ask_yes_no(answers, "Keep chapters?", True)
-    answers["_question_number"] = 10
+    answers["_question_number"] = int(answers.get("_question_number", 10)) + 1
+    copy_non_video_files = mux_ask_yes_no(answers, "Copy non-video files to output folder?", True)
+    answers["_question_number"] = int(answers.get("_question_number", 11)) + 1
     overwrite = mux_ask_yes_no(answers, "Overwrite existing output files?", False)
 
     return MuxCleanupRules(
@@ -4972,6 +8165,9 @@ def mux_configure_rules(answers: dict[str, Any], media_files: list[MuxMediaFile]
         keep_metadata=keep_metadata,
         keep_chapters=keep_chapters,
         overwrite=overwrite,
+        copy_non_video_files=copy_non_video_files,
+        selection_style="exact" if selection_style == "1" else "advanced",
+        metadata_edits=metadata_edits,
     )
 
 
@@ -4982,7 +8178,8 @@ def mux_text_matches_any(value: str, needles: list[str]) -> bool:
 
 def mux_selected_audio_streams(media: MuxMediaFile, rules: MuxCleanupRules) -> list[MuxStreamInfo]:
     if rules.audio_mode == "1":
-        return [stream for stream in media.audio_streams if stream.language.lower() in rules.audio_languages]
+        wanted = {mux_normalize_language(value) for value in rules.audio_languages}
+        return [stream for stream in media.audio_streams if mux_normalize_language(stream.language) in wanted]
     if rules.audio_mode == "2":
         return [stream for stream in media.audio_streams if mux_text_matches_any(stream.title, rules.audio_titles)]
     if rules.audio_mode == "3":
@@ -4994,7 +8191,8 @@ def mux_selected_audio_streams(media: MuxMediaFile, rules: MuxCleanupRules) -> l
 
 def mux_selected_subtitle_streams(media: MuxMediaFile, rules: MuxCleanupRules) -> list[MuxStreamInfo]:
     if rules.subtitle_mode == "2":
-        return [stream for stream in media.subtitle_streams if stream.language.lower() in rules.subtitle_languages]
+        wanted = {mux_normalize_language(value) for value in rules.subtitle_languages}
+        return [stream for stream in media.subtitle_streams if mux_normalize_language(stream.language) in wanted]
     if rules.subtitle_mode == "3":
         return [stream for stream in media.subtitle_streams if mux_text_matches_any(stream.title, rules.subtitle_titles)]
     if rules.subtitle_mode == "4":
@@ -5002,6 +8200,91 @@ def mux_selected_subtitle_streams(media: MuxMediaFile, rules: MuxCleanupRules) -
     if rules.subtitle_mode == "5":
         return media.subtitle_streams
     return []
+
+
+def mux_metadata_edit_applies(edit: MuxStreamMetadataEdit, stream: MuxStreamInfo) -> bool:
+    if edit.codec_type != stream.codec_type:
+        return False
+    if edit.match_indexes:
+        return stream.index in edit.match_indexes
+    if edit.match_languages:
+        wanted = {mux_normalize_language(value) for value in edit.match_languages}
+        return mux_normalize_language(stream.language) in wanted
+    return True
+
+
+def mux_metadata_values_for_stream(stream: MuxStreamInfo, rules: MuxCleanupRules) -> tuple[str, str]:
+    language = ""
+    title = ""
+    for edit in rules.metadata_edits:
+        if not mux_metadata_edit_applies(edit, stream):
+            continue
+        if edit.language:
+            language = mux_normalize_language(edit.language)
+        if edit.title:
+            title = edit.title
+    return language, title
+
+
+def mux_add_stream_metadata_options(
+    cmd: list[str],
+    stream_spec: str,
+    stream: MuxStreamInfo,
+    rules: MuxCleanupRules,
+) -> None:
+    language, title = mux_metadata_values_for_stream(stream, rules)
+    if language:
+        cmd.extend([f"-metadata:{stream_spec}", f"language={language}"])
+    if title:
+        cmd.extend([f"-metadata:{stream_spec}", f"title={title}"])
+
+
+def mux_same_stream_indexes(original: list[MuxStreamInfo], selected: list[MuxStreamInfo]) -> bool:
+    return [stream.index for stream in original] == [stream.index for stream in selected]
+
+
+def mux_default_disposition_needs_update(streams: list[MuxStreamInfo]) -> bool:
+    if not streams:
+        return False
+    if streams[0].disposition_default != 1:
+        return True
+    return any(stream.disposition_default != 0 for stream in streams[1:])
+
+
+def mux_metadata_edits_need_remux(streams: list[MuxStreamInfo], rules: MuxCleanupRules) -> bool:
+    for stream in streams:
+        target_language, target_title = mux_metadata_values_for_stream(stream, rules)
+        if target_language and mux_normalize_language(stream.language) != mux_normalize_language(target_language):
+            return True
+        if target_title and (stream.title or "") != target_title:
+            return True
+    return False
+
+
+def mux_remux_needed_reasons(
+    media: MuxMediaFile,
+    rules: MuxCleanupRules,
+    audio_keep: list[MuxStreamInfo],
+    subtitle_keep: list[MuxStreamInfo],
+) -> list[str]:
+    reasons: list[str] = []
+    if not mux_same_stream_indexes(media.audio_streams, audio_keep):
+        reasons.append("audio stream selection changes")
+    if not mux_same_stream_indexes(media.subtitle_streams, subtitle_keep):
+        reasons.append("subtitle stream selection changes")
+    if not rules.keep_attachments and media.attachment_streams:
+        reasons.append("attachments are removed")
+    if not rules.keep_metadata:
+        reasons.append("input metadata is removed")
+    if not rules.keep_chapters:
+        reasons.append("chapters are removed")
+    if mux_default_disposition_needs_update(audio_keep):
+        reasons.append("audio default disposition is normalized")
+    if mux_default_disposition_needs_update(subtitle_keep):
+        reasons.append("subtitle default disposition is normalized")
+    if mux_metadata_edits_need_remux([*audio_keep, *subtitle_keep], rules):
+        reasons.append("stream metadata is edited")
+    return reasons
 
 
 def mux_language_label(value: str) -> str:
@@ -5096,6 +8379,185 @@ def mux_make_output_path(input_root: Path, output_root: Path, input_file: Path, 
     return output_root / input_file.relative_to(input_root)
 
 
+def mux_format_size_difference(size_bytes: int) -> str:
+    sign = "+" if size_bytes > 0 else "-" if size_bytes < 0 else ""
+    absolute = abs(int(size_bytes))
+    kb = absolute / 1024
+    mb = kb / 1024
+    gb = mb / 1024
+    if mb < 5:
+        return f"{sign}{kb:.2f} KB"
+    if gb >= 1:
+        return f"{sign}{gb:.2f} GB"
+    return f"{sign}{mb:.2f} MB"
+
+
+def mux_path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def mux_path_total_size(path: Path, exclude_paths: list[Path] | None = None) -> int:
+    excludes = list(exclude_paths or [])
+    if not path.exists():
+        return 0
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError as exc:
+            log_warn(f"Could not read file size for {path}: {exc}")
+            return 0
+    total = 0
+    for child in path.rglob("*"):
+        if not child.is_file():
+            continue
+        if any(mux_path_is_under(child, excluded) for excluded in excludes):
+            continue
+        try:
+            total += child.stat().st_size
+        except OSError as exc:
+            log_warn(f"Could not read file size for {child}: {exc}")
+    return total
+
+
+def mux_extra_file_sources(input_root: Path, output_root: Path) -> list[Path]:
+    if input_root.is_file():
+        return []
+    sources: list[Path] = []
+    for source in sorted(input_root.rglob("*"), key=lambda path: str(path).lower()):
+        if not source.is_file():
+            continue
+        if source.suffix.lower() in MUX_CLEANUP_VIDEO_EXTS:
+            continue
+        if mux_path_is_under(source, output_root):
+            continue
+        sources.append(source)
+    return sources
+
+
+def mux_destination_snapshot(paths: list[Path]) -> dict[Path, tuple[int, int]]:
+    snapshot: dict[Path, tuple[int, int]] = {}
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[path] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def mux_robocopy_success(returncode: int) -> bool:
+    return 0 <= int(returncode) <= 7
+
+
+def mux_run_robocopy(args: list[str]) -> subprocess.CompletedProcess[str]:
+    log_info("robocopy command: " + command_to_text(args))
+    return subprocess.run(
+        args,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def mux_copy_video_without_remux(input_file: Path, output_file: Path) -> None:
+    if shutil.which(ROBOCOPY_BIN) is None:
+        raise OSError("robocopy was not found in PATH")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    before = mux_destination_snapshot([output_file])
+    args = [
+        ROBOCOPY_BIN,
+        str(input_file.parent),
+        str(output_file.parent),
+        input_file.name,
+        "/R:1",
+        "/W:1",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NJS",
+        "/NP",
+    ]
+    result = mux_run_robocopy(args)
+    if result.stdout.strip():
+        log_debug("robocopy stdout: " + result.stdout.strip())
+    if result.stderr.strip():
+        log_debug("robocopy stderr: " + result.stderr.strip())
+    after = mux_destination_snapshot([output_file])
+    if not mux_robocopy_success(result.returncode):
+        raise OSError(f"robocopy failed with exit code {result.returncode}")
+    if output_file not in after:
+        raise OSError("robocopy did not create the output file")
+    if before.get(output_file) == after.get(output_file):
+        log_info(f"robocopy copied unchanged video but destination metadata did not change: {output_file}")
+
+
+def mux_copy_extra_files(input_root: Path, output_root: Path, rules: MuxCleanupRules) -> tuple[int, int, int]:
+    sources = mux_extra_file_sources(input_root, output_root)
+    if not sources:
+        return 0, 0, 0
+    if shutil.which(ROBOCOPY_BIN) is None:
+        log_warn("robocopy was not found in PATH; non-video files were not copied.")
+        note("robocopy was not found in PATH; non-video files were not copied.")
+        return 0, 0, len(sources)
+    destinations: list[Path] = []
+    for source in sources:
+        try:
+            destinations.append(output_root / source.relative_to(input_root))
+        except ValueError:
+            continue
+    before = mux_destination_snapshot(destinations)
+    args = [
+        ROBOCOPY_BIN,
+        str(input_root),
+        str(output_root),
+        "/E",
+        "/R:1",
+        "/W:1",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NJS",
+        "/NP",
+        "/XF",
+    ]
+    args.extend(f"*{suffix}" for suffix in sorted(MUX_CLEANUP_VIDEO_EXTS))
+    if mux_path_is_under(output_root, input_root):
+        args.extend(["/XD", str(output_root)])
+    if not rules.overwrite:
+        args.extend(["/XC", "/XN", "/XO"])
+    result = mux_run_robocopy(args)
+    if result.stdout.strip():
+        log_debug("robocopy stdout: " + result.stdout.strip())
+    if result.stderr.strip():
+        log_debug("robocopy stderr: " + result.stderr.strip())
+    after = mux_destination_snapshot(destinations)
+    copied = skipped = failed = 0
+    for destination in destinations:
+        before_stat = before.get(destination)
+        after_stat = after.get(destination)
+        if after_stat is None:
+            failed += 1
+        elif before_stat is None or after_stat != before_stat:
+            copied += 1
+        else:
+            skipped += 1
+    if not mux_robocopy_success(result.returncode):
+        failed = max(failed, 1)
+        log_warn(f"robocopy failed with exit code {result.returncode}")
+    log_info(
+        f"Stream Cleanup non-video copy: copied={copied}; skipped={skipped}; "
+        f"failed={failed}; returncode={result.returncode}"
+    )
+    return copied, skipped, failed
+
+
 def mux_build_ffmpeg_command(
     ffmpeg: str,
     input_file: Path,
@@ -5115,33 +8577,48 @@ def mux_build_ffmpeg_command(
     cmd.extend(["-map_metadata", "0" if rules.keep_metadata else "-1"])
     cmd.extend(["-map_chapters", "0" if rules.keep_chapters else "-1"])
     cmd.extend(["-c", "copy"])
-    if audio_keep:
-        cmd.extend(["-disposition:a:0", "default"])
-    if subtitle_keep:
-        cmd.extend(["-disposition:s:0", "default"])
+    for index, _stream in enumerate(audio_keep):
+        cmd.extend([f"-disposition:a:{index}", "+default" if index == 0 else "-default"])
+    for index, _stream in enumerate(subtitle_keep):
+        cmd.extend([f"-disposition:s:{index}", "+default" if index == 0 else "-default"])
+    for index, stream in enumerate(audio_keep):
+        mux_add_stream_metadata_options(cmd, f"s:a:{index}", stream, rules)
+    for index, stream in enumerate(subtitle_keep):
+        mux_add_stream_metadata_options(cmd, f"s:s:{index}", stream, rules)
     cmd.append(str(output_file))
     return cmd, audio_keep, subtitle_keep
 
 
 def mux_print_confirm(input_root: Path, output_base: Path, output_root: Path, rules: MuxCleanupRules) -> None:
-    print()
-    print(paint("Confirm Stream Cleanup Remux", Color.BOLD + Color.LIGHT_BLUE))
-    print(paint("-" * 72, Color.GRAY))
-    print("  " + field_text("Input", input_root, Color.WHITE))
-    print("  " + field_text("Output base", output_base, Color.CYAN))
-    print("  " + field_text("Output root", output_root, Color.LIME))
-    print("  " + field_text("Audio mode", rules.audio_mode, Color.BLUE))
-    print("  " + field_text("Audio languages", rules.audio_languages or "-", Color.CYAN))
-    print("  " + field_text("Audio titles", rules.audio_titles or "-", Color.WHITE))
-    print("  " + field_text("Audio indexes", rules.audio_indexes or "-", Color.LIGHT_BLUE))
-    print("  " + field_text("Subtitle mode", rules.subtitle_mode, Color.ORANGE))
-    print("  " + field_text("Subtitle languages", rules.subtitle_languages or "-", Color.CYAN))
-    print("  " + field_text("Subtitle titles", rules.subtitle_titles or "-", Color.WHITE))
-    print("  " + field_text("Subtitle indexes", rules.subtitle_indexes or "-", Color.LIGHT_BLUE))
-    print("  " + field_text("Keep attachments", rules.keep_attachments, Color.PINK))
-    print("  " + field_text("Keep metadata", rules.keep_metadata, Color.GREEN))
-    print("  " + field_text("Keep chapters", rules.keep_chapters, Color.GREEN))
-    print("  " + field_text("Overwrite", rules.overwrite, Color.RED if rules.overwrite else Color.GREEN))
+    mux_print_header("Confirm Stream Cleanup Remux", Color.MUX_CONFIRM_HEADER, "-")
+    mux_print_setting("Input", input_root, Color.MUX_INPUT_PATH)
+    mux_print_setting("Output base", output_base, Color.MUX_OUTPUT_BASE)
+    mux_print_setting("Output root", output_root, Color.MUX_OUTPUT_ROOT)
+    mux_print_setting("Audio mode", rules.audio_mode, Color.MUX_MODE)
+    mux_print_setting("Audio languages", mux_format_value_list(rules.audio_languages, Color.MUX_AUDIO))
+    mux_print_setting("Audio titles", mux_format_value_list(rules.audio_titles, Color.MUX_AUDIO))
+    mux_print_setting("Audio indexes", mux_format_value_list(rules.audio_indexes, Color.MUX_AUDIO))
+    mux_print_setting("Subtitle mode", rules.subtitle_mode, Color.MUX_MODE)
+    mux_print_setting("Subtitle languages", mux_format_value_list(rules.subtitle_languages, Color.MUX_SUBTITLE))
+    mux_print_setting("Subtitle titles", mux_format_value_list(rules.subtitle_titles, Color.MUX_SUBTITLE))
+    mux_print_setting("Subtitle indexes", mux_format_value_list(rules.subtitle_indexes, Color.MUX_SUBTITLE))
+    mux_print_setting("Metadata edits", mux_format_metadata_edits(rules.metadata_edits), Color.CYAN)
+    mux_print_setting("Keep attachments", rules.keep_attachments, Color.MUX_TRUE if rules.keep_attachments else Color.MUX_FALSE)
+    mux_print_setting("Keep metadata", rules.keep_metadata, Color.MUX_TRUE if rules.keep_metadata else Color.MUX_FALSE)
+    mux_print_setting("Keep chapters", rules.keep_chapters, Color.MUX_TRUE if rules.keep_chapters else Color.MUX_FALSE)
+    mux_print_setting("Copy non-video files", rules.copy_non_video_files, Color.MUX_TRUE if rules.copy_non_video_files else Color.MUX_FALSE)
+    mux_print_setting("Overwrite", rules.overwrite, Color.MUX_FALSE if rules.overwrite else Color.MUX_TRUE)
+    log_info(
+        "Stream Cleanup confirmed rules: "
+        f"input={input_root}; output_base={output_base}; output_root={output_root}; "
+        f"audio_mode={rules.audio_mode}; audio_languages={rules.audio_languages}; "
+        f"audio_titles={rules.audio_titles}; audio_indexes={rules.audio_indexes}; "
+        f"subtitle_mode={rules.subtitle_mode}; subtitle_languages={rules.subtitle_languages}; "
+        f"subtitle_titles={rules.subtitle_titles}; subtitle_indexes={rules.subtitle_indexes}; "
+        f"keep_attachments={rules.keep_attachments}; keep_metadata={rules.keep_metadata}; "
+        f"keep_chapters={rules.keep_chapters}; copy_non_video_files={rules.copy_non_video_files}; "
+        f"overwrite={rules.overwrite}; metadata_edits={mux_format_metadata_edits(rules.metadata_edits)}"
+    )
 
 
 def mux_process_files(
@@ -5151,45 +8628,73 @@ def mux_process_files(
     output_root: Path,
     rules: MuxCleanupRules,
 ) -> tuple[int, float]:
-    print()
-    print(paint("Processing Stream Cleanup Remux", Color.BOLD + Color.LIGHT_BLUE))
-    print(paint("=" * 72, Color.GRAY))
+    mux_print_header("Processing Stream Cleanup Remux", Color.MUX_PROCESS_HEADER)
     started_at = time.perf_counter()
     total = len(media_files)
     succeeded = 0
     skipped = 0
+    no_audio = 0
     failed = 0
+    remuxed = 0
+    copied_unchanged = 0
+    output_files_for_size: list[Path] = []
     output_root.mkdir(parents=True, exist_ok=True)
     log_info(f"Stream Cleanup Remux processing started: input={input_root}; output={output_root}; files={total}; rules={rules}")
     for index, media in enumerate(media_files, start=1):
         output_file = mux_make_output_path(input_root, output_root, media.path, rules)
         output_file.parent.mkdir(parents=True, exist_ok=True)
         rel = mux_display_path(input_root, media.path)
+        audio_keep = mux_selected_audio_streams(media, rules)
+        subtitle_keep = mux_selected_subtitle_streams(media, rules)
+        if rules.audio_mode != "5" and not audio_keep and media.audio_streams:
+            no_audio += 1
+            note(f"[{index}/{total}] Skip no matching audio selected: {rel}")
+            log_warn(f"Stream Cleanup no matching audio selected: {media.path}")
+            continue
         if output_file.exists() and not rules.overwrite:
             skipped += 1
             note(f"[{index}/{total}] Skip existing output: {rel}")
             log_warn(f"Stream Cleanup Remux skip existing output: {output_file}")
             continue
+        remux_reasons = mux_remux_needed_reasons(media, rules, audio_keep, subtitle_keep)
+        if not remux_reasons:
+            print()
+            print(
+                f"{paint('[' + str(index) + '/' + str(total) + ']', Color.MUX_GOLD)} "
+                f"{paint('Copying unchanged:', Color.MUX_PROCESS_HEADER)} {paint(str(rel), Color.WHITE)}"
+            )
+            print(paint("  no remux needed", Color.GRAY))
+            log_info(f"Stream Cleanup copy unchanged: input={media.path}; output={output_file}")
+            try:
+                mux_copy_video_without_remux(media.path, output_file)
+            except OSError as exc:
+                failed += 1
+                log_exception(f"Could not copy unchanged video: {media.path} -> {output_file}")
+                error(f"FAILED to copy unchanged file: {exc}")
+                continue
+            succeeded += 1
+            copied_unchanged += 1
+            output_files_for_size.append(output_file)
+            note(f"OK: {output_file}")
+            continue
         cmd, audio_keep, subtitle_keep = mux_build_ffmpeg_command(ffmpeg, media.path, output_file, media, rules)
         log_info(
             f"Stream Cleanup Remux file {index}/{total}: input={media.path}; output={output_file}; "
             f"audio_keep={[s.index for s in audio_keep]}; subtitle_keep={[s.index for s in subtitle_keep]}; "
-            f"attachments={rules.keep_attachments}"
+            f"attachments={rules.keep_attachments}; remux_reasons={remux_reasons}"
         )
         if not media.video_streams:
             note(f"[{index}/{total}] Warning: no video stream found: {rel}")
-        if rules.audio_mode != "5" and not audio_keep:
-            note(f"[{index}/{total}] Warning: no matching audio selected: {rel}")
         print()
         print(
-            f"{paint('[' + str(index) + '/' + str(total) + ']', Color.LIGHT_BLUE)} "
-            f"{paint('Remuxing:', Color.CYAN)} {paint(str(rel), Color.WHITE)}"
+            f"{paint('[' + str(index) + '/' + str(total) + ']', Color.MUX_GOLD)} "
+            f"{paint('Remuxing:', Color.MUX_PROCESS_HEADER)} {paint(str(rel), Color.WHITE)}"
         )
         print(
             "  "
-            + field_text("audio kept", len(audio_keep), Color.BLUE)
+            + field_text("audio kept", len(audio_keep), Color.MUX_AUDIO)
             + " | "
-            + field_text("subtitles kept", len(subtitle_keep), Color.ORANGE)
+            + field_text("subtitles kept", len(subtitle_keep), Color.MUX_SUBTITLE)
             + " | "
             + field_text("attachments", "yes" if rules.keep_attachments else "no", Color.PINK)
         )
@@ -5197,47 +8702,71 @@ def mux_process_files(
         rc, _elapsed = run_ffmpeg_with_progress(cmd, total_duration=duration, label="Stream Cleanup Remux")
         if rc == 0:
             succeeded += 1
+            remuxed += 1
+            output_files_for_size.append(output_file)
             note(f"OK: {output_file}")
         else:
             failed += 1
             error(f"FAILED: {media.path}. See log file: {_log_file_text()}")
+    if rules.copy_non_video_files:
+        extra_copied, extra_skipped, extra_failed = mux_copy_extra_files(input_root, output_root, rules)
+    else:
+        extra_copied = extra_skipped = extra_failed = 0
+        log_info("Stream Cleanup non-video file copy skipped by user setting.")
     elapsed = time.perf_counter() - started_at
-    print()
-    print(paint("Stream Cleanup Remux Done", Color.BOLD + Color.LIME))
-    print("  " + field_text("Total", total, Color.WHITE))
-    print("  " + field_text("OK", succeeded, Color.GREEN))
-    print("  " + field_text("Skipped", skipped, Color.YELLOW))
-    print("  " + field_text("Failed", failed, Color.RED if failed else Color.GREEN))
-    print("  " + field_text("Output", output_root, Color.AQUA))
-    print("  " + field_text("Total time elapsed", format_elapsed(elapsed), Color.MAGENTA))
+    if input_root.is_dir():
+        original_total_size = mux_path_total_size(input_root, exclude_paths=[output_root])
+        output_total_size = mux_path_total_size(output_root)
+    else:
+        original_total_size = mux_path_total_size(input_root)
+        output_total_size = sum(mux_path_total_size(path) for path in output_files_for_size)
+    size_delta = output_total_size - original_total_size
+    size_delta_text = mux_format_size_difference(size_delta)
+    mux_print_header("Stream Cleanup Remux Done", Color.MUX_DONE_HEADER)
+    mux_print_setting("Total", total, Color.WHITE)
+    mux_print_setting("OK", succeeded, Color.MUX_TRUE)
+    mux_print_setting("Remuxed", remuxed, Color.MUX_AZURE)
+    mux_print_setting("Copied unchanged", copied_unchanged, Color.LIME)
+    mux_print_setting("Skipped", skipped, Color.YELLOW)
+    mux_print_setting("No audio match", no_audio, Color.ORANGE)
+    mux_print_setting("Failed", failed, Color.RED if failed else Color.MUX_TRUE)
+    mux_print_setting("Extra files copied", extra_copied, Color.MUX_AQUA)
+    mux_print_setting("Extra files skipped", extra_skipped, Color.YELLOW)
+    mux_print_setting("Extra files failed", extra_failed, Color.RED if extra_failed else Color.MUX_TRUE)
+    mux_print_setting("Output", output_root, Color.MUX_OUTPUT_ROOT)
+    mux_print_setting("Size difference", size_delta_text, Color.MUX_SIZE_DIFF)
+    mux_print_setting("Total time elapsed", format_elapsed(elapsed), Color.MUX_ELAPSED)
     log_info(
-        f"Stream Cleanup Remux done: total={total}; ok={succeeded}; skipped={skipped}; "
-        f"failed={failed}; elapsed={format_elapsed(elapsed)}; output={output_root}"
+        f"Stream Cleanup Remux done: total={total}; ok={succeeded}; remuxed={remuxed}; "
+        f"copied_unchanged={copied_unchanged}; skipped={skipped}; no_audio_match={no_audio}; "
+        f"failed={failed}; extra_copied={extra_copied}; extra_skipped={extra_skipped}; "
+        f"extra_failed={extra_failed}; original_size_bytes={original_total_size}; "
+        f"output_size_bytes={output_total_size}; size_difference={size_delta_text}; "
+        f"size_delta_bytes={size_delta}; elapsed={format_elapsed(elapsed)}; output={output_root}"
     )
     return (1 if failed else 0), elapsed
 
 
 def mux_verify_output(ffprobe: str, root: Path) -> None:
     files = mux_find_video_files(root)
-    print()
-    print(paint("Verify Stream Cleanup Output", Color.BOLD + Color.LIGHT_BLUE))
-    print(paint("-" * 72, Color.GRAY))
+    mux_print_header("Verify Stream Cleanup Output", Color.MUX_VERIFY_HEADER, "-")
     if not files:
         note("No supported video files found.")
         return
+    log_info(f"Stream Cleanup verify output: root={root}; files={len(files)}")
     for path in files:
         media = mux_probe_file(ffprobe, path)
         if media is None:
             continue
-        audio_langs = ",".join(stream.language for stream in media.audio_streams) or "-"
-        subtitle_langs = ",".join(stream.language for stream in media.subtitle_streams) or "-"
+        audio_langs = ",".join(display_language(stream.language) for stream in media.audio_streams) or "-"
+        subtitle_langs = ",".join(display_language(stream.language) for stream in media.subtitle_streams) or "-"
         print(
-            f"{paint(str(mux_display_path(root, path)), Color.WHITE)} | "
+            f"{paint(str(mux_display_path(root, path)), Color.MUX_FILE_LINE)} | "
             f"{field_text('video', len(media.video_streams), Color.MAGENTA)} | "
-            f"{field_text('audio', len(media.audio_streams), Color.BLUE)} "
-            f"{paint('[' + audio_langs + ']', Color.CYAN)} | "
-            f"{field_text('subs', len(media.subtitle_streams), Color.ORANGE)} "
-            f"{paint('[' + subtitle_langs + ']', Color.CYAN)} | "
+            f"{field_text('audio', len(media.audio_streams), Color.MUX_AUDIO)} "
+            f"{paint('[' + audio_langs + ']', Color.MUX_AUDIO)} | "
+            f"{field_text('subs', len(media.subtitle_streams), Color.MUX_SUBTITLE)} "
+            f"{paint('[' + subtitle_langs + ']', Color.MUX_SUBTITLE)} | "
             f"{field_text('attachments', len(media.attachment_streams), Color.PINK)}"
         )
 
@@ -5259,67 +8788,79 @@ def ask_mux_cleanup_input_path(answers: dict[str, Any]) -> Path:
 
 
 def run_mux_cleanup_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    muxcls_path = Path(__file__).resolve().parent / "assets" / FFMWIZ_RUNTIME_DIR_NAME / "MuxCls.py"
+    if not muxcls_path.exists():
+        error(f"Local Stream Cleanup runtime file was not found: {muxcls_path}")
+        return None
+    started_at = time.perf_counter()
+    old_argv = list(sys.argv)
+    old_embedded = os.environ.get("FFMWIZ_EMBEDDED_MUXCLS")
+    old_log_file = os.environ.get("FFMWIZ_LOG_FILE")
     try:
-        return _run_mux_cleanup_mode_impl(base_answers)
+        import importlib.util
+
+        os.environ["FFMWIZ_EMBEDDED_MUXCLS"] = "1"
+        if log_path() is not None:
+            os.environ["FFMWIZ_LOG_FILE"] = str(log_path())
+        sys.argv = [str(muxcls_path)]
+        spec = importlib.util.spec_from_file_location("ffmwiz_local_muxcls", muxcls_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load local MuxCls module: {muxcls_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["ffmwiz_local_muxcls"] = module
+        spec.loader.exec_module(module)
+        log_info(f"Starting embedded Stream Cleanup Remux from local copy: {muxcls_path}")
+        module.main_menu()
+        return None
+    except getattr(sys.modules.get("ffmwiz_local_muxcls"), "MenuExit", ExitWizard):
+        raise ExitWizard()
+    except getattr(sys.modules.get("ffmwiz_local_muxcls"), "MenuBack", Back):
+        note("Returning to main menu.")
+        return None
+    except SystemExit as exc:
+        code = int(exc.code or 0) if isinstance(exc.code, int) else 1
+        if code == 0:
+            return None
+        return code, time.perf_counter() - started_at
     except Back:
         note("Returning to main menu.")
         return None
+    finally:
+        sys.argv = old_argv
+        if old_embedded is None:
+            os.environ.pop("FFMWIZ_EMBEDDED_MUXCLS", None)
+        else:
+            os.environ["FFMWIZ_EMBEDDED_MUXCLS"] = old_embedded
+        if old_log_file is None:
+            os.environ.pop("FFMWIZ_LOG_FILE", None)
+        else:
+            os.environ["FFMWIZ_LOG_FILE"] = old_log_file
 
 
 def _run_mux_cleanup_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
     answers = dict(base_answers)
-    while True:
-        answers["_question_number"] = 1
-        input_root = ask_mux_cleanup_input_path(answers)
-        log_info(f"Stream Cleanup Remux input: {input_root}")
-        files = mux_find_video_files(input_root)
-        if not files:
-            error("No supported video files were found.")
-            return None
-        note(f"Found {len(files)} supported video file(s).")
-        media_files = mux_scan_files(answers["ffprobe"], files, answers.get("ffmpeg"))
-        if not media_files:
-            error("No files could be scanned successfully.")
-            return None
-        mux_print_scan_report(media_files, input_root)
-        mux_print_unique_summary(media_files)
-
-        action = None
-        while True:
-            answers["_question_number"] = 2
-            try:
-                action = mux_ask_choice(
-                    answers,
-                    "Choose Stream Cleanup action",
-                    "1=process files; 2=scan only; 3=verify another folder",
-                    {"1", "2", "3"},
-                    "1",
-                )
-            except Back:
-                break
-            if action == "2":
-                note("Stream Cleanup scan only completed.")
-                return None
-            if action == "3":
-                try:
-                    answers["_question_number"] = 3
-                    verify_path = ask_mux_cleanup_input_path(answers)
-                except Back:
-                    continue
-                mux_verify_output(answers["ffprobe"], verify_path)
-                return None
-            break
-        if action == "1":
-            break
+    answers["_question_number"] = 1
+    input_root = ask_mux_cleanup_input_path(answers)
+    log_info(f"Stream Cleanup Remux input: {input_root}")
+    files = mux_find_video_files(input_root)
+    if not files:
+        error("No supported video files were found.")
+        return None
+    note(f"Found {len(files)} supported video file(s).")
+    media_files = mux_scan_files(answers["ffprobe"], files, answers.get("ffmpeg"))
+    if not media_files:
+        error("No files could be scanned successfully.")
+        return None
+    mux_print_scan_report(media_files, input_root)
+    mux_print_unique_summary(media_files)
 
     while True:
         try:
+            answers["_mux_next_question_number"] = 2
             rules = mux_configure_rules(answers, media_files)
-            answers["_question_number"] = 11
             output_base = mux_ask_output_base(answers, input_root)
             output_root = mux_resolve_output_root(input_root, output_base, rules)
             mux_print_confirm(input_root, output_base, output_root, rules)
-            answers["_question_number"] = 12
             if not mux_ask_yes_no(answers, "Start Stream Cleanup Remux now?", True):
                 note("Stream Cleanup Remux was not started.")
                 return None
@@ -5329,7 +8870,6 @@ def _run_mux_cleanup_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float
             continue
     result = mux_process_files(answers["ffmpeg"], media_files, input_root, output_root, rules)
     try:
-        answers["_question_number"] = 13
         if mux_ask_yes_no(answers, "Verify output folder now?", True):
             mux_verify_output(answers["ffprobe"], output_root)
     except Back:
@@ -5344,6 +8884,7 @@ FOLDER_MEDIA_METADATA_KEYS = (
     "video_streams",
     "audio_streams",
     "subtitle_streams",
+    "attachment_streams",
     "packet_sizes",
     "audio_volume_stats",
 )
@@ -5387,13 +8928,14 @@ def scan_folder_media_files(
         if path.is_file() and not (exclude_folder and path_is_inside(path, exclude_folder))
     ]
     candidates = sorted(
-        (path for path in files if is_folder_media_candidate(path)),
+        (path for path in files if is_folder_media_candidate(path) and not looks_like_generated_output_file(path)),
         key=lambda path: str(path.relative_to(folder_path)).lower(),
     )
     skipped_non_media = sum(1 for path in files if not is_folder_media_candidate(path))
+    skipped_generated = sum(1 for path in files if is_folder_media_candidate(path) and looks_like_generated_output_file(path))
     log_info(
         f"Folder Encode scan: folder={folder_path}; media candidates={len(candidates)}; "
-        f"non-media files ignored={skipped_non_media}"
+        f"non-media files ignored={skipped_non_media}; generated outputs ignored={skipped_generated}"
     )
     def probe_one(path: Path) -> dict[str, Any] | None:
         probe_answers = dict(base_answers)
@@ -5509,6 +9051,7 @@ def print_folder_media_summary(items: list[dict[str, Any]], base_answers: dict[s
             width = stream.get("width", "?")
             height = stream.get("height", "?")
             estimate_label = " approx" if estimated and size else ""
+            chapters_value, chapters_color = chapter_presence(detail_answers)
             print(
                 f"     {paint('video ' + str(video_idx), Color.MAGENTA)}: "
                 f"{field_text('codec', stream.get('codec_name', 'unknown'), Color.CYAN)} | "
@@ -5519,7 +9062,8 @@ def print_folder_media_summary(items: list[dict[str, Any]], base_answers: dict[s
                 f"{field_text('duration', stream_duration, Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
                 f"{field_text('video-only size', format_bytes(size) + estimate_label, Color.GREEN)} | "
-                f"{field_text('total bitrate', describe_total_bitrate(fmt), Color.AQUA)}"
+                f"{field_text('total bitrate', describe_total_bitrate(fmt), Color.AQUA)} | "
+                f"{field_text('chapters', chapters_value, chapters_color)}"
             )
 
         for audio_idx, stream in enumerate(detail_answers.get("audio_streams", [])):
@@ -5533,8 +9077,7 @@ def print_folder_media_summary(items: list[dict[str, Any]], base_answers: dict[s
                 f"{field_text('codec', stream.get('codec_name', 'unknown'), Color.CYAN)} | "
                 f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
-                f"{field_text('max_volume', audio_volume_field(volume_stats, audio_idx, 'max_volume'), Color.ORANGE)} | "
-                f"{field_text('mean_volume', audio_volume_field(volume_stats, audio_idx, 'mean_volume'), Color.AQUA)} | "
+                f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, audio_idx), Color.MEAN_VOLUME)} | "
                 f"{field_text('track size', format_bytes(size) + estimate_label, Color.LIME)}"
             )
 
@@ -5681,6 +9224,93 @@ def list_encoders(ffmpeg: str, kind: str) -> list[str]:
         if len(parts) >= 2:
             encoders.append(parts[1])
     return sorted(set(encoders))
+
+
+def nvenc_encoder_available(video_encoders: list[str] | tuple[str, ...] | set[str] | None) -> bool:
+    encoders = {str(name).lower() for name in (video_encoders or [])}
+    return any(name.endswith("_nvenc") for name in encoders)
+
+
+def detect_nvidia_gpu_available(ffmpeg: str, video_encoders: list[str] | None = None) -> bool:
+    if video_encoders is not None and not nvenc_encoder_available(video_encoders):
+        log_info("GPU auto-detect: FFmpeg does not report NVENC encoders.")
+        return False
+    encoder = "h264_nvenc"
+    encoders = {str(name).lower() for name in (video_encoders or [])}
+    if encoders and encoder not in encoders:
+        encoder = "hevc_nvenc" if "hevc_nvenc" in encoders else next((name for name in encoders if name.endswith("_nvenc")), encoder)
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        # 256x256: NVENC rejects tiny frames ("Frame Dimension less than the
+        # minimum supported value"), so a 16x16 probe falsely reported "no GPU"
+        # even on cards that fully support NVENC. 256x256 clears the minimum for
+        # h264/hevc/av1 NVENC while staying a trivially fast probe.
+        "-i",
+        "nullsrc=s=256x256:d=0.1",
+        "-frames:v",
+        "1",
+        "-c:v",
+        encoder,
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=6)
+    except Exception as exc:
+        log_info(f"GPU auto-detect: NVENC probe failed to run: {exc}")
+        return False
+    available = result.returncode == 0
+    log_info(f"GPU auto-detect: NVENC probe encoder={encoder}; available={available}; returncode={result.returncode}")
+    return available
+
+
+def detect_gpu_model_name(ffmpeg: str) -> str | None:
+    """Best-effort human-readable NVIDIA GPU model for the startup banner.
+
+    Tries nvidia-smi first (exact marketing name, e.g. "NVIDIA GeForce RTX 4070
+    Ti"); if that is unavailable, parses the GPU name FFmpeg prints while
+    initialising NVENC. Returns None when no name can be determined.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=5,
+        )
+        if result.returncode == 0:
+            for raw in result.stdout.decode("utf-8", "replace").splitlines():
+                name = raw.strip()
+                if name:
+                    return name
+    except Exception as exc:
+        log_info(f"GPU model: nvidia-smi query failed: {exc}")
+    # Fallback: read the device name from FFmpeg's verbose NVENC init log.
+    try:
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "verbose", "-f", "lavfi",
+            "-i", "nullsrc=s=256x256:d=0.1", "-frames:v", "1",
+            "-c:v", "h264_nvenc", "-f", "null", os.devnull,
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False, timeout=8)
+        match = re.search(r"GPU #\d+\s*-\s*<\s*([^>]+?)\s*>", result.stderr.decode("utf-8", "replace"))
+        if match:
+            return match.group(1).strip()
+    except Exception as exc:
+        log_info(f"GPU model: FFmpeg NVENC name probe failed: {exc}")
+    return None
+
+
+def gpu_available_for_answers(answers: dict[str, Any]) -> bool:
+    if "gpu_available" in answers:
+        return bool(answers.get("gpu_available"))
+    available = detect_nvidia_gpu_available(str(answers.get("ffmpeg") or "ffmpeg"), list(answers.get("video_encoders") or []))
+    answers["gpu_available"] = available
+    return available
 
 
 def options_text(items: list[str], extra: list[str] | None = None) -> str:
@@ -5954,17 +9584,34 @@ def parse_selection_config(value: str, max_count: int, default: list[int], allow
     return numbers
 
 
+BACK_INPUT_TOKENS = {"0", "۰", "٠"}
+
+
+def is_back_value(value: str, *, allow_text: bool = False) -> bool:
+    lowered = str(value).strip().lower()
+    if lowered in BACK_INPUT_TOKENS:
+        return True
+    return allow_text and lowered in {"b", "back"}
+
+
 def ask_raw(prompt: str) -> str:
     value = strip_quotes(input(prompt).strip())
     if value.lower() == "exit":
+        log_info(f"User input: prompt={_strip_ansi(prompt).strip().replace(chr(10), ' ')}; action=quit")
         raise ExitWizard()
+    log_info(
+        "User input: "
+        f"prompt={_strip_ansi(prompt).strip().replace(chr(10), ' ')}; "
+        f"value={value!r}; default_used={'yes' if value == '' else 'no'}; "
+        f"action={'back' if is_back_value(value, allow_text=True) else 'answer'}"
+    )
     return value
 
 
 def ask_required(prompt: str, allow_n: bool = False) -> str:
     while True:
         value = ask_raw(prompt)
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if value:
             if value.lower() == "n" and not allow_n:
@@ -5978,14 +9625,17 @@ def ask_yes_no(prompt: str, default: bool) -> bool:
     default_text = "y" if default else "n"
     while True:
         value = ask_raw(prompt)
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
+            log_info(f"User choice: yes_no={default}; default_used=yes")
             return default
         lowered = value.lower()
         if lowered in {"y", "yes"}:
+            log_info("User choice: yes_no=True; default_used=no")
             return True
         if lowered in {"n", "no"}:
+            log_info("User choice: yes_no=False; default_used=no")
             return False
         error(f"Enter only y or n. Default on Enter: {default_text}")
 
@@ -6170,10 +9820,11 @@ def extract_crop_preview_frame(
 
 
 def choose_crop_graphically(answers: dict[str, Any]) -> tuple[int, int, int, int] | None:
-    """Open the Crop Editor GUI.
+    """Archived standalone Crop Editor GUI.
 
-    Prefers the PySide6 implementation in ffmwiz_gui.py and falls back
-    to the legacy Tk preview when PySide6 is not installed."""
+    Normal CLI prompts no longer call this helper. Use the Unified Video
+    Editor for active graphical crop workflows.
+    """
     if answers.get("video_streams"):
         try:
             source_w, source_h = first_video_size(answers)
@@ -6207,7 +9858,7 @@ def choose_crop_graphically(answers: dict[str, Any]) -> tuple[int, int, int, int
             return None
         return None
     note(
-        "Falling back to the legacy Tk crop preview. To enable the new GUI later, "
+        "Falling back to the archived legacy Tk crop preview. To enable the archived Qt helper later, "
         "run:  py -3 -m pip install -r requirements.txt  (or restart FFmWiz with "
         "FFMWIZ_AUTO_INSTALL=1)."
     )
@@ -7240,11 +10891,10 @@ def open_cut_gui(
     fps: float,
     duration: float,
 ) -> list[tuple[float, float]] | None:
-    """Open the Cut Editor GUI.
+    """Archived standalone Cut Editor GUI.
 
-    Prefers the new PySide6 implementation in ffmwiz_gui.py (launched as
-    a subprocess via JSON IPC). Falls back to the legacy Tk GUI when
-    PySide6 is not installed so the workflow keeps working everywhere.
+    Normal CLI prompts no longer call this helper. Use the Unified Video
+    Editor for active graphical cut workflows; Mode 3 is manual-only.
     """
     request = {
         "mode": "cut",
@@ -7275,7 +10925,7 @@ def open_cut_gui(
             return None
         return None  # canceled
     note(
-        "Falling back to the legacy Tk cut editor. To enable the new GUI later, "
+        "Falling back to the archived legacy Tk cut editor. To enable the archived Qt helper later, "
         "run:  py -3 -m pip install -r requirements.txt  (or restart FFmWiz with "
         "FFMWIZ_AUTO_INSTALL=1)."
     )
@@ -7316,10 +10966,51 @@ def open_video_speed_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
 
 def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
     duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    join_segments: list[dict[str, Any]] = []
+    if answers.get("join_input_items"):
+        first_segment = {
+            "path": str(answers["input_path"]),
+            "name": Path(answers["input_path"]).name,
+            "duration": float(duration),
+            "chapters": (answers.get("probe") or {}).get("chapters") or [],
+        }
+        join_segments.append(first_segment)
+        for item in answers.get("join_input_items") or []:
+            join_segments.append(
+                {
+                    "path": str(item.get("path")),
+                    "name": Path(item.get("path")).name,
+                    "duration": float(item.get("duration") or 0.0),
+                    "chapters": (item.get("probe") or {}).get("chapters") or [],
+                }
+            )
+        if join_segments:
+            duration = sum(max(0.0, float(segment.get("duration") or 0.0)) for segment in join_segments)
     try:
         source_w, source_h = first_video_size(answers)
     except Exception:
         source_w, source_h = 1920, 1080
+    chapters = []
+    if join_segments:
+        offset = 0.0
+        for segment_idx, segment in enumerate(join_segments, start=1):
+            for chapter in segment.get("chapters") or []:
+                copied = dict(chapter)
+                try:
+                    start_time = float(copied.get("start_time", copied.get("start", 0)))
+                    end_time = float(copied.get("end_time", copied.get("end", start_time)))
+                    copied["start_time"] = f"{start_time + offset:.6f}"
+                    copied["end_time"] = f"{end_time + offset:.6f}"
+                except Exception:
+                    pass
+                tags = dict(copied.get("tags") or {})
+                if tags.get("title"):
+                    tags["title"] = f"{tags['title']} (Video {segment_idx})"
+                copied["tags"] = tags
+                chapters.append(copied)
+            offset += max(0.0, float(segment.get("duration") or 0.0))
+    else:
+        chapters = (answers.get("probe") or {}).get("chapters") or []
     request = {
         "mode": "video_unified",
         "input_path": str(answers["input_path"]),
@@ -7329,11 +11020,17 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "source_h": int(source_h),
         "has_audio": bool(answers.get("audio_streams")),
         "audio_count": len(answers.get("audio_streams") or []),
-        "chapters": (answers.get("probe") or {}).get("chapters") or [],
+        "chapters": chapters,
+        "join_segments": join_segments,
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "log_path": str(log_path()) if log_path() is not None else "",
         "start_maximized": True,
     }
+    if join_segments:
+        log_info(
+            "Opening Unified Video Editor with joined inputs: "
+            + ", ".join(f"{idx + 1}:{Path(segment.get('path') or '').name}" for idx, segment in enumerate(join_segments))
+        )
     reply = _launch_qt_gui(request)
     if reply is None:
         error("Unified graphical video editor is not available. Install PySide6 and try again.")
@@ -7347,9 +11044,11 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
                 s, e = float(entry[0]), float(entry[1])
                 if e > s:
                     keep_ranges.append((s, e))
+            separators = normalize_separator_points(reply.get("separator_points") or [], duration)
             return {
                 "margins": (top, left, right, bottom),
                 "keep_ranges": normalize_cut_ranges(keep_ranges, duration),
+                "separator_points": separators,
                 "speed": clamp_speed_factor(reply.get("speed", DEFAULT_SPEED_FACTOR)),
                 "reverse": bool(reply.get("reverse")),
                 "include_audio": bool(reply.get("include_audio", True)),
@@ -8268,8 +11967,16 @@ def default_audio_codec_for_ext(ext: str) -> str:
     return AUDIO_CODEC_DEFAULTS_BY_FORMAT.get(ext.lower(), DEFAULT_AUDIO_CODEC)
 
 
+def normalize_audio_codec(codec: Any, default: str | None = None) -> str:
+    text = str(codec or default or DEFAULT_AUDIO_CODEC).strip()
+    lowered = text.lower()
+    if lowered == "n":
+        return "copy"
+    return AUDIO_CODEC_ALIASES.get(lowered, lowered)
+
+
 def audio_codec_uses_bitrate(codec: str) -> bool:
-    lowered = codec.lower()
+    lowered = normalize_audio_codec(codec)
     if lowered == "copy":
         return False
     if lowered.startswith("pcm_"):
@@ -8497,6 +12204,10 @@ def load_input_metadata(answers: dict[str, Any], input_path: Path) -> None:
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
     subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+    attachment_streams = [stream for stream in streams if stream.get("codec_type") == "attachment"]
+    data_streams = [stream for stream in streams if stream.get("codec_type") == "data"]
+    attachment_streams = [stream for stream in streams if stream.get("codec_type") == "attachment"]
+    data_streams = [stream for stream in streams if stream.get("codec_type") == "data"]
     if not video_streams and not audio_streams:
         raise ValueError("This file has no detectable video or audio streams.")
 
@@ -8506,6 +12217,8 @@ def load_input_metadata(answers: dict[str, Any], input_path: Path) -> None:
     answers["video_streams"] = video_streams
     answers["audio_streams"] = audio_streams
     answers["subtitle_streams"] = subtitle_streams
+    answers["attachment_streams"] = attachment_streams
+    answers["data_streams"] = data_streams
     answers.pop("packet_sizes", None)
     answers.pop("audio_duplicate_report", None)
 
@@ -8552,6 +12265,11 @@ def unique_numbered_path(path: Path) -> Path:
     raise RuntimeError(f"Could not find a free output filename near: {path}")
 
 
+def looks_like_generated_output_file(path: Path) -> bool:
+    stem = path.stem.lower()
+    return any(stem.endswith(suffix.lower()) for suffix in GENERATED_OUTPUT_SUFFIXES)
+
+
 def resolve_output_collision(output_path: Path, input_path: Path, collision_suffix: str) -> Path:
     """Avoid writing over the source file when output name and extension match."""
     if not paths_same(output_path, input_path):
@@ -8559,6 +12277,18 @@ def resolve_output_collision(output_path: Path, input_path: Path, collision_suff
     safe_stem = sanitize_output_stem(output_path.stem)
     candidate = output_path.with_name(f"{safe_stem}{collision_suffix}{output_path.suffix}")
     return unique_numbered_path(candidate)
+
+
+def resolve_output_collision_against_inputs(output_path: Path, input_paths: list[Path], collision_suffix: str) -> Path:
+    """Avoid writing the output over any source input, including joined inputs."""
+    resolved = output_path
+    for input_path in input_paths:
+        if paths_same(resolved, input_path):
+            safe_stem = sanitize_output_stem(resolved.stem)
+            resolved = unique_numbered_path(resolved.with_name(f"{safe_stem}{collision_suffix}{resolved.suffix}"))
+            log_info(f"Output path matched an input path; using safe output path instead: {resolved}")
+            break
+    return resolved
 
 
 def _append_cut_suffix(path: Path) -> Path:
@@ -8603,10 +12333,99 @@ def step_output_location(answers: dict[str, Any]) -> None:
             f"Enter=same folder as input; examples: {folder_example} or {name_example}",
         )
     )
-    if value == "0":
+    if is_back_value(value):
         raise Back()
     apply_output_location_value(answers, value)
-    print_source_info(answers)
+    join_items = list(answers.get("join_input_items") or [])
+    if join_items:
+        original_title = answers.get("_source_info_title")
+        answers["_source_info_title"] = f"Source file info (1/{len(join_items) + 1})"
+        print_source_info(answers)
+        if original_title is None:
+            answers.pop("_source_info_title", None)
+        else:
+            answers["_source_info_title"] = original_title
+        for idx, item in enumerate(join_items, start=2):
+            joined_answers = join_item_answers(answers, item)
+            joined_answers["_source_info_title"] = f"Source file info ({idx}/{len(join_items) + 1})"
+            print_source_info(joined_answers)
+    else:
+        print_source_info(answers)
+
+
+def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
+    if not output_has_video(answers) or not answers.get("input_path"):
+        answers.pop("join_input_items", None)
+        answers["_join_question_extra"] = 0
+        answers.pop("_join_base_question", None)
+        answers.pop("_join_last_question", None)
+        return
+    existing_items = list(answers.get("join_input_items") or [])
+    existing_extra = int(answers.get("_join_question_extra", 0) or 0)
+    current_question = int(answers.get("_question_number", 0) or 0)
+    resuming_existing_join = bool(existing_items and existing_extra and current_question > existing_extra)
+    base_question = int(answers.get("_join_base_question") or (current_question - existing_extra if resuming_existing_join else current_question))
+    items: list[dict[str, Any]] = existing_items if resuming_existing_join else []
+    if resuming_existing_join:
+        resume_question = max(current_question, int(answers.get("_join_last_question") or current_question))
+        answers["_question_number"] = resume_question
+        if not ask_yes_no(
+            question_prompt(answers, "Add another video file?", "y/n", "n"),
+            False,
+        ):
+            answers["join_input_items"] = items
+            answers["_join_question_extra"] = existing_extra
+            return
+        sub_question = resume_question + 1
+    else:
+        answers.pop("join_input_items", None)
+        answers["_join_question_extra"] = 0
+        answers["_join_base_question"] = base_question
+        if not ask_yes_no(
+            question_prompt(answers, "Add another video file to join with this input?", "y/n", "n"),
+            False,
+        ):
+            answers.pop("_join_base_question", None)
+            answers.pop("_join_last_question", None)
+            return
+        sub_question = base_question + 1
+    while True:
+        answers["_question_number"] = sub_question
+        value = ask_required(
+            question_prompt(
+                answers,
+                "Enter additional video file path",
+                "drag and drop a video file here or paste a path",
+            )
+        )
+        path = terminal_path(value)
+        if not path.exists() or not path.is_file():
+            error("File not found. Enter the full file path again.")
+            continue
+        if paths_same(path, answers["input_path"]) or any(paths_same(path, item["path"]) for item in items):
+            error("This video is already selected for joining. Enter a different file.")
+            continue
+        if looks_like_generated_output_file(path):
+            error("This looks like a previously generated FFmWiz output file. It was not added as a join input.")
+            continue
+        try:
+            items.append(join_load_media_item(answers, path))
+        except Exception as exc:
+            log_exception(f"Join input probe failed: {path}")
+            error(str(exc))
+            continue
+        sub_question += 1
+        answers["_question_number"] = sub_question
+        if not ask_yes_no(
+            question_prompt(answers, "Add another video file?", "y/n", "n"),
+            False,
+        ):
+            break
+        sub_question += 1
+    answers["_join_last_question"] = sub_question
+    answers["_join_question_extra"] = max(0, sub_question - base_question)
+    answers["join_input_items"] = items
+    note(f"Added {len(items)} additional video input(s) for joining.")
 
 
 def step_output_format(answers: dict[str, Any]) -> None:
@@ -8622,7 +12441,7 @@ def step_output_format(answers: dict[str, Any]) -> None:
                 default_ext,
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = default_ext
@@ -8644,7 +12463,7 @@ def step_video_codec(answers: dict[str, Any]) -> None:
                 DEFAULT_VIDEO_CODEC,
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = DEFAULT_VIDEO_CODEC
@@ -8665,8 +12484,40 @@ def step_video_codec(answers: dict[str, Any]) -> None:
 
 
 def step_use_gpu(answers: dict[str, Any]) -> None:
+    if not gpu_available_for_answers(answers):
+        answers["use_gpu"] = False
+        note("No usable NVIDIA/NVENC GPU was detected. GPU question skipped; CPU mode selected.")
+        log_info("User choice: use_gpu=False; reason=GPU unavailable")
+        return
     answers["use_gpu"] = ask_yes_no(
         question_prompt(answers, "Use GPU/NVIDIA for decode/filter/encode?", "y/n", "y"),
+        True,
+    )
+
+
+def cpu_two_pass_applicable(answers: dict[str, Any]) -> bool:
+    if not output_has_video(answers) or answers.get("use_gpu"):
+        return False
+    if str(answers.get("video_codec") or "").strip().lower() in {"copy", "n"}:
+        return False
+    if answers.get("join_input_items") or answers.get("separator_points") or answers.get("split_output_paths"):
+        return False
+    if answers.get("cut_keep_ranges") or answers.get("video_speed_enabled") or answers.get("reverse_video"):
+        return False
+    video_encoder, _tag, _profile = resolve_video_encoder(answers)
+    if video_encoder not in {"libx264", "libx265"}:
+        return False
+    return True
+
+
+def step_cpu_two_pass(answers: dict[str, Any]) -> None:
+    answers["cpu_two_pass"] = ask_yes_no(
+        question_prompt(
+            answers,
+            "Use two-pass CPU video encoding for closer target bitrate?",
+            "y/n; slower, but usually closer to the requested bitrate",
+            "y",
+        ),
         True,
     )
 
@@ -8680,19 +12531,31 @@ def step_unified_video_editor_for_encode(answers: dict[str, Any]) -> None:
             question_prompt(
                 answers,
                 "Open unified graphical video editor?",
-                f"y/n, {graphical_hint('g=Show Unified Video Editor')}; combines crop, cuts, speed/reverse, and audio waveform preview",
-                "n",
+                f"y/n; {colored_unified_editor_hint()}",
+                "y",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
-            value = "n"
+            value = "y"
         lowered = value.lower()
         if lowered in {"n", "no"}:
             answers["_unified_video_editor_used"] = False
+            answers["_unified_video_editor_declined"] = True
+            answers["_disable_followup_video_gui_prompts"] = True
+            answers["crop_enabled"] = False
+            answers["crop_values_inline"] = False
+            for key in ("crop_top", "crop_left", "crop_right", "crop_bottom"):
+                answers.pop(key, None)
+            answers["video_speed_enabled"] = False
+            answers["reverse_video"] = False
+            answers["audio_speed_from_video"] = False
+            answers["cut_keep_ranges"] = []
+            answers.pop("separator_points", None)
+            answers.pop("_unified_separator_points", None)
             return
-        if lowered in {"y", "yes", "g", "gui", "graphical"}:
+        if lowered in {"y", "yes"}:
             note("Loading Unified Graphical Video Editor...")
             sys.stdout.flush()
             result = open_unified_video_gui(answers)
@@ -8703,13 +12566,44 @@ def step_unified_video_editor_for_encode(answers: dict[str, Any]) -> None:
             if not set_crop_margins_if_valid(answers, top, left, right, bottom):
                 continue
             answers["_unified_video_editor_used"] = True
+            answers["_unified_video_editor_declined"] = False
+            answers["_disable_followup_video_gui_prompts"] = False
             answers["_unified_cut_keep_ranges"] = result.get("keep_ranges") or []
+            answers["_unified_separator_points"] = result.get("separator_points") or []
+            if answers["_unified_separator_points"]:
+                answers["separator_points"] = list(answers["_unified_separator_points"])
+            else:
+                answers.pop("separator_points", None)
             answers["_unified_video_speed"] = result["speed"]
             answers["_unified_reverse_video"] = result["reverse"]
             answers["_unified_include_audio"] = result["include_audio"]
+            speed = clamp_speed_factor(result.get("speed", DEFAULT_SPEED_FACTOR))
+            reverse = bool(result.get("reverse"))
+            answers["video_speed_enabled"] = bool(reverse or abs(speed - 1.0) > 1e-6)
+            answers["video_speed_factor"] = speed
+            answers["reverse_video"] = reverse
+            answers["audio_speed_from_video"] = bool(result.get("include_audio"))
+            unified_duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+            unified_duration += sum(float(item.get("duration") or 0.0) for item in answers.get("join_input_items") or [])
+            keep_ranges = normalize_cut_ranges(result.get("keep_ranges") or [], unified_duration)
+            answers["cut_keep_ranges"] = keep_ranges
+            if keep_ranges:
+                print(paint(format_cut_ranges_for_summary(keep_ranges, get_video_fps(answers), "Unified cuts (keep ranges)"), Color.LIME))
+            _unified_seps = answers.get("_unified_separator_points") or []
+            if _unified_seps:
+                print(paint(format_split_points_for_summary(_unified_seps, get_video_fps(answers), "Unified split points"), Color.LIME))
             print(paint("Unified graphical edits captured.", Color.LIME))
+            if answers["video_speed_enabled"]:
+                print(
+                    paint(
+                        f"Applied unified video speed: {speed * 100:.0f}% ({speed:g}x); "
+                        f"reverse video: {'yes' if reverse else 'no'}; "
+                        f"sync audio: {'yes' if answers['audio_speed_from_video'] else 'no'}",
+                        Color.LIME,
+                    )
+                )
             return
-        error("Enter y, n, or g.")
+        error("Enter y or n.")
 
 
 def step_crop_enabled(answers: dict[str, Any]) -> None:
@@ -8726,27 +12620,10 @@ def step_crop_enabled(answers: dict[str, Any]) -> None:
             print(paint(f"Applied unified crop: {format_crop_margins(answers)}", Color.LIME))
         return
     while True:
-        # Highlight the graphical crop editor shortcut so it stands out from
-        # the rest of the hint text. The outer paint() wraps the whole hint
-        # in HINT_YELLOW; we re-apply HINT_YELLOW after the inner aqua span
-        # so the trailing text restores the original color.
-        allow_gui = not answers.get("_disable_graphical_editors")
-        if allow_gui:
-            if USE_COLOR:
-                gui_hint = (
-                    f"{Color.AQUA}g=Show Graphical Crop Editor{Color.RESET}{Color.HINT_YELLOW}"
-                )
-            else:
-                gui_hint = "g=Show Graphical Crop Editor"
-            crop_hint = (
-                f"y/n, {gui_hint}, or inline top,left,right,bottom like "
-                f"{example_text('100,300,200,550')}; {paint('zero is allowed inside inline crop', Color.ZERO_INLINE)}"
-            )
-        else:
-            crop_hint = (
-                "y/n, or inline top,left,right,bottom like "
-                f"{example_text('100,300,200,550')}; {paint('zero is allowed inside inline crop', Color.ZERO_INLINE)}"
-            )
+        crop_hint = (
+            "y/n, or inline top,left,right,bottom like "
+            f"{example_text('100,300,200,550')}; {paint('zero is allowed inside inline crop', Color.ZERO_INLINE)}"
+        )
         value = ask_raw(
             question_prompt(
                 answers,
@@ -8755,7 +12632,7 @@ def step_crop_enabled(answers: dict[str, Any]) -> None:
                 "n",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -8771,31 +12648,12 @@ def step_crop_enabled(answers: dict[str, Any]) -> None:
             answers["crop_values_inline"] = False
             return
         if lowered in {"g", "gui", "preview"}:
-            if not allow_gui:
-                error("Graphical crop editor is not available in Folder Encode.")
-                continue
-            note("Loading Graphical Crop Editor...")
-            sys.stdout.flush()
-            margins = choose_crop_graphically(answers)
-            if margins is None:
-                if answers.pop("_last_gui_error", None) == "crop":
-                    note("Graphical crop preview failed. Returning to the crop question.")
-                else:
-                    note("Graphical crop preview was canceled.")
-                continue
-            top, left, right, bottom = margins
-            if not set_crop_margins_if_valid(answers, top, left, right, bottom):
-                continue
-            answers["crop_values_inline"] = True
-            print(paint(f"Applied graphical crop: {format_crop_margins(answers)}", Color.LIME))
-            return
+            error("The standalone Crop GUI is archived. Use the Unified Video Editor or enter crop margins inline.")
+            continue
 
         pieces = [piece.strip() for piece in value.split(",")]
         if len(pieces) != 4 or any(not re.fullmatch(r"\d+", piece) for piece in pieces):
-            if allow_gui:
-                error("Enter y, n, g, or four integer crop margins: top,left,right,bottom")
-            else:
-                error("Enter y, n, or four integer crop margins: top,left,right,bottom")
+            error("Enter y, n, or four integer crop margins: top,left,right,bottom")
             continue
         top, left, right, bottom = [int(piece) for piece in pieces]
         if not set_crop_margins_if_valid(answers, top, left, right, bottom):
@@ -8806,45 +12664,49 @@ def step_crop_enabled(answers: dict[str, Any]) -> None:
 
 def step_crop_top(answers: dict[str, Any]) -> None:
     while True:
-        value = ask_positive_int_or_n(
-            question_prompt(answers, "Enter crop top px", "integer pixels; use 00 for zero because 0=back"),
-            allow_n=False,
-            allow_zero_word=True,
-        )
-        if set_single_crop_margin_if_valid(answers, "crop_top", value):
+        value = ask_raw(question_prompt(answers, "Enter crop top px", "integer pixels; zero is allowed", back="back=b, quit=exit"))
+        if value.lower().strip() in {"b", "back"}:
+            raise Back()
+        if not re.fullmatch(r"\d+", value or ""):
+            error("Enter a non-negative integer.")
+            continue
+        if set_single_crop_margin_if_valid(answers, "crop_top", int(value)):
             return
 
 
 def step_crop_left(answers: dict[str, Any]) -> None:
     while True:
-        value = ask_positive_int_or_n(
-            question_prompt(answers, "Enter crop left px", "integer pixels; use 00 for zero because 0=back"),
-            allow_n=False,
-            allow_zero_word=True,
-        )
-        if set_single_crop_margin_if_valid(answers, "crop_left", value):
+        value = ask_raw(question_prompt(answers, "Enter crop left px", "integer pixels; zero is allowed", back="back=b, quit=exit"))
+        if value.lower().strip() in {"b", "back"}:
+            raise Back()
+        if not re.fullmatch(r"\d+", value or ""):
+            error("Enter a non-negative integer.")
+            continue
+        if set_single_crop_margin_if_valid(answers, "crop_left", int(value)):
             return
 
 
 def step_crop_right(answers: dict[str, Any]) -> None:
     while True:
-        value = ask_positive_int_or_n(
-            question_prompt(answers, "Enter crop right px", "integer pixels; use 00 for zero because 0=back"),
-            allow_n=False,
-            allow_zero_word=True,
-        )
-        if set_single_crop_margin_if_valid(answers, "crop_right", value):
+        value = ask_raw(question_prompt(answers, "Enter crop right px", "integer pixels; zero is allowed", back="back=b, quit=exit"))
+        if value.lower().strip() in {"b", "back"}:
+            raise Back()
+        if not re.fullmatch(r"\d+", value or ""):
+            error("Enter a non-negative integer.")
+            continue
+        if set_single_crop_margin_if_valid(answers, "crop_right", int(value)):
             return
 
 
 def step_crop_bottom(answers: dict[str, Any]) -> None:
     while True:
-        value = ask_positive_int_or_n(
-            question_prompt(answers, "Enter crop bottom px", "integer pixels; use 00 for zero because 0=back"),
-            allow_n=False,
-            allow_zero_word=True,
-        )
-        if set_single_crop_margin_if_valid(answers, "crop_bottom", value):
+        value = ask_raw(question_prompt(answers, "Enter crop bottom px", "integer pixels; zero is allowed", back="back=b, quit=exit"))
+        if value.lower().strip() in {"b", "back"}:
+            raise Back()
+        if not re.fullmatch(r"\d+", value or ""):
+            error("Enter a non-negative integer.")
+            continue
+        if set_single_crop_margin_if_valid(answers, "crop_bottom", int(value)):
             return
 
 
@@ -8863,7 +12725,7 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
     )
     while True:
         value = ask_raw(prompt)
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = str(suggested)
@@ -8908,7 +12770,7 @@ def step_resolution(answers: dict[str, Any]) -> None:
             "n",
         )
         value = ask_raw(prompt)
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -8935,7 +12797,7 @@ def step_fps(answers: dict[str, Any]) -> None:
     )
     while True:
         value = ask_raw(prompt)
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -8976,10 +12838,34 @@ def step_audio_tracks(answers: dict[str, Any]) -> None:
         label_text = f" | {' | '.join(labels)}" if labels else ""
         print(
             f"  {paint(stream_title(stream, idx), Color.WHITE)} | "
-            f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
-            f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
+            f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)} | "
             f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
         )
+    join_items = list(answers.get("join_input_items") or [])
+    if join_items:
+        print()
+        print(paint("Joined input audio tracks", Color.BOLD + Color.BLUE))
+        print("  " + paint("The selected track numbers below will be applied to every joined input.", Color.YELLOW))
+        for input_pos, item in enumerate(join_items, start=2):
+            joined = join_item_answers(answers, item)
+            joined_streams = joined.get("audio_streams") or []
+            joined_fmt = joined.get("format", {})
+            joined_packet_sizes = get_packet_sizes(joined)
+            joined_report = detect_duplicate_audio(joined) if joined.get("detect_duplicate_audio", True) and joined_streams else None
+            joined_volume = get_audio_volume_stats(joined) if joined_streams else {}
+            print("  " + field_text(f"input {input_pos}", Path(item.get("path")).name, Color.WHITE))
+            for idx, stream in enumerate(joined_streams):
+                size, _ = stream_size_bytes(stream, joined_fmt, joined_packet_sizes)
+                labels = duplicate_labels(idx, joined_report) if joined_report else []
+                label_text = f" | {' | '.join(labels)}" if labels else ""
+                print(
+                    f"    {paint(stream_title(stream, idx), Color.WHITE)} | "
+                    f"{field_text('mean / max volume', audio_mean_max_volume_field(joined_volume, idx), Color.MEAN_VOLUME)} | "
+                    f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
+                )
+            if len(joined_streams) != len(streams):
+                warning = f"input {input_pos} has {len(joined_streams)} audio track(s), primary input has {len(streams)}."
+                print("    " + paint(warning, Color.YELLOW))
 
     prompt = question_prompt(
         answers,
@@ -8996,6 +12882,8 @@ def step_audio_tracks(answers: dict[str, Any]) -> None:
             answers["audio_tracks"] = auto_select_audio_tracks(answers, "de")
             print(paint(f"Auto-selected audio tracks: {answers['audio_tracks']}", Color.LIME))
             return
+        # This prompt uses zero-based audio track numbers, so 0 must remain a
+        # valid stream selection. Back is intentionally b/back here.
         if lowered in {"b", "back"}:
             raise Back()
         if lowered in {"d", "e", "de", "ed"}:
@@ -9021,13 +12909,29 @@ def step_audio_codec(answers: dict[str, Any]) -> None:
             "n" if answers.get("_folder_encode_mode") else default_codec,
         )
     )
-    if value == "0":
+    if is_back_value(value):
         raise Back()
     if not value:
         value = "n" if answers.get("_folder_encode_mode") else default_codec
     if value.lower() == "n":
         value = "copy"
-    answers["audio_codec"] = value
+    value = normalize_audio_codec(value, default_codec)
+    if loudnorm_transform_enabled(answers) and value.lower() == "copy":
+        use_aac = ask_yes_no(
+            question_prompt(
+                answers,
+                "LoudNorm requires audio re-encoding. Use AAC?",
+                "y/n",
+                "y",
+            ),
+            True,
+        )
+        if use_aac:
+            value = DEFAULT_AUDIO_CODEC
+        else:
+            note("LoudNorm disabled because audio remains stream-copy.")
+            answers["loudnorm_enabled"] = False
+    answers["audio_codec"] = normalize_audio_codec(value, default_codec)
 
 
 def step_audio_bitrate(answers: dict[str, Any]) -> None:
@@ -9048,7 +12952,7 @@ def step_audio_bitrate(answers: dict[str, Any]) -> None:
                 str(default_audio_bitrate),
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = str(default_audio_bitrate)
@@ -9077,6 +12981,113 @@ def step_audio_bitrate(answers: dict[str, Any]) -> None:
         return
 
 
+def step_loudnorm(answers: dict[str, Any]) -> None:
+    answers.pop("loudnorm_enabled", None)
+    answers.pop("loudnorm_target_i", None)
+    answers.pop("loudnorm_measured", None)
+    selected = selected_audio_streams(answers) if answers.get("audio_streams") else []
+    if not selected:
+        return
+    enabled = ask_yes_no(
+        question_prompt(
+            answers,
+            "Increase / normalize audio loudness with loudnorm?",
+            "y/n",
+            "n",
+        ),
+        False,
+    )
+    if not enabled:
+        answers["loudnorm_enabled"] = False
+        log_info("User choice: loudnorm_enabled=False")
+        return
+    log_info("User choice: loudnorm_enabled=True")
+
+    audio_codec = normalize_audio_codec(
+        answers.get("audio_codec"),
+        default_audio_codec_for_ext(answers.get("output_ext", "")),
+    )
+    answers["audio_codec"] = audio_codec
+    if audio_codec == "copy":
+        use_aac = ask_yes_no(
+            question_prompt(
+                answers,
+                "LoudNorm requires audio re-encoding. Use AAC?",
+                "y/n",
+                "y",
+            ),
+            True,
+        )
+        if not use_aac:
+            note("LoudNorm disabled because audio remains stream-copy.")
+            answers["loudnorm_enabled"] = False
+            log_info("LoudNorm measured/applied decision: disabled because user kept audio stream-copy.")
+            return
+        answers["audio_codec"] = DEFAULT_AUDIO_CODEC
+        answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
+
+    audio_index = selected[0]
+    ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
+    input_path = Path(answers["input_path"])
+    measured: dict[str, float] | None = None
+    while True:
+        note(f"Measuring current loudness on audio track {audio_index}...")
+        total_duration = stream_duration_seconds({}, answers.get("format"))
+        measured = probe_loudnorm_measurement(ffmpeg, input_path, audio_index, total_duration=total_duration)
+        if measured is not None:
+            print_loudnorm_stats(measured)
+            break
+        error("LoudNorm measurement failed.")
+        action = ask_raw(
+            question_prompt(
+                answers,
+                "LoudNorm measurement failed. Choose action",
+                "r=retry; c=continue without loudnorm; m=manual single-pass loudnorm",
+                "c",
+            )
+        ).strip().lower()
+        if is_back_value(action):
+            raise Back()
+        if not action or action == "c":
+            answers["loudnorm_enabled"] = False
+            return
+        if action == "m":
+            measured = None
+            break
+        if action != "r":
+            error("Enter r, c, or m.")
+
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter target Integrated Loudness I in LUFS",
+                "examples: -16 general video, -18 safer/lower, -14 louder",
+                loudnorm_number(LOUDNORM_DEFAULT_TARGET_I),
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = loudnorm_number(LOUDNORM_DEFAULT_TARGET_I)
+        try:
+            target_i = parse_loudnorm_target(value)
+        except ValueError as exc:
+            error(str(exc))
+            continue
+        answers["loudnorm_enabled"] = True
+        answers["loudnorm_target_i"] = target_i
+        if measured is not None:
+            answers["loudnorm_measured"] = measured
+        else:
+            answers.pop("loudnorm_measured", None)
+        log_info(
+            f"User choice: loudnorm_target_i={target_i}; confirmed=yes; "
+            f"two_pass={'yes' if measured is not None else 'no'}"
+        )
+        return
+
+
 def step_subtitle_tracks(answers: dict[str, Any]) -> None:
     streams = answers["subtitle_streams"]
     print()
@@ -9096,6 +13107,135 @@ def step_subtitle_tracks(answers: dict[str, Any]) -> None:
     )
 
 
+def step_source_extra_policy(answers: dict[str, Any]) -> None:
+    features = source_extra_preservation_features(answers)
+    if not features:
+        answers["keep_source_metadata"] = True
+        answers["keep_source_chapters"] = True
+        answers["keep_source_subtitles"] = True
+        answers["keep_source_data_streams"] = True
+        answers["keep_source_extra_video_streams"] = True
+        answers["keep_embedded_attachments"] = False
+        return
+    print()
+    print(paint("Detected source metadata / extra streams:", Color.BOLD + Color.LIGHT_BLUE))
+    for feature in features:
+        print("  " + paint(feature, Color.WHITE))
+    keep = ask_yes_no(
+        question_prompt(
+            answers,
+            "Keep source metadata, chapters, extra video/subtitle/data streams, and embedded fonts/attachments?",
+            "y/n; n removes metadata, chapters, extra source video streams, source subtitles, data streams, and embedded font/attachment streams",
+            "y",
+        ),
+        True,
+    )
+    answers["keep_source_metadata"] = keep
+    answers["keep_source_chapters"] = keep
+    answers["keep_source_subtitles"] = keep
+    answers["keep_source_data_streams"] = keep
+    answers["keep_source_extra_video_streams"] = keep
+    if not keep:
+        answers["subtitle_tracks"] = []
+        answers["keep_embedded_attachments"] = False
+        log_info(
+            "User choice: keep_source_extras=False; "
+            "metadata=no; chapters=no; extra_video_streams=no; subtitles=no; data_streams=no; embedded_attachments=no"
+        )
+        return
+
+    attachment_count = len(embedded_attachment_streams(answers))
+    keep_attachments = False
+    if attachment_count:
+        if output_supports_embedded_attachments(answers):
+            keep_attachments = True
+        else:
+            note(
+                "Embedded font/attachment streams can only be kept reliably in MKV output here. "
+                f"Current output format is {answers.get('output_ext')}."
+            )
+            change_to_mkv = ask_yes_no(
+                question_prompt(
+                    answers,
+                    "Change output format to MKV so embedded font/attachment streams can be kept?",
+                    "y/n; otherwise metadata/chapters/subtitles are kept but embedded attachments are dropped",
+                    "n",
+                ),
+                False,
+            )
+            if change_to_mkv:
+                answers["output_ext"] = "mkv"
+                keep_attachments = True
+    answers["keep_embedded_attachments"] = keep_attachments
+    log_info(
+        "User choice: keep_source_extras=True; "
+        f"metadata=yes; chapters=yes; extra_video_streams=yes; subtitles=yes; data_streams=yes; "
+        f"embedded_attachments={keep_attachments}; output_ext={answers.get('output_ext')}"
+    )
+
+
+def embedded_attachment_display_line(stream: dict[str, Any], relative_index: int) -> str:
+    filename = stream_tag_value(stream, "filename", "")
+    mimetype = stream_tag_value(stream, "mimetype", "")
+    title = stream_tag_value(stream, "title", "")
+    pieces = [
+        f"{relative_index}: stream #{stream.get('index', '?')}",
+        f"codec={stream.get('codec_name', 'unknown')}",
+        f"kind={media_info_attachment_kind(stream)}",
+    ]
+    if filename:
+        pieces.append(f"filename={filename}")
+    if mimetype:
+        pieces.append(f"mimetype={mimetype}")
+    if title:
+        pieces.append(f"title={title}")
+    return " | ".join(pieces)
+
+
+def step_embedded_attachments(answers: dict[str, Any]) -> None:
+    streams = embedded_attachment_streams(answers)
+    print()
+    print(paint(f"Detected {len(streams)} embedded attachment(s):", Color.BOLD + Color.PINK))
+    for idx, stream in enumerate(streams):
+        print("  " + paint(embedded_attachment_display_line(stream, idx), Color.WHITE))
+    if not output_supports_embedded_attachments(answers):
+        note(
+            "Embedded font/attachment streams can only be kept reliably in MKV output here. "
+            f"Current output format is {answers.get('output_ext')}."
+        )
+        keep = ask_yes_no(
+            question_prompt(
+                answers,
+                "Change output format to MKV and keep embedded font/attachment streams?",
+                "y/n; required if you want embedded MKV fonts or other attachment streams copied",
+                "n",
+            ),
+            False,
+        )
+        if keep:
+            answers["output_ext"] = "mkv"
+        answers["keep_embedded_attachments"] = keep
+        log_info(
+            f"User choice: keep_embedded_attachments={keep}; "
+            f"attachment_count={len(streams)}; output_ext={answers.get('output_ext')}"
+        )
+        return
+    keep = ask_yes_no(
+        question_prompt(
+            answers,
+            "Keep embedded font/attachment streams in the encode?",
+            "y/n; MKV output only; copies attachment streams without re-encoding",
+            "n",
+        ),
+        False,
+    )
+    answers["keep_embedded_attachments"] = keep
+    log_info(
+        f"User choice: keep_embedded_attachments={keep}; "
+        f"attachment_count={len(streams)}; output_ext={answers.get('output_ext')}"
+    )
+
+
 def build_output_path(answers: dict[str, Any]) -> Path:
     input_path: Path = answers["input_path"]
     output_location: Path = answers["output_location"]
@@ -9111,8 +13251,28 @@ def build_output_path(answers: dict[str, Any]) -> Path:
 
     collision_suffix = answers.get("output_collision_suffix", "_Encode")
     output_path = resolve_output_collision(output_path, input_path, collision_suffix)
+    all_input_paths = [input_path] + [Path(item["path"]) for item in answers.get("join_input_items") or [] if item.get("path")]
+    output_path = resolve_output_collision_against_inputs(output_path, all_input_paths, collision_suffix)
     log_info(f"Resolved output path: {output_path}")
     return output_path
+
+
+def build_separator_base_output_path(answers: dict[str, Any]) -> Path:
+    input_path: Path = answers["input_path"]
+    output_location: Path = answers["output_location"]
+    output_ext = answers["output_ext"]
+    if answers.get("output_name_stem"):
+        return output_location / f"{sanitize_output_stem(answers['output_name_stem'])}.{output_ext}"
+    if output_location.suffix:
+        output_path = output_location.with_suffix("." + output_ext)
+        return output_path.with_name(f"{sanitize_output_stem(output_path.stem)}{output_path.suffix}")
+    return output_location / f"{sanitize_output_stem(input_path.stem)}.{output_ext}"
+
+
+def separator_output_path(answers: dict[str, Any], index: int) -> Path:
+    base = build_separator_base_output_path(answers)
+    suffix = base.suffix or ("." + str(answers.get("output_ext") or "mp4").lstrip("."))
+    return unique_numbered_path(base.with_name(f"{sanitize_output_stem(base.stem)}_Part{int(index):02d}{suffix}"))
 
 
 def resolve_video_encoder(answers: dict[str, Any]) -> tuple[str, str | None, str | None]:
@@ -9136,6 +13296,7 @@ def video_filters_required(answers: dict[str, Any]) -> bool:
         or answers.get("fps") is not None
         or answers.get("resolution", "n") != "n"
         or answers.get("cut_keep_ranges")
+        or answers.get("separator_points")
         or video_speed_transform_enabled(answers)
     )
 
@@ -9176,6 +13337,10 @@ def can_use_cuda_fast_path(answers: dict[str, Any], video_encoder: str | None) -
     cut_ranges = list(answers.get("cut_keep_ranges") or [])
     if has_crop(answers) and not cuda_decoder_for_source(answers):
         return False
+    # AR-preserving resize with padding cannot be done purely in CUDA; fall back
+    # to the complex graph path so CPU scale+pad filters are used with NVENC encode.
+    if _cuda_fast_path_needs_ar_padding(answers):
+        return False
     return bool(
         answers.get("use_gpu")
         and output_has_video(answers)
@@ -9185,20 +13350,72 @@ def can_use_cuda_fast_path(answers: dict[str, Any], video_encoder: str | None) -
         and not answers.get("_hardsub_mode")
         and len(cut_ranges) <= 1
         and not answers.get("_force_cpu_video_filter")
+        and not answers.get("separator_points")
         and not video_speed_transform_enabled(answers)
     )
+
+
+def _cuda_fast_path_needs_ar_padding(answers: dict[str, Any]) -> bool:
+    """Return True when the requested resize would require padding (AR mismatch)
+    and therefore cannot use the pure scale_cuda fast path."""
+    resolution = answers.get("resolution", "n")
+    if resolution is None or resolution == "n":
+        return False
+    if resize_mode_is_stretch(answers):
+        return False
+    try:
+        display_w, display_h = cropped_display_size(answers)
+    except (ValueError, KeyError, IndexError):
+        return False
+    dimensions, _ = calculate_scale_dimensions(answers, resolution)
+    if dimensions is None:
+        return False
+    width, height = dimensions
+    display_ar = display_w / max(1, display_h)
+    target_ar = width / max(1, height)
+    return abs(display_ar - target_ar) / max(display_ar, 1e-9) > 0.01
+
+
+def should_use_cuda_decode_for_complex_graph(
+    answers: dict[str, Any],
+    video_encoder: str | None,
+    using_cuda_fast_path: bool,
+) -> bool:
+    if using_cuda_fast_path:
+        return False
+    if not (
+        answers.get("use_gpu")
+        and output_has_video(answers)
+        and video_encoder
+        and video_encoder != "copy"
+        and str(video_encoder).endswith("_nvenc")
+    ):
+        return False
+    cut_ranges = list(answers.get("cut_keep_ranges") or [])
+    return bool(
+        answers.get("_join_complex_graph")
+        or answers.get("_force_cpu_video_filter")
+        or len(cut_ranges) > 1
+        or video_speed_transform_enabled(answers)
+        or video_filters_required(answers)
+    )
+
+
+def append_cuda_decode_args_for_input(cmd: list[str], answers: dict[str, Any]) -> None:
+    cmd.extend(["-hwaccel", "cuda", "-hwaccel_device", str(GPU_DEVICE_INDEX)])
 
 
 def build_cuda_video_filter(answers: dict[str, Any]) -> str | None:
     resolution = answers.get("resolution", "n")
     scale_dimensions = resolve_scale_dimensions(answers, resolution)
+    cuda_format = cuda_pixel_format_for_output(answers)
     if scale_dimensions:
         width, height = scale_dimensions
         return (
-            f"scale_cuda=w={width}:h={height}:format={CUDA_FORMAT}:"
+            f"scale_cuda=w={width}:h={height}:format={cuda_format}:"
             "interp_algo=bicubic:passthrough=0:reset_sar=1"
         )
-    return f"scale_cuda=format={CUDA_FORMAT}:passthrough=0:reset_sar=1"
+    return f"scale_cuda=format={cuda_format}:passthrough=0:reset_sar=1"
 
 
 def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
@@ -9217,7 +13434,42 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     scale_dimensions = resolve_scale_dimensions(answers, resolution)
     if scale_dimensions:
         width, height = scale_dimensions
-        filters.append(f"scale={width}:{height}")
+        is_stretch = resize_mode_is_stretch(answers)
+        if is_stretch:
+            # Exact stretch: force the requested dimensions regardless of AR.
+            filters.append(f"scale={width}:{height}")
+            log_info(f"Resize mode: Stretch; scale={width}:{height}")
+        else:
+            # AR-preserving: scale to fit within the box, then pad if needed.
+            sar = source_sar(answers)
+            crop_w, crop_h = cropped_source_size(answers)
+            display_w, display_h = cropped_display_size(answers)
+
+            # Calculate the scaled size preserving display AR within the target box.
+            display_ar = display_w / max(1, display_h)
+            target_ar = width / max(1, height)
+            ar_tolerance = 0.01  # 1% tolerance
+
+            if abs(display_ar - target_ar) / max(display_ar, 1e-9) <= ar_tolerance:
+                # AR matches target within tolerance – no padding needed.
+                filters.append(f"scale={width}:{height}")
+                log_info(
+                    f"Resize mode: Preserve (AR matches target); "
+                    f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
+                    f"display={display_w}x{display_h}; target={width}x{height}; no padding"
+                )
+            else:
+                # Use force_original_aspect_ratio=decrease to fit, then pad.
+                filters.append(
+                    f"scale={width}:{height}:"
+                    f"force_original_aspect_ratio=decrease:force_divisible_by=2"
+                )
+                filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
+                log_info(
+                    f"Resize mode: Preserve (AR mismatch, padding applied); "
+                    f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
+                    f"display={display_w}x{display_h}; target={width}x{height}"
+                )
 
     if video_speed_transform_enabled(answers):
         filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
@@ -9225,10 +13477,7 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     if FORCE_SAR:
         filters.append(f"setsar={FORCE_SAR}")
 
-    if SETPARAMS_RANGE:
-        filters.append(f"setparams=range={SETPARAMS_RANGE}")
-
-    filters.append(f"format={CPU_FORMAT}")
+    filters.append(f"format={cpu_pixel_format_for_output(answers)}")
     return ",".join(filters) if filters else None
 
 
@@ -9236,7 +13485,8 @@ def build_cpu_fallback_from_cuda_filter(answers: dict[str, Any]) -> str | None:
     cpu_filter = build_cpu_video_filter(answers)
     if not cpu_filter:
         return None
-    return f"hwdownload,format={CUDA_FORMAT},{cpu_filter},format={CUDA_FORMAT},hwupload_cuda"
+    cuda_format = cuda_pixel_format_for_output(answers)
+    return f"hwdownload,format={cuda_format},{cpu_filter},format={cuda_format},hwupload_cuda"
 
 
 def build_video_filter(answers: dict[str, Any], use_gpu_filtering: bool) -> str | None:
@@ -9254,19 +13504,35 @@ def build_audio_transform_filter_complex(
     for pos, audio_index in enumerate(audio_indices):
         current_label = f"0:a:{audio_index}"
         if keep_ranges:
+            source_labels: list[str]
+            if len(keep_ranges) > 1:
+                source_labels = [f"acut{pos}_src{range_idx}" for range_idx in range(len(keep_ranges))]
+                parts.append(
+                    f"[{current_label}]asplit={len(keep_ranges)}"
+                    f"{''.join(f'[{label}]' for label in source_labels)}"
+                )
+                log_info(
+                    f"Inserted asplit={len(keep_ranges)} for multi-range audio trim from "
+                    f"[{current_label}]."
+                )
+            else:
+                source_labels = [current_label]
             range_labels: list[str] = []
             for range_idx, (start, end) in enumerate(keep_ranges):
                 label = f"acut{pos}_{range_idx}"
                 range_labels.append(f"[{label}]")
                 parts.append(
-                    f"[{current_label}]atrim=start={start:.6f}:end={end:.6f},"
+                    f"[{source_labels[range_idx]}]atrim=start={start:.6f}:end={end:.6f},"
                     f"asetpts=PTS-STARTPTS[{label}]"
                 )
-            cut_label = f"acut{pos}"
-            parts.append(f"{''.join(range_labels)}concat=n={len(keep_ranges)}:v=0:a=1[{cut_label}]")
-            current_label = cut_label
+            if len(keep_ranges) > 1:
+                cut_label = f"acut{pos}"
+                parts.append(f"{''.join(range_labels)}concat=n={len(keep_ranges)}:v=0:a=1[{cut_label}]")
+                current_label = cut_label
+            else:
+                current_label = f"acut{pos}_0"
         out_label = f"aout{pos}"
-        if audio_speed_transform_enabled(answers):
+        if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
             parts.append(f"[{current_label}]{build_encode_audio_speed_filter(answers)}[{out_label}]")
         elif current_label.startswith("0:"):
             parts.append(f"[{current_label}]anull[{out_label}]")
@@ -9281,7 +13547,12 @@ def video_bitrate_mode(answers: dict[str, Any]) -> str:
     return mode if mode in {"quality_vbr", "strict_size"} else "quality_vbr"
 
 
-def append_video_bitrate_args(cmd: list[str], answers: dict[str, Any], bitrate_kbps: int) -> None:
+def append_video_bitrate_args(
+    cmd: list[str],
+    answers: dict[str, Any],
+    bitrate_kbps: int,
+    stream_spec: str = ":v",
+) -> None:
     mode = video_bitrate_mode(answers)
     if mode == "strict_size":
         maxrate = bitrate_kbps
@@ -9289,7 +13560,11 @@ def append_video_bitrate_args(cmd: list[str], answers: dict[str, Any], bitrate_k
     else:
         maxrate = bitrate_kbps * 2
         bufsize = bitrate_kbps * 4
-    cmd.extend(["-b:v", f"{bitrate_kbps}k", "-maxrate:v", f"{maxrate}k", "-bufsize:v", f"{bufsize}k"])
+    cmd.extend([
+        f"-b{stream_spec}", f"{bitrate_kbps}k",
+        f"-maxrate{stream_spec}", f"{maxrate}k",
+        f"-bufsize{stream_spec}", f"{bufsize}k",
+    ])
 
 
 def ps_quote(arg: str) -> str:
@@ -9302,6 +13577,141 @@ def ps_quote(arg: str) -> str:
 
 def command_to_powershell(args: list[str]) -> str:
     return " ".join(ps_quote(arg) for arg in args)
+
+
+def append_single_input_split_outputs(
+    cmd: list[str],
+    answers: dict[str, Any],
+    output_path: Path,
+    video_encoder: str,
+    tag: str | None,
+    profile: str | None,
+    audio_indices: list[int],
+    audio_transform_active: bool,
+    multi_cut: bool,
+    audio_for_cut: int | None,
+) -> bool:
+    source_duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    final_duration = final_processed_duration_for_splits(answers, source_duration)
+    split_points = normalize_separator_points(answers.get("separator_points"), final_duration)
+    if not split_points:
+        return False
+    filters: list[str] = []
+    audio_labels: list[str] = []
+    if multi_cut:
+        filters.extend(build_cut_filter_complex(answers, list(answers.get("cut_keep_ranges") or []), audio_for_cut).split(";"))
+        video_label = "v"
+        if audio_for_cut is not None:
+            audio_labels.append("a")
+    else:
+        video_filter = build_cpu_video_filter(answers) or "null"
+        filters.append(f"[0:v:0]{video_filter}[vbase]")
+        video_label = "vbase"
+        if audio_indices:
+            if audio_transform_active:
+                audio_fc, labels = build_audio_transform_filter_complex(answers, audio_indices)
+                filters.extend(audio_fc.split(";"))
+                audio_labels.extend(labels)
+            else:
+                for pos, audio_index in enumerate(audio_indices):
+                    label = f"abase{pos}"
+                    filters.append(f"[0:a:{audio_index}]asetpts=PTS-STARTPTS[{label}]")
+                    audio_labels.append(label)
+    filters.append(f"[{video_label}]setpts=PTS-STARTPTS[vfinal]")
+    final_audio_labels: list[str] = []
+    for pos, label in enumerate(audio_labels):
+        final_label = f"afinal{pos}"
+        filters.append(f"[{label}]asetpts=PTS-STARTPTS[{final_label}]")
+        final_audio_labels.append(final_label)
+    video_outputs, audio_outputs_by_part, split_intervals = append_final_split_filters(
+        filters,
+        "vfinal",
+        final_audio_labels,
+        split_points,
+        final_duration,
+        "s",
+        float(answers.get("fps") or get_video_fps(answers) or 0.0),
+    )
+    output_paths = split_part_output_paths(output_path, len(video_outputs), [Path(answers["input_path"])])
+    answers["split_output_paths"] = output_paths
+    answers["split_part_intervals"] = split_intervals
+    answers["output_path"] = output_paths[0]
+
+    # Prepare per-part chapter remapping if timeline is modified and chapters exist.
+    split_chapter_plans: list[dict[str, Any]] = []
+    split_chapter_metadata_paths: list[Path] = []
+    if source_chapters_keep_enabled(answers):
+        speed_factor = encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0
+        for part_idx, interval in enumerate(split_intervals):
+            plan = remap_chapters_for_encode(answers, speed_factor=speed_factor, part_interval=interval)
+            split_chapter_plans.append(plan)
+            if plan.get("mode") == "metadata" and plan.get("chapters"):
+                chapter_temp_dir = answers.get("_chapter_metadata_temp_dir")
+                if not chapter_temp_dir:
+                    chapter_temp_dir = tempfile.mkdtemp(prefix="ffmwiz_split_chapters_")
+                    answers["_chapter_metadata_temp_dir"] = chapter_temp_dir
+                metadata_path = write_encode_chapter_metadata(plan, Path(chapter_temp_dir), suffix=f"_part{part_idx + 1:02d}")
+                split_chapter_metadata_paths.append(metadata_path)
+            else:
+                split_chapter_metadata_paths.append(None)
+
+    # Add chapter metadata inputs (input index 1, 2, ... for each part that has chapters).
+    chapter_input_base = 1  # Input 0 is the main source file.
+    metadata_input_count = 0
+    part_chapter_input_indices: list[int | None] = []
+    for metadata_path in split_chapter_metadata_paths:
+        if metadata_path is not None:
+            cmd.extend(["-i", str(metadata_path)])
+            part_chapter_input_indices.append(chapter_input_base + metadata_input_count)
+            metadata_input_count += 1
+        else:
+            part_chapter_input_indices.append(None)
+
+    cmd.extend(["-filter_complex", ";".join(filters)])
+    for part_idx, part_output in enumerate(output_paths):
+        cmd.extend(["-map", f"[{video_outputs[part_idx]}]"])
+        for audio_label in audio_outputs_by_part[part_idx]:
+            cmd.extend(["-map", f"[{audio_label}]"])
+        attachments_mapped = append_embedded_attachment_maps(cmd, answers)
+        data_mapped = append_source_data_maps(cmd, answers)
+
+        # Per-part chapter handling for splits.
+        if not output_has_video(answers):
+            pass
+        else:
+            cmd.extend(["-map_metadata", "0" if source_metadata_keep_enabled(answers) else "-1"])
+            if not source_chapters_keep_enabled(answers):
+                cmd.extend(["-map_chapters", "-1"])
+            elif part_chapter_input_indices and part_chapter_input_indices[part_idx] is not None:
+                cmd.extend(["-map_chapters", str(part_chapter_input_indices[part_idx])])
+                log_info(f"Chapters: Part {part_idx + 1} uses remapped metadata input {part_chapter_input_indices[part_idx]}")
+            else:
+                cmd.extend(["-map_chapters", "-1"])
+
+        append_negative_stream_options(cmd, answers, True, [], data_mapped)
+        append_video_encode_options(cmd, answers, video_encoder, tag, profile)
+        append_audio_encode_options(cmd, answers, bool(audio_outputs_by_part[part_idx]))
+        append_clear_reencoded_stream_stat_metadata(
+            cmd,
+            answers,
+            video_output_count=1 if video_encoder != "copy" else 0,
+            audio_output_count=len(audio_outputs_by_part[part_idx]) if audio_outputs_by_part[part_idx] else 0,
+            subtitle_output_count=0,
+        )
+        if attachments_mapped:
+            append_embedded_attachment_codec_options(cmd, answers)
+        if data_mapped:
+            append_source_data_codec_options(cmd, answers)
+        append_container_options(cmd, answers["output_ext"])
+        cmd.append(str(part_output))
+    log_info(
+        "Split final output into parts: "
+        + ", ".join(
+            f"Part {idx + 1:02d} {seconds_to_ffmpeg_time(start)}->{seconds_to_ffmpeg_time(end)}"
+            for idx, (start, end) in enumerate(split_intervals)
+        )
+    )
+    return True
 
 
 def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
@@ -9322,12 +13732,16 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     # - MP4-like outputs get mov_text only for text subtitles, plus faststart/tag
     #   options that are valid for that family of muxers.
     cmd: list[str] = [ffmpeg, "-y" if OVERWRITE_OUTPUT else "-n"]
+    if answers.get("use_gpu") and answers.get("gpu_available") is False:
+        answers["use_gpu"] = False
+        log_info("GPU disabled automatically because no usable NVIDIA/NVENC GPU was detected.")
 
     has_video = output_has_video(answers)
     video_encoder = None
     tag = None
     profile = None
     use_cuda_fast_path = False
+    use_cuda_decode_complex = False
 
     cut_keep_ranges = list(answers.get("cut_keep_ranges") or [])
     cut_active = bool(cut_keep_ranges) and has_video
@@ -9351,12 +13765,16 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             )
             answers["video_codec"] = DEFAULT_VIDEO_CODEC
             video_encoder, tag, profile = resolve_video_encoder(answers)
+        video_encoder, tag, profile = enforce_bit_depth_compatible_video_encoder(answers, video_encoder, tag, profile)
 
         use_cuda_fast_path = can_use_cuda_fast_path(answers, video_encoder)
+        use_cuda_decode_complex = should_use_cuda_decode_for_complex_graph(answers, video_encoder, use_cuda_fast_path)
         if answers.get("use_gpu") and video_encoder != "copy" and not str(video_encoder).endswith("_nvenc"):
             note("The selected video encoder is not NVENC, so CPU decode/filter/encode will be used for video.")
         elif multi_cut and answers.get("use_gpu") and str(video_encoder).endswith("_nvenc"):
             log_info("Multiple cut ranges use CPU trim/concat filter_complex; NVENC encode remains enabled.")
+        elif use_cuda_decode_complex:
+            log_info("Complex CPU filter graph uses CUDA/NVDEC input decode and NVENC final encode.")
         elif (
             has_crop(answers)
             and answers.get("use_gpu")
@@ -9378,6 +13796,8 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                 if cuda_decoder:
                     cmd.extend(["-c:v", cuda_decoder])
                 cmd.extend(["-crop", cuvid_crop])
+        elif use_cuda_decode_complex:
+            append_cuda_decode_args_for_input(cmd, answers)
 
     if single_cut:
         start, end = cut_keep_ranges[0]
@@ -9389,17 +13809,40 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         start, end = cut_keep_ranges[0]
         cmd.extend(["-t", f"{max(0.0, end - start):.6f}"])
 
+    # Chapter remapping: if timeline is modified and source has chapters,
+    # generate a metadata file and add it as a second input so -map_chapters
+    # can reference it. The metadata file path is stored for later cleanup.
+    if (
+        has_video
+        and source_chapters_keep_enabled(answers)
+        and timeline_is_modified(answers)
+        and not answers.get("separator_points")  # Split path handles its own chapters.
+    ):
+        speed_factor = encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0
+        chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed_factor)
+        if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
+            chapter_temp_dir = tempfile.mkdtemp(prefix="ffmwiz_encode_chapters_")
+            answers["_chapter_metadata_temp_dir"] = chapter_temp_dir
+            metadata_path = write_encode_chapter_metadata(chapter_plan, Path(chapter_temp_dir))
+            cmd.extend(["-i", str(metadata_path)])
+            answers["_chapter_metadata_input_index"] = 1
+            log_info(f"Chapters: injected metadata input at index 1 ({metadata_path})")
+
     # Determine audio mapping. When multi-range cuts are active, only one audio
     # output stream is produced by the filter_complex concat. Pick the first
     # selected audio in that path.
     if answers.get("audio_speed_from_video") and answers.get("audio_streams"):
-        audio_indices = list(range(len(answers.get("audio_streams") or [])))
+        audio_indices = (
+            selected_audio_streams(answers)
+            if "audio_tracks" in answers
+            else list(range(len(answers.get("audio_streams") or [])))
+        )
     else:
         audio_indices = selected_audio_streams(answers) if answers.get("audio_streams") else []
     audio_transform_active = bool(audio_indices) and audio_transform_enabled(answers)
     if multi_cut and audio_cut_transform_enabled(answers):
         note("Audio waveform cuts are skipped when video multi-range cuts are active.")
-        audio_transform_active = audio_speed_transform_enabled(answers)
+        audio_transform_active = audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers)
     audio_for_cut: int | None = None
     if multi_cut and audio_indices:
         audio_for_cut = audio_indices[0]
@@ -9410,21 +13853,59 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             )
         audio_indices = [audio_for_cut]
 
-    if has_video:
+    full_source_map = can_use_full_source_map_for_simple_encode(
+        answers,
+        audio_indices,
+        audio_transform_active,
+        multi_cut,
+    )
+
+    if (
+        has_video
+        and video_encoder
+        and video_encoder != "copy"
+        and answers.get("separator_points")
+        and append_single_input_split_outputs(
+            cmd,
+            answers,
+            output_path,
+            video_encoder,
+            tag,
+            profile,
+            audio_indices,
+            audio_transform_active,
+            multi_cut,
+            audio_for_cut,
+        )
+    ):
+        return cmd
+
+    extra_video_count = 0
+    if full_source_map:
+        cmd.extend(["-map", "0"])
+        log_info("Full source stream map enabled for simple encode: -map 0")
+    elif has_video:
         if multi_cut:
             cmd.extend(["-map", "[v]"])
         else:
             cmd.extend(["-map", "0:v:0"])
+            extra_video_count = append_additional_source_video_maps(cmd, answers)
 
     if multi_cut and audio_for_cut is not None:
         cmd.extend(["-map", "[a]"])
+    elif full_source_map:
+        pass
     elif audio_transform_active and not multi_cut:
         pass
     elif not multi_cut:
         for audio_index in audio_indices:
             cmd.extend(["-map", f"0:a:{audio_index}"])
 
-    subtitle_indices = selected_subtitle_streams(answers) if has_video and answers.get("subtitle_streams") else []
+    subtitle_indices = [] if full_source_map else (
+        selected_subtitle_streams(answers)
+        if has_video and source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")
+        else []
+    )
     if multi_cut and subtitle_indices:
         note("Cuts active: subtitle streams are not mapped through filter_complex and were skipped.")
         subtitle_indices = []
@@ -9442,63 +13923,82 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         subtitle_indices = allowed_subtitles
     for subtitle_index in subtitle_indices:
         cmd.extend(["-map", f"0:s:{subtitle_index}"])
+    attachments_mapped = embedded_attachment_keep_enabled(answers) if full_source_map else append_embedded_attachment_maps(cmd, answers)
+    data_mapped = bool(source_data_streams(answers) and source_data_keep_enabled(answers)) if full_source_map else append_source_data_maps(cmd, answers)
+    append_source_metadata_chapter_options(cmd, answers)
 
-    if not has_video:
-        cmd.append("-vn")
-    if not subtitle_indices:
-        cmd.append("-sn")
-    cmd.append("-dn")
+    if not full_source_map:
+        append_negative_stream_options(cmd, answers, has_video, subtitle_indices, data_mapped)
 
     if has_video and video_encoder:
         video_bitrate = answers.get("video_bitrate_kbps")
         if video_encoder == "copy":
             cmd.extend(["-c:v", "copy"])
         else:
+            if full_source_map:
+                cmd.extend(["-c", "copy"])
             if multi_cut:
                 fc = build_cut_filter_complex(answers, cut_keep_ranges, audio_for_cut)
                 cmd.extend(["-filter_complex", fc])
             else:
                 video_filter = build_video_filter(answers, use_gpu_filtering=use_cuda_fast_path)
                 if video_filter:
-                    cmd.extend(["-filter:v", video_filter])
+                    cmd.extend(["-filter:v:0" if (extra_video_count or full_source_map) else "-filter:v", video_filter])
             if use_cuda_fast_path and answers.get("fps") is not None:
-                cmd.extend(["-r:v", str(answers["fps"]), "-fps_mode:v", "cfr"])
-            cmd.extend(["-c:v", video_encoder])
+                if extra_video_count or full_source_map:
+                    cmd.extend(["-r:v:0", str(answers["fps"]), "-fps_mode:v:0", "cfr"])
+                else:
+                    cmd.extend(["-r:v", str(answers["fps"]), "-fps_mode:v", "cfr"])
+            cmd.extend(["-c:v:0" if full_source_map else "-c:v", video_encoder])
 
             if video_encoder.endswith("_nvenc"):
                 cmd.extend(["-preset", NVENC_PRESET, "-tune", NVENC_TUNE, "-rc", NVENC_RC])
-                if profile and "hevc" in video_encoder:
-                    cmd.extend(["-profile:v", profile])
+                append_nvenc_multipass_args(cmd, answers, video_encoder)
+                if "hevc" in video_encoder:
+                    cmd.extend(["-profile:v:0" if full_source_map else "-profile:v", hevc_profile_for_output(answers, profile)])
             elif video_encoder in {"libx264", "libx265"}:
                 cmd.extend(["-preset", CPU_PRESET])
+                if video_encoder == "libx265":
+                    cmd.extend(["-profile:v:0" if full_source_map else "-profile:v", hevc_profile_for_output(answers, "main")])
 
             if video_bitrate:
-                append_video_bitrate_args(cmd, answers, int(video_bitrate))
+                append_video_bitrate_args(cmd, answers, int(video_bitrate), ":v:0" if full_source_map else ":v")
 
-            cmd.extend(["-color_range", COLOR_RANGE])
+            cmd.extend(["-color_range:v:0", COLOR_RANGE])
 
             if tag and answers["output_ext"].lower() in MP4_LIKE_EXTS:
-                cmd.extend(["-tag:v", tag])
+                cmd.extend(["-tag:v:0" if full_source_map else "-tag:v", tag])
 
+            if extra_video_count:
+                append_additional_source_video_codec_options(cmd, extra_video_count)
+
+    audio_codec_for_stats: str | None = None
     if audio_indices:
         if audio_transform_active and not multi_cut:
             audio_fc, audio_labels = build_audio_transform_filter_complex(answers, audio_indices)
             cmd.extend(["-filter_complex", audio_fc])
             for label in audio_labels:
                 cmd.extend(["-map", f"[{label}]"])
-        audio_codec = answers.get("audio_codec") or default_audio_codec_for_ext(answers.get("output_ext", ""))
-        if audio_transform_active and audio_codec.lower() == "copy":
-            note("Audio copy cannot be used with audio speed/reverse or waveform cuts. AAC was selected for audio.")
+        audio_codec = normalize_audio_codec(
+            answers.get("audio_codec"),
+            default_audio_codec_for_ext(answers.get("output_ext", "")),
+        )
+        answers["audio_codec"] = audio_codec
+        audio_codec_for_stats = audio_codec
+        if audio_transform_active and audio_codec == "copy":
+            note("Audio copy cannot be used with audio filters such as speed/reverse, waveform cuts, or LoudNorm. AAC was selected for audio.")
             audio_codec = DEFAULT_AUDIO_CODEC
             answers["audio_codec"] = audio_codec
-        if answers.get("output_ext", "").lower() == "webm" and audio_codec.lower() not in {"copy", "libopus", "libvorbis"}:
+            audio_codec_for_stats = audio_codec
+        if answers.get("output_ext", "").lower() == "webm" and audio_codec not in {"copy", "libopus", "libvorbis"}:
             note("WebM audio was changed to libopus for container compatibility.")
             audio_codec = "libopus"
             answers["audio_codec"] = audio_codec
-        if audio_codec.lower() == "copy":
+            audio_codec_for_stats = audio_codec
+        if audio_codec == "copy":
             cmd.extend(["-c:a", "copy"])
         else:
-            if audio_codec.lower() == "aac":
+            if audio_codec == "aac":
                 log_info("AAC audio encoding is CPU-side; video CUDA/NVENC path is unaffected.")
             cmd.extend(["-c:a", audio_codec])
             audio_bitrate = answers.get("audio_bitrate_kbps")
@@ -9511,17 +14011,131 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     else:
         cmd.append("-an")
 
+    output_is_processed = bool(has_video and video_encoder and video_encoder != "copy")
+    output_is_processed = output_is_processed or bool(audio_indices and audio_codec_for_stats and audio_codec_for_stats != "copy")
+    output_is_processed = output_is_processed or bool(subtitle_indices and answers["output_ext"].lower() in MP4_LIKE_EXTS)
+    if output_is_processed:
+        video_output_count_for_stats = 0
+        if has_video:
+            video_output_count_for_stats = len(answers.get("video_streams") or []) if full_source_map else 1 + extra_video_count
+        audio_output_count_for_stats = 0
+        if audio_indices:
+            audio_output_count_for_stats = len(answers.get("audio_streams") or []) if full_source_map else len(audio_indices)
+        subtitle_output_count_for_stats = len(answers.get("subtitle_streams") or []) if full_source_map else len(subtitle_indices)
+        append_clear_reencoded_stream_stat_metadata(
+            cmd,
+            answers,
+            video_output_count=video_output_count_for_stats,
+            audio_output_count=audio_output_count_for_stats,
+            subtitle_output_count=subtitle_output_count_for_stats,
+        )
+
     if subtitle_indices:
         if answers["output_ext"].lower() in MP4_LIKE_EXTS:
             cmd.extend(["-c:s", "mov_text"])
         else:
             cmd.extend(["-c:s", "copy"])
+    if attachments_mapped:
+        append_embedded_attachment_codec_options(cmd, answers)
+    if data_mapped:
+        append_source_data_codec_options(cmd, answers)
 
     if answers["output_ext"].lower() in MP4_LIKE_EXTS and MOVFLAGS:
         cmd.extend(["-movflags", MOVFLAGS])
 
     cmd.append(str(output_path))
     return cmd
+
+
+def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    segments = separator_ranges(answers.get("separator_points"), duration)
+    if len(segments) <= 1:
+        return []
+    source_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
+    specs: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments, start=1):
+        keep_ranges = intersect_keep_ranges_with_segment(source_keep_ranges, segment, duration)
+        if not keep_ranges:
+            log_info(f"Split part {index} skipped because cuts remove the whole part: {segment}")
+            continue
+        output_path = separator_output_path(answers, index)
+        job_answers = dict(answers)
+        job_answers["output_location"] = output_path.parent
+        job_answers["output_name_stem"] = output_path.stem
+        job_answers["output_ext"] = output_path.suffix.lstrip(".") or str(answers.get("output_ext") or "mp4")
+        job_answers["output_collision_suffix"] = ""
+        job_answers["cut_keep_ranges"] = keep_ranges
+        job_answers.pop("separator_points", None)
+        job_answers.pop("separator_jobs", None)
+        job_answers.pop("cmd", None)
+        job_answers.pop("output_path", None)
+        cmd = build_ffmpeg_command(job_answers)
+        specs.append(
+            {
+                "index": index,
+                "segment": segment,
+                "keep_ranges": keep_ranges,
+                "output_path": job_answers["output_path"],
+                "cmd": cmd,
+                "answers": job_answers,
+            }
+        )
+    return specs
+
+
+def print_separator_summary(specs: list[dict[str, Any]]) -> None:
+    if not specs:
+        return
+    print()
+    print(paint("Split output plan:", Color.BOLD + Color.LIGHT_BLUE))
+    for spec in specs:
+        start, end = spec["segment"]
+        print(
+            "  "
+            + field_text(f"#{spec['index']}", f"{seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}", Color.CYAN)
+            + " | "
+            + field_text("output", spec["output_path"], Color.LIME)
+        )
+
+
+def run_separator_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
+    specs = build_separator_job_specs(answers)
+    if not specs:
+        return run_ffmpeg_with_progress(
+            answers["cmd"],
+            total_duration=None,
+            label="FFmpeg encode",
+        )
+    note(f"Split mode will write {len(specs)} output file(s) one at a time.")
+    started_at = time.perf_counter()
+    failures = 0
+    completed = 0
+    for position, spec in enumerate(specs, start=1):
+        job_answers = spec["answers"]
+        start, end = spec["segment"]
+        print()
+        print(paint(f"Split part [{position}/{len(specs)}]: {seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}", Color.BOLD + Color.LIGHT_BLUE))
+        if reverse_video_needs_segmented_main_encode(job_answers):
+            rc, _ = run_segmented_reverse_main_encode(job_answers)
+        else:
+            rc, _ = run_ffmpeg_with_progress(
+                spec["cmd"],
+                total_duration=max(0.001, total_keep_duration(job_answers.get("cut_keep_ranges") or [])),
+                label=f"Split part {position}/{len(specs)}",
+            )
+        if rc == 0:
+            completed += 1
+            note(f"Finished {Path(spec['output_path']).name}")
+        else:
+            failures += 1
+            error(f"Failed Split part {position} with exit code {rc}.")
+    elapsed = time.perf_counter() - started_at
+    if failures:
+        error(f"Split mode completed with {completed} success(es) and {failures} failure(s).")
+        return 1, elapsed
+    note(f"Split mode completed successfully: {completed} file(s).")
+    return 0, elapsed
 
 
 def build_video_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
@@ -9544,7 +14158,7 @@ def build_video_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
     cmd.extend(["-map", "0:v:0"])
     cmd.extend(["-sn", "-dn"])
     cmd.extend(["-filter:v", build_video_speed_filter(speed, reverse)])
-    cmd.extend(["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18", "-pix_fmt", CPU_FORMAT])
+    cmd.extend(["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18", "-pix_fmt", cpu_pixel_format_for_output(answers)])
     if include_audio:
         labels: list[str] = []
         parts: list[str] = []
@@ -9595,7 +14209,7 @@ def build_video_speed_reverse_segment_command(
         "0:v:0",
     ]
     cmd.extend(["-sn", "-dn", "-filter:v", build_video_speed_filter(speed, reverse)])
-    cmd.extend(["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18", "-pix_fmt", CPU_FORMAT])
+    cmd.extend(["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18", "-pix_fmt", cpu_pixel_format_for_output(answers)])
     if include_audio:
         labels: list[str] = []
         parts: list[str] = []
@@ -9821,11 +14435,19 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
         cmd.extend(["-i", str(input_path)])
         parts: list[str] = []
         labels: list[str] = []
+        source_labels = [f"acut_src{idx}" for idx in range(len(keep_ranges))]
+        parts.append(
+            f"[0:a:{audio_index}]asplit={len(keep_ranges)}"
+            f"{''.join(f'[{label}]' for label in source_labels)}"
+        )
+        log_info(
+            f"Inserted asplit={len(keep_ranges)} for multi-range audio trim from [0:a:{audio_index}]."
+        )
         for idx, (start, end) in enumerate(keep_ranges):
             label = f"a{idx}"
             labels.append(f"[{label}]")
             parts.append(
-                f"[0:a:{audio_index}]atrim=start={start:.6f}:end={end:.6f},"
+                f"[{source_labels[idx]}]atrim=start={start:.6f}:end={end:.6f},"
                 f"asetpts=PTS-STARTPTS[{label}]"
             )
         parts.append(f"{''.join(labels)}concat=n={len(keep_ranges)}:v=0:a=1[a]")
@@ -9890,7 +14512,69 @@ def step_start_now(answers: dict[str, Any]) -> None:
     if output_is_audio_only(answers) and not answers.get("audio_streams"):
         fail("Audio-only output was selected, but the input file has no audio stream.")
 
-    cmd = build_ffmpeg_command(answers)
+    join_items = []
+    if answers.get("join_input_items"):
+        join_items = [
+            {
+                "path": answers["input_path"],
+                "probe": answers.get("probe") or {},
+                "format": answers.get("format") or {},
+                "streams": (
+                    list(answers.get("video_streams") or [])
+                    + list(answers.get("audio_streams") or [])
+                    + list(answers.get("subtitle_streams") or [])
+                    + list(answers.get("attachment_streams") or [])
+                    + list(answers.get("data_streams") or [])
+                ),
+                "video_streams": answers.get("video_streams") or [],
+                "audio_streams": answers.get("audio_streams") or [],
+                "data_streams": answers.get("data_streams") or [],
+                "duration": stream_duration_seconds({}, answers.get("format")) or 0.0,
+            },
+            *list(answers.get("join_input_items") or []),
+        ]
+    separator_specs = []
+    if separator_specs:
+        cmd = separator_specs[0]["cmd"]
+        answers["separator_jobs"] = [
+            {
+                "index": spec["index"],
+                "segment": spec["segment"],
+                "output_path": spec["output_path"],
+            }
+            for spec in separator_specs
+        ]
+        answers["output_path"] = separator_specs[0]["output_path"]
+    else:
+        answers.pop("separator_jobs", None)
+        if join_items:
+            output_path = build_output_path(answers)
+            answers["output_path"] = output_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            copy_compatible, reasons = join_copy_compatibility(join_items)
+            can_copy = (
+                copy_compatible
+                and str(answers.get("video_codec", "")).lower() == "copy"
+                and str(answers.get("audio_codec", "")).lower() == "copy"
+                and answers.get("audio_tracks") in (None, "all")
+                and source_metadata_keep_enabled(answers)
+                and source_chapters_keep_enabled(answers)
+                and source_subtitles_keep_enabled(answers)
+                and not video_filters_required(answers)
+                and not answers.get("cut_keep_ranges")
+                and not loudnorm_transform_enabled(answers)
+            )
+            print_join_summary(join_items, copy_compatible, reasons)
+            if can_copy:
+                cmd = build_join_copy_command(answers, join_items, output_path)
+            else:
+                if copy_compatible:
+                    note("Join inputs are stream-copy compatible, but selected encode settings require re-encoding.")
+                else:
+                    note("Join inputs are not stream-copy compatible. Re-encoding is required.")
+                cmd = build_join_encode_command(answers, join_items, output_path)
+        else:
+            cmd = build_ffmpeg_command(answers)
     answers["cmd"] = cmd
     print_summary(answers, cmd)
     answers["start_now"] = ask_yes_no(
@@ -9991,11 +14675,12 @@ def apply_config_audio_options(answers: dict[str, Any], config: dict[str, Any]) 
     if not selected_audio_streams(answers):
         return
 
-    audio_codec = config_value(config, "audio_codec") or default_audio_codec_for_ext(answers.get("output_ext", ""))
-    if audio_codec.lower() == "n":
-        audio_codec = "copy"
+    audio_codec = normalize_audio_codec(
+        config_value(config, "audio_codec"),
+        default_audio_codec_for_ext(answers.get("output_ext", "")),
+    )
     answers["audio_codec"] = audio_codec
-    if audio_codec.lower() == "copy":
+    if audio_codec == "copy":
         return
 
     first_selected = selected_audio_streams(answers)[0]
@@ -10017,12 +14702,50 @@ def apply_config_audio_options(answers: dict[str, Any], config: dict[str, Any]) 
 def apply_config_subtitle_options(answers: dict[str, Any], config: dict[str, Any]) -> None:
     if not output_has_video(answers) or not answers.get("subtitle_streams"):
         return
+    if not source_subtitles_keep_enabled(answers):
+        answers["subtitle_tracks"] = []
+        return
     answers["subtitle_tracks"] = parse_selection_config(
         config_value(config, "subtitle_tracks"),
         len(answers["subtitle_streams"]),
         [0],
         allow_none=True,
     )
+
+
+def apply_config_source_extra_options(answers: dict[str, Any], config: dict[str, Any]) -> None:
+    if not output_has_video(answers):
+        return
+    keep = parse_bool_config(config_value(config, "keep_source_metadata", "y"), True)
+    answers["keep_source_metadata"] = keep
+    answers["keep_source_chapters"] = keep
+    answers["keep_source_subtitles"] = keep
+    answers["keep_source_data_streams"] = keep
+    answers["keep_source_extra_video_streams"] = keep
+    if not keep:
+        answers["subtitle_tracks"] = []
+        answers["keep_embedded_attachments"] = False
+        return
+    keep_attachments = parse_bool_config(config_value(config, "keep_embedded_attachments", "n"), False)
+    answers["keep_embedded_attachments"] = bool(
+        keep_attachments and embedded_attachment_streams(answers) and output_supports_embedded_attachments(answers)
+    )
+
+
+def apply_unified_video_editor_answers(answers: dict[str, Any]) -> None:
+    if not answers.get("_unified_video_editor_used"):
+        return
+    if "_unified_video_speed" in answers or "_unified_reverse_video" in answers:
+        speed = clamp_speed_factor(answers.get("_unified_video_speed", DEFAULT_SPEED_FACTOR))
+        reverse = bool(answers.get("_unified_reverse_video"))
+        answers["video_speed_enabled"] = bool(reverse or abs(speed - 1.0) > 1e-6)
+        answers["video_speed_factor"] = speed
+        answers["reverse_video"] = reverse
+        answers["audio_speed_from_video"] = bool(answers.get("_unified_include_audio"))
+    if "_unified_cut_keep_ranges" in answers:
+        duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+        duration += sum(float(item.get("duration") or 0.0) for item in answers.get("join_input_items") or [])
+        answers["cut_keep_ranges"] = normalize_cut_ranges(answers.get("_unified_cut_keep_ranges") or [], duration)
 
 
 def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: bool = False) -> None:
@@ -10055,33 +14778,39 @@ def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: boo
         apply_config_video_options(answers, config, skip_crop=skip_crop, force_video_options=skip_crop)
 
     apply_config_audio_options(answers, config)
+    apply_config_source_extra_options(answers, config)
     apply_config_subtitle_options(answers, config)
 
 
 def run_wizard(answers: dict[str, Any]) -> None:
     steps = [
         Step("input_path", lambda a: True, step_input_path),
+        Step("join_inputs", output_has_video, step_join_additional_inputs_for_encode),
         Step("output_location", lambda a: True, step_output_location),
         Step("output_format", lambda a: True, step_output_format),
         Step("video_codec", output_has_video, step_video_codec),
         Step("use_gpu", output_has_video, step_use_gpu),
         Step("unified_video_editor", output_has_video, step_unified_video_editor_for_encode),
-        Step("crop_enabled", output_has_video, step_crop_enabled),
+        Step("crop_enabled", lambda a: output_has_video(a) and not a.get("_unified_video_editor_declined"), step_crop_enabled),
         Step("crop_top", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_top),
         Step("crop_left", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_left),
         Step("crop_right", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_right),
         Step("crop_bottom", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_bottom),
         Step("video_bitrate", video_reencode_options_applicable, step_video_bitrate),
+        Step("nvenc_multipass", nvenc_multipass_prompt_applicable, step_nvenc_multipass),
+        Step("cpu_two_pass", cpu_two_pass_applicable, step_cpu_two_pass),
         Step("resolution", video_reencode_options_applicable, step_resolution),
         Step("fps", video_reencode_options_applicable, step_fps),
-        Step("video_speed_reverse", output_has_video, step_video_speed_reverse_for_encode),
-        Step("cuts", lambda a: video_reencode_options_applicable(a), step_cuts),
+        Step("video_speed_reverse", lambda a: output_has_video(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), step_video_speed_reverse_for_encode),
+        Step("cuts", lambda a: video_reencode_options_applicable(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), step_cuts),
         Step("audio_tracks", lambda a: bool(a.get("audio_streams")), step_audio_tracks),
+        Step("loudnorm", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_loudnorm),
         Step("audio_cut", audio_only_transform_prompt_applicable, step_audio_cut_for_encode),
         Step("audio_speed_reverse", audio_only_transform_prompt_applicable, step_audio_speed_reverse_for_encode),
         Step("audio_codec", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_audio_codec),
         Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
-        Step("subtitle_tracks", lambda a: output_has_video(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
+        Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
+        Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
         Step("start_now", lambda a: True, step_start_now),
     ]
 
@@ -10093,22 +14822,35 @@ def run_wizard(answers: dict[str, Any]) -> None:
 
     def prev_index(start: int) -> int:
         idx = start
-        while idx > 0 and not steps[idx].applicable(answers):
+        while idx > 0 and (
+            not steps[idx].applicable(answers)
+            or is_auto_unified_crop_step(idx)
+            or step_is_auto_back_skip(steps[idx], answers)
+        ):
             idx -= 1
         return max(0, idx)
 
+    def is_auto_unified_crop_step(pos: int) -> bool:
+        return bool(
+            answers.get("_unified_video_editor_used")
+            and steps[pos].name in {"crop_enabled", "crop_top", "crop_left", "crop_right", "crop_bottom"}
+        )
+
     def question_number(current: int) -> int:
         count = 0
+        join_pos = next((pos for pos, step in enumerate(steps) if step.name == "join_inputs"), -1)
         for pos in range(current + 1):
-            if steps[pos].applicable(answers):
+            if steps[pos].applicable(answers) and not is_auto_unified_crop_step(pos):
                 count += 1
-        return answers.get("_question_offset", 0) + count
+        extra = int(answers.get("_join_question_extra", 0) or 0) if join_pos >= 0 and current >= join_pos else 0
+        return answers.get("_question_offset", 0) + count + extra
 
     idx = next_index(0)
     while idx < len(steps):
         try:
             answers["_question_number"] = question_number(idx)
             steps[idx].run(answers)
+            apply_unified_video_editor_answers(answers)
             idx = next_index(idx + 1)
         except Back:
             if idx == 0:
@@ -10116,8 +14858,83 @@ def run_wizard(answers: dict[str, Any]) -> None:
             idx = prev_index(idx - 1)
 
 
+def log_final_normalized_answers(answers: dict[str, Any], cmd: list[str]) -> None:
+    try:
+        input_paths = [str(answers.get("input_path"))]
+        input_paths.extend(str(item.get("path")) for item in answers.get("join_input_items") or [] if item.get("path"))
+        source_duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+        split_points = normalize_separator_points(answers.get("separator_points"), final_processed_duration_for_splits(answers, source_duration))
+        split_intervals = separator_ranges(split_points, final_processed_duration_for_splits(answers, source_duration)) if split_points else []
+        text = " ".join(str(part) for part in cmd)
+        summary = {
+            "input_paths": input_paths,
+            "output_path": str(answers.get("output_path")),
+            "split_output_paths": [str(path) for path in answers.get("split_output_paths") or []],
+            "video_codec": answers.get("video_codec"),
+            "source_bit_depth": describe_video_bit_depth(source_video_stream(answers) or {}),
+            "output_bit_depth": output_video_bit_depth(answers) if output_has_video(answers) else None,
+            "output_cpu_pixel_format": cpu_pixel_format_for_output(answers) if output_has_video(answers) else None,
+            "output_cuda_pixel_format": cuda_pixel_format_for_output(answers) if output_has_video(answers) else None,
+            "audio_codec": answers.get("audio_codec"),
+            "selected_audio_tracks": selected_audio_streams(answers) if answers.get("audio_streams") else [],
+            "additional_video_streams": len(additional_source_video_streams(answers)),
+            "attachment_streams": len(embedded_attachment_streams(answers)),
+            "data_streams": len(source_data_streams(answers)),
+            "keep_source_metadata": source_metadata_keep_enabled(answers),
+            "keep_source_chapters": source_chapters_keep_enabled(answers),
+            "keep_source_subtitles": source_subtitles_keep_enabled(answers),
+            "keep_source_data_streams": source_data_keep_enabled(answers),
+            "keep_source_extra_video_streams": source_extra_video_keep_enabled(answers),
+            "keep_embedded_attachments": bool(answers.get("keep_embedded_attachments")),
+            "crop_enabled": bool(answers.get("crop_enabled")),
+            "crop_margins": {
+                "top": answers.get("crop_top", 0),
+                "left": answers.get("crop_left", 0),
+                "right": answers.get("crop_right", 0),
+                "bottom": answers.get("crop_bottom", 0),
+            },
+            "crop_box_dimensions": answers.get("crop_box_dimensions"),
+            "final_resolution": answers.get("final_resolution"),
+            "fps": answers.get("fps"),
+            "video_speed": encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0,
+            "audio_speed": encode_audio_speed_factor(answers) if audio_speed_transform_enabled(answers) else 1.0,
+            "reverse_video": bool(answers.get("reverse_video")),
+            "reverse_audio": encode_audio_reverse_enabled(answers),
+            "split_enabled": bool(split_points),
+            "split_points": split_points,
+            "split_intervals": split_intervals,
+            "loudnorm_enabled": loudnorm_transform_enabled(answers),
+            "loudnorm_target_i": answers.get("loudnorm_target_i"),
+            "loudnorm_measured": answers.get("loudnorm_measured"),
+            "loudnorm_applied_tracks": selected_audio_streams(answers) if loudnorm_transform_enabled(answers) and answers.get("audio_streams") else [],
+            "gpu_requested": bool(answers.get("use_gpu")),
+            "cuda_fast_path": "-hwaccel_output_format cuda" in text and "scale_cuda" in text,
+            "complex_cpu_graph": "-filter_complex" in cmd,
+            "gpu_decode_only": "-hwaccel cuda" in text and "-hwaccel_output_format cuda" not in text,
+            "nvenc_encode": "_nvenc" in text,
+            "nvenc_multipass": normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")),
+            "nvenc_multipass_skip_reason": answers.get("nvenc_multipass_skip_reason"),
+            "scale_cuda_used": "scale_cuda" in text,
+            "hwdownload_used": "hwdownload" in text,
+            "hwupload_cuda_used": "hwupload_cuda" in text,
+        }
+        log_info("Final normalized answers before execution:\n" + json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    except Exception as exc:
+        log_warn(f"Could not log final normalized answers: {exc}")
+
+
 def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
-    log_info("Final PowerShell command: " + command_to_powershell(cmd))
+    two_pass_display = cpu_two_pass_enabled_for_command(answers, cmd)
+    if two_pass_display:
+        pass1_cmd, pass2_cmd, _passlog = build_cpu_two_pass_commands(cmd, answers)
+        log_info("Final PowerShell command (CPU two-pass pass 1/2): " + command_to_powershell(pass1_cmd))
+        log_info("Final PowerShell command (CPU two-pass pass 2/2): " + command_to_powershell(pass2_cmd))
+        log_command("Actual final subprocess pass 1/2", pass1_cmd)
+        log_command("Actual final subprocess pass 2/2", pass2_cmd)
+    else:
+        log_info("Final PowerShell command: " + command_to_powershell(cmd))
+        log_command("Actual final subprocess", cmd)
+    log_final_normalized_answers(answers, cmd)
     log_info(
         "Selected settings: input={}; output={}; format={}; video_codec={}; audio_codec={}; crop={}; fps={}; resolution={}".format(
             answers.get("input_path"), answers.get("output_path"), answers.get("output_ext"),
@@ -10127,15 +14944,34 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         )
     )
     print()
-    print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
-    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+    if two_pass_display:
+        pass1_cmd, pass2_cmd, _passlog = build_cpu_two_pass_commands(cmd, answers)
+        print(paint("Final PowerShell command (CPU two-pass pass 1/2):", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+        print(paint(command_to_powershell(pass1_cmd), Color.FINAL_COMMAND_TEXT))
+        print()
+        print(paint("Final PowerShell command (CPU two-pass pass 2/2):", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+        print(paint(command_to_powershell(pass2_cmd), Color.FINAL_COMMAND_TEXT))
+    else:
+        print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+        print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
     print()
     print(paint("Selected settings summary:", Color.BOLD + Color.LIME))
     print("  " + field_text("input", answers["input_path"], Color.WHITE))
+    if answers.get("join_input_items"):
+        join_items = list(answers.get("join_input_items") or [])
+        print("  " + field_text("joined inputs", len(join_items) + 1, Color.LIGHT_BLUE))
+        print("    " + paint(f"1. {Path(answers['input_path']).name}", Color.WHITE))
+        for idx, item in enumerate(join_items, start=2):
+            print("    " + paint(f"{idx}. {Path(item.get('path')).name}", Color.WHITE))
+        print("  " + field_text("join settings", "video/audio settings apply by track number to every joined input", Color.YELLOW))
     print("  " + field_text("output", answers["output_path"], Color.LIME))
     if output_has_video(answers):
         print("  " + field_text("video codec", answers.get("video_codec", DEFAULT_VIDEO_CODEC), Color.CYAN))
+        print("  " + field_text("source bit depth", describe_video_bit_depth(source_video_stream(answers) or {}), Color.PINK))
+        print("  " + field_text("output bit depth", f"{output_video_bit_depth(answers)}-bit", Color.PINK))
         print("  " + field_text("GPU", "yes" if answers.get("use_gpu") else "no", Color.GREEN if answers.get("use_gpu") else Color.YELLOW))
+        if "_nvenc" in command_to_text(cmd):
+            print("  " + field_text("NVENC multipass", normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")), Color.YELLOW))
         if answers.get("crop_enabled"):
             print("  " + field_text("crop", "yes, " + format_crop_margins(answers), Color.ORANGE))
             crop_box = answers.get("crop_box_dimensions")
@@ -10145,6 +14981,8 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         else:
             print("  " + field_text("crop", "no", Color.GREEN))
         print("  " + field_text("video bitrate", str(answers.get("video_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
+        if answers.get("cpu_two_pass"):
+            print("  " + field_text("CPU two-pass", "yes", Color.YELLOW))
         print("  " + field_text("resolution", format_resolution_summary(answers.get("resolution")), Color.MAGENTA))
         if answers.get("final_resolution"):
             final_w, final_h = answers["final_resolution"]
@@ -10158,17 +14996,35 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
                     "FFmWiz runs reverse video in short segments to avoid buffering the whole clip in RAM. "
                     "The single command above is an equivalent simple reference command."
                 )
+        if answers.get("separator_points"):
+            print(paint(format_split_points_for_summary(answers.get("separator_points") or [], get_video_fps(answers), "Split points"), Color.LIGHT_BLUE))
+        if answers.get("split_output_paths"):
+            print("  " + field_text("Split output parts", len(answers.get("split_output_paths") or []), Color.LIGHT_BLUE))
+            for idx, part_path in enumerate(answers.get("split_output_paths") or [], start=1):
+                print("    " + field_text(f"Part {idx:02d}", part_path, Color.LIME))
     if answers.get("audio_streams"):
         print("  " + field_text("audio tracks", answers.get("audio_tracks"), Color.LIGHT_BLUE))
         print("  " + field_text("audio codec", answers.get("audio_codec"), Color.CYAN))
         print("  " + field_text("audio bitrate", str(answers.get("audio_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
         if audio_cut_transform_enabled(answers):
-            print(paint(format_cut_ranges_for_summary(answers["audio_cut_keep_ranges"], 25.0, "audio cuts (keep ranges)"), Color.LIME))
+            print(paint(format_audio_ranges_for_summary(answers["audio_cut_keep_ranges"], "audio cuts (keep ranges)"), Color.LIME))
         if audio_speed_transform_enabled(answers):
             print("  " + field_text("audio speed", f"{encode_audio_speed_factor(answers) * 100:.0f}%", Color.MAGENTA))
             print("  " + field_text("reverse audio", "yes" if encode_audio_reverse_enabled(answers) else "no", Color.ORANGE))
+        if loudnorm_transform_enabled(answers):
+            mode = "two-pass" if answers.get("loudnorm_measured") else "single-pass"
+            print("  " + field_text("LoudNorm", f"I={answers.get('loudnorm_target_i', LOUDNORM_DEFAULT_TARGET_I):g} LUFS ({mode})", Color.MEAN_VOLUME))
     if output_has_video(answers) and answers.get("subtitle_streams"):
-        print("  " + field_text("subtitle tracks", answers.get("subtitle_tracks"), Color.WHITE))
+        if source_subtitles_keep_enabled(answers):
+            print("  " + field_text("subtitle tracks", answers.get("subtitle_tracks"), Color.WHITE))
+        else:
+            print("  " + field_text("subtitle tracks", "removed by metadata policy", Color.ORANGE))
+    if output_has_video(answers) and source_extra_preservation_features(answers):
+        print("  " + field_text("source metadata", "keep" if source_metadata_keep_enabled(answers) else "remove", Color.LIGHT_BLUE))
+        print("  " + field_text("chapters", "keep" if source_chapters_keep_enabled(answers) else "remove", Color.LIGHT_BLUE))
+    if output_has_video(answers) and embedded_attachment_streams(answers):
+        attachment_state = "yes" if embedded_attachment_keep_enabled(answers) else "no"
+        print("  " + field_text("embedded attachments", attachment_state, Color.PINK))
     cut_keep_ranges = answers.get("cut_keep_ranges") or []
     if cut_keep_ranges:
         fps = get_video_fps(answers)
@@ -10178,27 +15034,168 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         ))
 
 
+def cpu_two_pass_enabled_for_command(answers: dict[str, Any], cmd: list[str]) -> bool:
+    if not answers.get("cpu_two_pass"):
+        return False
+    text = " ".join(str(part) for part in cmd)
+    return ("-c:v libx264" in text or "-c:v:0 libx264" in text or "-c:v libx265" in text or "-c:v:0 libx265" in text)
+
+
+def cpu_two_pass_log_prefix(answers: dict[str, Any]) -> Path:
+    existing = answers.get("_cpu_two_pass_passlogfile")
+    if existing:
+        return Path(str(existing))
+    safe_stem = sanitize_output_stem(Path(str(answers.get("output_path") or "ffmwiz")).stem)[:48] or "ffmwiz"
+    passlog = Path(tempfile.gettempdir()) / f"ffmwiz_2pass_{safe_stem}_{os.getpid()}_{int(time.time())}"
+    answers["_cpu_two_pass_passlogfile"] = str(passlog)
+    return passlog
+
+
+def ffmpeg_input_section_end(cmd: list[str]) -> int:
+    idx = 0
+    end = 1
+    while idx < len(cmd):
+        if cmd[idx] == "-i" and idx + 1 < len(cmd):
+            end = idx + 2
+            idx += 2
+            continue
+        idx += 1
+    return end
+
+
+def cpu_two_pass_video_output_args(output_args: list[str]) -> list[str]:
+    prefixes_with_values = (
+        "-filter:v",
+        "-vf",
+        "-r:v",
+        "-fps_mode:v",
+        "-c:v",
+        "-preset",
+        "-profile:v",
+        "-b:v",
+        "-maxrate:v",
+        "-bufsize:v",
+        "-color_range:v",
+        "-pix_fmt",
+        "-x264-params",
+        "-x265-params",
+    )
+    result: list[str] = []
+    idx = 0
+    while idx < len(output_args):
+        opt = output_args[idx]
+        if any(opt == prefix or opt.startswith(prefix + ":") for prefix in prefixes_with_values):
+            if idx + 1 >= len(output_args):
+                raise ValueError(f"Missing value for two-pass video option: {opt}")
+            if opt != "-c" and output_args[idx + 1] != "copy":
+                result.extend([opt, output_args[idx + 1]])
+            idx += 2
+            continue
+        idx += 1
+    text = " ".join(result)
+    if "-c:v" not in text:
+        raise ValueError("CPU two-pass command could not find the final video encoder options.")
+    return result
+
+
+def build_cpu_two_pass_commands(cmd: list[str], answers: dict[str, Any]) -> tuple[list[str], list[str], Path]:
+    if len(cmd) < 2:
+        raise ValueError("FFmpeg command is too short for two-pass encoding.")
+    passlog = cpu_two_pass_log_prefix(answers)
+    input_end = ffmpeg_input_section_end(cmd)
+    input_args = list(cmd[:input_end])
+    output_args = list(cmd[input_end:-1])
+    video_args = cpu_two_pass_video_output_args(output_args)
+    first = (
+        input_args
+        + ["-map", "0:v:0"]
+        + video_args
+        + ["-pass", "1", "-passlogfile", str(passlog), "-an", "-sn", "-dn", "-f", "null", os.devnull]
+    )
+    second = list(cmd[:-1]) + ["-pass", "2", "-passlogfile", str(passlog), str(cmd[-1])]
+    return first, second, passlog
+
+
+def cleanup_cpu_two_pass_logs(passlog: Path) -> None:
+    parent = passlog.parent
+    prefix = passlog.name
+    try:
+        for path in parent.glob(prefix + "*"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def run_cpu_two_pass_ffmpeg(
+    cmd: list[str],
+    answers: dict[str, Any],
+    *,
+    total_duration: float | None,
+    progress_output_paths: list[Path],
+) -> tuple[int, float]:
+    first, second, passlog = build_cpu_two_pass_commands(cmd, answers)
+    log_info("CPU two-pass encoding enabled.")
+    log_command("CPU two-pass pass 1", first)
+    log_command("CPU two-pass pass 2", second)
+    try:
+        print(paint("Starting FFmpeg pass 1/2...", Color.GREEN))
+        rc1, elapsed1 = run_ffmpeg_with_progress(
+            first,
+            total_duration=total_duration,
+            label="FFmpeg encode pass 1/2",
+            initial_detail="CPU two-pass analysis pass",
+        )
+        if rc1 != 0:
+            return rc1, elapsed1
+        print()
+        print(paint("Starting FFmpeg pass 2/2...", Color.GREEN))
+        rc2, elapsed2 = run_ffmpeg_with_progress(
+            second,
+            total_duration=total_duration,
+            label="FFmpeg encode pass 2/2",
+            initial_detail="CPU two-pass final encode pass",
+            progress_output_paths=progress_output_paths,
+        )
+        return rc2, elapsed1 + elapsed2
+    finally:
+        cleanup_cpu_two_pass_logs(passlog)
+
+
 def graphical_hint(text: str) -> str:
     if USE_COLOR:
         return f"{Color.AQUA}{text}{Color.RESET}{Color.HINT_YELLOW}"
     return text
 
 
+def colored_unified_editor_hint() -> str:
+    return paint("(combines crop, cuts, speed/reverse, and audio waveform preview)", Color.HINT_YELLOW)
+
+
 def run_mode_steps(answers: dict[str, Any], steps: list[Step]) -> None:
+    def visible_question_number(current: int) -> int:
+        count = 0
+        for pos in range(current + 1):
+            if steps[pos].applicable(answers):
+                count += 1
+        return int(answers.get("_question_offset", 0) or 0) + count
+
     idx = 0
     while idx < len(steps):
         if not steps[idx].applicable(answers):
             idx += 1
             continue
         try:
-            answers["_question_number"] = idx + 1
+            answers["_question_number"] = visible_question_number(idx)
             steps[idx].run(answers)
             idx += 1
         except Back:
             if idx == 0:
                 raise
             idx -= 1
-            while idx > 0 and not steps[idx].applicable(answers):
+            while idx > 0 and (not steps[idx].applicable(answers) or step_is_auto_back_skip(steps[idx], answers)):
                 idx -= 1
 
 
@@ -10224,7 +15221,7 @@ def step_video_speed_reverse_options(answers: dict[str, Any]) -> None:
                 "n",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -10247,7 +15244,7 @@ def step_video_speed_reverse_options(answers: dict[str, Any]) -> None:
                 speed_text = ask_raw(
                     "Enter speed factor or percent (examples: 0.5x, 1.25x, 125%; Enter=100%; 0=back): "
                 )
-                if speed_text == "0":
+                if is_back_value(speed_text):
                     break
                 if not speed_text:
                     speed_text = "100%"
@@ -10279,7 +15276,7 @@ def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
         if answers["video_speed_enabled"]:
             print(paint(f"Applied unified speed/reverse: {speed:.2f}x, reverse={'yes' if reverse else 'no'}", Color.LIME))
         return
-    allow_gui = not answers.get("_disable_graphical_editors")
+    allow_gui = not answers.get("_disable_graphical_editors") and not answers.get("_disable_followup_video_gui_prompts")
     while True:
         hint = (
             f"y/n, {graphical_hint('g=Show Graphical Video Speed Editor')}; "
@@ -10288,7 +15285,7 @@ def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
             else "y/n; speed/reverse requires video re-encoding"
         )
         value = ask_raw(question_prompt(answers, "Change video speed or reverse video?", hint, "n"))
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -10298,7 +15295,7 @@ def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
             return
         if lowered in {"g", "gui", "graphical"}:
             if not allow_gui:
-                error("Graphical video speed editor is not available in Folder Encode.")
+                error("Graphical video speed editor is not available here. Use the Unified Video Editor or manual settings.")
                 continue
             note("Loading Graphical Video Speed Editor...")
             sys.stdout.flush()
@@ -10314,7 +15311,7 @@ def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
         if lowered in {"y", "yes"}:
             while True:
                 speed_text = ask_raw("Enter video speed factor or percent (examples: 0.5x, 1.25x, 125%; Enter=100%; 0=back): ")
-                if speed_text == "0":
+                if is_back_value(speed_text):
                     break
                 if not speed_text:
                     speed_text = "100%"
@@ -10345,7 +15342,7 @@ def step_audio_speed_reverse_options(answers: dict[str, Any]) -> None:
                 "n",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -10367,7 +15364,7 @@ def step_audio_speed_reverse_options(answers: dict[str, Any]) -> None:
                 speed_text = ask_raw(
                     "Enter speed factor or percent (examples: 0.5x, 1.25x, 125%; Enter=100%; 0=back): "
                 )
-                if speed_text == "0":
+                if is_back_value(speed_text):
                     break
                 if not speed_text:
                     speed_text = "100%"
@@ -10398,7 +15395,7 @@ def step_audio_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
             else f"y/n; applies to selected audio tracks.{suffix}"
         )
         value = ask_raw(question_prompt(answers, "Change audio speed or reverse audio?", hint, "n"))
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -10424,7 +15421,7 @@ def step_audio_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
         if lowered in {"y", "yes"}:
             while True:
                 speed_text = ask_raw("Enter audio speed factor or percent (examples: 0.5x, 1.25x, 125%; Enter=100%; 0=back): ")
-                if speed_text == "0":
+                if is_back_value(speed_text):
                     break
                 if not speed_text:
                     speed_text = "100%"
@@ -10461,8 +15458,7 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
             f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
             f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
             f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)} | "
-            f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
-            f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)}"
+            f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)}"
         )
     while True:
         value = ask_raw(
@@ -10473,7 +15469,7 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
                 "1",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "1"
@@ -10544,7 +15540,7 @@ def step_audio_cut_for_encode(answers: dict[str, Any]) -> None:
             else "y/n; terminal range entry applies to selected audio tracks"
         )
         value = ask_raw(question_prompt(answers, "Apply audio waveform cuts?", hint, "n"))
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -10622,6 +15618,78 @@ def step_video_speed_start_now(answers: dict[str, Any]) -> None:
     )
 
 
+def print_ffmpeg_processing_plan(
+    answers: dict[str, Any],
+    cmd: list[str],
+    total_duration: float | None,
+    processed_duration: float | None = None,
+) -> None:
+    text = " ".join(str(part) for part in cmd)
+    has_nvdec = "-hwaccel cuda" in text
+    has_cuda_frames = "-hwaccel_output_format cuda" in text
+    has_nvenc = "_nvenc" in text
+    has_complex = "-filter_complex" in cmd
+    if has_cuda_frames:
+        path = "CUDA fast path: NVDEC/CUDA decode -> CUDA filters -> NVENC encode"
+    elif has_nvdec and has_nvenc and has_complex:
+        path = "Hybrid GPU path: CUDA/NVDEC decode -> CPU filter graph -> NVENC encode"
+    elif has_nvenc:
+        path = "NVENC encode path: CPU decode/filter -> NVENC encode"
+    elif has_complex:
+        path = "CPU filter graph path"
+    else:
+        path = "Standard FFmpeg path"
+    print("  " + field_text("processing path", path, Color.LIGHT_BLUE))
+    log_info(f"FFmpeg processing path: {path}")
+    if has_cuda_frames:
+        print("  " + field_text("decode", "CUDA frames are kept on GPU; scale_cuda is used where scaling is needed", Color.CYAN))
+        log_info("Command decision: CUDA fast path enabled; hwaccel_output_format cuda is intentional.")
+    elif has_nvdec and has_nvenc and has_complex:
+        print("  " + field_text("decode", "CUDA/NVDEC is used before each video input", Color.CYAN))
+        print("  " + field_text("filters", "CPU filter_complex: crop/fps/scale/pad/concat/trim/speed/Split/audio filters", Color.ORANGE))
+        print("  " + field_text("encode", "NVENC is used for final video encoding", Color.LIME))
+        log_info("Command decision: complex graph uses CPU filters; CUDA decode-only enabled; hwaccel_output_format cuda intentionally omitted.")
+        log_info("Command decision: scale_cuda/pad_cuda/hwdownload/hwupload_cuda intentionally not used in complex CPU graph.")
+    elif has_nvenc:
+        print("  " + field_text("encode", "NVENC is used for final video encoding", Color.LIME))
+        log_info("Command decision: NVENC encode path without CUDA frame filtering.")
+    elif has_complex:
+        print("  " + field_text("filters", "CPU filter_complex", Color.ORANGE))
+        log_info("Command decision: CPU filter graph path.")
+    if answers.get("join_input_items"):
+        print("  " + field_text("join", f"{len(answers.get('join_input_items') or []) + 1} input videos", Color.CYAN))
+    if answers.get("cut_keep_ranges"):
+        print("  " + field_text("cuts", f"{len(answers.get('cut_keep_ranges') or [])} keep range(s)", Color.ORANGE))
+    if answers.get("separator_points"):
+        print("  " + field_text("Split", f"{len(answers.get('separator_points') or []) + 1} output part(s)", Color.LIGHT_BLUE))
+        if processed_duration and processed_duration > 0:
+            print("  " + field_text("processed duration", format_elapsed(processed_duration), Color.CYAN))
+            print("  " + field_text("progress basis", "aggregate Split timeline from encoded frames", Color.GRAY))
+    if loudnorm_transform_enabled(answers):
+        print("  " + field_text("LoudNorm", f"I={answers.get('loudnorm_target_i', LOUDNORM_DEFAULT_TARGET_I):g} LUFS", Color.MEAN_VOLUME))
+    if total_duration and total_duration > 0:
+        print("  " + field_text("progress duration", format_elapsed(total_duration), Color.MAGENTA))
+    if has_complex:
+        print("  " + field_text("startup phase", "decoding input, priming filter_complex, then feeding encoder", Color.GRAY))
+
+
+def ffmpeg_initial_progress_detail(answers: dict[str, Any], cmd: list[str]) -> str:
+    text = " ".join(str(part) for part in cmd)
+    has_nvdec = "-hwaccel cuda" in text
+    has_cuda_frames = "-hwaccel_output_format cuda" in text
+    has_nvenc = "_nvenc" in text
+    has_complex = "-filter_complex" in cmd
+    if has_cuda_frames:
+        return "launching CUDA decode/filter path and waiting for first encoded timestamp"
+    if has_nvdec and has_nvenc and has_complex:
+        return "CUDA/NVDEC decoding -> CPU filter_complex -> NVENC encoding; waiting for first encoded timestamp"
+    if has_nvenc and has_complex:
+        return "CPU decode/filter_complex -> NVENC encoding; waiting for first encoded timestamp"
+    if has_complex:
+        return "CPU filter_complex is starting; waiting for first encoded timestamp"
+    return "starting FFmpeg and waiting for first progress timestamp"
+
+
 def step_audio_speed_start_now(answers: dict[str, Any]) -> None:
     if answers.get("_speed_reverse_noop"):
         return
@@ -10658,6 +15726,847 @@ def step_audio_transform_start_now(answers: dict[str, Any]) -> None:
     )
 
 
+METADATA_DISPOSITION_FLAGS = (
+    "default",
+    "forced",
+    "hearing_impaired",
+    "visual_impaired",
+    "commentary",
+    "original",
+    "karaoke",
+    "lyrics",
+    "attached_pic",
+)
+
+
+def metadata_prompt(answers: dict[str, Any], title: str, details: str | None = None,
+                    default: str | None = None, back: str = "back=0, quit=exit") -> str:
+    answers["_metadata_question_number"] = int(answers.get("_metadata_question_number", 0)) + 1
+    saved = answers.get("_question_number")
+    answers["_question_number"] = answers["_metadata_question_number"]
+    try:
+        return question_prompt(answers, title, details, default, back)
+    finally:
+        if saved is None:
+            answers.pop("_question_number", None)
+        else:
+            answers["_question_number"] = saved
+
+
+def metadata_menu_item(number: int, label: str, default: bool = False) -> str:
+    marker = f" {paint('[' + str(number) + ']', Color.GREEN)}" if default else ""
+    return f"  {paint(str(number) + '.', Color.LIGHT_BLUE)} {label}{marker}"
+
+
+def metadata_menu_selection(default: str = "1", back: str = "0=back, quit=exit") -> str:
+    value = ask_raw(f"{paint('Selection', Color.BOLD)} {paint('[' + default + ']', Color.GREEN)} {back_text(back)}: ")
+    return default if value == "" else value
+
+
+def probe_media_json(input_path: Path, ffprobe: str | None = None) -> dict[str, Any]:
+    ffprobe_bin = ffprobe or shutil.which("ffprobe") or "ffprobe"
+    args = [
+        ffprobe_bin,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-show_format",
+        "-show_streams",
+        "-show_chapters",
+        "-of",
+        "json",
+        str(input_path),
+    ]
+    log_info("Metadata Editor ffprobe command: " + command_to_powershell(args))
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0:
+        log_error("Metadata Editor ffprobe failed:\n" + (result.stderr or result.stdout or "").strip())
+        raise FFprobeError(f"ffprobe could not read this file. See log file: {_log_file_text()}")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        log_error("Metadata Editor ffprobe returned invalid JSON:\n" + _text_preview(result.stdout, 3000))
+        raise FFprobeError(f"ffprobe returned invalid JSON. See log file: {_log_file_text()}") from exc
+    if not isinstance(payload, dict):
+        raise FFprobeError("ffprobe returned an unexpected JSON payload.")
+    return payload
+
+
+def metadata_stream_index(stream: dict[str, Any]) -> int | None:
+    try:
+        return int(stream.get("index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def metadata_stream_type(stream: dict[str, Any]) -> str:
+    return str(stream.get("codec_type") or "unknown").lower()
+
+
+def metadata_tags(stream: dict[str, Any]) -> dict[str, Any]:
+    return stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+
+
+def metadata_disposition_summary(stream: dict[str, Any]) -> str:
+    disposition = stream.get("disposition") if isinstance(stream.get("disposition"), dict) else {}
+    flags = [name for name in METADATA_DISPOSITION_FLAGS if int(disposition.get(name) or 0)]
+    return ",".join(flags) if flags else "-"
+
+
+def metadata_stream_spec(probe_json: dict[str, Any], stream: dict[str, Any]) -> str:
+    stream_index = metadata_stream_index(stream)
+    codec_type = metadata_stream_type(stream)
+    prefix = {"video": "v", "audio": "a", "subtitle": "s", "attachment": "t", "data": "d"}.get(codec_type)
+    if prefix is None:
+        return str(stream_index if stream_index is not None else 0)
+    relative = 0
+    for candidate in probe_json.get("streams") or []:
+        if metadata_stream_type(candidate) != codec_type:
+            continue
+        if metadata_stream_index(candidate) == stream_index:
+            return f"{prefix}:{relative}"
+        relative += 1
+    return str(stream_index if stream_index is not None else 0)
+
+
+def metadata_stream_relative_index(probe_json: dict[str, Any], stream: dict[str, Any]) -> int:
+    spec = metadata_stream_spec(probe_json, stream)
+    try:
+        return int(spec.rsplit(":", 1)[-1])
+    except (TypeError, ValueError):
+        return 0
+
+
+def metadata_type_color(codec_type: str) -> str:
+    return {
+        "video": Color.MAGENTA,
+        "audio": Color.BLUE,
+        "subtitle": Color.LIGHT_YELLOW,
+        "attachment": Color.MUX_LAVENDER,
+        "data": Color.GRAY,
+    }.get(codec_type, Color.WHITE)
+
+
+def metadata_stream_line(probe_json: dict[str, Any], stream: dict[str, Any]) -> str:
+    codec_type = metadata_stream_type(stream)
+    tags = metadata_tags(stream)
+    parts = [
+        field_text("stream index", metadata_stream_index(stream), Color.LIGHT_BLUE),
+        field_text("type", codec_type, metadata_type_color(codec_type)),
+        field_text("codec", stream.get("codec_name") or "unknown", Color.CYAN),
+    ]
+    if codec_type != "video":
+        parts.extend([
+            field_text("language", display_language(tags.get("language")), Color.GREEN),
+            field_text("title", tags.get("title") or "unknown", Color.WHITE),
+        ])
+    parts.extend([
+        field_text("disposition", metadata_disposition_summary(stream), Color.YELLOW),
+        field_text("spec", metadata_stream_spec(probe_json, stream), Color.MAGENTA),
+    ])
+    if codec_type == "video":
+        parts.extend([
+            field_text("size", f"{stream.get('width', '?')}x{stream.get('height', '?')}", Color.LIME),
+            field_text("pix_fmt", stream.get("pix_fmt") or "unknown", Color.ORANGE),
+            field_text("color_range", stream.get("color_range") or "unknown", Color.COLOR_RANGE_VALUE),
+            field_text("color_space", stream.get("color_space") or "unknown", Color.LIGHT_BLUE),
+            field_text("color_transfer", stream.get("color_transfer") or "unknown", Color.PINK),
+            field_text("color_primaries", stream.get("color_primaries") or "unknown", Color.AQUA),
+        ])
+    elif codec_type == "audio":
+        parts.extend([
+            field_text("sample_rate", stream.get("sample_rate") or "unknown", Color.MAGENTA),
+            field_text("channels", stream.get("channels") or "unknown", Color.GREEN),
+            field_text("channel_layout", stream.get("channel_layout") or "unknown", Color.AQUA),
+        ])
+    elif codec_type == "subtitle":
+        parts.append(field_text("subtitle codec", stream.get("codec_name") or "unknown", Color.LIGHT_YELLOW))
+    return " | ".join(str(part) for part in parts)
+
+
+def list_streams_for_selection(probe_json: dict[str, Any], streams: list[dict[str, Any]] | None = None) -> None:
+    print()
+    print(paint("Streams", Color.BOLD + Color.LIGHT_BLUE))
+    for stream in (streams if streams is not None else (probe_json.get("streams") or [])):
+        print("  " + metadata_stream_line(probe_json, stream))
+
+
+def select_stream(probe_json: dict[str, Any], answers: dict[str, Any],
+                  allowed_types: set[str] | None = None) -> dict[str, Any]:
+    allowed_types = {item.lower() for item in allowed_types} if allowed_types else None
+    streams = [
+        stream for stream in (probe_json.get("streams") or [])
+        if allowed_types is None or metadata_stream_type(stream) in allowed_types
+    ]
+    if not streams:
+        error("No matching streams were found for this operation.")
+        raise Back()
+    list_streams_for_selection(probe_json, streams)
+    by_index = {metadata_stream_index(stream): stream for stream in streams if metadata_stream_index(stream) is not None}
+    while True:
+        value = ask_raw(metadata_prompt(
+            answers,
+            "Enter stream index",
+            "use the real ffprobe stream index shown above; use b to go back",
+            back="back=b, quit=exit",
+        ))
+        if str(value).strip().lower() in {"b", "back"}:
+            raise Back()
+        if not re.fullmatch(r"\d+", value or ""):
+            error("Enter a numeric stream index from the list above.")
+            continue
+        stream = by_index.get(int(value))
+        if stream is None:
+            error("That stream index is not available for this operation.")
+            continue
+        log_info(
+            f"Metadata Editor selected stream: index={value}; "
+            f"type={metadata_stream_type(stream)}; spec={metadata_stream_spec(probe_json, stream)}"
+        )
+        return stream
+
+
+def metadata_output_path(input_path: Path, suffix: str, output_ext: str | None = None) -> Path:
+    ext = output_ext or input_path.suffix or ".mkv"
+    if ext and not str(ext).startswith("."):
+        ext = "." + str(ext)
+    candidate = input_path.with_name(f"{sanitize_output_stem(input_path.stem)}{suffix}{ext}")
+    candidate = resolve_output_collision_against_inputs(candidate, [input_path], suffix or "_metadata")
+    return unique_numbered_path(candidate)
+
+
+def metadata_report_output_path(input_path: Path, suffix: str, ext: str) -> Path:
+    report_dir = default_media_reports_dir()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    candidate = report_dir / f"{sanitize_output_stem(input_path.name)}{suffix}{ext}"
+    return unique_numbered_path(candidate)
+
+
+def confirm_and_run_ffmpeg(answers: dict[str, Any], cmd: list[str], label: str,
+                           output_path: Path | None = None) -> bool:
+    print()
+    print(paint("Final PowerShell command:", Color.FINAL_COMMAND_LABEL))
+    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+    log_info(f"{label} command: " + command_to_powershell(cmd))
+    if not ask_yes_no(metadata_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True):
+        note("FFmpeg was not started. Returning to the Metadata Editor menu.")
+        return False
+    rc, _elapsed = run_ffmpeg_with_progress(cmd, total_duration=None, label=label)
+    if rc == 0:
+        if output_path is not None:
+            note(f"Metadata operation finished: {output_path}")
+        return True
+    error(f"Metadata operation failed. Full output is in: {_log_file_text()}")
+    return False
+
+
+def metadata_stream_copy_command(ffmpeg: str, input_path: Path, output_path: Path) -> list[str]:
+    return [ffmpeg, "-hide_banner", "-y", "-i", str(input_path), "-map", "0", "-c", "copy"]
+
+
+def metadata_refresh_probe(answers: dict[str, Any]) -> dict[str, Any]:
+    probe = probe_media_json(answers["metadata_input_path"], answers.get("ffprobe"))
+    answers["metadata_probe"] = probe
+    return probe
+
+
+def metadata_show_input_overview(answers: dict[str, Any]) -> None:
+    probe = metadata_refresh_probe(answers)
+    input_path = answers["metadata_input_path"]
+    print()
+    print(paint("Metadata Editor input:", Color.BOLD + Color.LIGHT_BLUE))
+    print("  " + field_text("Path", input_path, Color.WHITE))
+    fmt = probe.get("format") if isinstance(probe.get("format"), dict) else {}
+    print("  " + field_text("Container", fmt.get("format_name") or "unknown", Color.CYAN))
+    print("  " + field_text("Duration", format_duration(stream_duration_seconds({}, fmt)), Color.MAGENTA))
+    print("  " + field_text("Chapters", len(probe.get("chapters") or []), Color.YELLOW))
+    list_streams_for_selection(probe)
+
+
+def metadata_set_current_input(answers: dict[str, Any], output_path: Path) -> None:
+    if output_path.exists():
+        answers["metadata_input_path"] = output_path
+        metadata_refresh_probe(answers)
+        note(f"Metadata Editor current input is now: {output_path}")
+
+
+def metadata_prompt_input(base_answers: dict[str, Any]) -> dict[str, Any]:
+    answers = dict(base_answers)
+    answers["_metadata_question_number"] = 0
+    while True:
+        value = ask_required(
+            metadata_prompt(answers, "Enter input media file path", r"drag and drop a file here or paste a path; example: D:\Videos\input.mkv"),
+            allow_n=False,
+        )
+        input_path = terminal_path(value)
+        if not input_path.exists() or not input_path.is_file():
+            error("Input file was not found.")
+            continue
+        answers["metadata_input_path"] = input_path
+        metadata_show_input_overview(answers)
+        return answers
+
+
+def metadata_value_prompt(answers: dict[str, Any], title: str, allow_empty: bool = False) -> str:
+    while True:
+        value = ask_raw(metadata_prompt(answers, title, back="back=b, quit=exit"))
+        if value.lower().strip() in {"b", "back"}:
+            raise Back()
+        if value or allow_empty:
+            return value
+        error("This value cannot be empty.")
+
+
+def run_stream_metadata_editor(answers: dict[str, Any]) -> None:
+    while True:
+        print()
+        print(paint("Stream Metadata Editor", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Edit stream title", default=True))
+        print(metadata_menu_item(2, "Edit stream language"))
+        print(metadata_menu_item(3, "Remove stream title"))
+        print(metadata_menu_item(4, "Remove stream language"))
+        print(metadata_menu_item(5, "Custom stream metadata key/value"))
+        print(metadata_menu_item(6, "Remove custom stream metadata key"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            return
+        if choice not in {"1", "2", "3", "4", "5", "6"}:
+            error("Enter a menu number from 1 to 6.")
+            continue
+        try:
+            probe = metadata_refresh_probe(answers)
+            stream = select_stream(probe, answers)
+            spec = metadata_stream_spec(probe, stream)
+            suffix = "_metadata_stream"
+            if choice == "1":
+                value = metadata_value_prompt(answers, "Enter new stream title")
+                metadata_arg = f"title={value}"
+                suffix = "_metadata_stream_title"
+            elif choice == "2":
+                note("Language examples: Japanese=jpn, English=eng, Persian=per or fas, Arabic=ara, Korean=kor, Chinese=chi or zho.")
+                value = metadata_value_prompt(answers, "Enter ISO 639-2 language code")
+                metadata_arg = f"language={value}"
+                suffix = "_metadata_language"
+            elif choice == "3":
+                metadata_arg = "title="
+                suffix = "_metadata_title_removed"
+            elif choice == "4":
+                metadata_arg = "language="
+                suffix = "_metadata_language_removed"
+            elif choice == "5":
+                key = metadata_value_prompt(answers, "Enter metadata key")
+                value = metadata_value_prompt(answers, "Enter metadata value")
+                metadata_arg = f"{key}={value}"
+                suffix = "_metadata_custom"
+            else:
+                key = metadata_value_prompt(answers, "Enter metadata key to remove")
+                metadata_arg = f"{key}="
+                suffix = "_metadata_custom_removed"
+            output_path = metadata_output_path(answers["metadata_input_path"], suffix)
+            cmd = metadata_stream_copy_command(answers["ffmpeg"], answers["metadata_input_path"], output_path)
+            cmd.extend([f"-metadata:s:{spec}", metadata_arg, str(output_path)])
+            if confirm_and_run_ffmpeg(answers, cmd, "Stream Metadata Editor", output_path):
+                metadata_set_current_input(answers, output_path)
+        except Back:
+            continue
+
+
+def metadata_dispositions_text(ffmpeg: str) -> str:
+    args = [ffmpeg, "-hide_banner", "-dispositions"]
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
+    return (result.stdout or result.stderr or "").strip()
+
+
+def run_stream_disposition_editor(answers: dict[str, Any]) -> None:
+    while True:
+        print()
+        print(paint("Stream Disposition Editor", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Set audio stream as default", default=True))
+        print(metadata_menu_item(2, "Remove default flag from audio stream"))
+        print(metadata_menu_item(3, "Set subtitle stream as default"))
+        print(metadata_menu_item(4, "Remove default flag from subtitle stream"))
+        print(metadata_menu_item(5, "Set subtitle stream as forced"))
+        print(metadata_menu_item(6, "Remove forced flag from subtitle stream"))
+        print(metadata_menu_item(7, "Set commentary flag"))
+        print(metadata_menu_item(8, "Remove commentary flag"))
+        print(metadata_menu_item(9, "Set original flag"))
+        print(metadata_menu_item(10, "Remove original flag"))
+        print(metadata_menu_item(11, "Clear all disposition flags from selected stream"))
+        print(metadata_menu_item(12, "Custom disposition flag editor"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            return
+        if choice not in {str(i) for i in range(1, 13)}:
+            error("Enter a menu number from 1 to 12.")
+            continue
+        try:
+            if choice == "12":
+                available = metadata_dispositions_text(answers["ffmpeg"])
+                if available:
+                    print()
+                    print(paint("Available FFmpeg dispositions:", Color.BOLD + Color.LIGHT_BLUE))
+                    print(available)
+            probe = metadata_refresh_probe(answers)
+            allowed = None
+            flag = ""
+            remove_flag = False
+            clear_type_default = False
+            if choice in {"1", "2"}:
+                allowed = {"audio"}
+                flag = "default"
+                remove_flag = choice == "2"
+            elif choice in {"3", "4", "5", "6"}:
+                allowed = {"subtitle"}
+                flag = "default" if choice in {"3", "4"} else "forced"
+                remove_flag = choice in {"4", "6"}
+            elif choice in {"7", "8"}:
+                flag = "commentary"
+                remove_flag = choice == "8"
+            elif choice in {"9", "10"}:
+                flag = "original"
+                remove_flag = choice == "10"
+            elif choice == "11":
+                flag = "0"
+            else:
+                flag = metadata_value_prompt(answers, "Enter disposition flag name")
+                remove_flag = ask_yes_no(metadata_prompt(answers, "Remove this flag instead of setting it?", "y/n", "n"), False)
+            stream = select_stream(probe, answers, allowed)
+            spec = metadata_stream_spec(probe, stream)
+            codec_type = metadata_stream_type(stream)
+            if flag == "default" and not remove_flag:
+                note("Setting default on one stream may not automatically remove default from other streams.")
+                clear_type_default = ask_yes_no(metadata_prompt(answers, "Make this stream the only default stream of its type?", "y/n", "n"), False)
+            disposition_value = "0" if flag == "0" else (f"-{flag}" if remove_flag else flag)
+            output_path = metadata_output_path(answers["metadata_input_path"], "_metadata_disposition")
+            cmd = metadata_stream_copy_command(answers["ffmpeg"], answers["metadata_input_path"], output_path)
+            if clear_type_default:
+                prefix = {"audio": "a", "subtitle": "s", "video": "v"}.get(codec_type)
+                if prefix:
+                    cmd.extend([f"-disposition:{prefix}", "0"])
+            cmd.extend([f"-disposition:{spec}", disposition_value, str(output_path)])
+            if confirm_and_run_ffmpeg(answers, cmd, "Stream Disposition Editor", output_path):
+                metadata_set_current_input(answers, output_path)
+        except Back:
+            continue
+
+
+def metadata_chapter_lines(probe: dict[str, Any]) -> list[str]:
+    chapters = probe.get("chapters") or []
+    if not chapters:
+        return ["No chapters were found."]
+    lines = []
+    for idx, chapter in enumerate(chapters, 1):
+        tags = chapter.get("tags") if isinstance(chapter.get("tags"), dict) else {}
+        title = tags.get("title") or "untitled"
+        start = float(chapter.get("start_time") or 0.0)
+        end = float(chapter.get("end_time") or 0.0)
+        lines.append(f"{idx}. {seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)} | {title}")
+    return lines
+
+
+def run_chapter_metadata_editor(answers: dict[str, Any]) -> None:
+    while True:
+        print()
+        print(paint("Chapter Metadata Editor", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Show chapters", default=True))
+        print(metadata_menu_item(2, "Export metadata and chapters to ffmetadata file"))
+        print(metadata_menu_item(3, "Import metadata and chapters from ffmetadata file"))
+        print(metadata_menu_item(4, "Remove all chapters"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            return
+        try:
+            input_path = answers["metadata_input_path"]
+            if choice == "1":
+                for line in metadata_chapter_lines(metadata_refresh_probe(answers)):
+                    print("  " + line)
+            elif choice == "2":
+                output_path = metadata_report_output_path(input_path, "_ffmetadata", ".txt")
+                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-f", "ffmetadata", str(output_path)]
+                confirm_and_run_ffmpeg(answers, cmd, "Chapter Metadata Export", output_path)
+            elif choice == "3":
+                note("Importing ffmetadata may replace metadata according to the file content.")
+                metadata_file = terminal_path(ask_required(metadata_prompt(answers, "Enter ffmetadata file path")))
+                if not metadata_file.exists() or not metadata_file.is_file():
+                    error("Metadata file was not found.")
+                    continue
+                output_path = metadata_output_path(input_path, "_chapters_imported")
+                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-i", str(metadata_file), "-map", "0", "-map_metadata", "1", "-map_chapters", "1", "-c", "copy", str(output_path)]
+                if confirm_and_run_ffmpeg(answers, cmd, "Chapter Metadata Import", output_path):
+                    metadata_set_current_input(answers, output_path)
+            elif choice == "4":
+                output_path = metadata_output_path(input_path, "_chapters_removed")
+                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-map", "0", "-map_chapters", "-1", "-c", "copy", str(output_path)]
+                if confirm_and_run_ffmpeg(answers, cmd, "Chapter Removal", output_path):
+                    metadata_set_current_input(answers, output_path)
+            else:
+                error("Enter a menu number from 1 to 4.")
+        except Back:
+            continue
+
+
+def metadata_attached_picture_streams(probe: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        stream for stream in (probe.get("streams") or [])
+        if metadata_stream_type(stream) == "video"
+        and int((stream.get("disposition") or {}).get("attached_pic") or 0)
+    ]
+
+
+def run_cover_picture_editor(answers: dict[str, Any]) -> None:
+    while True:
+        print()
+        print(paint("Cover / Attached Picture Editor", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Add cover image", default=True))
+        print(metadata_menu_item(2, "Replace existing cover image"))
+        print(metadata_menu_item(3, "Remove attached pictures"))
+        print(metadata_menu_item(4, "Show attached picture streams"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            return
+        try:
+            input_path = answers["metadata_input_path"]
+            probe = metadata_refresh_probe(answers)
+            attached = metadata_attached_picture_streams(probe)
+            if choice == "4":
+                if not attached:
+                    note("No attached picture streams were found.")
+                for stream in attached:
+                    print("  " + metadata_stream_line(probe, stream))
+                continue
+            if choice in {"1", "2"}:
+                cover = terminal_path(ask_required(metadata_prompt(answers, "Enter cover image path", "jpg, jpeg, png, or webp")))
+                if not cover.exists() or not cover.is_file():
+                    error("Cover image was not found.")
+                    continue
+                if cover.suffix.lower().lstrip(".") not in {"jpg", "jpeg", "png", "webp"}:
+                    error("Unsupported cover image extension. Use jpg, jpeg, png, or webp.")
+                    continue
+                if input_path.suffix.lower() in {".mp4", ".m4a", ".m4v", ".mov"} and cover.suffix.lower() not in {".jpg", ".jpeg"}:
+                    note("MP4-like containers usually expect JPEG cover art.")
+                output_path = metadata_output_path(input_path, "_cover_replaced" if choice == "2" else "_cover_added")
+                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-i", str(cover), "-map", "0"]
+                if choice == "2":
+                    for stream in attached:
+                        cmd.extend(["-map", f"-0:v:{metadata_stream_relative_index(probe, stream)}"])
+                video_count_after_removal = len([s for s in probe.get("streams") or [] if metadata_stream_type(s) == "video"]) - (len(attached) if choice == "2" else 0)
+                attached_idx = max(0, video_count_after_removal)
+                cmd.extend(["-map", "1", "-c", "copy", f"-c:v:{attached_idx}", "mjpeg", f"-disposition:v:{attached_idx}", "attached_pic", str(output_path)])
+                note("Attached picture support varies by container. This operation uses stream copy and only converts the added image stream when FFmpeg requires MJPEG.")
+                if confirm_and_run_ffmpeg(answers, cmd, "Cover / Attached Picture Editor", output_path):
+                    metadata_set_current_input(answers, output_path)
+            elif choice == "3":
+                if not attached:
+                    note("No attached picture streams were found.")
+                    continue
+                output_path = metadata_output_path(input_path, "_cover_removed")
+                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-map", "0"]
+                for stream in attached:
+                    cmd.extend(["-map", f"-0:v:{metadata_stream_relative_index(probe, stream)}"])
+                cmd.extend(["-c", "copy", str(output_path)])
+                if confirm_and_run_ffmpeg(answers, cmd, "Attached Picture Removal", output_path):
+                    metadata_set_current_input(answers, output_path)
+            else:
+                error("Enter a menu number from 1 to 4.")
+        except Back:
+            continue
+
+
+def metadata_filter_path(path: Path) -> str:
+    text = str(path).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+    return "'" + text + "'"
+
+
+def build_signalstats_command(
+    input_path: Path,
+    video_stream_index: int,
+    sampling_mode: str,
+    ffmpeg: str,
+    output_path: Path,
+    use_cuda_decode: bool = False,
+) -> list[str]:
+    step = {"fast": 120, "balanced": 30, "detailed": 5}.get(sampling_mode, 30)
+    vf = f"select='not(mod(n,{step}))',signalstats,metadata=mode=print:file={metadata_filter_path(output_path)}"
+    args = [ffmpeg, "-hide_banner", "-nostats", "-v", "warning"]
+    if use_cuda_decode:
+        args.extend(["-hwaccel", "cuda", "-hwaccel_device", str(GPU_DEVICE_INDEX)])
+    args.extend(["-i", str(input_path), "-map", f"0:{video_stream_index}", "-vf", vf, "-an", "-sn", "-f", "null", os.devnull])
+    return args
+
+
+def estimate_color_range(
+    input_path: Path,
+    video_stream_index: int,
+    sampling_mode: str,
+    ffmpeg: str,
+    use_cuda_decode: bool = False,
+) -> dict[str, Any]:
+    output_path = metadata_report_output_path(input_path, f"_color_range_signalstats_stream{video_stream_index}", ".txt")
+    args = build_signalstats_command(input_path, video_stream_index, sampling_mode, ffmpeg, output_path, use_cuda_decode)
+    log_info("Metadata Editor signalstats command: " + command_to_powershell(args))
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0 and use_cuda_decode:
+        log_error("Color range signalstats CUDA decode failed; retrying with CPU decode:\n" + (result.stderr or result.stdout or ""))
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        args = build_signalstats_command(input_path, video_stream_index, sampling_mode, ffmpeg, output_path, False)
+        log_info("Metadata Editor signalstats CPU fallback command: " + command_to_powershell(args))
+        result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0:
+        log_error("Color range signalstats failed:\n" + (result.stderr or result.stdout or ""))
+        raise RuntimeError("Color range estimation failed. See log file.")
+    values: dict[str, list[float]] = {"YMIN": [], "YLOW": [], "YAVG": [], "YHIGH": [], "YMAX": []}
+    if output_path.exists():
+        for line in output_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            for key in values:
+                needle = f"lavfi.signalstats.{key}="
+                if needle in line:
+                    try:
+                        values[key].append(float(line.split("=", 1)[1].strip()))
+                    except ValueError:
+                        pass
+    frames = max((len(item) for item in values.values()), default=0)
+    ymin = min(values["YMIN"]) if values["YMIN"] else None
+    ymax = max(values["YMAX"]) if values["YMAX"] else None
+    ylow = sum(values["YLOW"]) / len(values["YLOW"]) if values["YLOW"] else None
+    yhigh = sum(values["YHIGH"]) / len(values["YHIGH"]) if values["YHIGH"] else None
+    conclusion = "Estimated range: uncertain"
+    if ymin is not None and ymax is not None:
+        if ymin >= 8 and ymax <= 247:
+            conclusion = "Estimated range: probably limited/TV range"
+        elif ymin <= 5 or ymax >= 250:
+            conclusion = "Estimated range: possibly full/PC range"
+    return {"frames": frames, "ymin": ymin, "ymax": ymax, "ylow": ylow, "yhigh": yhigh, "report_path": str(output_path), "conclusion": conclusion}
+
+
+def metadata_bsf_name(codec_name: str) -> str | None:
+    codec = str(codec_name or "").lower()
+    if codec in {"h264", "avc1"}:
+        return "h264_metadata"
+    if codec in {"hevc", "h265"}:
+        return "hevc_metadata"
+    return None
+
+
+def run_video_bitstream_metadata_tools(answers: dict[str, Any]) -> None:
+    while True:
+        print()
+        print(paint("Video Bitstream Metadata Tools", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Inspect declared video color metadata", default=True))
+        print(metadata_menu_item(2, "Estimate actual color range from pixel values"))
+        print(metadata_menu_item(3, "Set H.264 video_full_range_flag"))
+        print(metadata_menu_item(4, "Set HEVC video_full_range_flag"))
+        print(metadata_menu_item(5, "Set H.264 color primaries / transfer / matrix"))
+        print(metadata_menu_item(6, "Set HEVC color primaries / transfer / matrix"))
+        print(metadata_menu_item(7, "Set H.264 sample aspect ratio"))
+        print(metadata_menu_item(8, "Set HEVC sample aspect ratio"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            return
+        if choice not in {str(i) for i in range(1, 9)}:
+            error("Enter a menu number from 1 to 8.")
+            continue
+        try:
+            input_path = answers["metadata_input_path"]
+            probe = metadata_refresh_probe(answers)
+            video_streams = [s for s in probe.get("streams") or [] if metadata_stream_type(s) == "video"]
+            if choice == "1":
+                for stream in video_streams:
+                    print("  " + metadata_stream_line(probe, stream))
+                continue
+            if len(video_streams) == 1:
+                stream = video_streams[0]
+                list_streams_for_selection(probe, video_streams)
+                stream_index = metadata_stream_index(stream)
+                note(f"Using the only video stream: {stream_index}.")
+                log_info(
+                    f"Metadata Editor auto-selected only video stream: index={stream_index}; "
+                    f"spec={metadata_stream_spec(probe, stream)}"
+                )
+            else:
+                stream = select_stream(probe, answers, {"video"})
+            if choice == "2":
+                mode = ask_raw(metadata_prompt(answers, "Choose sampling density", "1=fast every 120th frame; 2=balanced every 30th frame; 3=detailed every 5th frame", "2"))
+                if is_back_value(mode):
+                    raise Back()
+                sampling = {"1": "fast", "2": "balanced", "3": "detailed", "": "balanced"}.get(mode, "balanced")
+                if gpu_available_for_answers(answers):
+                    use_cuda_decode = ask_yes_no(
+                        metadata_prompt(
+                            answers,
+                            "Use CUDA/NVDEC GPU decode for this analysis?",
+                            "signalstats analysis still runs on CPU; GPU decode only reduces decode load when supported",
+                            "y",
+                        ),
+                        True,
+                    )
+                else:
+                    use_cuda_decode = False
+                    note("No usable NVIDIA/NVENC GPU was detected. CUDA decode question skipped.")
+                result = estimate_color_range(
+                    input_path,
+                    int(metadata_stream_index(stream) or 0),
+                    sampling,
+                    answers["ffmpeg"],
+                    use_cuda_decode=use_cuda_decode,
+                )
+                print()
+                print(paint("Color range estimate", Color.BOLD + Color.LIGHT_BLUE))
+                print("  " + field_text("Declared color_range", stream.get("color_range") or "unknown", Color.COLOR_RANGE_VALUE))
+                print("  " + field_text("Observed YMIN", result["ymin"], Color.YELLOW))
+                print("  " + field_text("Observed YMAX", result["ymax"], Color.YELLOW))
+                print("  " + field_text("Observed YLOW average", result["ylow"], Color.CYAN))
+                print("  " + field_text("Observed YHIGH average", result["yhigh"], Color.CYAN))
+                print("  " + field_text("Sampled frames", result["frames"], Color.GREEN))
+                print("  " + field_text("Conclusion", result["conclusion"], Color.MAGENTA))
+                note("This is an approximation based on decoded pixel statistics. It is not a 100% reliable proof of the original intended color range.")
+                continue
+            required_codec = {"3": {"h264", "avc1"}, "5": {"h264", "avc1"}, "7": {"h264", "avc1"}, "4": {"hevc", "h265"}, "6": {"hevc", "h265"}, "8": {"hevc", "h265"}}[choice]
+            codec = str(stream.get("codec_name") or "").lower()
+            if codec not in required_codec:
+                error("This operation is only available for the matching H.264 or HEVC codec.")
+                continue
+            bsf = metadata_bsf_name(codec)
+            if not bsf:
+                error("This video codec is not supported by this bitstream metadata tool.")
+                continue
+            note("This changes metadata/signaling only. It does not truly convert the video pixels. Wrong values can cause washed-out image or crushed blacks.")
+            if not ask_yes_no(metadata_prompt(answers, "Continue with this advanced bitstream metadata change?", "y/n", "n"), False):
+                continue
+            if choice in {"3", "4"}:
+                value = ask_raw(metadata_prompt(
+                    answers,
+                    "Choose video_full_range_flag",
+                    "0=limited/TV; 1=full/PC; use b to go back",
+                    back="back=b, quit=exit",
+                ))
+                if value.lower().strip() in {"b", "back"}:
+                    raise Back()
+                if value not in {"0", "1"}:
+                    error("Enter 0 or 1.")
+                    continue
+                suffix = "_colorflag_full" if value == "1" else "_colorflag_limited"
+                filter_arg = f"{bsf}=video_full_range_flag={value}"
+            elif choice in {"5", "6"}:
+                note("Common values: BT.709 = 1/1/1; BT.2020 SDR/PQ commonly uses primaries=9, transfer=14 or 16, matrix=9; SMPTE 170M/SD = 6/6/6.")
+                primaries = metadata_value_prompt(answers, "Enter colour_primaries numeric value")
+                transfer = metadata_value_prompt(answers, "Enter transfer_characteristics numeric value")
+                matrix = metadata_value_prompt(answers, "Enter matrix_coefficients numeric value")
+                suffix = "_color_metadata"
+                filter_arg = f"{bsf}=colour_primaries={primaries}:transfer_characteristics={transfer}:matrix_coefficients={matrix}"
+            else:
+                sar = metadata_value_prompt(answers, "Enter sample aspect ratio")
+                suffix = "_sample_aspect_ratio"
+                filter_arg = f"{bsf}=sample_aspect_ratio={sar}"
+            output_path = metadata_output_path(input_path, suffix)
+            spec = metadata_stream_spec(probe, stream)
+            cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-map", "0", "-c", "copy", f"-bsf:{spec}", filter_arg, str(output_path)]
+            if confirm_and_run_ffmpeg(answers, cmd, "Video Bitstream Metadata Tool", output_path):
+                metadata_set_current_input(answers, output_path)
+        except Back:
+            continue
+
+
+def metadata_json_report_command(ffprobe: str, input_path: Path, report_type: str) -> list[str]:
+    if report_type == "tags":
+        return [ffprobe, "-hide_banner", "-v", "error", "-show_entries", "format_tags:stream_tags:chapters", "-of", "json", str(input_path)]
+    if report_type == "color":
+        return [ffprobe, "-hide_banner", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index,codec_name,pix_fmt,bits_per_raw_sample,color_range,color_space,color_transfer,color_primaries,width,height", "-of", "json", str(input_path)]
+    if report_type == "disposition":
+        return [ffprobe, "-hide_banner", "-v", "error", "-show_entries", "stream=index,codec_type,codec_name:stream_disposition:stream_tags", "-of", "json", str(input_path)]
+    if report_type == "chapters":
+        return [ffprobe, "-hide_banner", "-v", "error", "-show_chapters", "-of", "json", str(input_path)]
+    return [ffprobe, "-hide_banner", "-v", "error", "-show_format", "-show_streams", "-show_chapters", "-of", "json", str(input_path)]
+
+
+def write_metadata_report(input_path: Path, report_type: str, answers: dict[str, Any]) -> Path:
+    if report_type == "human":
+        probe = probe_media_json(input_path, answers["ffprobe"])
+        lines = [f"Metadata report for: {input_path}", "", "Streams"]
+        lines.extend("  " + _strip_ansi(metadata_stream_line(probe, stream)) for stream in probe.get("streams") or [])
+        lines.extend(["", "Chapters"])
+        lines.extend("  " + line for line in metadata_chapter_lines(probe))
+        output_path = metadata_report_output_path(input_path, "_metadata_report", ".txt")
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return output_path
+    args = metadata_json_report_command(answers["ffprobe"], input_path, report_type)
+    log_info("Metadata report ffprobe command: " + command_to_powershell(args))
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0:
+        log_error("Metadata report ffprobe failed:\n" + (result.stderr or result.stdout or ""))
+        raise RuntimeError("Metadata report failed. See log file.")
+    suffix = {"full": "_metadata_report", "tags": "_metadata_tags", "color": "_metadata_color", "disposition": "_metadata_disposition", "chapters": "_metadata_chapters"}.get(report_type, "_metadata_report")
+    output_path = metadata_report_output_path(input_path, suffix, ".json")
+    output_path.write_text(result.stdout, encoding="utf-8")
+    return output_path
+
+
+def run_metadata_report_inspect(answers: dict[str, Any]) -> None:
+    while True:
+        print()
+        print(paint("Metadata Report / Inspect", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Full ffprobe JSON report", default=True))
+        print(metadata_menu_item(2, "Human-readable stream report"))
+        print(metadata_menu_item(3, "Tags-only report"))
+        print(metadata_menu_item(4, "Color metadata report"))
+        print(metadata_menu_item(5, "Disposition report"))
+        print(metadata_menu_item(6, "Chapter report"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            return
+        report_type = {"1": "full", "2": "human", "3": "tags", "4": "color", "5": "disposition", "6": "chapters"}.get(choice)
+        if not report_type:
+            error("Enter a menu number from 1 to 6.")
+            continue
+        try:
+            output_path = write_metadata_report(answers["metadata_input_path"], report_type, answers)
+            note(f"Metadata report written: {output_path}")
+            log_info(f"Metadata report written: type={report_type}; path={output_path}")
+        except Exception as exc:
+            log_exception("Metadata report failed")
+            error(str(exc))
+
+
+def run_metadata_editor_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    try:
+        answers = metadata_prompt_input(base_answers)
+    except Back:
+        note("Returning to main menu.")
+        return None
+    while True:
+        print()
+        print(paint("Metadata Editor", Color.BOLD + Color.LIGHT_BLUE))
+        print(metadata_menu_item(1, "Stream Metadata Editor", default=True))
+        print(metadata_menu_item(2, "Stream Disposition Editor"))
+        print(metadata_menu_item(3, "Chapter Metadata Editor"))
+        print(metadata_menu_item(4, "Cover / Attached Picture Editor"))
+        print(metadata_menu_item(5, "Video Bitstream Metadata Tools"))
+        choice = metadata_menu_selection("1")
+        if is_back_value(choice):
+            note("Returning to main menu.")
+            return None
+        try:
+            if choice == "1":
+                run_stream_metadata_editor(answers)
+            elif choice == "2":
+                run_stream_disposition_editor(answers)
+            elif choice == "3":
+                run_chapter_metadata_editor(answers)
+            elif choice == "4":
+                run_cover_picture_editor(answers)
+            elif choice == "5":
+                run_video_bitstream_metadata_tools(answers)
+            else:
+                error("Enter a menu number from 1 to 5.")
+        except ExitWizard:
+            raise
+        except Exception as exc:
+            log_exception("Metadata Editor operation failed")
+            error(str(exc))
+
+
 def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print()
     print(paint("FFmWiz Main menu:", Color.BOLD + Color.LIGHT_BLUE))
@@ -10666,11 +16575,14 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print(f"  {paint('3.', Color.LIGHT_BLUE)} Cut video only with copy")
     print(f"  {paint('4.', Color.LIGHT_BLUE)} Folder Encode")
     print(f"  {paint('5.', Color.LIGHT_BLUE)} Add files to video")
-    print(f"  {paint('6.', Color.LIGHT_BLUE)} Media info report")
-    print(f"  {paint('7.', Color.LIGHT_BLUE)} Stream Cleanup Remux")
-    print(f"  {paint('8.', Color.LIGHT_BLUE)} Hard Sub Encode")
-    print(f"  {paint('9.', Color.LIGHT_BLUE)} Video Speed / Reverse")
-    print(f"  {paint('10.', Color.LIGHT_BLUE)} Audio Cut / Speed / Reverse")
+    print(f"  {paint('6.', Color.LIGHT_BLUE)} Extract Stream")
+    print(f"  {paint('7.', Color.LIGHT_BLUE)} Media info report")
+    print(f"  {paint('8.', Color.LIGHT_BLUE)} Stream Cleanup Remux")
+    print(f"  {paint('9.', Color.LIGHT_BLUE)} Hard Sub Encode")
+    print(f"  {paint('10.', Color.LIGHT_BLUE)} Video Speed / Reverse")
+    print(f"  {paint('11.', Color.LIGHT_BLUE)} Audio Cut / Speed / Reverse")
+    print(f"  {paint('12.', Color.LIGHT_BLUE)} Join Videos")
+    print(f"  {paint('13.', Color.LIGHT_BLUE)} Metadata Editor")
     print()
     # The main menu has no previous step, so '0=back' is intentionally not
     # advertised. Submenus continue to support 0=back where it makes sense.
@@ -10681,9 +16593,9 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
         )
         if not value:
             return 1
-        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
+        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"}:
             return int(value)
-        error("Enter a menu number from 1 to 10.")
+        error("Enter a menu number from 1 to 13.")
 
 
 # Kept as a thin wrapper for backwards compatibility with any external caller.
@@ -10712,7 +16624,7 @@ def run_crop_only_prompt(answers: dict[str, Any]) -> None:
 
     def prev_index(start: int) -> int:
         idx = start
-        while idx > 0 and not steps[idx].applicable(answers):
+        while idx > 0 and (not steps[idx].applicable(answers) or step_is_auto_back_skip(steps[idx], answers)):
             idx -= 1
         return max(0, idx)
 
@@ -10760,7 +16672,7 @@ def ask_hmsf_time(
         base_details += f"; {details_extra}"
     while True:
         value = ask_raw(question_prompt(answers, title, base_details, default))
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             if default is None:
@@ -10785,13 +16697,11 @@ def ask_cut_method(answers: dict[str, Any]) -> int:
     """Ask the user how to define cut ranges.
 
     Returns:
-        1 -> open the temporary GUI cut editor (default)
-        2 -> enter cut times manually with h:m:s:frame
+        1 -> enter cut times manually with h:m:s:frame
     """
     print()
     print(paint("Cut video only with copy:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {paint('1.', Color.LIGHT_BLUE)} GUI cut editor {paint('[default]', Color.GREEN)}")
-    print(f"  {paint('2.', Color.LIGHT_BLUE)} Manual cut using h:m:s:frame")
+    print(f"  {paint('1.', Color.LIGHT_BLUE)} Manual cut using h:m:s:frame {paint('[default]', Color.GREEN)}")
     print()
     while True:
         value = ask_raw(
@@ -10800,11 +16710,14 @@ def ask_cut_method(answers: dict[str, Any]) -> int:
         )
         if not value:
             return 1
-        if value == "0":
+        if is_back_value(value):
             raise Back()
-        if value in {"1", "2"}:
+        if value == "1":
             return int(value)
-        error("Enter 1 or 2.")
+        if value.lower() in {"g", "gui", "graphical"}:
+            error("The standalone Cut GUI is archived. Use manual cut in this mode.")
+            continue
+        error("Enter 1.")
 
 
 def ask_manual_cut_layout(answers: dict[str, Any]) -> int:
@@ -10823,7 +16736,7 @@ def ask_manual_cut_layout(answers: dict[str, Any]) -> int:
         )
         if not value:
             return 1
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if value in {"1", "2", "3", "4"}:
             return int(value)
@@ -10907,6 +16820,16 @@ def format_cut_ranges_for_summary(
     return "\n".join(lines)
 
 
+def format_split_points_for_summary(points: list[float], fps: float, label: str = "Split points") -> str:
+    pts = sorted(float(p) for p in (points or []))
+    if not pts:
+        return f"{label}: (none)"
+    lines = [f"{label}: {len(pts)} (output split into {len(pts) + 1} parts):"]
+    for idx, t in enumerate(pts, start=1):
+        lines.append(f"  {idx}. {seconds_to_hmsf(t, fps)}  ({seconds_to_ffmpeg_time(t)})")
+    return "\n".join(lines)
+
+
 def format_audio_ranges_for_summary(ranges: list[tuple[float, float]], label: str) -> str:
     if not ranges:
         return f"{label}: (none)"
@@ -10951,7 +16874,7 @@ def ask_continue_default_yes(answers: dict[str, Any]) -> bool:
             f"{paint('Continue?', Color.BOLD)} {paint('[Y/n]', Color.GREEN)} "
             f"{back_text('0=back, quit=exit')}: "
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             return True
@@ -11370,20 +17293,14 @@ def _run_copy_cut_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] |
                 stage = 1
                 continue
             if method == 1:
-                gui_ranges = open_cut_gui(answers, fps=fps, duration=duration)
-                if gui_ranges is None:
-                    if answers.pop("_last_gui_error", None) == "cut":
-                        note("GUI cut editor failed. Returning to the cut-method menu.")
-                    else:
-                        note("GUI cut editor was canceled. Returning to the cut-method menu.")
-                    continue
-                keep_ranges = normalize_cut_ranges(gui_ranges, duration)
-            else:
                 try:
                     keep_ranges = collect_cut_ranges_terminal(answers, fps, duration)
                 except Back:
                     note("Returning to the cut-method menu.")
                     continue
+            else:
+                error("The standalone Cut GUI is archived. Use manual cut in this mode.")
+                continue
             if not keep_ranges:
                 note("No keep ranges were produced. Returning to the cut-method menu.")
                 continue
@@ -11436,18 +17353,7 @@ def step_cuts(answers: dict[str, Any]) -> None:
             ))
         return
     while True:
-        allow_gui = not answers.get("_disable_graphical_editors")
-        if allow_gui and USE_COLOR:
-            gui_hint = f"{Color.AQUA}g=Show Graphical Cut Editor{Color.RESET}{Color.HINT_YELLOW}"
-        elif allow_gui:
-            gui_hint = "g=Show Graphical Cut Editor"
-        else:
-            gui_hint = ""
-        hint_text = (
-            f"y/n, {gui_hint}; cuts are applied frame-accurate via filter_complex"
-            if allow_gui
-            else "y/n; cuts are applied frame-accurate via filter_complex"
-        )
+        hint_text = "y/n; cuts are applied frame-accurate via filter_complex"
         value = ask_raw(
             question_prompt(
                 answers,
@@ -11456,7 +17362,7 @@ def step_cuts(answers: dict[str, Any]) -> None:
                 "n",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -11469,22 +17375,10 @@ def step_cuts(answers: dict[str, Any]) -> None:
             except Back:
                 continue
         elif lowered in {"g", "gui", "preview"}:
-            if not allow_gui:
-                error("Graphical cut editor is not available in Folder Encode.")
-                continue
-            note("Loading Graphical Cut Editor...")
-            sys.stdout.flush()
-            gui_ranges = open_cut_gui(answers, fps=fps, duration=duration)
-            if gui_ranges is None:
-                if answers.pop("_last_gui_error", None) == "cut":
-                    note("GUI cut editor failed. Returning to the cut question.")
-                    continue
-                else:
-                    note("GUI cut editor was canceled. Returning to the cut question.")
-                    continue
-            keep_ranges = normalize_cut_ranges(gui_ranges, duration)
+            error("The standalone Cut GUI is archived. Use the Unified Video Editor or enter cuts manually.")
+            continue
         else:
-            error("Enter y, n, or g." if allow_gui else "Enter y or n.")
+            error("Enter y or n.")
             continue
         if not keep_ranges:
             note("No keep ranges were produced; cuts disabled.")
@@ -11527,7 +17421,7 @@ def step_folder_output_location(answers: dict[str, Any]) -> None:
                 f"Enter=create sibling folder named {default_output.name}; example: {folder_example}",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             output_folder = default_output
@@ -11589,15 +17483,18 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
         Step("crop_right", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_right),
         Step("crop_bottom", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_bottom),
         Step("video_bitrate", video_reencode_options_applicable, step_video_bitrate),
+        Step("nvenc_multipass", nvenc_multipass_prompt_applicable, step_nvenc_multipass),
         Step("resolution", video_reencode_options_applicable, step_resolution),
         Step("fps", video_reencode_options_applicable, step_fps),
         Step("video_speed_reverse", output_has_video, step_video_speed_reverse_for_encode),
         Step("audio_tracks", lambda a: bool(a.get("audio_streams")), step_audio_tracks),
+        Step("loudnorm", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_loudnorm),
         Step("audio_cut", audio_only_transform_prompt_applicable, step_audio_cut_for_encode),
         Step("audio_speed_reverse", audio_only_transform_prompt_applicable, step_audio_speed_reverse_for_encode),
         Step("audio_codec", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_audio_codec),
         Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
-        Step("subtitle_tracks", lambda a: output_has_video(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
+        Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
+        Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
         Step("start_now", lambda a: True, step_start_folder_now),
     ]
 
@@ -11609,14 +17506,24 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
 
     def prev_index(start: int) -> int:
         idx = start
-        while idx > 0 and not steps[idx].applicable(answers):
+        while idx > 0 and (
+            not steps[idx].applicable(answers)
+            or is_auto_unified_crop_step(idx)
+            or step_is_auto_back_skip(steps[idx], answers)
+        ):
             idx -= 1
         return max(0, idx)
+
+    def is_auto_unified_crop_step(pos: int) -> bool:
+        return bool(
+            answers.get("_unified_video_editor_used")
+            and steps[pos].name in {"crop_enabled", "crop_top", "crop_left", "crop_right", "crop_bottom"}
+        )
 
     def question_number(current: int) -> int:
         count = 0
         for pos in range(current + 1):
-            if steps[pos].applicable(answers):
+            if steps[pos].applicable(answers) and not is_auto_unified_crop_step(pos):
                 count += 1
         return answers.get("_question_offset", 0) + count
 
@@ -11625,6 +17532,7 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
         try:
             answers["_question_number"] = question_number(idx)
             steps[idx].run(answers)
+            apply_unified_video_editor_answers(answers)
             idx = next_index(idx + 1)
         except Back:
             if idx == 0:
@@ -11760,6 +17668,7 @@ def probe_additional_track_file(ffprobe: str, path: Path, ffmpeg: str | None = N
         "audio_volume_stats": audio_volume_stats,
         "subtitle_streams": subtitle_streams,
         "video_streams": video_streams,
+        "chapters": probe.get("chapters") or [],
     }
 
 
@@ -11791,8 +17700,7 @@ def print_additional_track_file_info(item: dict[str, Any]) -> None:
                 f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
                 f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
-                f"{field_text('max_volume', audio_volume_field(volume_stats, idx, 'max_volume'), Color.ORANGE)} | "
-                f"{field_text('mean_volume', audio_volume_field(volume_stats, idx, 'mean_volume'), Color.AQUA)} | "
+                f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)} | "
             f"{field_text('language', display_language(stream_tag_value(stream, 'language')), Color.WHITE)} | "
                 f"{field_text('title', stream_tag_value(stream, 'title'), Color.WHITE)}"
             )
@@ -11817,6 +17725,7 @@ def print_additional_track_file_info(item: dict[str, Any]) -> None:
             disposition = stream.get("disposition") or {}
             is_cover_art = bool(disposition.get("attached_pic")) or str(stream.get("codec_name", "")).lower() in {"mjpeg", "png"}
             stream_type = "cover art" if is_cover_art else "video"
+            chapters_value, chapters_color = chapter_presence(item)
             print(
                 f"  {paint(str(idx), Color.LIGHT_BLUE)}: "
                 f"{field_text('codec', stream.get('codec_name', 'unknown'), Color.CYAN)} | "
@@ -11826,7 +17735,8 @@ def print_additional_track_file_info(item: dict[str, Any]) -> None:
                 f"{field_text('Color range', display_color_range(stream.get('color_range')), Color.COLOR_RANGE_VALUE)} | "
                 f"{field_text('duration', duration, Color.MAGENTA)} | "
                 f"{field_text('bitrate', describe_bitrate(rate), Color.YELLOW)} | "
-                f"{field_text('total bitrate', describe_total_bitrate(fmt), Color.AQUA)}"
+                f"{field_text('total bitrate', describe_total_bitrate(fmt), Color.AQUA)} | "
+                f"{field_text('chapters', chapters_value, chapters_color)}"
             )
     print()
 
@@ -11877,7 +17787,7 @@ def ask_metadata_for_added_stream(
                 "back=0, quit=exit",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise RetryAdditionalFile()
         metadata = parse_add_track_metadata(value)
         if value and not metadata:
@@ -12077,7 +17987,7 @@ def ask_additional_track_files(
             )
         )
         lowered = value.lower().strip()
-        if lowered == "0":
+        if is_back_value(value):
             if extra_items:
                 removed = extra_items.pop()
                 note(f"Removed added file: {Path(removed['path']).name}")
@@ -12215,6 +18125,296 @@ def _run_add_files_to_video_mode_impl(base_answers: dict[str, Any]) -> tuple[int
         cmd,
         total_duration=(duration if duration > 0 else None),
         label="Add files to video",
+    )
+
+
+EXTRACT_AUDIO_EXTENSIONS = {
+    "aac": ".aac",
+    "ac3": ".ac3",
+    "eac3": ".eac3",
+    "mp3": ".mp3",
+    "mp2": ".mp2",
+    "opus": ".opus",
+    "vorbis": ".ogg",
+    "flac": ".flac",
+    "alac": ".m4a",
+    "pcm_s16le": ".wav",
+    "pcm_s24le": ".wav",
+    "pcm_s32le": ".wav",
+    "pcm_f32le": ".wav",
+    "dts": ".dts",
+    "truehd": ".thd",
+}
+EXTRACT_SUBTITLE_EXTENSIONS = {
+    "ass": ".ass",
+    "ssa": ".ssa",
+    "subrip": ".srt",
+    "srt": ".srt",
+    "text": ".srt",
+    "mov_text": ".srt",
+    "webvtt": ".vtt",
+    "hdmv_pgs_subtitle": ".sup",
+    "pgs": ".sup",
+    "dvd_subtitle": ".sub",
+    "dvdsub": ".sub",
+    "vobsub": ".sub",
+    "dvb_subtitle": ".sub",
+    "dvbsub": ".sub",
+    "xsub": ".avi",
+}
+
+
+def stream_global_index(stream: dict[str, Any]) -> int | None:
+    try:
+        return int(stream.get("index"))
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_stream_candidates(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    streams = answers.get("probe", {}).get("streams") or []
+    candidates = [
+        stream for stream in streams
+        if stream.get("codec_type") in {"video", "audio", "subtitle"} and stream_global_index(stream) is not None
+    ]
+    return sorted(candidates, key=lambda stream: int(stream.get("index", 0)))
+
+
+def extract_stream_default_extension(stream: dict[str, Any]) -> str:
+    codec_type = str(stream.get("codec_type") or "").lower()
+    codec = str(stream.get("codec_name") or "").lower()
+    if codec_type == "audio":
+        return EXTRACT_AUDIO_EXTENSIONS.get(codec, ".mka")
+    if codec_type == "subtitle":
+        return EXTRACT_SUBTITLE_EXTENSIONS.get(codec, ".srt")
+    if codec_type == "video":
+        return ".mkv"
+    return ".bin"
+
+
+def extract_stream_codec_args(stream: dict[str, Any]) -> tuple[list[str], str]:
+    codec_type = str(stream.get("codec_type") or "").lower()
+    codec = str(stream.get("codec_name") or "").lower()
+    if codec_type == "subtitle" and codec in {"mov_text", "text"}:
+        return ["-c:s", "srt"], "text subtitle converted to SRT for extraction"
+    return ["-c", "copy"], "stream copy"
+
+
+def default_extract_stream_output_path(input_path: Path, stream: dict[str, Any]) -> Path:
+    stream_index = stream_global_index(stream)
+    codec_type = str(stream.get("codec_type") or "stream").lower()
+    suffix = extract_stream_default_extension(stream)
+    stem = f"{sanitize_output_stem(input_path.stem)}{EXTRACT_STREAM_OUTPUT_SUFFIX}{stream_index}_{codec_type}"
+    return input_path.parent / f"{stem}{suffix}"
+
+
+def choose_extract_stream_output_path(input_path: Path, stream: dict[str, Any], value: str) -> Path:
+    default_path = default_extract_stream_output_path(input_path, stream)
+    default_suffix = default_path.suffix
+    if not value:
+        candidate = default_path
+    else:
+        output_value = terminal_path(value)
+        if not output_value.drive and not output_value.root and output_value.parent == Path("."):
+            if output_value.suffix:
+                candidate = input_path.parent / sanitize_output_stem(output_value.stem)
+                candidate = candidate.with_suffix(output_value.suffix)
+            else:
+                candidate = input_path.parent / f"{sanitize_output_stem(output_value.name)}{default_suffix}"
+        elif output_value.suffix:
+            candidate = output_value.with_name(f"{sanitize_output_stem(output_value.stem)}{output_value.suffix}")
+        else:
+            candidate = output_value / default_path.name
+    candidate = resolve_output_collision_against_inputs(candidate, [input_path], "_Extract")
+    return unique_numbered_path(candidate)
+
+
+def extract_stream_description(stream: dict[str, Any], answers: dict[str, Any]) -> str:
+    codec_type = str(stream.get("codec_type") or "unknown")
+    codec = str(stream.get("codec_name") or "unknown")
+    stream_index = stream_global_index(stream)
+    duration = format_duration(stream_duration_seconds(stream, answers.get("format")))
+    packet_sizes = get_packet_sizes(answers)
+    color = {"video": Color.MAGENTA, "audio": Color.BLUE, "subtitle": Color.LIGHT_YELLOW}.get(codec_type, Color.WHITE)
+    parts = [
+        field_text("stream index", stream_index if stream_index is not None else "unknown", Color.LIGHT_BLUE),
+        field_text("type", codec_type, color),
+        field_text("codec", codec, Color.CYAN),
+        field_text("duration", duration, Color.MAGENTA),
+    ]
+    if codec_type == "video":
+        parts.append(field_text("size", f"{stream.get('width', '?')}x{stream.get('height', '?')}", Color.LIME))
+        fps = rational_to_float(stream.get("avg_frame_rate"))
+        parts.append(field_text("fps", format(fps, ".3g") if fps else "unknown", Color.MAGENTA))
+    elif codec_type == "audio":
+        parts.append(field_text("channels", stream.get("channels", "unknown"), Color.GREEN))
+        parts.append(field_text("sample_rate", stream.get("sample_rate", "unknown"), Color.MAGENTA))
+        parts.append(field_text("bitrate", describe_bitrate(stream_bitrate_kbps(stream, answers.get("format"), packet_sizes)), Color.YELLOW))
+    elif codec_type == "subtitle":
+        lang = display_language(stream.get("tags", {}).get("language"))
+        title = stream.get("tags", {}).get("title") or "unknown"
+        parts.append(field_text("language", lang or "unknown", Color.AQUA))
+        parts.append(field_text("title", title, Color.WHITE))
+    return " | ".join(parts)
+
+
+def print_extract_stream_candidates(answers: dict[str, Any]) -> None:
+    print()
+    print(paint("Extractable streams", Color.BOLD + Color.LIGHT_BLUE))
+    for stream in extract_stream_candidates(answers):
+        print("  " + extract_stream_description(stream, answers))
+
+
+def step_extract_stream_input(answers: dict[str, Any]) -> None:
+    step_input_path(answers)
+    print_source_info(answers)
+
+
+def step_extract_stream_index(answers: dict[str, Any]) -> None:
+    candidates = extract_stream_candidates(answers)
+    if not candidates:
+        raise ValueError("No extractable video, audio, or subtitle streams were found.")
+    print_extract_stream_candidates(answers)
+    by_index = {stream_global_index(stream): stream for stream in candidates}
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter stream index to extract",
+                "use the ffprobe stream index shown above; 0 is stream index 0 here",
+                back="back=b, quit=exit",
+            )
+        )
+        lowered = value.lower().strip()
+        if lowered in {"b", "back"}:
+            raise Back()
+        if not value:
+            error("Enter a stream index.")
+            continue
+        if not re.fullmatch(r"\d+", value):
+            error("Enter a numeric stream index from the list above.")
+            continue
+        stream_index = int(value)
+        stream = by_index.get(stream_index)
+        if stream is None:
+            allowed = ", ".join(str(idx) for idx in sorted(index for index in by_index if index is not None))
+            error(f"Stream index {stream_index} was not found. Available indexes: {allowed}")
+            continue
+        answers["extract_stream"] = stream
+        answers["extract_stream_index"] = stream_index
+        log_info(
+            "User choice: extract_stream_index="
+            f"{stream_index}; type={stream.get('codec_type')}; codec={stream.get('codec_name')}"
+        )
+        return
+
+
+def step_extract_stream_output_path(answers: dict[str, Any]) -> None:
+    stream = answers["extract_stream"]
+    default_path = default_extract_stream_output_path(answers["input_path"], stream)
+    folder_example = example_text(r"E:\output")
+    name_example = example_text('"Extracted track"')
+    value = ask_raw(
+        question_prompt(
+            answers,
+            "Enter extracted stream output path, output folder, or bare output name",
+            f"Enter={default_path.name}; examples: {folder_example} or {name_example}",
+        )
+    )
+    if is_back_value(value):
+        raise Back()
+    answers["extract_output_path"] = choose_extract_stream_output_path(answers["input_path"], stream, value)
+    log_info(f"Resolved extracted stream output path: {answers['extract_output_path']}")
+
+
+def build_extract_stream_command(ffmpeg: str, input_path: Path, stream: dict[str, Any], output_path: Path) -> list[str]:
+    stream_index = stream_global_index(stream)
+    if stream_index is None:
+        raise ValueError("Selected stream has no ffprobe stream index.")
+    codec_type = str(stream.get("codec_type") or "").lower()
+    codec_args, _mode = extract_stream_codec_args(stream)
+    cmd = [ffmpeg, "-hide_banner", "-y", "-i", str(input_path), "-map", f"0:{stream_index}"]
+    if codec_type == "video":
+        cmd.extend(["-an", "-sn", "-dn"])
+    elif codec_type == "audio":
+        cmd.extend(["-vn", "-sn", "-dn"])
+    elif codec_type == "subtitle":
+        cmd.extend(["-vn", "-an", "-dn"])
+    cmd.extend(codec_args)
+    cmd.append(str(output_path))
+    return cmd
+
+
+def print_extract_stream_summary(answers: dict[str, Any], cmd: list[str]) -> None:
+    stream = answers["extract_stream"]
+    output_path = answers["extract_output_path"]
+    _codec_args, mode = extract_stream_codec_args(stream)
+    print()
+    print(paint("Extract Stream summary:", Color.BOLD + Color.LIME))
+    print("  " + field_text("Input", answers["input_path"], Color.WHITE))
+    print("  " + field_text("Selected stream", f"#{answers['extract_stream_index']}", Color.LIGHT_BLUE))
+    print("  " + field_text("Type", stream.get("codec_type", "unknown"), Color.MAGENTA))
+    print("  " + field_text("Codec", stream.get("codec_name", "unknown"), Color.CYAN))
+    print("  " + field_text("Extraction mode", mode, Color.YELLOW))
+    print("  " + field_text("Output", output_path, Color.LIME))
+    print()
+    print(paint("Final PowerShell command:", Color.FINAL_COMMAND_LABEL))
+    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+    log_info("Extract Stream summary: " + json.dumps({
+        "input": str(answers["input_path"]),
+        "stream_index": answers["extract_stream_index"],
+        "codec_type": stream.get("codec_type"),
+        "codec": stream.get("codec_name"),
+        "mode": mode,
+        "output": str(output_path),
+    }, ensure_ascii=False))
+    log_info("Final PowerShell command: " + command_to_powershell(cmd))
+
+
+def step_extract_stream_start_now(answers: dict[str, Any]) -> None:
+    cmd = build_extract_stream_command(
+        answers["ffmpeg"],
+        answers["input_path"],
+        answers["extract_stream"],
+        answers["extract_output_path"],
+    )
+    answers["cmd"] = cmd
+    print_extract_stream_summary(answers, cmd)
+    answers["start_now"] = ask_yes_no(
+        question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
+        True,
+    )
+
+
+def run_extract_stream_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    answers = dict(base_answers)
+    steps = [
+        Step("input_path", lambda a: True, step_extract_stream_input),
+        Step("extract_stream_index", lambda a: True, step_extract_stream_index),
+        Step("extract_output_path", lambda a: True, step_extract_stream_output_path),
+        Step("start_now", lambda a: True, step_extract_stream_start_now),
+    ]
+    try:
+        run_mode_steps(answers, steps)
+    except Back:
+        note("Returning to main menu.")
+        return None
+    if not answers.get("start_now", True):
+        note("FFmpeg was not started. The command above is ready to run manually.")
+        return None
+    output_path = Path(answers["extract_output_path"])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    duration = stream_duration_seconds(answers.get("extract_stream", {}), answers.get("format"))
+    log_info(
+        f"Extract Stream starting: input={answers['input_path']}; "
+        f"stream_index={answers.get('extract_stream_index')}; output={output_path}"
+    )
+    print()
+    print(paint("Starting FFmpeg...", Color.GREEN))
+    return run_ffmpeg_with_progress(
+        answers["cmd"],
+        total_duration=(duration if duration and duration > 0 else None),
+        label="Extract Stream",
     )
 
 
@@ -12360,10 +18560,9 @@ def build_hardsub_video_filter(answers: dict[str, Any], video_encoder: str) -> s
         ])
     else:
         filters.append(subtitle_filter)
-        if hardsub_output_10bit(answers):
-            filters.append("format=p010le" if video_encoder.endswith("_nvenc") else "format=yuv420p10le")
-        else:
-            filters.append("format=yuv420p")
+        filters.append(
+            "format=" + (cuda_pixel_format_for_output(answers) if video_encoder.endswith("_nvenc") else cpu_pixel_format_for_output(answers))
+        )
         source_range = str((answers.get("video_streams") or [{}])[0].get("color_range") or "").lower()
         if source_range in {"tv", "pc"}:
             filters.append(f"setparams=range={source_range}")
@@ -12442,11 +18641,13 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
     video_encoder, tag, _profile = resolve_video_encoder(answers)
     if video_encoder == "copy":
         video_encoder = "libx265"
+    video_encoder, tag, _profile = enforce_bit_depth_compatible_video_encoder(answers, video_encoder, tag, _profile)
     cmd: list[str] = [ffmpeg, "-y" if OVERWRITE_OUTPUT else "-n", "-i", str(input_path)]
 
     cmd.extend(["-map", "0:v:0"])
     audio_mode = answers.get("hardsub_audio_mode", "copy-all")
     audio_policy = answers.get("hardsub_audio_container_policy")
+    mapped_audio_output_count = 0
     if audio_mode != "none" and input_ext != output_ext and not audio_policy:
         raise ValueError("HardSub audio container policy is required when output container differs from the source container.")
     if audio_policy == "match-source-container":
@@ -12456,8 +18657,10 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
     if audio_mode == "none" or audio_policy == "none":
         cmd.append("-an")
     elif audio_mode == "selected":
-        for index in answers.get("hardsub_audio_tracks", []):
+        selected_hardsub_audio = list(answers.get("hardsub_audio_tracks", []))
+        for index in selected_hardsub_audio:
             cmd.extend(["-map", f"0:a:{index}"])
+        mapped_audio_output_count = len(selected_hardsub_audio)
         if audio_policy == "aac":
             bitrate = int(answers.get("hardsub_audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
             cmd.extend(["-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2"])
@@ -12465,6 +18668,7 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
             cmd.extend(["-c:a", "copy"])
     else:
         cmd.extend(["-map", "0:a?"])
+        mapped_audio_output_count = len(answers.get("audio_streams") or [])
         if audio_policy == "aac":
             bitrate = int(answers.get("hardsub_audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
             cmd.extend(["-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2"])
@@ -12476,11 +18680,19 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
     cmd.extend(["-filter:v", build_hardsub_video_filter(answers, video_encoder)])
     cmd.extend(["-c:v", video_encoder])
     append_hardsub_quality_args(cmd, answers, video_encoder)
+    append_nvenc_multipass_args(cmd, answers, video_encoder)
     append_hardsub_color_args(cmd, answers)
-    if video_encoder == "hevc_nvenc" and hardsub_output_10bit(answers):
-        cmd.extend(["-profile:v", "main10"])
-    elif video_encoder == "hevc_nvenc":
-        cmd.extend(["-profile:v", "main"])
+    if video_encoder == "hevc_nvenc":
+        cmd.extend(["-profile:v", hevc_profile_for_output(answers, "main")])
+    elif video_encoder == "libx265":
+        cmd.extend(["-profile:v", hevc_profile_for_output(answers, "main")])
+    append_clear_reencoded_stream_stat_metadata(
+        cmd,
+        answers,
+        video_output_count=1,
+        audio_output_count=mapped_audio_output_count,
+        subtitle_output_count=0,
+    )
     if tag and output_ext in MP4_LIKE_EXTS:
         cmd.extend(["-tag:v", tag])
     if output_ext in MP4_LIKE_EXTS and MOVFLAGS:
@@ -12529,7 +18741,7 @@ def step_hardsub_output_location(answers: dict[str, Any]) -> None:
             f"Enter=same folder as input; default suffix {HARDSUB_OUTPUT_SUFFIX}; example: {folder_example}",
         )
     )
-    if value == "0":
+    if is_back_value(value):
         raise Back()
     apply_output_location_value(answers, value)
 
@@ -12545,7 +18757,7 @@ def step_hardsub_output_format(answers: dict[str, Any]) -> None:
                 "n",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "n"
@@ -12577,7 +18789,7 @@ def step_hardsub_subtitle_source(answers: dict[str, Any]) -> None:
                     "1",
                 )
             )
-            if value == "0":
+            if is_back_value(value):
                 raise Back()
             if not value:
                 value = "1"
@@ -12599,7 +18811,7 @@ def step_hardsub_subtitle_source(answers: dict[str, Any]) -> None:
                     "1",
                 )
             )
-            if value == "0":
+            if is_back_value(value):
                 raise Back()
             if not value:
                 value = "1"
@@ -12651,7 +18863,7 @@ def step_hardsub_fontsdir(answers: dict[str, Any]) -> None:
                 f"Enter=none; optional for ASS/SSA embedded fonts and MKV font attachments; example: {fonts_example}",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             answers["hardsub_fontsdir"] = None
@@ -12676,7 +18888,7 @@ def step_hardsub_video_codec(answers: dict[str, Any]) -> None:
                 "n",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value or value.lower() == "n":
             value = default_codec
@@ -12688,6 +18900,11 @@ def step_hardsub_video_codec(answers: dict[str, Any]) -> None:
 
 
 def step_hardsub_use_gpu(answers: dict[str, Any]) -> None:
+    if not gpu_available_for_answers(answers):
+        answers["use_gpu"] = False
+        note("No usable NVIDIA/NVENC GPU was detected. GPU question skipped; CPU mode selected.")
+        log_info("User choice: use_gpu=False; reason=GPU unavailable")
+        return
     answers["use_gpu"] = ask_yes_no(
         question_prompt(answers, "Use GPU/NVIDIA encoder if available?", "y/n", "y"),
         True,
@@ -12704,7 +18921,7 @@ def step_hardsub_quality(answers: dict[str, Any]) -> None:
                 "1",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "1"
@@ -12722,7 +18939,7 @@ def step_hardsub_quality(answers: dict[str, Any]) -> None:
                         "18",
                     )
                 )
-                if custom == "0":
+                if is_back_value(custom):
                     raise Back()
                 if not custom:
                     custom = "18"
@@ -12758,7 +18975,7 @@ def step_hardsub_hdr_handling(answers: dict[str, Any]) -> None:
                 "1",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "1"
@@ -12782,7 +18999,7 @@ def step_hardsub_audio_mode(answers: dict[str, Any]) -> None:
                 "1",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "1"
@@ -12832,7 +19049,7 @@ def step_hardsub_audio_container_policy(answers: dict[str, Any]) -> None:
                 "2",
             )
         )
-        if value == "0":
+        if is_back_value(value):
             raise Back()
         if not value:
             value = "2"
@@ -12867,6 +19084,8 @@ def step_hardsub_start_now(answers: dict[str, Any]) -> None:
         print("  " + field_text("subtitle", answers.get("hardsub_subtitle_path"), Color.MAGENTA))
     print("  " + field_text("output", answers["output_path"], Color.LIME))
     print("  " + field_text("video codec", answers.get("video_codec"), Color.CYAN))
+    if "_nvenc" in command_to_text(cmd):
+        print("  " + field_text("NVENC multipass", normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")), Color.YELLOW))
     print("  " + field_text("quality", answers.get("hardsub_quality_mode"), Color.YELLOW))
     print("  " + field_text("HDR/Dolby handling", answers.get("hardsub_hdr_handling"), Color.ORANGE))
     print("  " + field_text("audio", answers.get("hardsub_audio_mode"), Color.BLUE))
@@ -12899,6 +19118,11 @@ def _run_hardsub_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, fl
         Step("hardsub_fontsdir", lambda a: True, step_hardsub_fontsdir),
         Step("video_codec", lambda a: True, step_hardsub_video_codec),
         Step("use_gpu", lambda a: True, step_hardsub_use_gpu),
+        Step(
+            "nvenc_multipass",
+            lambda a: nvenc_multipass_prompt_applicable(a),
+            lambda a: ask_nvenc_multipass_if_applicable(a, workflow_name="HardSub", quality_oriented=True),
+        ),
         Step("hardsub_quality", lambda a: True, step_hardsub_quality),
         Step("hardsub_hdr", lambda a: True, step_hardsub_hdr_handling),
         Step("hardsub_audio", lambda a: True, step_hardsub_audio_mode),
@@ -12916,6 +19140,8 @@ def _run_hardsub_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, fl
             if idx == 0:
                 raise
             idx -= 1
+            while idx > 0 and step_is_auto_back_skip(steps[idx], answers):
+                idx -= 1
 
     if not answers.get("start_now", True):
         note("FFmpeg was not started. The command above is ready to run manually.")
@@ -12943,13 +19169,30 @@ def build_cut_filter_complex(
     if not keep_ranges:
         raise ValueError("build_cut_filter_complex requires at least one keep range.")
     fc_parts: list[str] = []
+    video_sources: list[str]
+    audio_sources: list[str] = []
+    if len(keep_ranges) > 1:
+        video_sources = [f"vsrc{idx}" for idx in range(len(keep_ranges))]
+        fc_parts.append(f"[0:v:0]split={len(keep_ranges)}{''.join(f'[{label}]' for label in video_sources)}")
+        log_info(f"Inserted split={len(keep_ranges)} for multi-range video trim from [0:v:0].")
+        if audio_for_cut is not None:
+            audio_sources = [f"asrc{idx}" for idx in range(len(keep_ranges))]
+            fc_parts.append(
+                f"[0:a:{audio_for_cut}]asplit={len(keep_ranges)}"
+                f"{''.join(f'[{label}]' for label in audio_sources)}"
+            )
+            log_info(f"Inserted asplit={len(keep_ranges)} for multi-range audio trim from [0:a:{audio_for_cut}].")
+    else:
+        video_sources = ["0:v:0"]
+        if audio_for_cut is not None:
+            audio_sources = [f"0:a:{audio_for_cut}"]
     for idx, (start, end) in enumerate(keep_ranges):
         fc_parts.append(
-            f"[0:v:0]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{idx}]"
+            f"[{video_sources[idx]}]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{idx}]"
         )
         if audio_for_cut is not None:
             fc_parts.append(
-                f"[0:a:{audio_for_cut}]atrim=start={start:.6f}:end={end:.6f},"
+                f"[{audio_sources[idx]}]atrim=start={start:.6f}:end={end:.6f},"
                 f"asetpts=PTS-STARTPTS[a{idx}]"
             )
 
@@ -12960,7 +19203,7 @@ def build_cut_filter_complex(
             if audio_for_cut is not None:
                 concat_inputs += f"[a{idx}]"
         if audio_for_cut is not None:
-            if audio_speed_transform_enabled(answers):
+            if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
                 fc_parts.append(f"{concat_inputs}concat=n={len(keep_ranges)}:v=1:a=1[vc][ac]")
                 fc_parts.append(f"[ac]{build_encode_audio_speed_filter(answers)}[a]")
             else:
@@ -12971,7 +19214,10 @@ def build_cut_filter_complex(
     else:
         video_label = "v0"
         if audio_for_cut is not None:
-            fc_parts.append("[a0]asetpts=PTS-STARTPTS[a]")
+            if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
+                fc_parts.append(f"[a0]{build_encode_audio_speed_filter(answers)}[a]")
+            else:
+                fc_parts.append("[a0]asetpts=PTS-STARTPTS[a]")
 
     # Apply the user's video filters (crop/fps/scale/setsar/setparams) after concat.
     user_video_filter = build_cpu_video_filter(answers)
@@ -12982,9 +19228,15 @@ def build_cut_filter_complex(
     return ";".join(fc_parts)
 
 
-def print_startup_banner(config_path: Path, launcher_path: Path) -> None:
+def print_startup_banner(config_path: Path, launcher_path: Path, answers: dict[str, Any] | None = None) -> None:
     _ = (config_path, launcher_path)
     startup_line("FFmpeg", "found.", Color.LIME)
+    answers = answers or {}
+    if answers.get("gpu_available"):
+        model = answers.get("gpu_model") or "NVIDIA NVENC GPU"
+        startup_line("GPU", f"detected - {model} (NVENC hardware encoding).", Color.GREEN, Color.GREEN)
+    else:
+        startup_line("GPU", "not detected - video will be encoded on the CPU.", Color.RED, Color.RED)
 
 
 def run_video_speed_reverse_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
@@ -13155,21 +19407,597 @@ def _run_audio_transform_mode_impl(base_answers: dict[str, Any]) -> tuple[int, f
     )
 
 
+def ffconcat_quote_path(path: Path) -> str:
+    return str(path.resolve()).replace("\\", "/").replace("'", r"'\''")
+
+
+def join_load_media_item(answers: dict[str, Any], path: Path) -> dict[str, Any]:
+    probe = ffprobe_json(answers["ffprobe"], path)
+    streams = probe.get("streams", [])
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+    if not video_streams:
+        raise ValueError("Join Videos requires video inputs.")
+    return {
+        "path": path,
+        "probe": probe,
+        "format": probe.get("format", {}),
+        "streams": streams,
+        "video_streams": video_streams,
+        "audio_streams": audio_streams,
+        "subtitle_streams": subtitle_streams,
+        "attachment_streams": attachment_streams,
+        "data_streams": data_streams,
+        "duration": stream_duration_seconds({}, probe.get("format")) or stream_duration_seconds(video_streams[0], probe.get("format")) or 0.0,
+    }
+
+
+def join_item_answers(base_answers: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ffmpeg": base_answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
+        "ffprobe": base_answers.get("ffprobe") or shutil.which("ffprobe") or "ffprobe",
+        "detect_duplicate_audio": base_answers.get("detect_duplicate_audio", True),
+        "input_path": item["path"],
+        "probe": item.get("probe") or {},
+        "format": item.get("format") or {},
+        "video_streams": item.get("video_streams") or [],
+        "audio_streams": item.get("audio_streams") or [],
+        "subtitle_streams": item.get("subtitle_streams") or [],
+        "attachment_streams": item.get("attachment_streams") or [],
+        "data_streams": item.get("data_streams") or [],
+    }
+
+
+def join_stream_signature(item: dict[str, Any]) -> list[tuple[Any, ...]]:
+    signature: list[tuple[Any, ...]] = []
+    for stream in item.get("streams") or []:
+        codec_type = stream.get("codec_type")
+        if codec_type not in {"video", "audio", "subtitle"}:
+            continue
+        if codec_type == "video":
+            signature.append(
+                (
+                    "video",
+                    str(stream.get("codec_name") or "").lower(),
+                    int(stream.get("width") or 0),
+                    int(stream.get("height") or 0),
+                    round(rational_to_float(stream.get("avg_frame_rate")) or rational_to_float(stream.get("r_frame_rate")) or 0.0, 3),
+                    str(stream.get("pix_fmt") or "").lower(),
+                )
+            )
+        elif codec_type == "audio":
+            signature.append(
+                (
+                    "audio",
+                    str(stream.get("codec_name") or "").lower(),
+                    int(stream.get("sample_rate") or 0),
+                    int(stream.get("channels") or 0),
+                    str(stream.get("channel_layout") or "").lower(),
+                )
+            )
+        else:
+            signature.append(("subtitle", str(stream.get("codec_name") or "").lower()))
+    return signature
+
+
+def join_copy_compatibility(items: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    if len(items) < 2:
+        return False, ["at least two video inputs are required"]
+    reasons: list[str] = []
+    first_ext = items[0]["path"].suffix.lower()
+    first_sig = join_stream_signature(items[0])
+    for item in items[1:]:
+        if item["path"].suffix.lower() != first_ext:
+            reasons.append("input containers/extensions differ")
+            break
+        if join_stream_signature(item) != first_sig:
+            reasons.append("stream layout, codec, resolution, fps, pixel format, or audio layout differs")
+            break
+    return not reasons, reasons
+
+
+def join_default_output_path(answers: dict[str, Any], first_input: Path) -> Path:
+    output_location = Path(answers.get("output_location") or first_input.parent)
+    suffix = first_input.suffix or ".mkv"
+    if answers.get("output_name_stem"):
+        candidate = output_location / f"{sanitize_output_stem(answers['output_name_stem'])}{suffix}"
+    elif output_location.suffix:
+        candidate = output_location.with_suffix(suffix)
+    else:
+        candidate = output_location / f"{sanitize_output_stem(first_input.stem)}_Joined{suffix}"
+    return resolve_output_collision(candidate, first_input, "_Joined")
+
+
+def write_join_concat_list(items: list[dict[str, Any]], output_path: Path) -> Path:
+    list_path = unique_numbered_path(output_path.with_name(f".{sanitize_output_stem(output_path.stem)}_ffconcat.txt"))
+    lines = ["ffconcat version 1.0"]
+    for item in items:
+        lines.append(f"file '{ffconcat_quote_path(item['path'])}'")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return list_path
+
+
+def build_join_copy_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
+    output_path = resolve_output_collision_against_inputs(
+        output_path,
+        [Path(item["path"]) for item in items if item.get("path")],
+        answers.get("output_collision_suffix", "_Encode"),
+    )
+    answers["output_path"] = output_path
+    list_path = write_join_concat_list(items, output_path)
+    answers["_join_concat_list"] = list_path
+    return [
+        answers["ffmpeg"],
+        "-hide_banner",
+        "-y" if OVERWRITE_OUTPUT else "-n",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+
+
+def cleanup_join_concat_list(answers: dict[str, Any]) -> None:
+    list_path = answers.pop("_join_concat_list", None)
+    if not list_path:
+        return
+    try:
+        path = Path(list_path)
+        if path.exists() and path.is_file():
+            path.unlink()
+            log_debug(f"Removed temporary join concat list: {path}")
+    except Exception:
+        log_exception("Could not remove temporary join concat list")
+
+
+def cleanup_encode_chapter_metadata(answers: dict[str, Any]) -> None:
+    """Remove the temporary directory used for encode chapter metadata files."""
+    temp_dir = answers.pop("_chapter_metadata_temp_dir", None)
+    answers.pop("_chapter_metadata_input_index", None)
+    if not temp_dir:
+        return
+    try:
+        dir_path = Path(temp_dir)
+        if dir_path.exists() and dir_path.is_dir():
+            shutil.rmtree(dir_path, ignore_errors=True)
+            log_debug(f"Removed temporary chapter metadata directory: {dir_path}")
+    except Exception:
+        log_exception("Could not remove temporary chapter metadata directory")
+
+
+def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
+    output_path = resolve_output_collision_against_inputs(
+        output_path,
+        [Path(item["path"]) for item in items if item.get("path")],
+        answers.get("output_collision_suffix", "_Final"),
+    )
+    answers["output_path"] = output_path
+    first_video = items[0]["video_streams"][0]
+    format_answers = dict(answers)
+    format_answers["video_streams"] = [first_video]
+    output_pix_fmt = cpu_pixel_format_for_output(format_answers)
+    nvenc_pix_fmt = "p010le" if output_video_bit_depth(format_answers) > 8 else "yuv420p"
+    target_depth = output_video_bit_depth(format_answers)
+    target_w = int(first_video.get("width") or 1280)
+    target_h = int(first_video.get("height") or 720)
+    target_fps = rational_to_float(first_video.get("avg_frame_rate")) or rational_to_float(first_video.get("r_frame_rate")) or 30.0
+    available_video_encoders = {str(name).lower() for name in answers.get("video_encoders") or []}
+    use_nvenc_encode = "h264_nvenc" in available_video_encoders and target_depth <= 10
+    use_cuda_decode_complex = bool(answers.get("use_gpu") and use_nvenc_encode)
+    cmd: list[str] = [answers["ffmpeg"], "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n"]
+    for item in items:
+        if use_cuda_decode_complex:
+            append_cuda_decode_args_for_input(cmd, answers)
+        cmd.extend(["-i", str(item["path"])])
+    filters: list[str] = []
+    inputs: list[str] = []
+    any_audio = any(item.get("audio_streams") for item in items)
+    for idx, item in enumerate(items):
+        filters.append(
+            f"[{idx}:v:0]fps={target_fps:g},"
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,format={output_pix_fmt},setpts=PTS-STARTPTS[v{idx}]"
+        )
+        inputs.append(f"[v{idx}]")
+        if any_audio and item.get("audio_streams"):
+            filters.append(f"[{idx}:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{idx}]")
+            inputs.append(f"[a{idx}]")
+        elif any_audio:
+            duration = max(0.001, float(item.get("duration") or 0.001))
+            filters.append(f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration:.6f}[a{idx}]")
+            inputs.append(f"[a{idx}]")
+    filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=1:a={1 if any_audio else 0}[v]{'[a]' if any_audio else ''}")
+    cmd.extend(["-filter_complex", ";".join(filters), "-map", "[v]"])
+    if any_audio:
+        cmd.extend(["-map", "[a]"])
+    else:
+        cmd.append("-an")
+    if use_nvenc_encode:
+        log_info("Join Videos near-quality encode selected h264_nvenc because NVENC is available.")
+        cmd.extend([
+            "-c:v", "h264_nvenc",
+            "-preset", NVENC_PRESET,
+            "-tune", NVENC_TUNE,
+            "-rc", "constqp",
+        ])
+        append_nvenc_multipass_args(cmd, answers, "h264_nvenc")
+        cmd.extend([
+            "-qp", "18",
+            "-pix_fmt", nvenc_pix_fmt,
+        ])
+    elif target_depth > 10:
+        cmd.extend(["-c:v", "libx265", "-preset", "slow", "-crf", "18", "-pix_fmt", output_pix_fmt])
+        cmd.extend(["-profile:v", hevc_profile_for_output(format_answers, "main")])
+    else:
+        cmd.extend(["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", output_pix_fmt])
+    if any_audio:
+        cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2"])
+    if output_path.suffix.lower() in {".mp4", ".m4v", ".mov"}:
+        cmd.extend(["-movflags", "+faststart"])
+    cmd.append(str(output_path))
+    return cmd
+
+
+def append_join_trim_concat_filter(
+    filters: list[str],
+    input_label: str,
+    keep_ranges: list[tuple[float, float]],
+    media_type: str,
+    output_label: str,
+) -> str:
+    if not keep_ranges:
+        return input_label
+    labels: list[str] = []
+    trim_name = "trim" if media_type == "video" else "atrim"
+    pts_filter = "setpts=PTS-STARTPTS" if media_type == "video" else "asetpts=PTS-STARTPTS"
+    source_labels: list[str]
+    if len(keep_ranges) > 1:
+        split_name = "split" if media_type == "video" else "asplit"
+        source_labels = [f"{output_label}_src{idx}" for idx in range(len(keep_ranges))]
+        filters.append(f"[{input_label}]{split_name}={len(keep_ranges)}{''.join(f'[{label}]' for label in source_labels)}")
+        log_info(
+            f"Filter graph decision: inserted {split_name}={len(keep_ranges)} before multi-range "
+            f"{trim_name} on [{input_label}] to avoid reusing one filter output."
+        )
+    else:
+        source_labels = [input_label]
+    for idx, (start, end) in enumerate(keep_ranges):
+        label = f"{output_label}_{idx}"
+        filters.append(f"[{source_labels[idx]}]{trim_name}=start={start:.6f}:end={end:.6f},{pts_filter}[{label}]")
+        labels.append(f"[{label}]")
+    if len(labels) == 1:
+        return f"{output_label}_0"
+    if media_type == "video":
+        filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[{output_label}]")
+    else:
+        filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[{output_label}]")
+    return output_label
+
+
+def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
+    output_path = resolve_output_collision_against_inputs(
+        output_path,
+        [Path(item["path"]) for item in items if item.get("path")],
+        answers.get("output_collision_suffix", "_Encode"),
+    )
+    answers["output_path"] = output_path
+    join_answers = dict(answers)
+    join_answers["_join_complex_graph"] = True
+    video_encoder, tag, profile = resolve_video_encoder(join_answers)
+    if video_encoder == "copy":
+        join_answers["video_codec"] = DEFAULT_VIDEO_CODEC
+        video_encoder, tag, profile = resolve_video_encoder(join_answers)
+    video_encoder, tag, profile = enforce_bit_depth_compatible_video_encoder(join_answers, video_encoder, tag, profile)
+    first_video = items[0]["video_streams"][0]
+    join_answers["video_streams"] = [first_video]
+    target_dimensions = resolve_scale_dimensions(join_answers, join_answers.get("resolution", "n"))
+    if target_dimensions:
+        target_w, target_h = target_dimensions
+    else:
+        target_w = int(first_video.get("width") or 1280)
+        target_h = int(first_video.get("height") or 720)
+        join_answers["final_resolution"] = (target_w, target_h)
+    target_fps = float(join_answers.get("fps") or rational_to_float(first_video.get("avg_frame_rate")) or rational_to_float(first_video.get("r_frame_rate")) or 30.0)
+
+    cmd: list[str] = [join_answers["ffmpeg"], "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n"]
+    use_cuda_decode_complex = should_use_cuda_decode_for_complex_graph(join_answers, video_encoder, False)
+    for item in items:
+        if use_cuda_decode_complex:
+            append_cuda_decode_args_for_input(cmd, join_answers)
+        cmd.extend(["-i", str(item["path"])])
+
+    selected_audio = selected_audio_streams(join_answers) if join_answers.get("audio_streams") else []
+    for item_pos, item in enumerate(items, start=1):
+        audio_count = len(item.get("audio_streams") or [])
+        missing = [idx for idx in selected_audio if idx >= audio_count]
+        if missing:
+            raise RuntimeError(
+                f"Joined input {item_pos} has {audio_count} audio track(s), so selected track(s) {missing} cannot be mapped."
+            )
+
+    filters: list[str] = []
+    concat_inputs: list[str] = []
+    top = int(join_answers.get("crop_top", 0) or 0)
+    left = int(join_answers.get("crop_left", 0) or 0)
+    right = int(join_answers.get("crop_right", 0) or 0)
+    bottom = int(join_answers.get("crop_bottom", 0) or 0)
+    crop_filter = f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}" if join_answers.get("crop_enabled") and any((top, left, right, bottom)) else ""
+    output_pix_fmt = cpu_pixel_format_for_output(join_answers)
+
+    for input_idx, _item in enumerate(items):
+        chain = []
+        if crop_filter:
+            chain.append(crop_filter)
+        chain.extend([
+            f"fps={target_fps:g}",
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2",
+            "setsar=1",
+            output_pix_fmt and f"format={output_pix_fmt}",
+            "setpts=PTS-STARTPTS",
+        ])
+        chain = [part for part in chain if part]
+        filters.append(f"[{input_idx}:v:0]{','.join(chain)}[jv{input_idx}]")
+        concat_inputs.append(f"[jv{input_idx}]")
+        for audio_pos, audio_index in enumerate(selected_audio):
+            filters.append(
+                f"[{input_idx}:a:{audio_index}]"
+                f"aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[ja{input_idx}_{audio_pos}]"
+            )
+            concat_inputs.append(f"[ja{input_idx}_{audio_pos}]")
+
+    concat_outputs = ["[jvcat]"] + [f"[jacat{pos}]" for pos, _idx in enumerate(selected_audio)]
+    filters.append(
+        f"{''.join(concat_inputs)}concat=n={len(items)}:v=1:a={len(selected_audio)}{''.join(concat_outputs)}"
+    )
+
+    source_join_duration = sum(float(item.get("duration") or 0.0) for item in items)
+    keep_ranges = normalize_cut_ranges(list(join_answers.get("cut_keep_ranges") or []), source_join_duration)
+    video_label = append_join_trim_concat_filter(filters, "jvcat", keep_ranges, "video", "jvcut")
+    if video_speed_transform_enabled(join_answers):
+        filters.append(
+            f"[{video_label}]{build_video_speed_filter(encode_video_speed_factor(join_answers), bool(join_answers.get('reverse_video')))}[jvfinal]"
+        )
+    else:
+        filters.append(f"[{video_label}]setpts=PTS-STARTPTS[jvfinal]")
+    video_label = "jvfinal"
+
+    audio_labels: list[str] = []
+    for audio_pos, _audio_index in enumerate(selected_audio):
+        label = append_join_trim_concat_filter(filters, f"jacat{audio_pos}", keep_ranges, "audio", f"jacut{audio_pos}")
+        final_audio_label = f"jafinal{audio_pos}"
+        if audio_speed_transform_enabled(join_answers) or loudnorm_transform_enabled(join_answers):
+            filters.append(f"[{label}]{build_encode_audio_speed_filter(join_answers)}[{final_audio_label}]")
+        else:
+            filters.append(f"[{label}]asetpts=PTS-STARTPTS[{final_audio_label}]")
+        audio_labels.append(final_audio_label)
+
+    final_duration = final_processed_duration_for_splits(join_answers, source_join_duration)
+    split_points = normalize_separator_points(join_answers.get("separator_points"), final_duration)
+    split_active = bool(split_points)
+    if split_active:
+        video_outputs, audio_outputs_by_part, split_intervals = append_final_split_filters(
+            filters,
+            video_label,
+            audio_labels,
+            split_points,
+            final_duration,
+            "j",
+            float(join_answers.get("fps") or 0.0),
+        )
+        output_paths = split_part_output_paths(output_path, len(video_outputs), [Path(item["path"]) for item in items])
+        join_answers["split_output_paths"] = output_paths
+        join_answers["split_part_intervals"] = split_intervals
+        answers["split_output_paths"] = output_paths
+        answers["split_part_intervals"] = split_intervals
+        join_answers["output_path"] = output_paths[0]
+        answers["output_path"] = output_paths[0]
+    else:
+        video_outputs = [video_label]
+        audio_outputs_by_part = [[label for label in audio_labels]]
+        split_intervals = []
+        output_paths = [output_path]
+
+    cmd.extend(["-filter_complex", ";".join(filters)])
+
+    if join_answers.get("use_gpu") and str(video_encoder).endswith("_nvenc"):
+        log_info("Join Videos uses CPU concat filters; NVENC is still used for final video encoding.")
+    for part_idx, part_output in enumerate(output_paths):
+        cmd.extend(["-map", f"[{video_outputs[part_idx]}]"])
+        for audio_label in audio_outputs_by_part[part_idx]:
+            cmd.extend(["-map", f"[{audio_label}]"])
+        attachments_mapped = append_embedded_attachment_maps(cmd, join_answers)
+        data_mapped = append_source_data_maps(cmd, join_answers)
+        append_source_metadata_chapter_options(cmd, join_answers)
+        append_negative_stream_options(cmd, join_answers, True, [], data_mapped)
+        append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
+        append_audio_encode_options(cmd, join_answers, bool(audio_outputs_by_part[part_idx]))
+        append_clear_reencoded_stream_stat_metadata(
+            cmd,
+            join_answers,
+            video_output_count=1 if video_encoder != "copy" else 0,
+            audio_output_count=len(audio_outputs_by_part[part_idx]) if audio_outputs_by_part[part_idx] else 0,
+            subtitle_output_count=0,
+        )
+        if attachments_mapped:
+            append_embedded_attachment_codec_options(cmd, join_answers)
+        if data_mapped:
+            append_source_data_codec_options(cmd, join_answers)
+        append_container_options(cmd, join_answers["output_ext"])
+        cmd.append(str(part_output))
+    if split_active:
+        log_info(
+            "Split final joined output into parts: "
+            + ", ".join(
+                f"Part {idx + 1:02d} {seconds_to_ffmpeg_time(start)}->{seconds_to_ffmpeg_time(end)}"
+                for idx, (start, end) in enumerate(split_intervals)
+            )
+        )
+    answers["final_resolution"] = join_answers.get("final_resolution")
+    answers.pop("_join_complex_graph", None)
+    return cmd
+
+
+def print_join_summary(items: list[dict[str, Any]], copy_compatible: bool, reasons: list[str]) -> None:
+    print()
+    print(paint("Join Videos summary:", Color.BOLD + Color.LIGHT_BLUE))
+    for idx, item in enumerate(items, start=1):
+        video = item["video_streams"][0]
+        fps = rational_to_float(video.get("avg_frame_rate")) or rational_to_float(video.get("r_frame_rate")) or 0.0
+        print(
+            "  "
+            + field_text(
+                f"input {idx}",
+                f"{item['path'].name} | duration: {format_duration(item.get('duration'))} | "
+                f"video: {video.get('codec_name', 'unknown')} {video.get('width', '?')}x{video.get('height', '?')} {fps:g} fps | "
+                f"audio tracks: {len(item.get('audio_streams') or [])}",
+                Color.WHITE,
+            )
+        )
+    if copy_compatible:
+        print("  " + field_text("join mode", "stream copy, no re-encode", Color.GREEN))
+    else:
+        print("  " + field_text("join mode", "re-encode required", Color.ORANGE))
+        for reason in reasons:
+            print("    " + paint(reason, Color.YELLOW))
+
+
+def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    answers = dict(base_answers)
+    answers["_question_number"] = 1
+    items: list[dict[str, Any]] = []
+    try:
+        while True:
+            label = "Enter first video file path" if not items else "Enter another video file path"
+            value = ask_required(
+                question_prompt(
+                    answers,
+                    label,
+                    "drag and drop a video file here or paste a path",
+                )
+            )
+            path = terminal_path(value)
+            if not path.exists() or not path.is_file():
+                error("File not found. Enter the full file path again.")
+                continue
+            try:
+                item = join_load_media_item(answers, path)
+            except Exception as exc:
+                log_exception(f"Join Videos probe failed: {path}")
+                error(str(exc))
+                continue
+            items.append(item)
+            answers["_question_number"] = len(items) + 1
+            if len(items) >= 2:
+                more = ask_yes_no(
+                    question_prompt(answers, "Add another video file?", "y/n", "n"),
+                    False,
+                )
+                answers["_question_number"] += 1
+                if not more:
+                    break
+
+        output_answers = dict(answers)
+        output_answers["input_path"] = items[0]["path"]
+        output_answers["probe"] = items[0]["probe"]
+        output_answers["format"] = items[0]["format"]
+        output_answers["video_streams"] = items[0]["video_streams"]
+        output_answers["audio_streams"] = items[0]["audio_streams"]
+        output_answers["subtitle_streams"] = [stream for stream in items[0].get("streams", []) if stream.get("codec_type") == "subtitle"]
+        output_answers["attachment_streams"] = [stream for stream in items[0].get("streams", []) if stream.get("codec_type") == "attachment"]
+        output_answers["data_streams"] = [stream for stream in items[0].get("streams", []) if stream.get("codec_type") == "data"]
+        output_answers["join_input_items"] = items[1:]
+        step_output_location(output_answers)
+        answers.update({key: output_answers[key] for key in ("output_location", "output_name_stem", "output_used_default") if key in output_answers})
+    except Back:
+        note("Returning to main menu.")
+        return None
+
+    output_path = join_default_output_path(answers, items[0]["path"])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    copy_compatible, reasons = join_copy_compatibility(items)
+    print_join_summary(items, copy_compatible, reasons)
+    if copy_compatible:
+        cmd = build_join_copy_command(answers, items, output_path)
+    else:
+        note("These files cannot be safely joined with stream copy. Re-encoding is required.")
+        use_near = ask_yes_no(
+            question_prompt(
+                answers,
+                "Encode with closest possible quality to the inputs?",
+                "y/n",
+                "y",
+            ),
+            True,
+        )
+        if not use_near:
+            note("Join Videos was canceled before encoding.")
+            return None
+        first_video = items[0]["video_streams"][0]
+        format_answers = dict(answers)
+        format_answers["video_streams"] = [first_video]
+        target_depth = output_video_bit_depth(format_answers)
+        available_video_encoders = {str(name).lower() for name in answers.get("video_encoders") or []}
+        if "h264_nvenc" in available_video_encoders and target_depth <= 10:
+            ask_nvenc_multipass_if_applicable(
+                answers,
+                video_encoder="h264_nvenc",
+                workflow_name="Join Videos near-quality",
+                quality_oriented=True,
+            )
+        else:
+            set_nvenc_multipass_skip_reason(answers, "CPU encoder selected")
+        cmd = build_join_near_quality_command(answers, items, output_path)
+    output_path = Path(answers.get("output_path") or output_path)
+    answers["output_path"] = output_path
+    log_info(f"Join Videos command: {command_to_powershell(cmd)}")
+    print()
+    print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+    start_now = ask_yes_no(question_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True)
+    if not start_now:
+        note("FFmpeg was not started. The command above is ready to run manually.")
+        cleanup_join_concat_list(answers)
+        return None
+    total_duration = sum(float(item.get("duration") or 0.0) for item in items)
+    print()
+    print(paint("Starting FFmpeg...", Color.GREEN))
+    try:
+        return run_ffmpeg_with_progress(cmd, total_duration=(total_duration if total_duration > 0 else None), label="Join Videos")
+    finally:
+        cleanup_join_concat_list(answers)
+
+
 def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, float] | None:
     answers = dict(base_answers)
     answers["_question_number"] = 1
     start_mode = ask_main_menu(answers, config_path)
-    if start_mode == 10:
+    if start_mode == 13:
+        return run_metadata_editor_mode(base_answers)
+    if start_mode == 12:
+        return run_join_videos_mode(base_answers)
+    if start_mode == 11:
         return run_audio_transform_mode(base_answers)
-    if start_mode == 9:
+    if start_mode == 10:
         return run_video_speed_reverse_mode(base_answers)
-    if start_mode == 8:
+    if start_mode == 9:
         return run_hardsub_encode_mode(base_answers)
-    if start_mode == 7:
+    if start_mode == 8:
         return run_mux_cleanup_mode(base_answers)
-    if start_mode == 6:
+    if start_mode == 7:
         run_media_info_mode(base_answers)
         return None
+    if start_mode == 6:
+        return run_extract_stream_mode(base_answers)
     if start_mode == 5:
         return run_add_files_to_video_mode(base_answers)
     if start_mode == 4:
@@ -13200,20 +20028,63 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     cmd = answers["cmd"]
     if not answers.get("start_now", True):
         note("FFmpeg was not started. The command above is ready to run manually.")
+        cleanup_join_concat_list(answers)
+        cleanup_encode_chapter_metadata(answers)
         return None
 
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
     # Estimate total duration so the progress bar can compute percent / ETA.
-    total_duration = stream_duration_seconds({}, answers.get("format")) or 0.0
-    log_info(f"Starting FFmpeg encode. Estimated source duration: "
-             f"{format_elapsed(total_duration) if total_duration else 'unknown'}")
-    if reverse_video_needs_segmented_main_encode(answers):
-        return run_segmented_reverse_main_encode(answers)
-    return_code, elapsed = run_ffmpeg_with_progress(
-        cmd, total_duration=(total_duration if total_duration > 0 else None),
-        label="FFmpeg encode",
+    source_duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    if answers.get("join_input_items"):
+        source_duration += sum(float(item.get("duration") or 0.0) for item in answers.get("join_input_items") or [])
+    processed_duration = final_processed_duration_for_splits(answers, source_duration) if source_duration > 0 else 0.0
+    progress_duration = ffmpeg_progress_duration_for_answers(answers, source_duration) if source_duration > 0 else 0.0
+    print_ffmpeg_processing_plan(
+        answers,
+        cmd,
+        progress_duration if progress_duration > 0 else None,
+        processed_duration if processed_duration > 0 else None,
     )
+    log_info(f"Starting FFmpeg encode. Estimated source duration: "
+             f"{format_elapsed(source_duration) if source_duration else 'unknown'}; "
+             f"estimated processed duration: {format_elapsed(processed_duration) if processed_duration else 'unknown'}; "
+             f"progress duration: {format_elapsed(progress_duration) if progress_duration else 'unknown'}")
+    if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
+        return run_segmented_reverse_main_encode(answers)
+    try:
+        split_progress_fps = None
+        if answers.get("separator_points") and progress_duration > 0:
+            try:
+                split_progress_fps = float(answers.get("fps") or get_video_fps(answers))
+            except Exception:
+                split_progress_fps = None
+        split_part_intervals = list(answers.get("split_part_intervals") or [])
+        split_progress_part_durations = [
+            max(0.0, float(end) - float(start))
+            for start, end in split_part_intervals
+        ]
+        progress_output_paths = [Path(path) for path in (answers.get("split_output_paths") or [])]
+        if not progress_output_paths and answers.get("output_path"):
+            progress_output_paths = [Path(answers["output_path"])]
+        if cpu_two_pass_enabled_for_command(answers, cmd):
+            return run_cpu_two_pass_ffmpeg(
+                cmd,
+                answers,
+                total_duration=(progress_duration if progress_duration > 0 else None),
+                progress_output_paths=progress_output_paths,
+            )
+        return_code, elapsed = run_ffmpeg_with_progress(
+            cmd, total_duration=(progress_duration if progress_duration > 0 else None),
+            label="FFmpeg encode",
+            split_progress_fps=split_progress_fps,
+            split_progress_part_durations=split_progress_part_durations,
+            initial_detail=ffmpeg_initial_progress_detail(answers, cmd),
+            progress_output_paths=progress_output_paths,
+        )
+    finally:
+        cleanup_join_concat_list(answers)
+        cleanup_encode_chapter_metadata(answers)
     return return_code, elapsed
 
 
@@ -13273,8 +20144,8 @@ def main() -> int:
         note(f"Could not refresh FFmpeg reference: {exc}")
         log_warn(f"ensure_ffmpeg_reference_file failed: {exc}")
 
-    # Auto-install PySide6 (the runtime for the new Cut Editor / Crop
-    # Preview GUIs) on first run so the new GUI is the default path. This
+    # Auto-install PySide6 (the runtime for the active unified/speed/audio
+    # GUI windows) on first run so graphical editors are available. This
     # block runs only when PySide6 is missing; subsequent runs detect it
     # via the cached probe and skip the prompt entirely.
     try:
@@ -13282,14 +20153,24 @@ def main() -> int:
     except Exception as exc:
         note(f"PySide6 auto-install check failed: {exc}")
 
+    video_encoders = list_encoders(ffmpeg, "video")
     base_answers: dict[str, Any] = {
         "ffmpeg": ffmpeg,
         "ffprobe": ffprobe,
         "muxers": list_muxers(ffmpeg),
-        "video_encoders": list_encoders(ffmpeg, "video"),
+        "video_encoders": video_encoders,
         "audio_encoders": list_encoders(ffmpeg, "audio"),
+        "gpu_available": detect_nvidia_gpu_available(ffmpeg, video_encoders),
         "detect_duplicate_audio": True,
     }
+    # Resolve the GPU model name once (for the startup banner) so the per-job
+    # banner reprint stays instant instead of re-querying nvidia-smi each loop.
+    if base_answers["gpu_available"]:
+        base_answers["gpu_model"] = detect_gpu_model_name(ffmpeg)
+        log_info(f"GPU detected for encoding: {base_answers.get('gpu_model') or 'NVIDIA NVENC GPU'}")
+    else:
+        base_answers["gpu_model"] = None
+        log_info("No usable NVENC GPU detected; CPU encoding will be used.")
 
     first_run = True
     while True:
@@ -13297,7 +20178,7 @@ def main() -> int:
             print()
             note("Ready for a new job.")
             print()
-        print_startup_banner(config_path, launcher_path)
+        print_startup_banner(config_path, launcher_path, base_answers)
         result = run_one_job(base_answers, config_path)
         if result is None:
             note("Returning to the first question.")
