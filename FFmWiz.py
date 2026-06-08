@@ -1210,6 +1210,13 @@ def append_video_encode_options(
     video_bitrate = answers.get("video_bitrate_kbps")
     if video_bitrate:
         append_video_bitrate_args(cmd, answers, int(video_bitrate))
+    elif answers.get("video_crf") is not None:
+        crf_value = answers["video_crf"]
+        if str(video_encoder).endswith("_nvenc"):
+            cmd[cmd.index("-rc") + 1] = "constqp"
+            cmd.extend(["-cq:v", str(int(round(crf_value))), "-b:v", "0"])
+        else:
+            cmd.extend(["-crf", f"{crf_value:g}"])
     cmd.extend(["-color_range:v:0", COLOR_RANGE])
     if tag and str(answers.get("output_ext", "")).lower() in MP4_LIKE_EXTS:
         cmd.extend(["-tag:v", tag])
@@ -12765,6 +12772,31 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
     packet_sizes = get_packet_sizes(answers)
     source = stream_bitrate_kbps(answers["video_streams"][0], answers.get("format"), packet_sizes)
     source_limit, source_limit_label = detected_video_bitrate_limit(answers)
+
+    # First ask: bitrate mode or constant quality (RF/CQ).
+    mode_prompt = question_prompt(
+        answers,
+        "Video quality mode",
+        f"bitrate=target average kbps; rf=constant quality (CRF/CQ)",
+        "bitrate",
+    )
+    while True:
+        mode_value = ask_raw(mode_prompt).strip().lower()
+        if is_back_value(mode_value):
+            raise Back()
+        if not mode_value or mode_value in {"bitrate", "b", "1"}:
+            mode_value = "bitrate"
+            break
+        if mode_value in {"rf", "crf", "cq", "2"}:
+            mode_value = "rf"
+            break
+        error("Enter 'bitrate' or 'rf'.")
+
+    if mode_value == "rf":
+        _step_video_constant_quality(answers)
+        return
+
+    # Bitrate mode: same as before.
     suggested = source or DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS
     prompt = question_prompt(
         answers,
@@ -12802,6 +12834,55 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
             continue
         answers["video_bitrate_kbps"] = number
         answers["video_bitrate_keep"] = False
+        answers.pop("video_crf", None)
+        return
+
+
+def _step_video_constant_quality(answers: dict[str, Any]) -> None:
+    """Ask for a CRF/CQ value for constant-quality encoding."""
+    encoder, _, _ = resolve_video_encoder(answers)
+    is_nvenc = str(encoder).endswith("_nvenc")
+
+    if is_nvenc:
+        label = "CQ"
+        range_text = "0-51; 0 = lossless, 19-23 = visually good, 28-35 = smaller files"
+        default = "23"
+    else:
+        label = "CRF"
+        range_text = "0-51; 0 = lossless, 18-23 = visually good, 28-35 = smaller files"
+        default = "23"
+
+    note(
+        f"Constant Quality ({label}) mode: the encoder targets a perceptual quality level.\n"
+        f"  Range: {range_text}\n"
+        f"  Lower = higher quality + larger file. Higher = lower quality + smaller file.\n"
+        f"  Decimal values accepted (e.g. 22.5). Typical range for good quality: 18-28."
+    )
+
+    prompt = question_prompt(
+        answers,
+        f"Enter {label} value",
+        f"range 0-51; examples: 18, 23, 28, 22.5",
+        default,
+    )
+    while True:
+        value = ask_raw(prompt)
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = default
+        try:
+            crf = float(value)
+        except (TypeError, ValueError):
+            error("Enter a number (integer or decimal).")
+            continue
+        if crf < 0 or crf > 51:
+            error("Value must be between 0 and 51.")
+            continue
+        answers["video_crf"] = crf
+        answers.pop("video_bitrate_kbps", None)
+        answers.pop("video_bitrate_keep", None)
+        log_info(f"User choice: video constant quality {label}={crf}")
         return
 
 
@@ -13077,36 +13158,48 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         answers["audio_codec"] = DEFAULT_AUDIO_CODEC
         answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
 
-    audio_index = selected[0]
-    ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
-    input_path = Path(answers["input_path"])
+    # Ask whether to measure current loudness (two-pass) or skip to manual target.
+    measure = ask_yes_no(
+        question_prompt(
+            answers,
+            "Measure current audio loudness for two-pass normalization?",
+            "y=measure (more accurate); n=skip to manual target (faster)",
+            "y",
+        ),
+        True,
+    )
+
     measured: dict[str, float] | None = None
-    while True:
-        note(f"Measuring current loudness on audio track {audio_index}...")
-        total_duration = stream_duration_seconds({}, answers.get("format"))
-        measured = probe_loudnorm_measurement(ffmpeg, input_path, audio_index, total_duration=total_duration)
-        if measured is not None:
-            print_loudnorm_stats(measured)
-            break
-        error("LoudNorm measurement failed.")
-        action = ask_raw(
-            question_prompt(
-                answers,
-                "LoudNorm measurement failed. Choose action",
-                "r=retry; c=continue without loudnorm; m=manual single-pass loudnorm",
-                "c",
-            )
-        ).strip().lower()
-        if is_back_value(action):
-            raise Back()
-        if not action or action == "c":
-            answers["loudnorm_enabled"] = False
-            return
-        if action == "m":
-            measured = None
-            break
-        if action != "r":
-            error("Enter r, c, or m.")
+    if measure:
+        audio_index = selected[0]
+        ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
+        input_path = Path(answers["input_path"])
+        while True:
+            note(f"Measuring current loudness on audio track {audio_index}...")
+            total_duration = stream_duration_seconds({}, answers.get("format"))
+            measured = probe_loudnorm_measurement(ffmpeg, input_path, audio_index, total_duration=total_duration)
+            if measured is not None:
+                print_loudnorm_stats(measured)
+                break
+            error("LoudNorm measurement failed.")
+            action = ask_raw(
+                question_prompt(
+                    answers,
+                    "LoudNorm measurement failed. Choose action",
+                    "r=retry; c=continue without loudnorm; m=manual single-pass loudnorm",
+                    "c",
+                )
+            ).strip().lower()
+            if is_back_value(action):
+                raise Back()
+            if not action or action == "c":
+                answers["loudnorm_enabled"] = False
+                return
+            if action == "m":
+                measured = None
+                break
+            if action != "r":
+                error("Enter r, c, or m.")
 
     while True:
         value = ask_raw(
@@ -14002,6 +14095,18 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 
             if video_bitrate:
                 append_video_bitrate_args(cmd, answers, int(video_bitrate), ":v:0" if full_source_map else ":v")
+            elif answers.get("video_crf") is not None:
+                crf_value = answers["video_crf"]
+                stream_spec = ":v:0" if full_source_map else ":v"
+                if video_encoder.endswith("_nvenc"):
+                    # NVENC constant quality: use constqp rc with -cq:v
+                    cmd[cmd.index("-rc") + 1] = "constqp"
+                    cmd.extend([f"-cq{stream_spec}", str(int(round(crf_value))), f"-b{stream_spec}", "0"])
+                    log_info(f"NVENC constant quality: -rc constqp -cq{stream_spec} {int(round(crf_value))}")
+                else:
+                    # CPU encoder: -crf
+                    cmd.extend([f"-crf", f"{crf_value:g}"])
+                    log_info(f"CPU encoder constant quality: -crf {crf_value:g}")
 
             cmd.extend(["-color_range:v:0", COLOR_RANGE])
 

@@ -6838,7 +6838,16 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.update()
 
         def set_playhead(self, seconds: float, follow: bool = False) -> None:
-            self.playhead = max(0.0, min(self.duration, float(seconds)))
+            t = max(0.0, min(self.duration, float(seconds)))
+            # Snap to video midpoint when within a small pixel threshold.
+            center_time = self.duration / 2.0
+            if self.view_span > 0:
+                wave_w = self._wave_rect().width()
+                pixels_per_second = wave_w / max(0.001, self.view_span)
+                snap_threshold_px = 6
+                if abs(t - center_time) * pixels_per_second < snap_threshold_px:
+                    t = center_time
+            self.playhead = t
             if follow:
                 self._ensure_visible(self.playhead)
             self.update()
@@ -7242,33 +7251,34 @@ def build_unified_video_editor(request: dict[str, Any]):
                 p.setPen(QtGui.QPen(marker_color, 1))
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 9 if selected else 8))
                 p.drawText(QRectF(x + 5, ruler.bottom() + 2, 42, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
-            # Center-of-view guide: a short indicator above the waveform with a
-            # timecode label, marking the exact centre of the visible range.
-            # Positioned above timeline tracks to avoid visual clutter.
-            center_time = max(0.0, min(self.duration, self.view_start + self.view_span / 2.0))
+            # Video midpoint guide: fixed at the exact centre of the entire
+            # video duration. Positioned in the ruler area above the waveform
+            # tracks. Acts as a snap target for the playhead and other markers.
+            center_time = self.duration / 2.0
             cx = self._time_to_x(center_time)
-            # Draw a short vertical line above the waveform area only (in the ruler space).
-            guide_color = QtGui.QColor(255, 180, 80, 160)  # Orange, distinct from blue timeline.
-            p.setPen(QtGui.QPen(guide_color, 1, Qt.DashLine))
-            guide_top = ruler.bottom() + 2
-            guide_bottom = ruler.bottom() + 14
-            p.drawLine(QPointF(cx, guide_top), QPointF(cx, guide_bottom))
-            # Diamond indicator at the guide top.
-            p.setBrush(QtGui.QBrush(QtGui.QColor(255, 180, 80, 220)))
-            p.setPen(Qt.NoPen)
-            p.drawPolygon(QtGui.QPolygonF([
-                QPointF(cx, guide_top - 4), QPointF(cx + 4, guide_top),
-                QPointF(cx, guide_top + 4), QPointF(cx - 4, guide_top),
-            ]))
-            # Timecode pill below the guide.
-            _ctc = seconds_to_timecode(center_time)
-            p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
-            _pill = QRectF(cx - 54, guide_bottom + 2, 108, 16)
-            p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 205)))
-            p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 160), 1))
-            p.drawRoundedRect(_pill, 4, 4)
-            p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
-            p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
+            if ruler.left() - 2 <= cx <= ruler.right() + 2:
+                # Draw guide line in ruler area only (above waveform tracks).
+                guide_color = QtGui.QColor(255, 180, 80, 160)
+                p.setPen(QtGui.QPen(guide_color, 1, Qt.DashLine))
+                guide_top = ruler.top() + 4
+                guide_bottom = ruler.bottom()
+                p.drawLine(QPointF(cx, guide_top), QPointF(cx, guide_bottom))
+                # Diamond indicator at the top.
+                p.setBrush(QtGui.QBrush(QtGui.QColor(255, 180, 80, 220)))
+                p.setPen(Qt.NoPen)
+                p.drawPolygon(QtGui.QPolygonF([
+                    QPointF(cx, guide_top - 4), QPointF(cx + 4, guide_top),
+                    QPointF(cx, guide_top + 4), QPointF(cx - 4, guide_top),
+                ]))
+                # Timecode pill above the waveform (inside ruler area).
+                _ctc = seconds_to_timecode(center_time)
+                p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
+                _pill = QRectF(cx - 54, ruler.top() - 18, 108, 16)
+                p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 205)))
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 160), 1))
+                p.drawRoundedRect(_pill, 4, 4)
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
+                p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
             ph_x = self._time_to_x(self.playhead)
             if wave.left() - 4 <= ph_x <= wave.right() + 4:
                 halo = QtGui.QColor(PALETTE["playhead_halo"])
