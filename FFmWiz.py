@@ -2032,12 +2032,32 @@ def build_loudnorm_filter(answers: dict[str, Any]) -> str:
     measured = answers.get("loudnorm_measured") if isinstance(answers.get("loudnorm_measured"), dict) else {}
     required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
     if measured and all(measured.get(key) not in {None, ""} for key in required):
-        log_info(
-            "Using two-pass loudnorm filter: "
-            f"target_i={target_i:g}; input_i={measured['input_i']}; input_tp={measured['input_tp']}; "
-            f"input_lra={measured['input_lra']}; input_thresh={measured['input_thresh']}; "
-            f"target_offset={measured['target_offset']}"
-        )
+        # Determine whether linear normalization is feasible.
+        measured_i = float(measured["input_i"])
+        measured_tp = float(measured["input_tp"])
+        required_gain = target_i - measured_i
+        predicted_tp = measured_tp + required_gain
+        target_tp = float(LOUDNORM_TARGET_TP)
+        use_linear = predicted_tp <= target_tp
+
+        if use_linear:
+            linear_text = "true"
+            log_info(
+                "LoudNorm mode: Linear (measured two-pass); "
+                f"target_i={target_i:g}; measured_I={measured_i:g}; measured_TP={measured_tp:g}; "
+                f"gain={required_gain:+.2f} dB; predicted_TP={predicted_tp:.2f} dBTP; "
+                f"target_TP={target_tp:g} dBTP; linear=true"
+            )
+        else:
+            linear_text = "false"
+            log_info(
+                "LoudNorm mode: Dynamic; "
+                f"Reason: Linear gain would raise predicted true peak to {predicted_tp:+.2f} dBTP, "
+                f"above the selected {target_tp:g} dBTP limit. "
+                f"target_i={target_i:g}; measured_I={measured_i:g}; measured_TP={measured_tp:g}; "
+                f"gain={required_gain:+.2f} dB; linear=false"
+            )
+
         return (
             "loudnorm="
             f"I={loudnorm_number(target_i)}:"
@@ -2048,7 +2068,7 @@ def build_loudnorm_filter(answers: dict[str, Any]) -> str:
             f"measured_LRA={loudnorm_number(measured['input_lra'])}:"
             f"measured_thresh={loudnorm_number(measured['input_thresh'])}:"
             f"offset={loudnorm_number(measured['target_offset'])}:"
-            "linear=true:print_format=summary"
+            f"linear={linear_text}:print_format=summary"
         )
     log_info(f"Using single-pass loudnorm filter because measured values are unavailable: target_i={target_i:g}")
     return (
@@ -2060,6 +2080,11 @@ def build_loudnorm_filter(answers: dict[str, Any]) -> str:
     )
 
 
+def _loudnorm_output_sample_rate() -> int:
+    """Return the sample rate to apply after LoudNorm to stabilize the output."""
+    return int(AUDIO_SAMPLE_RATE) if AUDIO_SAMPLE_RATE else 48000
+
+
 def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
     filters: list[str] = []
     if encode_audio_reverse_enabled(answers):
@@ -2069,6 +2094,8 @@ def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
         filters.append(atempo_filter_chain(speed))
     if loudnorm_transform_enabled(answers):
         filters.append(build_loudnorm_filter(answers))
+        # Explicitly resample after LoudNorm to guarantee a stable output rate.
+        filters.append(f"aresample={_loudnorm_output_sample_rate()}")
     filters.append("asetpts=PTS-STARTPTS")
     chain = ",".join(filters)
     if loudnorm_transform_enabled(answers):
@@ -13609,6 +13636,11 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
 
     if video_speed_transform_enabled(answers):
         filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
+
+    # When crop is active but no resize step guarantees even dimensions,
+    # add a compatibility pad that rounds to even width/height for encoders.
+    if answers.get("crop_enabled") and not scale_dimensions:
+        filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0")
 
     if FORCE_SAR and not scale_resets_sar:
         filters.append(f"setsar={FORCE_SAR}")
