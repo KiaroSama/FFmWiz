@@ -647,6 +647,10 @@ class Color:
     RES_NUMBERS = "\033[38;5;165m"
     RES_TARGET = "\033[38;5;204m"
     RES_EXACT = "\033[38;5;141m"
+    # Distinct prompt option-key colors (high-contrast, not used elsewhere).
+    OPT_KEY_CYAN = "\033[38;5;87m"     # Bright cyan-turquoise for bitrate/CRF keys.
+    OPT_KEY_CHARTREUSE = "\033[38;5;154m"  # Bright yellow-green for y/n keys.
+    OPT_KEY_CORAL = "\033[38;5;209m"   # Bright coral-orange for 0/1/2 keys.
     AUDIO_ALL = "\033[38;5;120m"
     AUDIO_DROP_DUP = "\033[38;5;208m"
     AUDIO_DROP_EMPTY = "\033[38;5;198m"
@@ -1347,9 +1351,9 @@ def ask_nvenc_multipass_if_applicable(
             question_prompt(
                 answers,
                 "Use NVENC multipass?",
-                f"{paint('0', Color.PINK)}{paint('=Disabled / fastest', Color.HINT_YELLOW)}; "
-                f"{paint('1', Color.PINK)}{paint('=qres / quarter-resolution first pass', Color.HINT_YELLOW)}; "
-                f"{paint('2', Color.PINK)}{paint('=fullres / best quality, slower', Color.HINT_YELLOW)}",
+                f"{paint('0', Color.OPT_KEY_CORAL)}{paint('=Disabled / fastest', Color.HINT_YELLOW)}; "
+                f"{paint('1', Color.OPT_KEY_CORAL)}{paint('=qres / quarter-resolution first pass', Color.HINT_YELLOW)}; "
+                f"{paint('2', Color.OPT_KEY_CORAL)}{paint('=fullres / best quality, slower', Color.HINT_YELLOW)}",
                 default_choice,
                 back="back=b, quit=exit",
             )
@@ -12806,8 +12810,8 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
     mode_prompt = question_prompt(
         answers,
         "Video quality mode",
-        f"{paint('bitrate', Color.AQUA)}{paint('=target average kbps', Color.HINT_YELLOW)}; "
-        f"{paint('CRF', Color.AQUA)}{paint('=constant quality (RF/CQ)', Color.HINT_YELLOW)}",
+        f"{paint('bitrate', Color.OPT_KEY_CYAN)}{paint('=target average kbps', Color.HINT_YELLOW)}; "
+        f"{paint('CRF', Color.OPT_KEY_CYAN)}{paint('=constant quality (RF/CQ)', Color.HINT_YELLOW)}",
         "bitrate",
     )
     while True:
@@ -13193,8 +13197,8 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         question_prompt(
             answers,
             "Measure current audio loudness for two-pass normalization?",
-            f"{paint('y', Color.LIME)}{paint('=measure (more accurate)', Color.HINT_YELLOW)}; "
-            f"{paint('n', Color.LIME)}{paint('=skip to manual target (faster)', Color.HINT_YELLOW)}",
+            f"{paint('y', Color.OPT_KEY_CHARTREUSE)}{paint('=measure (more accurate)', Color.HINT_YELLOW)}; "
+            f"{paint('n', Color.OPT_KEY_CHARTREUSE)}{paint('=skip to manual target (faster)', Color.HINT_YELLOW)}",
             "y",
         ),
         True,
@@ -20370,6 +20374,7 @@ def main() -> int:
             first_run = False
             continue
         return_code, elapsed = result
+        print()
         note(f"Total time elapsed: {format_elapsed(elapsed)}")
         log_info(f"Total time elapsed: {format_elapsed(elapsed)}")
         if return_code == 0:

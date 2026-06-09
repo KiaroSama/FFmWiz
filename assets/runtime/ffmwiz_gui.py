@@ -7071,19 +7071,20 @@ def build_unified_video_editor(request: dict[str, Any]):
                 t += step
             for edge_t in (start, end):
                 x = self._time_to_x(edge_t)
-                # Skip edge label if it would overlap with existing tick labels.
-                too_close = any(abs(x - tx) < tick_label_width * 0.7 for tx in tick_positions)
+                label_left = max(ruler.left(), min(x - tick_label_width / 2, ruler.right() - tick_label_width))
+                label_right = label_left + tick_label_width
+                # Skip if overlaps any existing tick label or the previous edge label.
+                if label_left < last_label_right + 8:
+                    continue
+                too_close = any(abs(x - tx) < tick_label_width * 0.85 for tx in tick_positions)
                 if too_close:
                     continue
                 p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["tick_hi"]), 1))
                 p.drawLine(QPointF(x, ruler.bottom() - 12), QPointF(x, ruler.bottom() - 2))
-                label_rect = QRectF(
-                    max(ruler.left(), min(x - tick_label_width / 2, ruler.right() - tick_label_width)),
-                    ruler.top() + 5,
-                    tick_label_width,
-                    18,
-                )
+                label_rect = QRectF(label_left, ruler.top() + 5, tick_label_width, 18)
                 p.drawText(label_rect, Qt.AlignCenter, seconds_to_timecode(edge_t))
+                last_label_right = label_right
+                tick_positions.append(float(x))
             for chapter_idx, chapter in enumerate(self.chapters, start=1):
                 cs = float(chapter.get("start", 0.0))
                 if cs < start or cs > end:
@@ -7263,36 +7264,38 @@ def build_unified_video_editor(request: dict[str, Any]):
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 9 if selected else 8))
                 p.drawText(QRectF(x + 5, ruler.bottom() + 2, 42, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
             # Video midpoint guide: fixed at the exact centre of the entire
-            # video duration. Positioned in the ruler area above the waveform
-            # tracks. Acts as a snap target for the playhead and other markers.
+            # video duration. Positioned above tick labels in the ruler area.
             center_time = self.duration / 2.0
             cx = self._time_to_x(center_time)
             if ruler.left() - 2 <= cx <= ruler.right() + 2:
-                # Draw guide line from ruler bottom down into the waveform area.
-                guide_color = QtGui.QColor(255, 180, 80, 140)
-                p.setPen(QtGui.QPen(guide_color, 1, Qt.DashLine))
-                p.drawLine(QPointF(cx, ruler.bottom()), QPointF(cx, wave.top() + 20))
                 # Small triangle at ruler bottom pointing down.
-                p.setBrush(QtGui.QBrush(QtGui.QColor(255, 180, 80, 220)))
+                guide_color = QtGui.QColor(255, 180, 80, 180)
+                p.setBrush(QtGui.QBrush(guide_color))
                 p.setPen(Qt.NoPen)
                 p.drawPolygon(QtGui.QPolygonF([
                     QPointF(cx - 5, ruler.bottom() - 1),
                     QPointF(cx + 5, ruler.bottom() - 1),
                     QPointF(cx, ruler.bottom() + 6),
                 ]))
-                # Timecode pill at the bottom of ruler area (just above the waveform).
+                # Dashed guide line from triangle down into the waveform.
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 100), 1, Qt.DashLine))
+                p.drawLine(QPointF(cx, ruler.bottom() + 6), QPointF(cx, wave.top() + 20))
+                # Timecode pill at VERY TOP of ruler (above tick labels).
                 _ctc = seconds_to_timecode(center_time)
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
                 pill_w = 118
-                pill_h = 16
+                pill_h = 15
                 pill_x = max(ruler.left() + 2, min(cx - pill_w / 2, ruler.right() - pill_w - 2))
-                pill_y = ruler.bottom() - pill_h - 3
-                _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
-                p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 230)))
-                p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 200), 1))
-                p.drawRoundedRect(_pill, 4, 4)
-                p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
-                p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
+                pill_y = ruler.top() + 2
+                # Skip pill if it would overlap a tick label at the same Y position.
+                overlaps_tick = any(abs(pill_x - tx + pill_w / 2) < pill_w for tx in tick_positions)
+                if not overlaps_tick:
+                    _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
+                    p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 235)))
+                    p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 200), 1))
+                    p.drawRoundedRect(_pill, 4, 4)
+                    p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
+                    p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
             ph_x = self._time_to_x(self.playhead)
             if wave.left() - 4 <= ph_x <= wave.right() + 4:
                 halo = QtGui.QColor(PALETTE["playhead_halo"])
