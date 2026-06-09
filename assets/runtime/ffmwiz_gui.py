@@ -7042,10 +7042,16 @@ def build_unified_video_editor(request: dict[str, Any]):
             p.setFont(QtGui.QFont("Segoe UI Semibold", 9))
             tick_label_width = 100
             tick_positions: list[float] = []
+            last_label_right: float = -999.0  # Track rightmost label edge to prevent overlap.
             t = math.ceil(start / step) * step
             while t <= end + 1e-6:
                 x = self._time_to_x(t)
                 if abs(t - start) <= max(0.001, step * 0.04) or abs(t - end) <= max(0.001, step * 0.04):
+                    t += step
+                    continue
+                label_left = max(ruler.left(), min(x - tick_label_width / 2, ruler.right() - tick_label_width))
+                # Skip label if it overlaps the previous one.
+                if label_left < last_label_right + 8:
                     t += step
                     continue
                 p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["tick_hi"]), 1))
@@ -7053,7 +7059,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                 tick_positions.append(float(x))
                 p.drawText(
                     QRectF(
-                        max(ruler.left(), min(x - tick_label_width / 2, ruler.right() - tick_label_width)),
+                        label_left,
                         ruler.top() + 5,
                         tick_label_width,
                         18,
@@ -7061,6 +7067,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                     Qt.AlignCenter,
                     seconds_to_timecode(t),
                 )
+                last_label_right = label_left + tick_label_width
                 t += step
             for edge_t in (start, end):
                 x = self._time_to_x(edge_t)
@@ -7261,28 +7268,27 @@ def build_unified_video_editor(request: dict[str, Any]):
             center_time = self.duration / 2.0
             cx = self._time_to_x(center_time)
             if ruler.left() - 2 <= cx <= ruler.right() + 2:
-                # Draw guide line in ruler area only (above waveform tracks).
-                guide_color = QtGui.QColor(255, 180, 80, 160)
+                # Draw guide line from ruler bottom down into the waveform area.
+                guide_color = QtGui.QColor(255, 180, 80, 140)
                 p.setPen(QtGui.QPen(guide_color, 1, Qt.DashLine))
-                guide_top = ruler.top() + 4
-                guide_bottom = ruler.bottom()
-                p.drawLine(QPointF(cx, guide_top), QPointF(cx, guide_bottom))
-                # Diamond indicator at the guide top.
+                p.drawLine(QPointF(cx, ruler.bottom()), QPointF(cx, wave.top() + 20))
+                # Small triangle at ruler bottom pointing down.
                 p.setBrush(QtGui.QBrush(QtGui.QColor(255, 180, 80, 220)))
                 p.setPen(Qt.NoPen)
                 p.drawPolygon(QtGui.QPolygonF([
-                    QPointF(cx, guide_top - 4), QPointF(cx + 4, guide_top),
-                    QPointF(cx, guide_top + 4), QPointF(cx - 4, guide_top),
+                    QPointF(cx - 5, ruler.bottom() - 1),
+                    QPointF(cx + 5, ruler.bottom() - 1),
+                    QPointF(cx, ruler.bottom() + 6),
                 ]))
-                # Timecode pill inside the ruler area, clamped to stay within bounds.
+                # Timecode pill at the bottom of ruler area (just above the waveform).
                 _ctc = seconds_to_timecode(center_time)
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
-                pill_w = 108
+                pill_w = 118
                 pill_h = 16
                 pill_x = max(ruler.left() + 2, min(cx - pill_w / 2, ruler.right() - pill_w - 2))
-                pill_y = ruler.top() + 4
+                pill_y = ruler.bottom() - pill_h - 3
                 _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
-                p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 225)))
+                p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 230)))
                 p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 200), 1))
                 p.drawRoundedRect(_pill, 4, 4)
                 p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
