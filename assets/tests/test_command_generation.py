@@ -486,20 +486,22 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertAlmostEqual(current_seconds, 17.0, places=2)
 
     def test_loudnorm_filter_uses_two_pass_values_when_available(self):
+        # Use values where linear mode is feasible:
+        # gain = -16 - (-18) = +2 dB; predicted_TP = -4.0 + 2 = -2.0 <= -1.5 target TP.
         answers = {
             "loudnorm_enabled": True,
             "loudnorm_target_i": -16.0,
             "loudnorm_measured": {
-                "input_i": -23.4,
-                "input_tp": -5.1,
+                "input_i": -18.0,
+                "input_tp": -4.0,
                 "input_lra": 4.2,
-                "input_thresh": -33.9,
+                "input_thresh": -28.5,
                 "target_offset": -0.3,
             },
         }
         filt = FFmWiz.build_loudnorm_filter(answers)
         self.assertIn("loudnorm=I=-16:TP=-1.5:LRA=11", filt)
-        self.assertIn("measured_I=-23.4", filt)
+        self.assertIn("measured_I=-18", filt)
         self.assertIn("linear=true", filt)
 
     def test_loudnorm_filter_falls_back_to_single_pass(self):
@@ -3399,6 +3401,121 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertIn("_Part02", text)
             # Cleanup
             FFmWiz.cleanup_encode_chapter_metadata(answers)
+
+    # ===================================================================
+    # LoudNorm linear/dynamic and crop even-dimension tests
+    # ===================================================================
+
+    def test_loudnorm_linear_feasible(self):
+        """Linear mode feasible: gain does not exceed target TP."""
+        answers = {
+            "loudnorm_enabled": True,
+            "loudnorm_target_i": -16.0,
+            "loudnorm_measured": {
+                "input_i": -17.0,
+                "input_tp": -3.0,
+                "input_lra": 6.0,
+                "input_thresh": -27.5,
+                "target_offset": -0.2,
+            },
+        }
+        # gain = +1 dB, predicted_TP = -3.0 + 1 = -2.0 <= -1.5 → linear
+        filt = FFmWiz.build_loudnorm_filter(answers)
+        self.assertIn("linear=true", filt)
+
+    def test_loudnorm_linear_not_feasible(self):
+        """Linear mode not feasible: predicted TP exceeds target TP."""
+        answers = {
+            "loudnorm_enabled": True,
+            "loudnorm_target_i": -14.0,
+            "loudnorm_measured": {
+                "input_i": -19.64,
+                "input_tp": -2.96,
+                "input_lra": 8.4,
+                "input_thresh": -30.32,
+                "target_offset": -0.51,
+            },
+        }
+        # gain = +5.64 dB, predicted_TP = -2.96 + 5.64 = +2.68 > -1.5 → dynamic
+        filt = FFmWiz.build_loudnorm_filter(answers)
+        self.assertIn("linear=false", filt)
+        self.assertNotIn("linear=true", filt)
+
+    def test_loudnorm_aresample_after_filter(self):
+        """LoudNorm processing chain includes aresample=48000 after loudnorm."""
+        answers = {
+            "loudnorm_enabled": True,
+            "loudnorm_target_i": -16.0,
+            "audio_speed_from_video": False,
+            "video_speed_enabled": False,
+        }
+        chain = FFmWiz.build_encode_audio_processing_filter(answers)
+        self.assertIn("loudnorm=", chain)
+        self.assertIn("aresample=48000", chain)
+        # aresample must come after loudnorm but before asetpts
+        loudnorm_pos = chain.index("loudnorm=")
+        aresample_pos = chain.index("aresample=48000")
+        asetpts_pos = chain.index("asetpts=")
+        self.assertLess(loudnorm_pos, aresample_pos)
+        self.assertLess(aresample_pos, asetpts_pos)
+
+    def test_crop_odd_dimensions_adds_compatibility_pad(self):
+        """Odd cropped dimensions get a compatibility pad for even output."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            # 1920x1080, crop: left=44 right=39 top=27 bottom=22 → 1837x1031 (both odd)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": True,
+                "crop_left": 44, "crop_right": 39,
+                "crop_top": 27, "crop_bottom": 22,
+                "use_gpu": False,
+                "resolution": "n",  # No resize
+            })
+            answers.pop("fps", None)
+            text = self.command_text(answers)
+            self.assertIn("crop=iw-44-39:ih-27-22:44:27:exact=1", text)
+            self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0", text)
+
+    def test_crop_even_dimensions_still_has_compatibility_pad(self):
+        """Even cropped dimensions: compatibility pad is harmless (no-op)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            # 1920x1080, crop: left=100 right=100 top=40 bottom=40 → 1720x1000 (both even)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": True,
+                "crop_left": 100, "crop_right": 100,
+                "crop_top": 40, "crop_bottom": 40,
+                "use_gpu": False,
+                "resolution": "n",
+            })
+            answers.pop("fps", None)
+            text = self.command_text(answers)
+            self.assertIn("exact=1", text)
+            # Pad expression is present but is a no-op for even dims
+            self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0", text)
+
+    def test_crop_followed_by_preserve_resize_no_double_pad(self):
+        """Crop + Preserve resize: no redundant compatibility pad before scale."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 1920, "height": 1080}],
+                "crop_enabled": True,
+                "crop_left": 44, "crop_right": 39,
+                "crop_top": 27, "crop_bottom": 22,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("854x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("exact=1", text)
+            self.assertIn("force_divisible_by=2", text)
+            # Should NOT have the ceil pad when resize with force_divisible_by=2 follows
+            self.assertNotIn("pad=ceil(iw/2)*2", text)
 
 
 if __name__ == "__main__":
