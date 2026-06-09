@@ -1347,7 +1347,9 @@ def ask_nvenc_multipass_if_applicable(
             question_prompt(
                 answers,
                 "Use NVENC multipass?",
-                "0=Disabled / fastest; 1=qres / quarter-resolution first pass; 2=fullres / best quality, slower",
+                f"{paint('0', Color.PINK)}{paint('=Disabled / fastest', Color.HINT_YELLOW)}; "
+                f"{paint('1', Color.PINK)}{paint('=qres / quarter-resolution first pass', Color.HINT_YELLOW)}; "
+                f"{paint('2', Color.PINK)}{paint('=fullres / best quality, slower', Color.HINT_YELLOW)}",
                 default_choice,
                 back="back=b, quit=exit",
             )
@@ -12777,8 +12779,8 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
     mode_prompt = question_prompt(
         answers,
         "Video quality mode",
-        f"{example_text('bitrate')}{paint('=target average kbps', Color.HINT_YELLOW)}; "
-        f"{example_text('CRF')}{paint('=constant quality (RF/CQ)', Color.HINT_YELLOW)}",
+        f"{paint('bitrate', Color.AQUA)}{paint('=target average kbps', Color.HINT_YELLOW)}; "
+        f"{paint('CRF', Color.AQUA)}{paint('=constant quality (RF/CQ)', Color.HINT_YELLOW)}",
         "bitrate",
     )
     while True:
@@ -13164,8 +13166,8 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         question_prompt(
             answers,
             "Measure current audio loudness for two-pass normalization?",
-            f"{example_text('y')}{paint('=measure (more accurate)', Color.HINT_YELLOW)}; "
-            f"{example_text('n')}{paint('=skip to manual target (faster)', Color.HINT_YELLOW)}",
+            f"{paint('y', Color.LIME)}{paint('=measure (more accurate)', Color.HINT_YELLOW)}; "
+            f"{paint('n', Color.LIME)}{paint('=skip to manual target (faster)', Color.HINT_YELLOW)}",
             "y",
         ),
         True,
