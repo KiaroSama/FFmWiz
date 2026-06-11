@@ -8,6 +8,13 @@ version = "0.1.0"
 description = "Windows-focused interactive FFmpeg wizard with Cut/Crop GUIs, folder encode, track adding, media reports, stream cleanup remux, and hard-sub encode."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Private :: Do Not Upload",
+]
 dependencies = [
     "PySide6==6.11.1",
 ]

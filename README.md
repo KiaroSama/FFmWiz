@@ -613,6 +613,14 @@ Keep the `assets` folder next to the script. The GUI app icon is loaded from `as
 - If output and input would be the same file, the script changes the output filename automatically.
 - Duplicate or empty audio tracks are never removed unless you explicitly choose `d`, `e`, or `de`.
 
+## License
+
+License: Proprietary / All Rights Reserved.
+
+This project is not open source. Copying, modification, redistribution, publication, sublicensing, hosting, deployment, reverse engineering, or reuse in another project is not allowed without prior written permission from the copyright holder.
+
+See the `LICENSE` file at the repository root for the full notice.
+
 ## Support
 
 Add your donation addresses here:
