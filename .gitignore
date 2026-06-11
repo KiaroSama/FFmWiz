@@ -35,3 +35,10 @@ encoded/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Private local-only documents; never commit.
+explain-AI.md
+
+# Local-only sandboxes named .ignoreme at any depth; never commit.
+.ignoreme
+.ignoreme/
