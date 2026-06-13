@@ -1152,7 +1152,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertIn("-hwaccel cuda", text)
         self.assertIn("-hwaccel_output_format cuda", text)
         self.assertIn("-c:v h264_cuvid", text)
-        self.assertIn("-crop 172x189x429x1095", text)
+        self.assertIn("-crop 172x189x428x1095", text)
         self.assertIn("scale_cuda=w=852:h=480", text)
         self.assertIn("-r:v 4", text)
         self.assertIn("-fps_mode:v cfr", text)
@@ -1165,7 +1165,7 @@ class CommandGenerationTests(unittest.TestCase):
             text = self.command_text(answers)
         self.assertIn("-hwaccel cuda", text)
         self.assertIn("-c:v h264_cuvid", text)
-        self.assertIn("-crop 172x189x429x1095", text)
+        self.assertIn("-crop 172x189x428x1095", text)
         self.assertIn("-t 6074.221000", text)
         self.assertIn("scale_cuda=w=852:h=480", text)
         self.assertIn("hevc_nvenc", text)
@@ -1188,11 +1188,11 @@ class CommandGenerationTests(unittest.TestCase):
             answers["video_streams"][0]["codec_name"] = "prores"
             text = self.command_text(answers)
         self.assertIn("-hwaccel cuda -hwaccel_device 0 -i", text)
-        self.assertIn("crop=iw-429-1095:ih-172-189:429:172", text)
+        self.assertIn("crop=iw-428-1095:ih-172-189:428:172", text)
         self.assertIn("scale=852:480", text)
         self.assertIn("fps=4", text)
         self.assertIn("hevc_nvenc", text)
-        self.assert_not_contains_any(text, ["-hwaccel_output_format cuda", "-crop 172x189x429x1095", "scale_cuda", "hwdownload", "hwupload_cuda"])
+        self.assert_not_contains_any(text, ["-hwaccel_output_format cuda", "-crop 172x189x428x1095", "scale_cuda", "hwdownload", "hwupload_cuda"])
 
     def test_strict_size_bitrate_mode_uses_old_envelope(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1334,7 +1334,9 @@ class CommandGenerationTests(unittest.TestCase):
             "crop_bottom": 189,
         }
         dims, _warning = FFmWiz.calculate_scale_dimensions(answers, FFmWiz.parse_resolution("480p"))
-        self.assertEqual(answers["crop_box_dimensions"], (1916, 1079))
+        # answers has no "resolution" key, so crop normalization treats this as a
+        # no-resize case and aligns the cropped frame to even output dimensions.
+        self.assertEqual(answers["crop_box_dimensions"], (1916, 1080))
         self.assertEqual(dims, (852, 480))
 
     def test_explicit_width_preserves_ratio(self):
@@ -3146,8 +3148,8 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertIn("pad=1018:480", text)
             # Must NOT contain plain stretch scale
             self.assertNotIn("scale=1018:480,setsar=1", text)
-            # Must still use expected settings
-            self.assertIn("crop=iw-420-736:ih-179-184:420:179", text)
+            # Must still use expected settings (top normalized 179->178 for 4:2:0 origin)
+            self.assertIn("crop=iw-420-736:ih-178-184:420:178", text)
             self.assertIn("fps=4", text)
             self.assertIn("hevc_nvenc", text)
             self.assertIn("-map_chapters -1", text)
@@ -3305,7 +3307,7 @@ class CommandGenerationTests(unittest.TestCase):
                 "resolution": FFmWiz.parse_resolution("1016x480"),
             })
             text = self.command_text(answers)
-            self.assertIn("crop=iw-421-730:ih-176-182:421:176:exact=1", text)
+            self.assertIn("crop=iw-420-730:ih-176-182:420:176:exact=1", text)
 
     def test_preserve_mode_scale_includes_reset_sar(self):
         """Preserve-mode scale must include reset_sar=1 and no trailing setsar=1 after pad."""
@@ -3383,8 +3385,8 @@ class CommandGenerationTests(unittest.TestCase):
                 "audio_speed_from_video": False,
             })
             text = self.command_text(answers)
-            # Must contain exact=1 in crop
-            self.assertIn("crop=iw-421-730:ih-176-182:421:176:exact=1", text)
+            # Must contain exact=1 in crop (left normalized 421->420 for 4:2:0 origin)
+            self.assertIn("crop=iw-420-730:ih-176-182:420:176:exact=1", text)
             # Must contain reset_sar=1 in scale
             self.assertIn("scale=1016:480:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1", text)
             # Must contain pad
@@ -3392,7 +3394,7 @@ class CommandGenerationTests(unittest.TestCase):
             # Must NOT have trailing setsar=1 after pad
             self.assertNotIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
             # Must NOT have plain crop without exact=1
-            self.assertNotIn("crop=iw-421-730:ih-176-182:421:176,", text)
+            self.assertNotIn("crop=iw-420-730:ih-176-182:420:176,", text)
             # Other settings preserved
             self.assertIn("fps=4", text)
             self.assertIn("hevc_nvenc", text)
@@ -3459,14 +3461,17 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertLess(loudnorm_pos, aresample_pos)
         self.assertLess(aresample_pos, asetpts_pos)
 
-    def test_crop_odd_dimensions_adds_compatibility_pad(self):
-        """Odd cropped dimensions get a compatibility pad for even output."""
+    def test_crop_odd_dimensions_normalized_without_compatibility_pad(self):
+        """Odd crop values are normalized to chroma/encoder-aligned values and
+        NEVER repaired with a black compatibility pad."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
-            # 1920x1080, crop: left=44 right=39 top=27 bottom=22 → 1837x1031 (both odd)
+            # 1920x1080, 4:2:0, no resize. Requested left=44 right=39 top=27 bottom=22.
+            # Origin must be even (left ok, top 27->26); cropped size must be even
+            # (source even -> right even 39->38; bottom 22 keeps height even).
             answers.update({
                 "video_streams": [{"codec_type": "video", "codec_name": "h264",
-                                   "width": 1920, "height": 1080}],
+                                   "width": 1920, "height": 1080, "pix_fmt": "yuv420p"}],
                 "crop_enabled": True,
                 "crop_left": 44, "crop_right": 39,
                 "crop_top": 27, "crop_bottom": 22,
@@ -3475,17 +3480,19 @@ class CommandGenerationTests(unittest.TestCase):
             })
             answers.pop("fps", None)
             text = self.command_text(answers)
-            self.assertIn("crop=iw-44-39:ih-27-22:44:27:exact=1", text)
-            self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0", text)
+            self.assertIn("crop=iw-44-38:ih-26-22:44:26:exact=1", text)
+            self.assertNotIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0", text)
+            # Final cropped dimensions must be even.
+            self.assertEqual(FFmWiz.cropped_source_size(answers), (1838, 1032))
 
-    def test_crop_even_dimensions_still_has_compatibility_pad(self):
-        """Even cropped dimensions: compatibility pad is harmless (no-op)."""
+    def test_crop_even_dimensions_no_compatibility_pad(self):
+        """Already-aligned crop values are unchanged and add no compatibility pad."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
             # 1920x1080, crop: left=100 right=100 top=40 bottom=40 → 1720x1000 (both even)
             answers.update({
                 "video_streams": [{"codec_type": "video", "codec_name": "h264",
-                                   "width": 1920, "height": 1080}],
+                                   "width": 1920, "height": 1080, "pix_fmt": "yuv420p"}],
                 "crop_enabled": True,
                 "crop_left": 100, "crop_right": 100,
                 "crop_top": 40, "crop_bottom": 40,
@@ -3494,9 +3501,8 @@ class CommandGenerationTests(unittest.TestCase):
             })
             answers.pop("fps", None)
             text = self.command_text(answers)
-            self.assertIn("exact=1", text)
-            # Pad expression is present but is a no-op for even dims
-            self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0", text)
+            self.assertIn("crop=iw-100-100:ih-40-40:100:40:exact=1", text)
+            self.assertNotIn("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0", text)
 
     def test_crop_followed_by_preserve_resize_no_double_pad(self):
         """Crop + Preserve resize: no redundant compatibility pad before scale."""
@@ -3516,6 +3522,179 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertIn("force_divisible_by=2", text)
             # Should NOT have the ceil pad when resize with force_divisible_by=2 follows
             self.assertNotIn("pad=ceil(iw/2)*2", text)
+
+    # ===================================================================
+    # Crop normalization (chroma/encoder alignment without black padding)
+    # ===================================================================
+
+    def _crop_answers(self, width, height, pix_fmt, left, right, top, bottom, resolution="n"):
+        return {
+            "video_streams": [{
+                "codec_type": "video", "codec_name": "h264",
+                "width": width, "height": height, "pix_fmt": pix_fmt,
+            }],
+            "crop_enabled": True,
+            "crop_left": left, "crop_right": right,
+            "crop_top": top, "crop_bottom": bottom,
+            "resolution": resolution,
+        }
+
+    def test_crop_norm_1_reported_1280x720_case(self):
+        """Test 1: 1280x720 yuv420p, requested 45/39/25/22 -> 44/40/24/22."""
+        answers = self._crop_answers(1280, 720, "yuv420p", 45, 39, 25, 22)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        self.assertEqual((left, right, top, bottom), (44, 40, 24, 22))
+        self.assertEqual(FFmWiz.cropped_source_size(answers), (1196, 674))
+        # CPU filter uses normalized values with exact=1, no compatibility pad.
+        cpu_answers = self.base_answers_with_crop(1280, 720, "yuv420p", 45, 39, 25, 22)
+        cpu_text = self.command_text(cpu_answers)
+        self.assertIn("crop=iw-44-40:ih-24-22:44:24:exact=1", cpu_text)
+        self.assertNotIn("pad=ceil(iw/2)*2", cpu_text)
+        # CUVID decoder crop uses the same geometry (top x bottom x left x right).
+        gpu_answers = dict(cpu_answers)
+        gpu_answers["use_gpu"] = True
+        self.assertEqual(FFmWiz.crop_margins_to_cuvid_crop(gpu_answers), "24x22x44x40")
+
+    def base_answers_with_crop(self, width, height, pix_fmt, left, right, top, bottom):
+        # A full no-resize encode answers set for command-text assertions.
+        answers = self.base_answers(".")
+        answers.update({
+            "video_streams": [{
+                "codec_type": "video", "codec_name": "h264",
+                "width": width, "height": height, "pix_fmt": pix_fmt,
+                "avg_frame_rate": "30/1", "color_range": "tv",
+            }],
+            "crop_enabled": True,
+            "crop_left": left, "crop_right": right,
+            "crop_top": top, "crop_bottom": bottom,
+            "use_gpu": False,
+            "resolution": "n",
+        })
+        answers.pop("fps", None)
+        return answers
+
+    def test_crop_norm_2_already_valid_values_unchanged(self):
+        """Test 2: already-aligned values are unchanged, no padding."""
+        answers = self._crop_answers(1280, 720, "yuv420p", 44, 40, 24, 22)
+        self.assertEqual(FFmWiz.normalized_crop_margins(answers), (44, 40, 24, 22))
+        text = self.command_text(self.base_answers_with_crop(1280, 720, "yuv420p", 44, 40, 24, 22))
+        self.assertIn("crop=iw-44-40:ih-24-22:44:24:exact=1", text)
+        self.assertNotIn("pad=ceil(iw/2)*2", text)
+
+    def test_crop_norm_3_odd_source_width(self):
+        """Test 3: source width 1279 (odd), 4:2:0 -> left even, right odd, width even."""
+        answers = self._crop_answers(1279, 720, "yuv420p", 44, 40, 24, 22)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        self.assertEqual(left % 2, 0)
+        self.assertEqual(right % 2, 1)
+        width = 1279 - left - right
+        self.assertEqual(width % 2, 0)
+        self.assertEqual((left, right), (44, 39))
+
+    def test_crop_norm_4_odd_source_height(self):
+        """Test 4: source height 719 (odd), 4:2:0 -> top even, bottom odd, height even."""
+        answers = self._crop_answers(1280, 719, "yuv420p", 44, 40, 24, 22)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        self.assertEqual(top % 2, 0)
+        self.assertEqual(bottom % 2, 1)
+        height = 719 - top - bottom
+        self.assertEqual(height % 2, 0)
+        self.assertEqual((top, bottom), (24, 21))
+
+    def test_crop_norm_5_both_dimensions_odd(self):
+        """Test 5: both source dimensions odd; each axis validated independently."""
+        answers = self._crop_answers(1279, 719, "yuv420p", 45, 39, 25, 22)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        self.assertEqual(left % 2, 0)
+        self.assertEqual(top % 2, 0)
+        self.assertEqual((1279 - left - right) % 2, 0)
+        self.assertEqual((719 - top - bottom) % 2, 0)
+        crop_w, crop_h = FFmWiz.cropped_source_size(answers)
+        self.assertGreater(crop_w, 0)
+        self.assertGreater(crop_h, 0)
+
+    def test_crop_norm_6_zero_and_near_zero(self):
+        """Test 6: zero crop stays zero; tiny crop never goes negative."""
+        zero = self._crop_answers(1280, 720, "yuv420p", 0, 0, 0, 0)
+        self.assertEqual(FFmWiz.normalized_crop_margins(zero), (0, 0, 0, 0))
+        tiny = self._crop_answers(1280, 720, "yuv420p", 1, 0, 1, 0)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(tiny)
+        self.assertTrue(min(left, right, top, bottom) >= 0)
+        self.assertEqual(left % 2, 0)
+        self.assertEqual(top % 2, 0)
+
+    def test_crop_norm_7_crop_near_boundary_rejected(self):
+        """Test 7: an impossible crop rectangle is rejected before FFmpeg runs."""
+        answers = self._crop_answers(1280, 720, "yuv420p", 2000, 2000, 0, 0)
+        with self.assertRaises(ValueError):
+            FFmWiz.normalized_crop_margins(answers)
+
+    def test_crop_norm_8_yuv422_horizontal_only_origin(self):
+        """Test 8: 4:2:2 source does not force an even vertical crop origin.
+        Requested top stays odd because the output height is already even."""
+        h, v = FFmWiz.chroma_subsampling_alignment("yuv422p")
+        self.assertEqual((h, v), (2, 1))
+        answers = self._crop_answers(1280, 720, "yuv422p", 44, 40, 25, 23)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        # 720-25-23 = 672 (even) so the odd vertical origin is preserved.
+        self.assertEqual((left, right, top, bottom), (44, 40, 25, 23))
+        self.assertEqual((720 - top - bottom) % 2, 0)
+        # A 4:2:0 source with the same request WOULD force an even top.
+        yuv420 = self._crop_answers(1280, 720, "yuv420p", 44, 40, 25, 23)
+        self.assertEqual(FFmWiz.normalized_crop_margins(yuv420)[2] % 2, 0)
+
+    def test_crop_norm_9_yuv444_origin_not_forced(self):
+        """Test 9: 4:4:4 source allows odd crop origin; output stays encodable."""
+        h, v = FFmWiz.chroma_subsampling_alignment("yuv444p")
+        self.assertEqual((h, v), (1, 1))
+        # 45+39=84 (even width crop) and 25+23=48 (even height crop) keep the
+        # output dimensions even, so both odd origins are preserved.
+        answers = self._crop_answers(1280, 720, "yuv444p", 45, 39, 25, 23)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        self.assertEqual((left, right, top, bottom), (45, 39, 25, 23))
+        self.assertEqual((1280 - left - right) % 2, 0)
+        self.assertEqual((720 - top - bottom) % 2, 0)
+
+    def test_crop_norm_10_preserve_resize_after_crop(self):
+        """Test 10: crop origin normalized; preserve resize handles output size;
+        no separate one-pixel compatibility pad is inserted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers.update({
+                "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                   "width": 2876, "height": 1442, "pix_fmt": "yuv420p",
+                                   "avg_frame_rate": "30/1", "color_range": "tv"}],
+                "crop_enabled": True,
+                "crop_left": 421, "crop_right": 730,
+                "crop_top": 179, "crop_bottom": 184,
+                "use_gpu": False,
+                "resolution": FFmWiz.parse_resolution("1018x480"),
+            })
+            text = self.command_text(answers)
+            self.assertIn("crop=iw-420-730:ih-178-184:420:178:exact=1", text)
+            self.assertIn("force_divisible_by=2", text)
+            self.assertNotIn("pad=ceil(iw/2)*2", text)
+
+    def test_crop_norm_11_cpu_and_cuvid_equivalent(self):
+        """Test 11: CPU filter and CUVID decoder resolve to the same rectangle."""
+        answers = self.base_answers_with_crop(1280, 720, "yuv420p", 45, 39, 25, 22)
+        cpu_filter = FFmWiz.build_cpu_video_filter(answers)
+        self.assertIn("crop=iw-44-40:ih-24-22:44:24:exact=1", cpu_filter)
+        gpu_answers = dict(answers)
+        gpu_answers["use_gpu"] = True
+        self.assertEqual(FFmWiz.crop_margins_to_cuvid_crop(gpu_answers), "24x22x44x40")
+
+    def test_crop_norm_12_no_odd_origin_color_shift_regression(self):
+        """Test 12: a 4:2:0 source with an odd requested origin must never emit
+        an odd crop x/y (which causes chroma-phase color shift)."""
+        answers = self.base_answers_with_crop(1280, 720, "yuv420p", 45, 39, 25, 22)
+        left, right, top, bottom = FFmWiz.normalized_crop_margins(answers)
+        self.assertEqual(left % 2, 0)
+        self.assertEqual(top % 2, 0)
+        text = self.command_text(answers)
+        self.assertNotIn(":45:", text)
+        self.assertNotIn("ih-25-", text)
+        self.assertIn("crop=iw-44-40:ih-24-22:44:24:exact=1", text)
 
 
 if __name__ == "__main__":
