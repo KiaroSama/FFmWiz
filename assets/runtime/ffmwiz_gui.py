@@ -991,6 +991,52 @@ def invert_cut_ranges(cut_ranges, duration: float):
     return invert_cuts_to_keep(cut_ranges, duration)
 
 
+def _snap_crop_axis_even(near: int, far: int, source_dim: int) -> tuple[int, int]:
+    """Snap one crop axis so the origin (near = left/top) is even and the
+    resulting output size is even, staying as close as possible to the requested
+    pair. Mirrors the CLI crop normalization for the common 4:2:0 case so the
+    editor never reports or returns odd crop dimensions.
+
+    Deterministic priority (minimized in order): total adjustment, preserve the
+    requested total crop (output size), smallest center shift, less content
+    removed, smaller origin-side crop."""
+    near = max(0, int(near))
+    far = max(0, int(far))
+    source_dim = int(source_dim)
+    best_key = None
+    best_pair = None
+    window = 8
+    while best_pair is None and window <= source_dim + 2:
+        for n in range(max(0, near - window), near + window + 1):
+            if n % 2:
+                continue
+            for f in range(max(0, far - window), far + window + 1):
+                size = source_dim - n - f
+                if size < 2 or size % 2:
+                    continue
+                key = (
+                    abs(n - near) + abs(f - far),
+                    abs((n + f) - (near + far)),
+                    abs((n - f) - (near - far)),
+                    n + f,
+                    n,
+                )
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_pair = (n, f)
+        window *= 2
+    return best_pair if best_pair is not None else (near - (near % 2), far)
+
+
+def snap_crop_margins_even(margins, source_w: int, source_h: int) -> list[int]:
+    """Snap [top, left, right, bottom] crop margins to an even origin and even
+    output size for the given source dimensions."""
+    top, left, right, bottom = (int(v) for v in margins)
+    h_near, h_far = _snap_crop_axis_even(left, right, source_w)
+    v_near, v_far = _snap_crop_axis_even(top, bottom, source_h)
+    return [v_near, h_near, h_far, v_far]
+
+
 def _chapter_time_seconds(chapter: dict[str, Any], key: str) -> float | None:
     text_key = f"{key}_time"
     if chapter.get(text_key) is not None:
@@ -4178,7 +4224,7 @@ def build_crop_editor(request: dict[str, Any]):
             super().keyReleaseEvent(event)
 
         def confirm(self):
-            self.result = {"status": "ok", "margins": list(self.canvas.margins)}
+            self.result = {"status": "ok", "margins": snap_crop_margins_even(self.canvas.margins, int(self.source_w), int(self.source_h))}
             try:
                 self.player.stop()
             except Exception:
@@ -8693,6 +8739,10 @@ def build_unified_video_editor(request: dict[str, Any]):
             if getattr(self, "_syncing_crop_controls", False) or not hasattr(self, "preview"):
                 return
             margins = self._validated_crop_field_margins()
+            if commit:
+                # Snap typed values to even origin/size so the editor never
+                # commits odd crop dimensions.
+                margins = self._normalize_crop_margins_even(margins)
             changed = margins != [int(v) for v in self.preview.margins]
             if changed:
                 self.preview.set_margins(margins)
@@ -9355,11 +9405,34 @@ def build_unified_video_editor(request: dict[str, Any]):
             except Exception as exc:
                 _gui_log_debug(f"Could not apply preview playback rate: {exc}", force=True)
 
+        @staticmethod
+        def _snap_axis_even(near: int, far: int, source_dim: int) -> tuple[int, int]:
+            return _snap_crop_axis_even(near, far, source_dim)
+
+        def _normalize_crop_margins_even(self, margins) -> list[int]:
+            return snap_crop_margins_even(margins, int(self.source_w), int(self.source_h))
+
+        def _snap_crop_to_even(self) -> bool:
+            # Snap the current preview crop to even origin/size. Returns True when
+            # the margins changed.
+            if not hasattr(self, "preview"):
+                return False
+            current = [int(v) for v in self.preview.margins]
+            if not any(current):
+                return False
+            snapped = self._normalize_crop_margins_even(current)
+            if snapped != current:
+                self.preview.set_margins(snapped)
+                self._sync_crop_fields()
+                return True
+            return False
+
         def _on_crop_changed(self):
             self._sync_crop_fields()
             self._refresh_all()
 
         def _on_crop_edit_finished(self):
+            self._snap_crop_to_even()
             self._commit_history()
             self._refresh_all()
 
@@ -9850,7 +9923,8 @@ def build_unified_video_editor(request: dict[str, Any]):
             super().keyReleaseEvent(event)
 
         def confirm(self):
-            margins = [int(v) for v in self.preview.margins]
+            self._snap_crop_to_even()
+            margins = self._normalize_crop_margins_even([int(v) for v in self.preview.margins])
             cuts = normalize_ranges(self._cut_ranges, self.duration)
             keep_ranges = [[float(s), float(e)] for s, e in (invert_cuts_to_keep(cuts, self.duration) if cuts else [])]
             speed = float(self._speed())
