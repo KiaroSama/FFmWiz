@@ -8128,6 +8128,16 @@ def build_unified_video_editor(request: dict[str, Any]):
             crop_grid.addWidget(_make_crop_field("bottom", self.source_h - 16), 4, 2, alignment=Qt.AlignHCenter)
             _bot_lab = _axis_label("Bottom"); _bot_lab.setAlignment(Qt.AlignCenter)
             crop_grid.addWidget(_bot_lab, 5, 2, alignment=Qt.AlignHCenter | Qt.AlignTop)
+            crop_note = QLabel(
+                "Crop is auto-aligned so the encoded frame stays valid (works the "
+                "same in CPU and GPU mode, with no black padding). Left/Top snap to "
+                "even. Right/Bottom are reduced as little as possible so the final "
+                "width/height come out even: on an even source dimension the odd "
+                "value becomes even, on an odd source dimension it stays odd."
+            )
+            crop_note.setObjectName("tip")
+            crop_note.setWordWrap(True)
+            crop_grid.addWidget(crop_note, 6, 0, 1, 5)
             crop_grid.setColumnStretch(0, 1)
             crop_grid.setColumnStretch(1, 0)
             crop_grid.setColumnStretch(2, 0)
