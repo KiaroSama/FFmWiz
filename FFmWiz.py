@@ -1312,8 +1312,10 @@ def resolved_video_encoder_for_nvenc_multipass(answers: dict[str, Any]) -> str:
 
 
 def nvenc_multipass_prompt_applicable(answers: dict[str, Any]) -> bool:
-    if answers.get("nvenc_multipass") in NVENC_MULTIPASS_MODES:
-        return False
+    # Applicability must depend only on the workflow shape (NVENC video
+    # re-encode), not on whether the value was already answered. Otherwise the
+    # step would vanish during back navigation and shift later question
+    # numbers once the user answered it.
     if not output_has_video(answers):
         set_nvenc_multipass_skip_reason(answers, "audio-only workflow")
         return False
@@ -1333,8 +1335,6 @@ def ask_nvenc_multipass_if_applicable(
     quality_oriented: bool = True,
     pure_copy: bool = False,
 ) -> str:
-    if answers.get("nvenc_multipass") in NVENC_MULTIPASS_MODES:
-        return normalize_nvenc_multipass_mode(answers.get("nvenc_multipass"))
     encoder = video_encoder if video_encoder is not None else resolved_video_encoder_for_nvenc_multipass(answers)
     if not nvenc_multipass_applicable_for_encoder(
         answers,
@@ -1344,7 +1344,13 @@ def ask_nvenc_multipass_if_applicable(
         workflow_name=workflow_name,
     ):
         return "disabled"
-    default_mode = nvenc_multipass_default_mode(answers, quality_oriented)
+    # Re-prompt on every entry (including back navigation). When a value was
+    # already chosen, offer it as the default so pressing Enter keeps it.
+    previous_mode = answers.get("nvenc_multipass")
+    if previous_mode in NVENC_MULTIPASS_MODES:
+        default_mode = normalize_nvenc_multipass_mode(previous_mode)
+    else:
+        default_mode = nvenc_multipass_default_mode(answers, quality_oriented)
     default_choice = {"disabled": "0", "qres": "1", "fullres": "2"}[default_mode]
     while True:
         value = ask_raw(
