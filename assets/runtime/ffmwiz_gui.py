@@ -8129,11 +8129,8 @@ def build_unified_video_editor(request: dict[str, Any]):
             _bot_lab = _axis_label("Bottom"); _bot_lab.setAlignment(Qt.AlignCenter)
             crop_grid.addWidget(_bot_lab, 5, 2, alignment=Qt.AlignHCenter | Qt.AlignTop)
             crop_note = QLabel(
-                "Crop is auto-aligned so the encoded frame stays valid (works the "
-                "same in CPU and GPU mode, with no black padding). Left/Top snap to "
-                "even. Right/Bottom are reduced as little as possible so the final "
-                "width/height come out even: on an even source dimension the odd "
-                "value becomes even, on an odd source dimension it stays odd."
+                "Crop is auto-aligned to even dimensions to keep the chroma phase "
+                "correct so the video colors are not damaged."
             )
             crop_note.setObjectName("tip")
             crop_note.setWordWrap(True)
