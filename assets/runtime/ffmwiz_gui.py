@@ -10132,6 +10132,29 @@ def main() -> int:
         )
 
     QtCore.QTimer.singleShot(0, apply_deferred_stylesheet)
+
+    def grab_initial_keyboard_focus():
+        # Without this, the window opens without keyboard focus and the
+        # layout-independent shortcuts only start working after the user clicks
+        # somewhere in the window. Activate the window and move keyboard focus to
+        # the preview canvas (which routes keys, falling back to the window-level
+        # keyPressEvent for unhandled keys) or to the window itself.
+        try:
+            window.activateWindow()
+            window.raise_()
+            target = getattr(window, "canvas", None) or getattr(window, "preview", None)
+            if target is None or not hasattr(target, "setFocus"):
+                target = window
+            try:
+                target.setFocusPolicy(QtCore.Qt.StrongFocus)
+            except Exception:
+                pass
+            target.setFocus(QtCore.Qt.OtherFocusReason)
+            _gui_log_debug(f"{mode} GUI grabbed initial keyboard focus", force=True)
+        except Exception as exc:
+            _gui_log_debug(f"Could not grab initial keyboard focus: {exc}", force=True)
+
+    QtCore.QTimer.singleShot(0, grab_initial_keyboard_focus)
     app.exec()
 
     payload = getattr(window, "result", {"status": "canceled"})
