@@ -10133,15 +10133,53 @@ def main() -> int:
 
     QtCore.QTimer.singleShot(0, apply_deferred_stylesheet)
 
+    def _force_foreground_windows():
+        # QShortcut(Qt.WindowShortcut) only fires when the editor is the ACTIVE
+        # top-level window. A window shown from a subprocess often does not win
+        # the Windows foreground lock via activateWindow() alone, so shortcuts
+        # stay dead until the user clicks. Attach to the current foreground
+        # thread's input queue to bypass the lock and force activation.
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(window.winId())
+            if not hwnd:
+                return
+            fg = user32.GetForegroundWindow()
+            cur_thread = kernel32.GetCurrentThreadId()
+            fg_thread = user32.GetWindowThreadProcessId(fg, 0) if fg else 0
+            attached = bool(fg_thread) and fg_thread != cur_thread
+            if attached:
+                user32.AttachThreadInput(fg_thread, cur_thread, True)
+            try:
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(fg_thread, cur_thread, False)
+        except Exception as exc:
+            _gui_log_debug(f"Could not force window foreground: {exc}", force=True)
+
     def grab_initial_keyboard_focus():
-        # Without this, the window opens without keyboard focus and the
-        # layout-independent shortcuts only start working after the user clicks
-        # somewhere in the window. Activate the window and move keyboard focus to
+        # Without this, the window opens without keyboard focus / active state and
+        # the layout-independent shortcuts only start working after the user
+        # clicks inside the window. Activate the window and move keyboard focus to
         # the preview canvas (which routes keys, falling back to the window-level
         # keyPressEvent for unhandled keys) or to the window itself.
         try:
+            try:
+                window.setWindowState(
+                    (window.windowState() & ~QtCore.Qt.WindowMinimized) | QtCore.Qt.WindowActive
+                )
+            except Exception:
+                pass
             window.activateWindow()
             window.raise_()
+            _force_foreground_windows()
             target = getattr(window, "canvas", None) or getattr(window, "preview", None)
             if target is None or not hasattr(target, "setFocus"):
                 target = window
@@ -10154,7 +10192,10 @@ def main() -> int:
         except Exception as exc:
             _gui_log_debug(f"Could not grab initial keyboard focus: {exc}", force=True)
 
+    # Run immediately after show and again shortly after, because the first
+    # attempt can land before the window is fully mapped/activated by the OS.
     QtCore.QTimer.singleShot(0, grab_initial_keyboard_focus)
+    QtCore.QTimer.singleShot(180, grab_initial_keyboard_focus)
     app.exec()
 
     payload = getattr(window, "result", {"status": "canceled"})
