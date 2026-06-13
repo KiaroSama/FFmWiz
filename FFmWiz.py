@@ -4129,13 +4129,9 @@ def cropped_source_size(answers: dict[str, Any]) -> tuple[int, int]:
     source_w, source_h = first_video_size(answers)
     if not answers.get("crop_enabled"):
         return source_w, source_h
-    left = int(answers.get("crop_left", 0) or 0)
-    right = int(answers.get("crop_right", 0) or 0)
-    top = int(answers.get("crop_top", 0) or 0)
-    bottom = int(answers.get("crop_bottom", 0) or 0)
-    message = crop_margins_validation_message(answers, top, left, right, bottom)
-    if message:
-        raise ValueError(message)
+    # Use the chroma/encoder-normalized margins so downstream resize math and
+    # the actual crop filter agree on the post-crop dimensions.
+    left, right, top, bottom = normalized_crop_margins(answers)
     return source_w - left - right, source_h - top - bottom
 
 
@@ -4212,6 +4208,212 @@ def crop_margins_validation_message(
             f"smaller than source height ({source_h} px)."
         )
     return None
+
+
+def chroma_subsampling_alignment(pix_fmt: str | None) -> tuple[int, int]:
+    """Return (horizontal, vertical) chroma sample-grid alignment for a pixel
+    format. The crop origin must be a multiple of these values so cropping never
+    introduces a chroma-phase shift (color bleeding) on subsampled formats.
+
+    4:2:0 -> (2, 2); 4:2:2 -> (2, 1); 4:4:0 -> (1, 2); 4:1:1 -> (4, 1);
+    4:1:0 -> (4, 4); 4:4:4 / RGB / grayscale -> (1, 1). Unknown formats fall
+    back to the most conservative common case (4:2:0)."""
+    fmt = str(pix_fmt or "").strip().lower()
+    if not fmt:
+        return (2, 2)
+    if fmt.startswith((
+        "rgb", "bgr", "gbr", "argb", "abgr", "rgba", "bgra",
+        "0rgb", "0bgr", "rgb0", "bgr0", "gray", "ya", "pal8", "monow", "monob",
+    )):
+        return (1, 1)
+    # NV-/P-family semi-planar formats.
+    if fmt in {"nv12", "nv21", "p010", "p010le", "p010be", "p016", "p016le", "p016be"}:
+        return (2, 2)
+    if fmt in {"nv16", "p210", "p210le", "p210be", "p216", "p216le", "p216be"}:
+        return (2, 1)
+    if fmt in {"nv24", "nv42", "p410", "p410le", "p410be", "p416", "p416le", "p416be"}:
+        return (1, 1)
+    # Packed 4:2:2.
+    if fmt in {"yuyv422", "uyvy422", "yvyu422"}:
+        return (2, 1)
+    # Planar yuv tokens carry the subsampling in the name.
+    if "444" in fmt:
+        return (1, 1)
+    if "440" in fmt:
+        return (1, 2)
+    if "422" in fmt:
+        return (2, 1)
+    if "411" in fmt:
+        return (4, 1)
+    if "410" in fmt:
+        return (4, 4)
+    if "420" in fmt:
+        return (2, 2)
+    return (2, 2)
+
+
+def _normalize_crop_axis(
+    requested_near: int,
+    requested_far: int,
+    source_dim: int,
+    origin_align: int,
+    output_align: int,
+) -> tuple[int, int] | None:
+    """Find the closest valid (near, far) crop pair for one axis.
+
+    near = left/top, far = right/bottom. A valid pair satisfies:
+      near >= 0, far >= 0, near + far < source_dim
+      near % origin_align == 0                         (chroma-aligned origin)
+      (source_dim - near - far) % output_align == 0    (encodable output size)
+      source_dim - near - far >= output_align          (positive output size)
+
+    Among valid pairs the closest one is chosen by this deterministic priority
+    (each minimized in order):
+      1. total absolute adjustment from the requested values
+      2. preserve the requested total crop amount (keep the output size)
+      3. smallest crop-box center shift
+      4. remove less image content (smaller total crop)
+      5. prefer decreasing the origin-side crop
+    Returns None when no valid pair exists for this axis.
+    """
+    origin_align = max(1, int(origin_align))
+    output_align = max(1, int(output_align))
+    requested_near = max(0, int(requested_near))
+    requested_far = max(0, int(requested_far))
+
+    best_key: tuple[int, int, int, int, int] | None = None
+    best_pair: tuple[int, int] | None = None
+    window = max(8, 4 * max(origin_align, output_align) + 2)
+    limit = source_dim + max(origin_align, output_align)
+    while best_pair is None and window <= limit:
+        near_hi = requested_near + window
+        far_hi = requested_far + window
+        for near in range(max(0, requested_near - window), near_hi + 1):
+            if near % origin_align != 0:
+                continue
+            for far in range(max(0, requested_far - window), far_hi + 1):
+                cropped = source_dim - near - far
+                if cropped < output_align or cropped % output_align != 0:
+                    continue
+                key = (
+                    abs(near - requested_near) + abs(far - requested_far),
+                    abs((near + far) - (requested_near + requested_far)),
+                    abs((near - far) - (requested_near - requested_far)),
+                    near + far,
+                    near,
+                )
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_pair = (near, far)
+        window *= 2
+    return best_pair
+
+
+def output_size_alignment(answers: dict[str, Any]) -> tuple[int, int]:
+    """Return the (width, height) alignment the cropped frame must satisfy.
+
+    When a resize step follows the crop, that scale (force_divisible_by=2 plus a
+    pad to an even canvas) already produces encodable dimensions, so the crop
+    output size needs no separate even-dimension correction and only the crop
+    origin must stay chroma-aligned. Without a following resize, the cropped
+    dimensions must satisfy the output pixel-format / encoder grid directly.
+
+    The "resize requested" test mirrors calculate_scale_dimensions (which treats
+    only None / "n" as no-resize) and intentionally avoids calling
+    resolve_scale_dimensions, because that path computes scaled dimensions from
+    cropped_source_size and would recurse back into crop normalization."""
+    resolution = answers.get("resolution", "n")
+    resize_follows = resolution is not None and resolution != "n"
+    if resize_follows:
+        return (1, 1)
+    return chroma_subsampling_alignment(cpu_pixel_format_for_output(answers))
+
+
+def normalized_crop_margins(answers: dict[str, Any]) -> tuple[int, int, int, int]:
+    """Return chroma/encoder-aligned (left, right, top, bottom) crop margins.
+
+    The crop origin is aligned to the source chroma grid and the cropped frame
+    is aligned to the output encoder grid, keeping the values as close as
+    possible to what the user entered. No black compatibility padding is ever
+    added. Raises ValueError when no valid crop rectangle exists."""
+    source_w, source_h = first_video_size(answers)
+    left = int(answers.get("crop_left", 0) or 0)
+    right = int(answers.get("crop_right", 0) or 0)
+    top = int(answers.get("crop_top", 0) or 0)
+    bottom = int(answers.get("crop_bottom", 0) or 0)
+
+    message = crop_margins_validation_message(answers, top, left, right, bottom)
+    if message:
+        raise ValueError(message)
+
+    stream = source_video_stream(answers) or {}
+    h_origin_align, v_origin_align = chroma_subsampling_alignment(stream.get("pix_fmt"))
+    out_w_align, out_h_align = output_size_alignment(answers)
+
+    horizontal = _normalize_crop_axis(left, right, source_w, h_origin_align, out_w_align)
+    vertical = _normalize_crop_axis(top, bottom, source_h, v_origin_align, out_h_align)
+    if horizontal is None or vertical is None:
+        raise ValueError(
+            "Could not find a valid crop rectangle that satisfies the source "
+            "chroma grid and the output encoder dimensions. Reduce the crop amount."
+        )
+    adj_left, adj_right = horizontal
+    adj_top, adj_bottom = vertical
+    return adj_left, adj_right, adj_top, adj_bottom
+
+
+def crop_normalization_summary_lines(answers: dict[str, Any]) -> list[str]:
+    """Build human-readable summary lines describing the crop normalization.
+    Returns an empty list when crop is not active."""
+    if not answers.get("crop_enabled"):
+        return []
+    req_left = int(answers.get("crop_left", 0) or 0)
+    req_right = int(answers.get("crop_right", 0) or 0)
+    req_top = int(answers.get("crop_top", 0) or 0)
+    req_bottom = int(answers.get("crop_bottom", 0) or 0)
+    if not any((req_left, req_right, req_top, req_bottom)):
+        return []
+    source_w, source_h = first_video_size(answers)
+    stream = source_video_stream(answers) or {}
+    pix_fmt = str(stream.get("pix_fmt") or "unknown")
+    h_align, v_align = chroma_subsampling_alignment(stream.get("pix_fmt"))
+    adj_left, adj_right, adj_top, adj_bottom = normalized_crop_margins(answers)
+    final_w = source_w - adj_left - adj_right
+    final_h = source_h - adj_top - adj_bottom
+    backend = "CUVID decoder" if (
+        answers.get("use_gpu")
+        and cuda_decoder_for_source(answers)
+        and can_use_cuda_fast_path(answers, resolve_video_encoder(answers)[0])
+    ) else "CPU filter"
+    changed = (adj_left, adj_right, adj_top, adj_bottom) != (req_left, req_right, req_top, req_bottom)
+    lines = [
+        f"Source resolution: {source_w}x{source_h}",
+        f"Source pixel format: {pix_fmt}",
+        f"Chroma origin alignment: horizontal={h_align}, vertical={v_align}",
+        f"Requested crop: left={req_left}, right={req_right}, top={req_top}, bottom={req_bottom}",
+        f"Adjusted crop: left={adj_left}, right={adj_right}, top={adj_top}, bottom={adj_bottom}",
+        f"Adjustment per side: left={adj_left - req_left:+d}, right={adj_right - req_right:+d}, "
+        f"top={adj_top - req_top:+d}, bottom={adj_bottom - req_bottom:+d}",
+        f"Final cropped resolution: {final_w}x{final_h}",
+        f"Crop backend: {backend}",
+        "Automatic black compatibility padding: disabled",
+    ]
+    if changed:
+        lines.append("Reason: Align crop origin to the source chroma grid and keep encodable output dimensions without padding.")
+    else:
+        lines.append("Crop values already satisfy chroma and encoder alignment requirements.")
+    return lines
+
+
+def log_crop_normalization_summary(answers: dict[str, Any]) -> None:
+    """Log the crop normalization decision once before command generation."""
+    try:
+        lines = crop_normalization_summary_lines(answers)
+    except ValueError:
+        # Validation errors are surfaced later by the command builders.
+        return
+    for line in lines:
+        log_info(f"Crop normalization | {line}")
 
 
 def set_crop_margins_if_valid(
@@ -13528,10 +13730,9 @@ def has_crop(answers: dict[str, Any]) -> bool:
 def crop_margins_to_cuvid_crop(answers: dict[str, Any]) -> str | None:
     if not has_crop(answers):
         return None
-    top = int(answers.get("crop_top", 0) or 0)
-    bottom = int(answers.get("crop_bottom", 0) or 0)
-    left = int(answers.get("crop_left", 0) or 0)
-    right = int(answers.get("crop_right", 0) or 0)
+    # Use the same normalized margins as the CPU crop filter so the CUVID
+    # decoder crop produces an identical visible rectangle.
+    left, right, top, bottom = normalized_crop_margins(answers)
     return f"{top}x{bottom}x{left}x{right}"
 
 
@@ -13633,10 +13834,7 @@ def build_cuda_video_filter(answers: dict[str, Any]) -> str | None:
 def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     filters: list[str] = []
     if answers.get("crop_enabled"):
-        left = answers["crop_left"]
-        right = answers["crop_right"]
-        top = answers["crop_top"]
-        bottom = answers["crop_bottom"]
+        left, right, top, bottom = normalized_crop_margins(answers)
         filters.append(f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1")
 
     if answers.get("fps") is not None:
@@ -13679,10 +13877,8 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     if video_speed_transform_enabled(answers):
         filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
 
-    # When crop is active but no resize step guarantees even dimensions,
-    # add a compatibility pad that rounds to even width/height for encoders.
-    if answers.get("crop_enabled") and not scale_dimensions:
-        filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0")
+    # Crop dimensions are normalized to the output encoder grid by
+    # normalized_crop_margins, so no black compatibility padding is added here.
 
     if FORCE_SAR and not scale_resets_sar:
         filters.append(f"setsar={FORCE_SAR}")
@@ -14798,6 +14994,7 @@ def step_start_now(answers: dict[str, Any]) -> None:
         else:
             cmd = build_ffmpeg_command(answers)
     answers["cmd"] = cmd
+    log_crop_normalization_summary(answers)
     print_summary(answers, cmd)
     answers["start_now"] = ask_yes_no(
         question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
@@ -15196,6 +15393,24 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             print("  " + field_text("NVENC multipass", normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")), Color.YELLOW))
         if answers.get("crop_enabled"):
             print("  " + field_text("crop", "yes, " + format_crop_margins(answers), Color.ORANGE))
+            try:
+                adj_left, adj_right, adj_top, adj_bottom = normalized_crop_margins(answers)
+                req = (
+                    int(answers.get("crop_left", 0) or 0),
+                    int(answers.get("crop_right", 0) or 0),
+                    int(answers.get("crop_top", 0) or 0),
+                    int(answers.get("crop_bottom", 0) or 0),
+                )
+                if (adj_left, adj_right, adj_top, adj_bottom) != req:
+                    print("  " + field_text(
+                        "crop (aligned)",
+                        f"top={adj_top} px, left={adj_left} px, right={adj_right} px, bottom={adj_bottom} px",
+                        Color.ORANGE,
+                    ))
+                crop_w, crop_h = cropped_source_size(answers)
+                print("  " + field_text("cropped resolution", f"{crop_w}x{crop_h}", Color.ORANGE))
+            except ValueError:
+                pass
             crop_box = answers.get("crop_box_dimensions")
             crop_ar = answers.get("cropped_aspect_ratio")
             if crop_box and crop_ar:
@@ -19958,7 +20173,13 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     left = int(join_answers.get("crop_left", 0) or 0)
     right = int(join_answers.get("crop_right", 0) or 0)
     bottom = int(join_answers.get("crop_bottom", 0) or 0)
-    crop_filter = f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1" if join_answers.get("crop_enabled") and any((top, left, right, bottom)) else ""
+    if join_answers.get("crop_enabled") and any((top, left, right, bottom)):
+        # Normalize to the source chroma grid / output encoder grid so the join
+        # crop matches the single-input crop paths and adds no black padding.
+        n_left, n_right, n_top, n_bottom = normalized_crop_margins(join_answers)
+        crop_filter = f"crop=iw-{n_left}-{n_right}:ih-{n_top}-{n_bottom}:{n_left}:{n_top}:exact=1"
+    else:
+        crop_filter = ""
     output_pix_fmt = cpu_pixel_format_for_output(join_answers)
 
     for input_idx, _item in enumerate(items):
