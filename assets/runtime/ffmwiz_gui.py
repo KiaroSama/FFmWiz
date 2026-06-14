@@ -6740,7 +6740,11 @@ def build_unified_video_editor(request: dict[str, Any]):
                 return _blank()
             rate = self._pcm_rate
             total = len(self._pcm) // 2
-            gmax = self._pcm_gmax or 1
+            # Absolute amplitude: scale against full-scale int16, NOT the clip's
+            # own peak. This way quiet audio renders a short waveform and loud
+            # audio a tall one, instead of every clip being normalized to fill the
+            # same height regardless of its real loudness.
+            gmax = 32768
             col = QtGui.QColor("#3a8bff")
 
             if self._pcm_np is not None:
@@ -7309,39 +7313,46 @@ def build_unified_video_editor(request: dict[str, Any]):
                 p.setPen(QtGui.QPen(marker_color, 1))
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 9 if selected else 8))
                 p.drawText(QRectF(x + 5, ruler.bottom() + 2, 42, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
-            # Video midpoint guide: fixed at the exact centre of the entire
-            # video duration. Positioned above tick labels in the ruler area.
+            # Video midpoint guide: fixed at the exact centre of the entire video
+            # duration. Drawn like the CTI/playhead (arrow at the top of the ruler
+            # plus a full-height line) in a distinct violet so it is always clearly
+            # visible and not confused with the red playhead.
             center_time = self.duration / 2.0
             cx = self._time_to_x(center_time)
             if ruler.left() - 2 <= cx <= ruler.right() + 2:
-                # Small triangle at ruler bottom pointing down.
-                guide_color = QtGui.QColor(255, 180, 80, 180)
+                guide_color = QtGui.QColor("#c084fc")
+                guide_backing = QtGui.QColor(10, 6, 18, 220)
+                arrow_top = ruler.top() + 1
+                arrow_tip = ruler.top() + 19
+                # Full-height guide line (same span as the playhead). A dark backing
+                # line gives contrast where it crosses the bright blue waveform.
+                p.setPen(QtGui.QPen(guide_backing, 3))
+                p.drawLine(QPointF(cx, arrow_tip), QPointF(cx, wave.bottom() + 8))
+                p.setPen(QtGui.QPen(guide_color, 2, Qt.DashLine))
+                p.drawLine(QPointF(cx, arrow_tip), QPointF(cx, wave.bottom() + 8))
+                # Down-pointing arrow at the top of the ruler, the same height as
+                # the CTI arrow.
                 p.setBrush(QtGui.QBrush(guide_color))
-                p.setPen(Qt.NoPen)
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["bg"]), 1))
                 p.drawPolygon(QtGui.QPolygonF([
-                    QPointF(cx - 5, ruler.bottom() - 1),
-                    QPointF(cx + 5, ruler.bottom() - 1),
-                    QPointF(cx, ruler.bottom() + 6),
+                    QPointF(cx - 9, arrow_top),
+                    QPointF(cx + 9, arrow_top),
+                    QPointF(cx, arrow_tip),
                 ]))
-                # Dashed guide line from triangle down into the waveform.
-                p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 100), 1, Qt.DashLine))
-                p.drawLine(QPointF(cx, ruler.bottom() + 6), QPointF(cx, wave.top() + 20))
-                # Timecode pill at VERY TOP of ruler (above tick labels).
+                # Timecode pill in the gap between the ruler and the waveform, so it
+                # is always shown and never collides with tick labels or the arrow.
                 _ctc = seconds_to_timecode(center_time)
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
                 pill_w = 118
-                pill_h = 15
+                pill_h = 16
                 pill_x = max(ruler.left() + 2, min(cx - pill_w / 2, ruler.right() - pill_w - 2))
-                pill_y = ruler.top() + 2
-                # Skip pill if it would overlap a tick label at the same Y position.
-                overlaps_tick = any(abs(pill_x - tx + pill_w / 2) < pill_w for tx in tick_positions)
-                if not overlaps_tick:
-                    _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
-                    p.setBrush(QtGui.QBrush(QtGui.QColor(8, 16, 26, 235)))
-                    p.setPen(QtGui.QPen(QtGui.QColor(255, 180, 80, 200), 1))
-                    p.drawRoundedRect(_pill, 4, 4)
-                    p.setPen(QtGui.QPen(QtGui.QColor(255, 220, 160), 1))
-                    p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
+                pill_y = ruler.bottom() + (wave.top() - ruler.bottom() - pill_h) / 2.0
+                _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
+                p.setBrush(QtGui.QBrush(QtGui.QColor(20, 12, 32, 235)))
+                p.setPen(QtGui.QPen(guide_color, 1))
+                p.drawRoundedRect(_pill, 4, 4)
+                p.setPen(QtGui.QPen(QtGui.QColor("#e9d5ff"), 1))
+                p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
             ph_x = self._time_to_x(self.playhead)
             if wave.left() - 4 <= ph_x <= wave.right() + 4:
                 halo = QtGui.QColor(PALETTE["playhead_halo"])
