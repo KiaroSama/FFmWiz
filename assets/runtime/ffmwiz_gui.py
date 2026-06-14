@@ -1037,6 +1037,14 @@ def snap_crop_margins_even(margins, source_w: int, source_h: int) -> list[int]:
     return [v_near, h_near, h_far, v_far]
 
 
+# Amplitude (16-bit sample value) at which the waveform reaches full height.
+# Scaling is continuous and relative: quieter audio draws shorter bars and
+# louder audio taller bars, capped (clamped) once it reaches this level. This is
+# set below full-scale (32768) so normal audio uses the available height well
+# instead of looking tiny, while very loud peaks clamp at the ceiling. ~ -3.4 dBFS.
+WAVEFORM_CEILING_PEAK = 22000
+
+
 def _chapter_time_seconds(chapter: dict[str, Any], key: str) -> float | None:
     text_key = f"{key}_time"
     if chapter.get(text_key) is not None:
@@ -6743,8 +6751,9 @@ def build_unified_video_editor(request: dict[str, Any]):
             # Absolute amplitude: scale against full-scale int16, NOT the clip's
             # own peak. This way quiet audio renders a short waveform and loud
             # audio a tall one, instead of every clip being normalized to fill the
-            # same height regardless of its real loudness.
-            gmax = 32768
+            # same height regardless of its real loudness. The value is clamped so
+            # amplitude above the ceiling reference caps at full height.
+            gmax = WAVEFORM_CEILING_PEAK
             col = QtGui.QColor("#3a8bff")
 
             if self._pcm_np is not None:
@@ -6772,6 +6781,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                         v = (0.5 * (2.0 * p1 + (-p0 + p2) * frac
                                     + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f2
                                     + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f3)) / gmax
+                        v = _np.clip(v, -1.0, 1.0)   # cap at the ceiling reference
                         vpx = cyl - v * half
                         v2 = _np.empty_like(vpx)
                         v2[:-1] = vpx[1:]; v2[-1] = vpx[-1]   # connect each column to the next
@@ -6808,6 +6818,10 @@ def build_unified_video_editor(request: dict[str, Any]):
                         _np.clip(idx, 0, n - 1, out=idx)
                         top = _np.maximum.reduceat(seg, idx)[:width_px].astype(_np.float64) / gmax
                         bot = _np.minimum.reduceat(seg, idx)[:width_px].astype(_np.float64) / gmax
+                    # Cap at the ceiling reference so loud peaks clamp instead of
+                    # overflowing the waveform area.
+                    top = _np.clip(top, -1.0, 1.0)
+                    bot = _np.clip(bot, -1.0, 1.0)
                     top_px = cyl - top * half
                     bot_px = cyl - bot * half
                     # Always span the centre line so adjacent columns stay connected — a
@@ -6843,8 +6857,10 @@ def build_unified_video_editor(request: dict[str, Any]):
                         mn, mx = audioop.minmax(frag, 2)
                     else:
                         mn = mx = 0
-                    lines.append(QtCore.QLineF(px + 0.5, cyl - (mx / gmax) * half,
-                                               px + 0.5, cyl - (mn / gmax) * half))
+                    mxv = max(-1.0, min(1.0, mx / gmax))
+                    mnv = max(-1.0, min(1.0, mn / gmax))
+                    lines.append(QtCore.QLineF(px + 0.5, cyl - mxv * half,
+                                               px + 0.5, cyl - mnv * half))
                 pp = QtGui.QPainter(img)
                 pp.setPen(QtGui.QPen(col, 1.0))
                 pp.drawLines(lines)
