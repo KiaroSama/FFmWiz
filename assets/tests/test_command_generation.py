@@ -1989,7 +1989,7 @@ class CommandGenerationTests(unittest.TestCase):
             answers = {
                 "output_ext": "mp4",
                 "video_codec": "h264",
-                "video_streams": [{"codec_type": "video", "width": 100, "height": 100}],
+                "video_streams": [{"codec_type": "video", "width": 100, "height": 100, "color_range": "tv"}],
                 "audio_streams": [],
                 "subtitle_streams": [],
                 "format": {"duration": "100"},
@@ -2081,7 +2081,7 @@ class CommandGenerationTests(unittest.TestCase):
                 FFmWiz.run_wizard({
                     "output_ext": "mp4",
                     "video_codec": "H265",
-                    "video_streams": [{"codec_type": "video", "width": 100, "height": 100}],
+                    "video_streams": [{"codec_type": "video", "width": 100, "height": 100, "color_range": "tv"}],
                     "audio_streams": [],
                     "subtitle_streams": [],
                     "format": {"duration": "100"},
@@ -3695,6 +3695,212 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertNotIn(":45:", text)
         self.assertNotIn("ih-25-", text)
         self.assertIn("crop=iw-44-40:ih-24-22:44:24:exact=1", text)
+
+    # ===================================================================
+    # Color-range resolution and menu
+    # ===================================================================
+
+    def _encode_answers(self, tmp, color_range=None, resolution="480p"):
+        answers = self.base_answers(tmp)
+        answers["use_gpu"] = False
+        stream = dict(answers["video_streams"][0])
+        if color_range is None:
+            stream.pop("color_range", None)
+        else:
+            stream["color_range"] = color_range
+        answers["video_streams"] = [stream]
+        answers["resolution"] = FFmWiz.parse_resolution(resolution) if resolution != "n" else "n"
+        return answers
+
+    def test_color_range_normalize(self):
+        self.assertEqual(FFmWiz.normalize_color_range("limited"), "tv")
+        self.assertEqual(FFmWiz.normalize_color_range("mpeg"), "tv")
+        self.assertEqual(FFmWiz.normalize_color_range("tv"), "tv")
+        self.assertEqual(FFmWiz.normalize_color_range("full"), "pc")
+        self.assertEqual(FFmWiz.normalize_color_range("jpeg"), "pc")
+        self.assertEqual(FFmWiz.normalize_color_range("pc"), "pc")
+        self.assertEqual(FFmWiz.normalize_color_range("unknown"), "")
+        self.assertEqual(FFmWiz.normalize_color_range(""), "")
+
+    def test_color_range_unknown_default_enter_is_tv(self):
+        """Test 1: unknown range, menu appears, Enter selects TV/Limited, command has tv."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            self.assertTrue(FFmWiz.color_range_prompt_applicable(answers))
+            with mock.patch.object(FFmWiz, "ask_raw", return_value="") as ask, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_color_range(answers)
+            self.assertTrue(ask.called)
+            self.assertEqual(answers["color_range_choice"], "tv")
+            self.assertIn("-color_range:v:0 tv", self.command_text(answers))
+
+    def test_color_range_unknown_keep_unspecified(self):
+        """Test 2: unknown range + Keep unspecified -> no forced tv/pc."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_color_range(answers)
+            self.assertEqual(answers["color_range_choice"], "unspecified")
+            text = self.command_text(answers)
+            self.assertNotIn("-color_range:v:0 tv", text)
+            self.assertNotIn("-color_range:v:0 pc", text)
+
+    def test_color_range_unknown_assume_pc(self):
+        """Test 3: unknown range + Assume PC/Full -> command has pc."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            with mock.patch.object(FFmWiz, "ask_raw", return_value="3"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_color_range(answers)
+            self.assertEqual(answers["color_range_choice"], "pc")
+            self.assertIn("-color_range:v:0 pc", self.command_text(answers))
+
+    def test_color_range_known_tv_no_menu(self):
+        """Test 4: known TV/Limited -> menu not applicable, value preserved."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range="tv")
+            self.assertFalse(FFmWiz.color_range_prompt_applicable(answers))
+            self.assertEqual(FFmWiz.resolve_color_range(answers), ("tv", "detected"))
+            self.assertIn("-color_range:v:0 tv", self.command_text(answers))
+
+    def test_color_range_known_pc_no_menu(self):
+        """Test 5: known PC/Full -> menu not applicable, value preserved."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range="pc")
+            self.assertFalse(FFmWiz.color_range_prompt_applicable(answers))
+            self.assertEqual(FFmWiz.resolve_color_range(answers), ("pc", "detected"))
+            self.assertIn("-color_range:v:0 pc", self.command_text(answers))
+
+    def test_color_range_split_applies_to_all_parts(self):
+        """Test 6: one workflow, multiple Split parts -> same resolved choice everywhere."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            answers["color_range_choice"] = "pc"
+            answers["separator_points"] = [120.0, 300.0]
+            answers["format"] = {"duration": "600.0"}
+            text = self.command_text(answers)
+            self.assertEqual(text.count("-color_range:v:0 pc"), text.count("-c:v libx265"))
+            self.assertNotIn("-color_range:v:0 tv", text)
+
+    def test_color_range_back_navigation_keeps_previous_default(self):
+        """Test 7: re-entering the menu offers the previous choice as default."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            answers["color_range_choice"] = "pc"
+            captured = {}
+
+            def fake_ask(prompt):
+                captured["prompt"] = prompt
+                return ""  # Enter keeps the default.
+
+            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_color_range(answers)
+            self.assertIn("[3]", captured["prompt"])  # previous pc -> default option 3
+            self.assertEqual(answers["color_range_choice"], "pc")
+
+    def test_color_range_stream_copy_has_no_forced_metadata(self):
+        """Test 8: pure stream copy/remux -> no menu, no invented color-range metadata."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None, resolution="n")
+            answers["video_codec"] = "copy"
+            answers["audio_codec"] = "copy"
+            answers["crop_enabled"] = False
+            answers.pop("fps", None)
+            answers["fps"] = None
+            self.assertFalse(FFmWiz.color_range_prompt_applicable(answers))
+            text = self.command_text(answers)
+            self.assertNotIn("-color_range", text)
+
+    def test_color_range_cpu_two_pass_consistent(self):
+        """Test 9: CPU two-pass uses consistent resolved color-range behavior."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            answers["color_range_choice"] = "pc"
+            answers["cpu_two_pass"] = True
+            cmd = self.command_for(answers)
+            first, second, _passlog = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+            # Pass 2 carries the resolved color-range; pass 1 is the analysis pass.
+            self.assertIn("-color_range:v:0 pc", " ".join(second))
+
+    # ===================================================================
+    # SAR / DAR parsing, calculation, and setsar handling
+    # ===================================================================
+
+    def test_parse_rational_valid_and_invalid(self):
+        self.assertAlmostEqual(FFmWiz.parse_rational("16:9"), 16 / 9)
+        self.assertAlmostEqual(FFmWiz.parse_rational("4/3"), 4 / 3)
+        self.assertAlmostEqual(FFmWiz.parse_rational("1.5"), 1.5)
+        for bad in ("0:1", "0/0", "-1", "N/A", "unknown", "", None, "abc"):
+            self.assertIsNone(FFmWiz.parse_rational(bad))
+
+    def test_sar_dar_square_pixels(self):
+        """Test 10: 1920x1080 SAR 1:1 -> DAR 16:9, square pixels."""
+        answers = {"video_streams": [{"width": 1920, "height": 1080, "sample_aspect_ratio": "1:1"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["sar_text"], "1:1")
+        self.assertEqual(info["dar_text"], "16:9")
+        self.assertEqual(info["pixel_shape"], "square")
+
+    def test_sar_dar_calculated_from_sar_when_dar_missing(self):
+        """Test 12: known SAR, missing DAR -> DAR calculated as 4:3, labeled calculated."""
+        answers = {"video_streams": [{"width": 720, "height": 576, "sample_aspect_ratio": "16:15"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertAlmostEqual(info["dar"], 4 / 3, places=4)
+        self.assertEqual(info["dar_text"], "4:3")
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and SAR")
+        self.assertEqual(info["pixel_shape"], "non-square")
+
+    def test_sar_dar_discrepancy_uses_calculated(self):
+        """Test 18: ffprobe DAR disagrees with calculated -> discrepancy flagged, calculated used."""
+        answers = {"video_streams": [{"width": 720, "height": 576,
+                                       "sample_aspect_ratio": "16:15",
+                                       "display_aspect_ratio": "16:9"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and SAR")
+        self.assertIsNotNone(info["discrepancy"])
+        self.assertAlmostEqual(info["dar"], 4 / 3, places=4)
+
+    def test_sar_dar_unknown_fallback(self):
+        """Test 16: unknown SAR -> width/height fallback reported, no crash."""
+        answers = {"video_streams": [{"width": 1920, "height": 1080}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["sar_text"], "unknown")
+        self.assertEqual(info["pixel_shape"], "unknown")
+        self.assertEqual(info["dar_source"], "width/height fallback (assumed SAR 1:1)")
+
+    def test_no_resize_nonsquare_sar_omits_setsar(self):
+        """Test 11: 720x576 SAR 16:15 no-resize -> source SAR preserved, no setsar=1."""
+        answers = {
+            "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                               "width": 720, "height": 576, "sample_aspect_ratio": "16:15"}],
+            "resolution": "n", "crop_enabled": False,
+        }
+        vf = FFmWiz.build_cpu_video_filter(answers) or ""
+        self.assertNotIn("setsar", vf)
+
+    def test_no_resize_square_sar_omits_setsar(self):
+        """No-resize square source: redundant setsar is omitted."""
+        answers = {
+            "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                               "width": 1920, "height": 1080, "sample_aspect_ratio": "1:1"}],
+            "resolution": "n", "crop_enabled": False,
+        }
+        vf = FFmWiz.build_cpu_video_filter(answers) or ""
+        self.assertNotIn("setsar", vf)
+
+    def test_stretch_resize_keeps_setsar(self):
+        """Test 15: explicit stretch keeps the intentional square-pixel setsar."""
+        answers = {
+            "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                               "width": 1920, "height": 1080}],
+            "resolution": FFmWiz.parse_resolution("stretch:1280x720"),
+            "crop_enabled": False,
+        }
+        vf = FFmWiz.build_cpu_video_filter(answers) or ""
+        self.assertIn("scale=1280:720", vf)
+        self.assertIn("setsar=1", vf)
 
 
 if __name__ == "__main__":
