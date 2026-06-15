@@ -1221,7 +1221,7 @@ def append_video_encode_options(
             cmd.extend(["-cq:v", str(int(round(crf_value))), "-b:v", "0"])
         else:
             cmd.extend(["-crf", f"{crf_value:g}"])
-    cmd.extend(["-color_range:v:0", COLOR_RANGE])
+    cmd.extend(color_range_output_args(answers, ":v:0"))
     if tag and str(answers.get("output_ext", "")).lower() in MP4_LIKE_EXTS:
         cmd.extend(["-tag:v", tag])
 
@@ -1389,6 +1389,71 @@ def ask_nvenc_multipass_if_applicable(
 
 def step_nvenc_multipass(answers: dict[str, Any]) -> None:
     ask_nvenc_multipass_if_applicable(answers, workflow_name="main encode", quality_oriented=True)
+
+
+def color_range_prompt_applicable(answers: dict[str, Any]) -> bool:
+    """Show the unknown-source color-range menu only when the output video is
+    re-encoded (color-range metadata may be written) and the source range is
+    unknown. Pure stream-copy/remux is excluded. Applicability is stable across
+    back/forward navigation (it does not depend on whether a choice was made)."""
+    if not output_has_video(answers):
+        return False
+    if source_color_range_known(answers):
+        return False
+    codec = str(answers.get("video_codec") or "").strip().lower()
+    if codec in {"copy", "n"} and not video_filters_required(answers):
+        # Pure copy/remux: preserve the source bitstream, do not invent metadata.
+        return False
+    return True
+
+
+def step_color_range(answers: dict[str, Any]) -> None:
+    """Resolve an unknown source color range via a 3-option menu. The choice is
+    stored in answers['color_range_choice'] and reused for every output Part."""
+    if source_color_range_known(answers):
+        return
+    previous = str(answers.get("color_range_choice") or "").strip().lower()
+    default_choice = {"tv": "1", "unspecified": "2", "pc": "3"}.get(previous, "1")
+    print()
+    note("Source color range is unknown:")
+    print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited", Color.HINT_YELLOW))
+    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Keep unspecified", Color.HINT_YELLOW))
+    print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full", Color.HINT_YELLOW))
+    mapping = {"1": "tv", "2": "unspecified", "3": "pc", "۱": "tv", "۲": "unspecified", "۳": "pc"}
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Select source color range",
+                "1=Assume TV/Limited; 2=Keep unspecified; 3=Assume PC/Full",
+                default_choice,
+                back="back=b, quit=exit",
+            )
+        )
+        lowered = value.strip().lower()
+        if lowered in {"b", "back"}:
+            raise Back()
+        if not lowered:
+            lowered = default_choice
+        choice = mapping.get(lowered)
+        if not choice:
+            error("Enter 1, 2, or 3. Use b to go back.")
+            continue
+        answers["color_range_choice"] = choice
+        resolved, source = resolve_color_range(answers)
+        log_info(
+            "Color range resolved: detected=unknown; resolved=%s; resolution_source=%s; "
+            "output_metadata=%s; pixel_value_range_conversion=no"
+            % (resolved or "unspecified", source, resolved or "omitted")
+        )
+        note(
+            "Color range: "
+            + ("Assume TV/Limited" if choice == "tv"
+               else "Keep unspecified" if choice == "unspecified"
+               else "Assume PC/Full")
+            + " (user-assumed, no pixel-value conversion)."
+        )
+        return
 
 
 def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_audio: bool) -> None:
@@ -4164,6 +4229,175 @@ def source_sar(answers: dict[str, Any]) -> float:
     return parse_sar_value(sar_str)
 
 
+# ------------------------------------------------------------------
+# Shared color-range helpers. The source metadata range is normalized to a
+# small internal vocabulary ("tv", "pc", or "" = unspecified). When the source
+# range is unknown the interactive wizard asks the user; command builders fall
+# back to the historical default (tv) so non-interactive paths are unchanged.
+# ------------------------------------------------------------------
+
+COLOR_RANGE_ALIASES = {
+    "tv": "tv",
+    "limited": "tv",
+    "mpeg": "tv",
+    "pc": "pc",
+    "full": "pc",
+    "jpeg": "pc",
+}
+
+
+def normalize_color_range(value: Any) -> str:
+    """Map any ffprobe/metadata color-range value to 'tv', 'pc', or '' (unspecified)."""
+    text = str(value or "").strip().lower()
+    return COLOR_RANGE_ALIASES.get(text, "")
+
+
+def source_color_range_known(answers: dict[str, Any]) -> bool:
+    """True when the source video stream reports a valid, known color range."""
+    stream = source_video_stream(answers) or {}
+    return normalize_color_range(stream.get("color_range")) in {"tv", "pc"}
+
+
+def resolve_color_range(answers: dict[str, Any]) -> tuple[str, str]:
+    """Resolve the output color-range decision.
+
+    Returns (resolved, source) where resolved is 'tv', 'pc', or '' (omit), and
+    source is one of: 'detected', 'user assumption', 'user choice', 'default'.
+
+    - Known source range -> use it (detected).
+    - Unknown source + a stored wizard choice:
+        'tv'/'pc'  -> user assumption (metadata only, no pixel conversion)
+        'unspecified' -> omit any forced range (user choice)
+    - Unknown source + no stored choice (command builders / non-interactive):
+        fall back to the historical default (tv) so existing behavior is kept.
+    """
+    stream = source_video_stream(answers) or {}
+    detected = normalize_color_range(stream.get("color_range"))
+    if detected in {"tv", "pc"}:
+        return detected, "detected"
+    choice = str(answers.get("color_range_choice") or "").strip().lower()
+    if choice == "unspecified":
+        return "", "user choice"
+    if choice in {"tv", "pc"}:
+        return choice, "user assumption"
+    return COLOR_RANGE, "default"
+
+
+def color_range_output_args(answers: dict[str, Any], spec: str = ":v:0") -> list[str]:
+    """Return the FFmpeg output color-range option (or [] when unspecified).
+
+    This only writes output metadata; it never performs a pixel-value range
+    conversion on its own."""
+    resolved, _source = resolve_color_range(answers)
+    if resolved in {"tv", "pc"}:
+        return [f"-color_range{spec}", resolved]
+    return []
+
+
+# ------------------------------------------------------------------
+# Shared SAR/DAR helpers. SAR (sample aspect ratio) describes pixel shape;
+# DAR (display aspect ratio) = coded_w/coded_h * SAR. These parse safely and
+# never invent values silently (a fallback is always reported by the caller).
+# ------------------------------------------------------------------
+
+
+def parse_rational(text: Any) -> float | None:
+    """Parse 'N:M', 'N/M', or a float to a positive float. Return None for
+    unknown/empty/invalid/zero/negative values (so callers can detect them)."""
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw or raw.lower() in {"n/a", "unknown", "none"}:
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)", raw)
+    if match:
+        num = float(match.group(1))
+        den = float(match.group(2))
+        if num > 0 and den > 0:
+            return num / den
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def _format_ratio(value: float) -> str:
+    """Format an aspect-ratio float as a compact 'W:H' when it matches a common
+    ratio, otherwise as a 3-decimal number."""
+    if value <= 0:
+        return "unknown"
+    common = {
+        16 / 9: "16:9", 4 / 3: "4:3", 21 / 9: "21:9", 1.0: "1:1",
+        3 / 2: "3:2", 5 / 4: "5:4", 9 / 16: "9:16", 2.39: "239:100",
+    }
+    for ratio, label in common.items():
+        if abs(value - ratio) < 0.005:
+            return label
+    return f"{value:.3f}"
+
+
+def sar_dar_info(answers: dict[str, Any]) -> dict[str, Any]:
+    """Compute SAR/DAR information for the source video stream.
+
+    Source-of-truth order for DAR:
+      1. valid coded width/height + valid SAR -> calculated
+      2. valid ffprobe DAR
+      3. width/height with assumed SAR 1:1 (fallback, reported)
+    """
+    stream = source_video_stream(answers) or {}
+    try:
+        coded_w = int(stream.get("width") or 0)
+        coded_h = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        coded_w = coded_h = 0
+    sar = parse_rational(stream.get("sample_aspect_ratio"))
+    probe_dar = parse_rational(stream.get("display_aspect_ratio"))
+
+    info: dict[str, Any] = {
+        "coded_w": coded_w or None,
+        "coded_h": coded_h or None,
+        "sar": sar,
+        "sar_text": _format_ratio(sar) if sar else "unknown",
+        "probe_dar": probe_dar,
+        "dar": None,
+        "dar_text": "unknown",
+        "dar_source": "unknown",
+        "pixel_shape": "unknown",
+        "discrepancy": None,
+    }
+
+    calc_dar = None
+    if coded_w > 0 and coded_h > 0 and sar:
+        calc_dar = (coded_w / coded_h) * sar
+        info["dar"] = calc_dar
+        info["dar_source"] = "calculated from coded resolution and SAR"
+    elif probe_dar:
+        info["dar"] = probe_dar
+        info["dar_source"] = "ffprobe"
+    elif coded_w > 0 and coded_h > 0:
+        info["dar"] = coded_w / coded_h
+        info["dar_source"] = "width/height fallback (assumed SAR 1:1)"
+
+    if info["dar"]:
+        info["dar_text"] = _format_ratio(info["dar"])
+
+    # When ffprobe also reports a DAR and we calculated one, flag disagreement.
+    if calc_dar and probe_dar and abs(calc_dar - probe_dar) > 0.02:
+        info["discrepancy"] = (calc_dar, probe_dar)
+
+    if sar is not None:
+        info["pixel_shape"] = "square" if abs(sar - 1.0) < 1e-3 else "non-square"
+
+    return info
+
+
+def effective_source_dar(answers: dict[str, Any]) -> float | None:
+    """Return the effective source display aspect ratio, or None if unknown."""
+    return sar_dar_info(answers).get("dar")
+
+
 def cropped_display_size(answers: dict[str, Any]) -> tuple[int, int]:
     """Return the effective display dimensions after crop, accounting for SAR.
     These are the dimensions as seen on screen (DAR-adjusted)."""
@@ -6136,8 +6370,35 @@ def print_source_info(answers: dict[str, Any]) -> None:
                 f"{field_text('chapters', chapters_value, chapters_color)} | "
                 f"{field_text('Color range', display_color_range(stream.get('color_range')), Color.COLOR_RANGE_VALUE)}"
             )
-
-    if audio_streams:
+            if idx == 0:
+                info = sar_dar_info(answers)
+                coded = (
+                    f"{info['coded_w']}x{info['coded_h']}"
+                    if info.get("coded_w") and info.get("coded_h") else "unknown"
+                )
+                eff = f"{info['dar']:.6f}" if info.get("dar") else "unknown"
+                print(
+                    "     "
+                    f"{field_text('coded resolution', coded, Color.LIME)} | "
+                    f"{field_text('SAR', info['sar_text'], Color.AQUA)} | "
+                    f"{field_text('DAR', info['dar_text'], Color.AQUA)} | "
+                    f"{field_text('effective DAR', eff, Color.AQUA)} | "
+                    f"{field_text('pixel shape', info['pixel_shape'], Color.PINK)} | "
+                    f"{field_text('DAR source', info['dar_source'], Color.DIM)}"
+                )
+                log_info(
+                    "Source SAR/DAR: coded=%s; SAR=%s; DAR=%s; effective_DAR=%s; "
+                    "pixel_shape=%s; DAR_source=%s"
+                    % (coded, info['sar_text'], info['dar_text'], eff,
+                       info['pixel_shape'], info['dar_source'])
+                )
+                if info.get("discrepancy"):
+                    calc_dar, probe_dar = info["discrepancy"]
+                    log_warn(
+                        "SAR/DAR discrepancy: calculated DAR %.6f vs ffprobe DAR %.6f; "
+                        "using calculated (coded resolution + SAR) as source of truth."
+                        % (calc_dar, probe_dar)
+                    )
         print(paint("\nAudio streams", Color.BOLD + Color.BLUE))
         volume_stats = get_audio_volume_stats(answers)
         report = detect_duplicate_audio(answers) if answers.get("detect_duplicate_audio", True) else None
@@ -13880,8 +14141,32 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     # Crop dimensions are normalized to the output encoder grid by
     # normalized_crop_margins, so no black compatibility padding is added here.
 
-    if FORCE_SAR and not scale_resets_sar:
-        filters.append(f"setsar={FORCE_SAR}")
+    # SAR handling:
+    #  - Preserve/Fit resize already resets SAR inside the scale filter
+    #    (scale_resets_sar) -> no trailing setsar needed.
+    #  - Stretch resize (scale_dimensions set, but not reset) intentionally
+    #    produces square pixels -> keep the explicit setsar.
+    #  - No resize: do NOT blindly force setsar=1. Forcing 1:1 on a non-square
+    #    source changes its display geometry. Preserve the source SAR by
+    #    omitting the filter (the decoder passes the source SAR through), and do
+    #    not invent 1:1 for an unknown SAR.
+    if not scale_resets_sar:
+        if scale_dimensions:
+            # Stretch resize: square-pixel output is intentional here.
+            if FORCE_SAR:
+                filters.append(f"setsar={FORCE_SAR}")
+        else:
+            info = sar_dar_info(answers)
+            sar = info.get("sar")
+            if sar is not None and abs(sar - 1.0) >= 1e-3:
+                log_info(
+                    f"SAR: no-resize path preserves source non-square SAR "
+                    f"{info.get('sar_text')} (no setsar forced)."
+                )
+            elif sar is None:
+                log_info("SAR: source SAR unknown; no setsar forced in no-resize path.")
+            else:
+                log_info("SAR: source pixels are square; setsar omitted as redundant.")
 
     filters.append(f"format={cpu_pixel_format_for_output(answers)}")
     return ",".join(filters) if filters else None
@@ -14382,7 +14667,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                     cmd.extend([f"-crf", f"{crf_value:g}"])
                     log_info(f"CPU encoder constant quality: -crf {crf_value:g}")
 
-            cmd.extend(["-color_range:v:0", COLOR_RANGE])
+            cmd.extend(color_range_output_args(answers, ":v:0"))
 
             if tag and answers["output_ext"].lower() in MP4_LIKE_EXTS:
                 cmd.extend(["-tag:v:0" if full_source_map else "-tag:v", tag])
@@ -15230,6 +15515,7 @@ def run_wizard(answers: dict[str, Any]) -> None:
         Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
         Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
         Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
+        Step("color_range", color_range_prompt_applicable, step_color_range),
         Step("start_now", lambda a: True, step_start_now),
     ]
 
@@ -15424,6 +15710,27 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         if answers.get("final_resolution"):
             final_w, final_h = answers["final_resolution"]
             print("  " + field_text("final output resolution", f"{final_w}x{final_h}", Color.LIME))
+        # Color-range and SAR/DAR summary.
+        resolved_range, range_source = resolve_color_range(answers)
+        detected_range = display_color_range((source_video_stream(answers) or {}).get("color_range"))
+        print("  " + field_text("detected source color range", detected_range, Color.COLOR_RANGE_VALUE))
+        print("  " + field_text(
+            "resolved color range",
+            (resolved_range or "unspecified") + f" ({range_source})",
+            Color.COLOR_RANGE_VALUE,
+        ))
+        print("  " + field_text(
+            "output color-range metadata",
+            resolved_range if resolved_range else "omitted",
+            Color.COLOR_RANGE_VALUE,
+        ))
+        print("  " + field_text("pixel-value range conversion", "no", Color.DIM))
+        _sd = sar_dar_info(answers)
+        print("  " + field_text(
+            "source SAR / DAR",
+            f"{_sd['sar_text']} / {_sd['dar_text']} ({_sd['dar_source']})",
+            Color.AQUA,
+        ))
         print("  " + field_text("fps", answers.get("fps") or "source", Color.MAGENTA))
         if video_speed_transform_enabled(answers):
             print("  " + field_text("video speed", f"{encode_video_speed_factor(answers) * 100:.0f}%", Color.MAGENTA))
@@ -19045,6 +19352,10 @@ def append_hardsub_color_args(cmd: list[str], answers: dict[str, Any]) -> None:
         cmd.extend(["-color_range", "tv", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"])
         return
     if handling != "preserve":
+        # Standard handling: write the resolved output color-range metadata
+        # (detected source range, or the user's unknown-range assumption). This
+        # only sets metadata; it performs no pixel-value range conversion.
+        cmd.extend(color_range_output_args(answers, ""))
         return
     for ff_arg, key in (
         ("-color_range", "color_range"),
@@ -19570,6 +19881,7 @@ def _run_hardsub_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, fl
         Step("hardsub_hdr", lambda a: True, step_hardsub_hdr_handling),
         Step("hardsub_audio", lambda a: True, step_hardsub_audio_mode),
         Step("hardsub_audio_container", lambda a: True, step_hardsub_audio_container_policy),
+        Step("color_range", color_range_prompt_applicable, step_color_range),
         Step("start_now", lambda a: True, step_hardsub_start_now),
     ]
 
