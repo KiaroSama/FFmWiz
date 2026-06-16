@@ -1228,7 +1228,7 @@ def append_video_encode_options(
             cmd.extend(["-cq:v", str(int(round(crf_value))), "-b:v", "0"])
         else:
             cmd.extend(["-crf", f"{crf_value:g}"])
-    cmd.extend(color_range_output_args(answers, ":v:0"))
+    cmd.extend(color_range_output_args(answers, ":v:0", workflow="append_video_encode_options"))
     if tag and str(answers.get("output_ext", "")).lower() in MP4_LIKE_EXTS:
         cmd.extend(["-tag:v", tag])
 
@@ -4398,10 +4398,35 @@ def source_color_range_known(answers: dict[str, Any]) -> bool:
     return normalize_color_range(stream.get("color_range")) in {"tv", "pc"}
 
 
+def _color_range_unresolved_message(
+    answers: dict[str, Any], detected: str, workflow: str | None
+) -> str:
+    """Build a diagnostic message for an unresolved color-range decision.
+    Identifies the source path, selected video stream, detected range, the
+    workflow/builder that requested resolution, and the missing choice."""
+    stream = source_video_stream(answers) or {}
+    source_path = str(answers.get("input_path") or "unknown")
+    stream_index = stream.get("index", "?")
+    codec = stream.get("codec_name", "unknown")
+    pix_fmt = stream.get("pix_fmt", "unknown")
+    return (
+        "Color range could not be resolved before FFmpeg execution. "
+        f"workflow/builder={workflow or 'unknown'}; "
+        f"source path={source_path}; "
+        f"selected video stream=index {stream_index} (codec={codec}, pix_fmt={pix_fmt}); "
+        f"detected range={detected or 'unknown'}; "
+        "missing resolved choice=color_range_choice (expected one of tv/pc/unspecified "
+        "from the wizard, batch policy, or per-file policy). "
+        "Compatibility fallback is opt-in only for explicitly identified legacy/direct "
+        "API callers."
+    )
+
+
 def resolve_color_range(
     answers: dict[str, Any],
     *,
-    allow_compatibility_fallback: bool = True,
+    allow_compatibility_fallback: bool = False,
+    workflow: str | None = None,
 ) -> tuple[str, str]:
     """Resolve the output color-range decision.
 
@@ -4414,10 +4439,12 @@ def resolve_color_range(
         'tv'/'pc'  -> assumption (metadata only, no pixel conversion)
         'unspecified' -> omit any forced range (user choice)
     - Unknown source + no stored choice:
-        if allow_compatibility_fallback -> historical default (tv), reported
-        explicitly as a 'compatibility fallback' so it never masquerades as a
-        detected value; otherwise raise ColorRangeUnresolvedError so production
-        builders never silently assume a range.
+        Defensive default is allow_compatibility_fallback=False: raise
+        ColorRangeUnresolvedError so production builders never silently assume a
+        range. Only explicitly identified legacy/direct API callers may opt in
+        with allow_compatibility_fallback=True, in which case the historical
+        default (tv) is returned and reported explicitly as a 'compatibility
+        fallback' so it never masquerades as a detected value.
     """
     stream = source_video_stream(answers) or {}
     detected = normalize_color_range(stream.get("color_range"))
@@ -4431,8 +4458,7 @@ def resolve_color_range(
         return choice, source
     if not allow_compatibility_fallback:
         raise ColorRangeUnresolvedError(
-            "Source color range is unknown and no explicit color-range decision "
-            "was resolved for this workflow."
+            _color_range_unresolved_message(answers, detected, workflow)
         )
     return COLOR_RANGE, "compatibility fallback"
 
@@ -4441,21 +4467,26 @@ def color_range_output_args(
     answers: dict[str, Any],
     spec: str = ":v:0",
     *,
-    allow_compatibility_fallback: bool = True,
+    allow_compatibility_fallback: bool = False,
+    workflow: str | None = None,
 ) -> list[str]:
     """Return the FFmpeg output color-range option (or [] when unspecified).
 
     This only writes output metadata; it never performs a pixel-value range
-    conversion on its own."""
+    conversion on its own. The defensive default (allow_compatibility_fallback=
+    False) raises ColorRangeUnresolvedError for an unresolved unknown-range
+    source so production command builders never emit a silent fallback."""
     resolved, _source = resolve_color_range(
-        answers, allow_compatibility_fallback=allow_compatibility_fallback
+        answers,
+        allow_compatibility_fallback=allow_compatibility_fallback,
+        workflow=workflow,
     )
     if resolved in {"tv", "pc"}:
         return [f"-color_range{spec}", resolved]
     return []
 
 
-def ensure_color_range_resolved(answers: dict[str, Any]) -> None:
+def ensure_color_range_resolved(answers: dict[str, Any], workflow: str | None = None) -> None:
     """Production-entry guard: before generating a re-encode command in a UI
     workflow, confirm the color range is explicitly resolved (detected, user/
     batch assumption, or unspecified) rather than a silent compatibility
@@ -4464,10 +4495,12 @@ def ensure_color_range_resolved(answers: dict[str, Any]) -> None:
         return
     if str(resolve_video_encoder(answers)[0]).lower() == "copy":
         return
-    resolved, source = resolve_color_range(answers, allow_compatibility_fallback=False)
+    resolved, source = resolve_color_range(
+        answers, allow_compatibility_fallback=False, workflow=workflow
+    )
     log_info(
-        "Color range entry check: resolved=%s; resolution_source=%s"
-        % (resolved or "unspecified", source)
+        "Color range entry check: workflow=%s; resolved=%s; resolution_source=%s"
+        % (workflow or "unknown", resolved or "unspecified", source)
     )
 
 
@@ -15011,7 +15044,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                     cmd.extend([f"-crf", f"{crf_value:g}"])
                     log_info(f"CPU encoder constant quality: -crf {crf_value:g}")
 
-            cmd.extend(color_range_output_args(answers, ":v:0"))
+            cmd.extend(color_range_output_args(answers, ":v:0", workflow="build_ffmpeg_command"))
 
             if tag and answers["output_ext"].lower() in MP4_LIKE_EXTS:
                 cmd.extend(["-tag:v:0" if full_source_map else "-tag:v", tag])
@@ -15623,7 +15656,7 @@ def step_start_now(answers: dict[str, Any]) -> None:
         else:
             cmd = build_ffmpeg_command(answers)
     answers["cmd"] = cmd
-    ensure_color_range_resolved(answers)
+    ensure_color_range_resolved(answers, workflow="Main Wizard")
     log_crop_normalization_summary(answers)
     log_and_warn_pixel_format(answers)
     print_summary(answers, cmd)
@@ -16056,8 +16089,13 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         if answers.get("final_resolution"):
             final_w, final_h = answers["final_resolution"]
             print("  " + field_text("final output resolution", f"{final_w}x{final_h}", Color.LIME))
-        # Color-range and SAR/DAR summary.
-        resolved_range, range_source = resolve_color_range(answers)
+        # Color-range and SAR/DAR summary. The summary is a display surface, so
+        # an unresolved unknown range (e.g. a pure stream-copy that writes no
+        # color-range metadata) is reported honestly instead of raising.
+        try:
+            resolved_range, range_source = resolve_color_range(answers, workflow="print_summary")
+        except ColorRangeUnresolvedError:
+            resolved_range, range_source = "", "unresolved (no metadata written)"
         detected_range = display_color_range((source_video_stream(answers) or {}).get("color_range"))
         print("  " + field_text("detected source color range", detected_range, Color.COLOR_RANGE_VALUE))
         print("  " + field_text(
@@ -18729,7 +18767,7 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
         print(paint(f"Folder Encode [{index}/{total}]: {input_path.name}", Color.BOLD + Color.LIGHT_BLUE))
         try:
             job_answers = prepare_folder_job_answers(answers, item)
-            ensure_color_range_resolved(job_answers)
+            ensure_color_range_resolved(job_answers, workflow="Folder Encode")
             log_and_warn_pixel_format(job_answers)
             cmd = build_ffmpeg_command(job_answers)
         except Exception as exc:
@@ -19724,7 +19762,7 @@ def append_hardsub_color_args(cmd: list[str], answers: dict[str, Any]) -> None:
         # Standard handling: write the resolved output color-range metadata
         # (detected source range, or the user's unknown-range assumption). This
         # only sets metadata; it performs no pixel-value range conversion.
-        cmd.extend(color_range_output_args(answers, ""))
+        cmd.extend(color_range_output_args(answers, "", workflow="build_hardsub_command"))
         return
     for ff_arg, key in (
         ("-color_range", "color_range"),
@@ -20196,7 +20234,7 @@ def step_hardsub_audio_container_policy(answers: dict[str, Any]) -> None:
 
 
 def step_hardsub_start_now(answers: dict[str, Any]) -> None:
-    ensure_color_range_resolved(answers)
+    ensure_color_range_resolved(answers, workflow="HardSub")
     log_and_warn_pixel_format(answers)
     cmd = build_hardsub_command(answers)
     answers["cmd"] = cmd
