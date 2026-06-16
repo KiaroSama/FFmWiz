@@ -15,15 +15,20 @@ class CommandGenerationTests(unittest.TestCase):
     def setUp(self):
         FFmWiz.USE_COLOR = False
         # Isolate the FFmpeg capability cache in a uniquely-owned temp directory
-        # so tests can never touch the real/default cache. The directory carries
-        # an ownership marker and is removed only via the safe cleanup helper.
+        # so tests can never touch the real/default cache. The previous value of
+        # FFMWIZ_CACHE_DIR is saved and restored in tearDown (even on failure).
+        self._prev_cache_env = os.environ.get("FFMWIZ_CACHE_DIR")
         self._cache_run_id = uuid.uuid4().hex
         self._cache_dir = cache_test_utils.create_owned_temp_cache_dir(self._cache_run_id)
         os.environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
         FFmWiz._CAPABILITY_SESSION_MEMO.clear()
 
     def tearDown(self):
-        os.environ.pop("FFMWIZ_CACHE_DIR", None)
+        # Restore the prior environment value rather than blindly unsetting it.
+        if self._prev_cache_env is None:
+            os.environ.pop("FFMWIZ_CACHE_DIR", None)
+        else:
+            os.environ["FFMWIZ_CACHE_DIR"] = self._prev_cache_env
         FFmWiz._CAPABILITY_SESSION_MEMO.clear()
         # Safe, ownership-verified removal of only this test's temp cache dir.
         cache_test_utils.safe_remove_owned_temp_dir(
@@ -5280,6 +5285,126 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertEqual(vf.count("setsar="), 1)
             self.assertIn("setsar=1", vf)
             self.assertNotIn("setsar=1/1", vf)
+
+    # ===================================================================
+    # Real-cache read-only snapshot safety
+    # ===================================================================
+
+    def test_snapshot_is_read_only_for_existing_file(self):
+        """Snapshotting an existing cache file does not modify it."""
+        with tempfile.TemporaryDirectory(prefix="ffmwiz_snap_") as tmp:
+            f = Path(tmp, "ffmpeg_capabilities.json")
+            f.write_text('{"schema_version":1,"environments":{}}', encoding="utf-8")
+            before = (f.stat().st_size, f.stat().st_mtime_ns, f.read_bytes())
+            snap = cache_test_utils.snapshot_runtime_cache_state(tmp)
+            after = (f.stat().st_size, f.stat().st_mtime_ns, f.read_bytes())
+            self.assertEqual(before, after)  # unchanged
+            self.assertTrue(snap["ffmpeg_capabilities.json"]["exists"])
+            self.assertIsNotNone(snap["ffmpeg_capabilities.json"]["sha256"])
+            self.assertFalse(snap["ffmpeg_capabilities.corrupt"]["exists"])
+
+    def test_snapshot_does_not_create_absent_files(self):
+        """Snapshotting an empty cache dir creates nothing."""
+        with tempfile.TemporaryDirectory(prefix="ffmwiz_snap_") as tmp:
+            snap = cache_test_utils.snapshot_runtime_cache_state(tmp)
+            for name in cache_test_utils.CAPABILITY_CACHE_OWNED_FILENAMES:
+                self.assertFalse(snap[name]["exists"])
+                self.assertIsNone(snap[name]["sha256"])
+                self.assertFalse(Path(tmp, name).exists())  # not created
+
+    def test_snapshot_does_not_create_runtime_cache_dir(self):
+        """The default runtime snapshot never creates the real .cache directory."""
+        runtime_dir = cache_test_utils.runtime_cache_dir()
+        existed_before = runtime_dir.exists()
+        cache_test_utils.snapshot_runtime_cache_state()  # default = real dir
+        self.assertEqual(runtime_dir.exists(), existed_before)
+
+    # ===================================================================
+    # Isolated cache environment save/restore
+    # ===================================================================
+
+    def test_isolated_cache_env_restores_previous_value(self):
+        os.environ["FFMWIZ_CACHE_DIR"] = "SENTINEL_PREV_VALUE"
+        try:
+            with cache_test_utils.isolated_cache_env() as (path, _run):
+                self.assertEqual(os.environ["FFMWIZ_CACHE_DIR"], path)
+            self.assertEqual(os.environ["FFMWIZ_CACHE_DIR"], "SENTINEL_PREV_VALUE")
+        finally:
+            os.environ.pop("FFMWIZ_CACHE_DIR", None)
+
+    def test_isolated_cache_env_restores_on_exception(self):
+        os.environ.pop("FFMWIZ_CACHE_DIR", None)
+        with self.assertRaises(ValueError):
+            with cache_test_utils.isolated_cache_env():
+                raise ValueError("boom")
+        # Absent before -> absent after, even though the body raised.
+        self.assertNotIn("FFMWIZ_CACHE_DIR", os.environ)
+
+    def test_writable_tests_use_isolated_cache_dir(self):
+        active = FFmWiz.capability_cache_path().resolve()
+        self.assertEqual(active.parent, Path(self._cache_dir).resolve())
+        self.assertEqual(os.environ.get("FFMWIZ_CACHE_DIR"), self._cache_dir)
+
+    # ===================================================================
+    # Validation sentinel safety
+    # ===================================================================
+
+    def test_sentinel_exclusive_creation_and_unique_name(self):
+        info = cache_test_utils.create_validation_sentinel(self._cache_dir, self._cache_run_id)
+        try:
+            self.assertIn(self._cache_run_id, info["name"])
+            self.assertTrue(info["name"].startswith(".ffmwiz_validation_sentinel_"))
+            self.assertNotIn(info["name"], cache_test_utils.CAPABILITY_CACHE_OWNED_FILENAMES)
+            self.assertEqual(Path(info["path"]).read_text(encoding="utf-8"), info["token"])
+        finally:
+            cache_test_utils.remove_validation_sentinel(info, self._cache_dir)
+
+    def test_sentinel_existing_path_blocks_overwrite(self):
+        info = cache_test_utils.create_validation_sentinel(self._cache_dir, self._cache_run_id)
+        try:
+            # Re-creating with the same run id targets the same path -> refused.
+            with self.assertRaises(RuntimeError):
+                cache_test_utils.create_validation_sentinel(self._cache_dir, self._cache_run_id)
+        finally:
+            cache_test_utils.remove_validation_sentinel(info, self._cache_dir)
+
+    def test_sentinel_token_mismatch_blocks_deletion(self):
+        info = cache_test_utils.create_validation_sentinel(self._cache_dir, self._cache_run_id)
+        try:
+            tampered = dict(info)
+            tampered["token"] = "WRONG-TOKEN"
+            with self.assertRaises(RuntimeError):
+                cache_test_utils.remove_validation_sentinel(tampered, self._cache_dir)
+            self.assertTrue(Path(info["path"]).exists())
+        finally:
+            cache_test_utils.remove_validation_sentinel(info, self._cache_dir)
+
+    def test_sentinel_never_uses_production_cache_filename(self):
+        info = cache_test_utils.create_validation_sentinel(self._cache_dir, self._cache_run_id)
+        try:
+            self.assertNotIn("ffmpeg_capabilities", info["name"])
+        finally:
+            cache_test_utils.remove_validation_sentinel(info, self._cache_dir)
+
+    def test_sentinel_only_exact_owned_removed(self):
+        info = cache_test_utils.create_validation_sentinel(self._cache_dir, self._cache_run_id)
+        decoy = Path(self._cache_dir, ".ffmwiz_validation_sentinel_OTHER")
+        decoy.write_text("other", encoding="utf-8")
+        self.assertTrue(cache_test_utils.remove_validation_sentinel(info, self._cache_dir))
+        self.assertFalse(Path(info["path"]).exists())
+        self.assertTrue(decoy.exists())  # unrelated sentinel-like file survives
+
+    def test_mock_protected_cache_dir_not_recursively_deleted(self):
+        """A mock runtime .cache dir (no ownership marker) cannot be rmtree'd."""
+        with tempfile.TemporaryDirectory(prefix="ffmwiz_mockproj_") as tmp:
+            mock_cache = Path(tmp, "mock_project", ".cache")
+            mock_cache.mkdir(parents=True)
+            keep = mock_cache / "ffmpeg_capabilities.json"
+            keep.write_text("{}", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                cache_test_utils.safe_remove_owned_temp_dir(
+                    mock_cache, "any-id", tempfile.gettempdir())
+            self.assertTrue(keep.exists())  # nothing deleted
 
 
 if __name__ == "__main__":
