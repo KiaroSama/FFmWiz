@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import FFmWiz
+import cache_test_utils
 
 
 class CommandGenerationTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class CommandGenerationTests(unittest.TestCase):
         # so tests can never touch the real/default cache. The directory carries
         # an ownership marker and is removed only via the safe cleanup helper.
         self._cache_run_id = uuid.uuid4().hex
-        self._cache_dir = FFmWiz.create_owned_temp_cache_dir(self._cache_run_id)
+        self._cache_dir = cache_test_utils.create_owned_temp_cache_dir(self._cache_run_id)
         os.environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
         FFmWiz._CAPABILITY_SESSION_MEMO.clear()
 
@@ -25,7 +26,7 @@ class CommandGenerationTests(unittest.TestCase):
         os.environ.pop("FFMWIZ_CACHE_DIR", None)
         FFmWiz._CAPABILITY_SESSION_MEMO.clear()
         # Safe, ownership-verified removal of only this test's temp cache dir.
-        FFmWiz.safe_remove_owned_temp_dir(
+        cache_test_utils.safe_remove_owned_temp_dir(
             self._cache_dir, self._cache_run_id, tempfile.gettempdir())
 
     def base_answers(self, output_dir: str) -> dict:
@@ -5074,42 +5075,42 @@ class CommandGenerationTests(unittest.TestCase):
 
     def test_cleanup_isolated_temp_cache_created_with_marker(self):
         run_id = "run-" + os.urandom(4).hex()
-        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        path = cache_test_utils.create_owned_temp_cache_dir(run_id)
         try:
             p = Path(path)
             self.assertTrue(p.is_dir())
             self.assertEqual(Path(tempfile.gettempdir()).resolve(), p.resolve().parent)
-            marker = p / FFmWiz.TEST_CACHE_OWNER_MARKER
+            marker = p / cache_test_utils.TEST_CACHE_OWNER_MARKER
             self.assertTrue(marker.is_file())
             self.assertEqual(marker.read_text(encoding="utf-8").strip(), run_id)
         finally:
-            FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
+            cache_test_utils.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
 
     def test_cleanup_owned_delete_and_idempotent(self):
         run_id = "run-" + os.urandom(4).hex()
-        path = FFmWiz.create_owned_temp_cache_dir(run_id)
-        self.assertTrue(FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir()))
+        path = cache_test_utils.create_owned_temp_cache_dir(run_id)
+        self.assertTrue(cache_test_utils.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir()))
         self.assertFalse(Path(path).exists())
         # Idempotent second call.
-        self.assertFalse(FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir()))
+        self.assertFalse(cache_test_utils.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir()))
 
     def test_cleanup_marker_mismatch_blocks(self):
         run_id = "run-" + os.urandom(4).hex()
-        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        path = cache_test_utils.create_owned_temp_cache_dir(run_id)
         try:
             with self.assertRaises(RuntimeError):
-                FFmWiz.safe_remove_owned_temp_dir(path, "WRONG-ID", tempfile.gettempdir())
+                cache_test_utils.safe_remove_owned_temp_dir(path, "WRONG-ID", tempfile.gettempdir())
             self.assertTrue(Path(path).exists())
         finally:
-            FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
+            cache_test_utils.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
 
     def test_cleanup_missing_marker_blocks(self):
         run_id = "run-" + os.urandom(4).hex()
-        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        path = cache_test_utils.create_owned_temp_cache_dir(run_id)
         try:
-            (Path(path) / FFmWiz.TEST_CACHE_OWNER_MARKER).unlink()
+            (Path(path) / cache_test_utils.TEST_CACHE_OWNER_MARKER).unlink()
             with self.assertRaises(RuntimeError):
-                FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
+                cache_test_utils.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
             self.assertTrue(Path(path).exists())
         finally:
             import shutil as _sh
@@ -5127,16 +5128,16 @@ class CommandGenerationTests(unittest.TestCase):
         ]
         for candidate in protected_candidates:
             with self.assertRaises(RuntimeError):
-                FFmWiz.safe_remove_owned_temp_dir(candidate, "any", root)
+                cache_test_utils.safe_remove_owned_temp_dir(candidate, "any", root)
 
     def test_cleanup_refuses_path_outside_temp_root(self):
         project_root = Path(FFmWiz.__file__).resolve().parent
         with self.assertRaises(RuntimeError):
-            FFmWiz.safe_remove_owned_temp_dir(project_root / "some_sub", "any", tempfile.gettempdir())
+            cache_test_utils.safe_remove_owned_temp_dir(project_root / "some_sub", "any", tempfile.gettempdir())
 
     def test_cleanup_refuses_symlink_to_protected(self):
         run_id = "run-" + os.urandom(4).hex()
-        link_parent = FFmWiz.create_owned_temp_cache_dir(run_id)
+        link_parent = cache_test_utils.create_owned_temp_cache_dir(run_id)
         link = Path(link_parent) / "link_to_cache"
         target = Path(FFmWiz.__file__).resolve().parent / FFmWiz.CAPABILITY_CACHE_DIRNAME
         try:
@@ -5146,15 +5147,15 @@ class CommandGenerationTests(unittest.TestCase):
                 self.skipTest("symlink creation not permitted on this system")
             # Resolves to project .cache -> protected -> refused.
             with self.assertRaises(RuntimeError):
-                FFmWiz.safe_remove_owned_temp_dir(link, run_id, tempfile.gettempdir())
+                cache_test_utils.safe_remove_owned_temp_dir(link, run_id, tempfile.gettempdir())
         finally:
-            FFmWiz.safe_remove_owned_temp_dir(link_parent, run_id, tempfile.gettempdir())
+            cache_test_utils.safe_remove_owned_temp_dir(link_parent, run_id, tempfile.gettempdir())
 
     def test_capability_clear_removes_only_owned_file(self):
         FFmWiz.save_capability_cache({"schema_version": 1, "environments": {"E": {}}})
         unrelated = Path(self._cache_dir, "unrelated_user_file.json")
         unrelated.write_text("{}", encoding="utf-8")
-        marker = Path(self._cache_dir, FFmWiz.TEST_CACHE_OWNER_MARKER)
+        marker = Path(self._cache_dir, cache_test_utils.TEST_CACHE_OWNER_MARKER)
         with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz._capability_cache_clear()
@@ -5176,6 +5177,109 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(active.parent, Path(self._cache_dir).resolve())
         project_cache = Path(FFmWiz.__file__).resolve().parent / FFmWiz.CAPABILITY_CACHE_DIRNAME
         self.assertNotEqual(active.parent, project_cache)
+
+    def test_production_has_no_test_only_cache_helpers(self):
+        """Test-only cleanup infrastructure must not live in production FFmWiz.py."""
+        for symbol in ("create_owned_temp_cache_dir", "safe_remove_owned_temp_dir",
+                       "TEST_CACHE_OWNER_MARKER", "protected_cleanup_paths"):
+            self.assertFalse(hasattr(FFmWiz, symbol),
+                             "FFmWiz unexpectedly exposes test-only symbol %s" % symbol)
+        src = Path(FFmWiz.__file__).read_text(encoding="utf-8")
+        self.assertNotIn(".ffmwiz_test_cache_owner", src)
+        self.assertNotIn("create_owned_temp_cache_dir", src)
+        self.assertNotIn("safe_remove_owned_temp_dir", src)
+        self.assertNotIn("ffmwiz_test_cache_", src)
+        # The test utility module provides them instead.
+        self.assertTrue(hasattr(cache_test_utils, "create_owned_temp_cache_dir"))
+        self.assertTrue(hasattr(cache_test_utils, "safe_remove_owned_temp_dir"))
+
+    def test_clear_removes_recovery_created_corrupt_backup(self):
+        """The clear action removes the exact corrupt-backup the recovery makes."""
+        cap = FFmWiz.capability_cache_path()
+        cap.parent.mkdir(parents=True, exist_ok=True)
+        cap.write_text("{not valid json", encoding="utf-8")
+        # Real recovery path renames the bad file to ffmpeg_capabilities.corrupt.
+        FFmWiz.load_capability_cache()
+        corrupt = cap.with_suffix(".corrupt")
+        self.assertEqual(corrupt.name, "ffmpeg_capabilities.corrupt")
+        self.assertTrue(corrupt.exists())
+        # Recreate a valid primary file as well.
+        FFmWiz.save_capability_cache({"schema_version": 1, "environments": {}})
+        self.assertTrue(cap.exists())
+        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz._capability_cache_clear()
+        self.assertFalse(cap.exists())
+        self.assertFalse(corrupt.exists())
+
+    def test_clear_keeps_similar_but_unrelated_filenames(self):
+        """Files that merely resemble cache artifacts must survive the clear."""
+        cap = FFmWiz.capability_cache_path()
+        cap.parent.mkdir(parents=True, exist_ok=True)
+        FFmWiz.save_capability_cache({"schema_version": 1, "environments": {}})
+        decoys = [
+            Path(self._cache_dir, "ffmpeg_capabilities.json.bak"),
+            Path(self._cache_dir, "my_ffmpeg_capabilities.json"),
+            Path(self._cache_dir, "capabilities.corrupt"),
+            Path(self._cache_dir, "ffmpeg_capabilities.corrupt.old"),
+            Path(self._cache_dir, "notes.txt"),
+        ]
+        for d in decoys:
+            d.write_text("keep", encoding="utf-8")
+        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz._capability_cache_clear()
+        self.assertFalse(cap.exists())
+        for d in decoys:
+            self.assertTrue(d.exists(), "decoy unexpectedly removed: %s" % d.name)
+
+    def test_clear_missing_files_is_idempotent_noop(self):
+        """Clearing when no cache files exist is a safe no-op (no prompt, no error)."""
+        cap = FFmWiz.capability_cache_path()
+        self.assertFalse(cap.exists())
+        with mock.patch.object(FFmWiz, "ask_yes_no",
+                               side_effect=AssertionError("should not prompt")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            FFmWiz._capability_cache_clear()
+            FFmWiz._capability_cache_clear()  # idempotent
+        self.assertIn("already empty", out.getvalue())
+        self.assertTrue(Path(self._cache_dir).is_dir())
+
+    def test_clear_partial_failure_does_not_claim_full_success(self):
+        """If one owned artifact cannot be deleted, unrelated files survive and
+        the message does not falsely claim a full clear."""
+        cap = FFmWiz.capability_cache_path()
+        cap.parent.mkdir(parents=True, exist_ok=True)
+        FFmWiz.save_capability_cache({"schema_version": 1, "environments": {}})
+        # Make the corrupt-backup name an undeletable directory (unlink fails).
+        corrupt_dir = cap.with_suffix(".corrupt")
+        corrupt_dir.mkdir()
+        (corrupt_dir / "blocker.txt").write_text("x", encoding="utf-8")
+        unrelated = Path(self._cache_dir, "survivor.json")
+        unrelated.write_text("{}", encoding="utf-8")
+        buf = io.StringIO()
+        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+                contextlib.redirect_stdout(buf):
+            FFmWiz._capability_cache_clear()
+        text = buf.getvalue()
+        self.assertFalse(cap.exists())               # primary removed
+        self.assertTrue(corrupt_dir.is_dir())         # failed artifact remains
+        self.assertTrue(unrelated.exists())           # unrelated survives
+        self.assertIn("partially cleared", text)
+        self.assertNotIn("Capability cache cleared (", text)
+
+    def test_hardsub_square_sar_single_setsar(self):
+        """Square-SAR HardSub gains exactly one setsar=1 (no redundant/contradictory)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.hardsub_answers(tmp, output_ext="mkv")
+            answers["color_range_choice"] = "tv"
+            answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264",
+                                         "width": 1920, "height": 1080,
+                                         "sample_aspect_ratio": "1:1"}]
+            vf = FFmWiz.build_hardsub_video_filter(answers, "libx265")
+            self.assertEqual(vf.count("setsar="), 1)
+            self.assertIn("setsar=1", vf)
+            self.assertNotIn("setsar=1/1", vf)
 
 
 if __name__ == "__main__":
