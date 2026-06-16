@@ -1360,30 +1360,31 @@ def ask_nvenc_multipass_if_applicable(
         default_mode = normalize_nvenc_multipass_mode(previous_mode)
     else:
         default_mode = nvenc_multipass_default_mode(answers, quality_oriented)
-    default_choice = {"disabled": "0", "qres": "1", "fullres": "2"}[default_mode]
+    default_choice = {"disabled": "1", "qres": "2", "fullres": "3"}[default_mode]
     while True:
         value = ask_raw(
             question_prompt(
                 answers,
                 "Use NVENC multipass?",
-                f"{paint('0', Color.OPT_KEY_CORAL)}{paint('=Disabled / fastest', Color.HINT_YELLOW)}; "
-                f"{paint('1', Color.OPT_KEY_CORAL)}{paint('=qres / quarter-resolution first pass', Color.HINT_YELLOW)}; "
-                f"{paint('2', Color.OPT_KEY_CORAL)}{paint('=fullres / best quality, slower', Color.HINT_YELLOW)}",
+                f"{paint('1', Color.OPT_KEY_CORAL)}{paint('=Disabled / fastest', Color.HINT_YELLOW)}; "
+                f"{paint('2', Color.OPT_KEY_CORAL)}{paint('=qres / quarter-resolution first pass', Color.HINT_YELLOW)}; "
+                f"{paint('3', Color.OPT_KEY_CORAL)}{paint('=fullres / best quality, slower', Color.HINT_YELLOW)}",
                 default_choice,
-                back="back=b, quit=exit",
             )
         )
         lowered = value.strip().lower()
-        if lowered in {"b", "back"}:
+        if is_back_value(value):
             raise Back()
         if not lowered:
             lowered = default_choice
             default_used = True
         else:
             default_used = False
-        mapping = {"0": "disabled", "۱": "qres", "١": "qres", "1": "qres", "۲": "fullres", "٢": "fullres", "2": "fullres"}
-        if lowered in {"۰", "٠"}:
-            lowered = "0"
+        mapping = {
+            "1": "disabled", "۱": "disabled", "١": "disabled",
+            "2": "qres", "۲": "qres", "٢": "qres",
+            "3": "fullres", "۳": "fullres", "٣": "fullres",
+        }
         mode = mapping.get(lowered)
         if mode:
             answers["nvenc_multipass"] = mode
@@ -1393,7 +1394,7 @@ def ask_nvenc_multipass_if_applicable(
                 f"default_used={'yes' if default_used else 'no'}"
             )
             return mode
-        error("Enter 0, 1, or 2. Use b to go back.")
+        error("Enter 1, 2, or 3. Use 0 to go back.")
 
 
 def step_nvenc_multipass(answers: dict[str, Any]) -> None:

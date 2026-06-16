@@ -2245,6 +2245,39 @@ class CommandGenerationTests(unittest.TestCase):
                 FFmWiz.step_nvenc_multipass(answers)
         self.assertEqual(answers["nvenc_multipass"], "qres")
 
+    def test_nvenc_multipass_menu_digits_and_back(self):
+        """NVENC multipass uses 1=Disabled, 2=qres, 3=fullres, and 0=back."""
+        for digit, expected in (("1", "disabled"), ("2", "qres"), ("3", "fullres")):
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                with mock.patch.object(FFmWiz, "ask_raw", return_value=digit):
+                    FFmWiz.step_nvenc_multipass(answers)
+                self.assertEqual(answers["nvenc_multipass"], expected)
+        # Prompt wording and back token.
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            captured = {}
+
+            def fake_ask(prompt):
+                captured["prompt"] = prompt
+                return "1"
+
+            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask):
+                FFmWiz.step_nvenc_multipass(answers)
+            prompt = captured["prompt"]
+            self.assertIn("1=Disabled", prompt)
+            self.assertIn("2=qres", prompt)
+            self.assertIn("3=fullres", prompt)
+            self.assertIn("back=0", prompt)
+            self.assertNotIn("back=b", prompt)
+            self.assertNotIn("0=Disabled", prompt)
+        # Entering 0 navigates back.
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+                with self.assertRaises(FFmWiz.Back):
+                    FFmWiz.step_nvenc_multipass(answers)
+
     def test_nvenc_multipass_prompt_skips_cpu_encoder(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
