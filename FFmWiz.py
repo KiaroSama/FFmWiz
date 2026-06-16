@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import concurrent.futures
 import csv
+import hashlib
 import html
 import json
 import logging
@@ -19,6 +20,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
@@ -4550,10 +4552,332 @@ def encoder_preserves_unspecified_range(answers: dict[str, Any]) -> bool:
 def expected_unforced_range(answers: dict[str, Any]) -> str:
     """The color range expected in the final file when FFmWiz forces none.
     Empty string when the encoder/container preserves an unspecified range;
-    otherwise the verified default ('tv')."""
+    otherwise the verified default ('tv'). This is a static heuristic used for
+    pre-probe guidance only; the FFmpeg capability cache is authoritative."""
     if encoder_preserves_unspecified_range(answers):
         return ""
     return "tv"
+
+
+# ====================================================================
+# FFmpeg capability cache.
+#
+# Encoder/container color-range signaling behavior is an observation about a
+# specific FFmpeg build and runtime environment, not a timeless global fact.
+# Results are therefore cached per environment fingerprint (ffmpeg/ffprobe
+# build, OS/arch, and GPU/driver for NVENC) and treated as valid only while the
+# fingerprint is unchanged. Any FFmpeg/ffprobe/driver/GPU change invalidates the
+# relevant entry. The cache is a local, deletable, git-ignored convenience; the
+# main workflow never fails merely because a probe failed.
+# ====================================================================
+
+CAPABILITY_CACHE_SCHEMA_VERSION = 1
+CAPABILITY_CACHE_DIRNAME = ".cache"
+CAPABILITY_CACHE_FILENAME = "ffmpeg_capabilities.json"
+CAPABILITY_GROUP = "color_range_do_not_force"
+
+# Per-session memo so a single run never re-probes the same combination (used by
+# Folder Encode / Split / two-pass which must probe once, not once per item).
+_CAPABILITY_SESSION_MEMO: dict[str, dict[str, Any]] = {}
+
+
+def _utc_now_text() -> str:
+    """Current UTC timestamp, second precision, no milliseconds."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def capability_cache_path() -> Path:
+    """Local capability-cache file path. Honors FFMWIZ_CACHE_DIR for isolated
+    test runs; otherwise uses a project-local .cache directory."""
+    override = os.environ.get("FFMWIZ_CACHE_DIR")
+    base = Path(override) if override else (Path(__file__).resolve().parent / CAPABILITY_CACHE_DIRNAME)
+    return base / CAPABILITY_CACHE_FILENAME
+
+
+def container_family(ext: Any) -> str:
+    """Normalize an output extension to a container family for capability keys."""
+    e = str(ext or "").strip().lower().lstrip(".")
+    if e in MP4_LIKE_EXTS:
+        return "mp4"
+    return e or "unknown"
+
+
+def _capability_run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
+
+
+def detect_nvidia_gpu_identity() -> tuple[str, str]:
+    """Return (gpu_name, driver_version) via nvidia-smi, or ('unknown','unknown')."""
+    try:
+        r = _capability_run(["nvidia-smi", "--query-gpu=name,driver_version",
+                             "--format=csv,noheader"], timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            parts = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
+            name = parts[0] if parts else "unknown"
+            driver = parts[1] if len(parts) > 1 else "unknown"
+            return name or "unknown", driver or "unknown"
+    except Exception:
+        pass
+    return "unknown", "unknown"
+
+
+def capability_environment_identity(ffmpeg: str, ffprobe: str, *, include_gpu: bool) -> dict[str, Any]:
+    """Build a normalized environment-identity dict. GPU/driver are included only
+    for NVENC probes so CPU-encoder entries do not depend on GPU identity."""
+    identity: dict[str, Any] = {
+        "os": platform.system(),
+        "arch": platform.machine(),
+    }
+    try:
+        exe = shutil.which(ffmpeg) or ffmpeg
+        p = Path(exe)
+        identity["ffmpeg_path"] = str(p.resolve()) if p.exists() else str(exe)
+        if p.exists():
+            st = p.stat()
+            identity["ffmpeg_size"] = st.st_size
+            identity["ffmpeg_mtime"] = int(st.st_mtime)
+    except Exception:
+        identity["ffmpeg_path"] = str(ffmpeg)
+    try:
+        r = _capability_run([ffmpeg, "-hide_banner", "-version"], timeout=15)
+        lines = r.stdout.splitlines()
+        identity["ffmpeg_version_line"] = lines[0].strip() if lines else ""
+        identity["ffmpeg_build_hash"] = hashlib.sha256(
+            r.stdout.encode("utf-8", "replace")).hexdigest()[:16]
+    except Exception:
+        identity["ffmpeg_version_line"] = ""
+        identity["ffmpeg_build_hash"] = ""
+    try:
+        r = _capability_run([ffprobe, "-hide_banner", "-version"], timeout=15)
+        lines = r.stdout.splitlines()
+        identity["ffprobe_version_line"] = lines[0].strip() if lines else ""
+    except Exception:
+        identity["ffprobe_version_line"] = ""
+    if include_gpu:
+        gpu, driver = detect_nvidia_gpu_identity()
+        identity["gpu"] = gpu
+        identity["nvidia_driver"] = driver
+    return identity
+
+
+def capability_environment_key(ffmpeg: str, ffprobe: str, encoder: str) -> tuple[dict[str, Any], str]:
+    """Return (identity, stable_hash). NVENC encoders bind to GPU/driver too."""
+    is_nvenc = str(encoder).lower().endswith("_nvenc")
+    identity = capability_environment_identity(ffmpeg, ffprobe, include_gpu=is_nvenc)
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+    return identity, digest
+
+
+def load_capability_cache() -> dict[str, Any]:
+    """Load the capability cache, rebuilding safely on corruption or schema drift."""
+    path = capability_cache_path()
+    empty = {"schema_version": CAPABILITY_CACHE_SCHEMA_VERSION, "environments": {}}
+    if not path.exists():
+        return empty
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("environments"), dict):
+            raise ValueError("unexpected cache structure")
+        if data.get("schema_version") != CAPABILITY_CACHE_SCHEMA_VERSION:
+            log_info("FFmpeg capability cache schema changed; starting a fresh cache.")
+            return empty
+        return data
+    except Exception as exc:
+        log_warn("FFmpeg capability cache is unreadable (%s); rebuilding. File: %s" % (exc, path))
+        try:
+            shutil.move(str(path), str(path.with_suffix(".corrupt")))
+        except Exception:
+            pass
+        return empty
+
+
+def save_capability_cache(data: dict[str, Any]) -> bool:
+    """Atomically write the capability cache (temp file + flush + replace)."""
+    path = capability_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        return True
+    except Exception as exc:
+        log_warn("Could not write FFmpeg capability cache: %s" % exc)
+        return False
+
+
+def probe_color_range_capability(ffmpeg: str, ffprobe: str, encoder: str, ext: Any,
+                                  *, tmpdir: str | None = None) -> dict[str, Any]:
+    """Encode a tiny synthetic clip (lavfi testsrc2) omitting -color_range and
+    inspect the final color_range with ffprobe. Never raises; returns a result
+    dict with a 'status' of verified / unsupported / probe_failed."""
+    family = container_family(ext)
+    safe_ext = str(ext or "mp4").strip().lower().lstrip(".") or "mp4"
+    created = False
+    if tmpdir is None:
+        tmpdir = tempfile.mkdtemp(prefix="ffmwiz_cap_")
+        created = True
+    out = Path(tmpdir) / ("cap_%s_%s.%s" % (encoder, family, safe_ext))
+    extra = ["-preset", "p4"] if str(encoder).lower().endswith("_nvenc") else []
+    cmd = [ffmpeg, "-y", "-hide_banner", "-v", "error", "-f", "lavfi",
+           "-i", "testsrc2=size=320x240:rate=24:duration=1", "-frames:v", "12",
+           "-an", "-vf", "format=yuv420p", "-c:v", str(encoder)] + extra + [str(out)]
+    result: dict[str, Any] = {
+        "status": "unknown", "expected_final_range": None,
+        "probe_method": "real encode + ffprobe", "encoder": str(encoder),
+        "container_family": family,
+        "sample_command_hash": hashlib.sha256(" ".join(cmd).encode("utf-8", "replace")).hexdigest()[:16],
+        "ffprobe_result": None, "verified_at_utc": _utc_now_text(), "error": None,
+    }
+    try:
+        r = _capability_run(cmd, timeout=90)
+        if r.returncode != 0:
+            result["status"] = "unsupported" if str(encoder).lower().endswith("_nvenc") else "probe_failed"
+            result["error"] = (r.stderr or "").strip()[-240:]
+            return result
+        pr = _capability_run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                              "-show_entries", "stream=color_range", "-of", "json", str(out)], timeout=30)
+        cr = "unknown"
+        try:
+            cr = json.loads(pr.stdout)["streams"][0].get("color_range") or "unknown"
+        except Exception:
+            cr = "unknown"
+        result["status"] = "verified"
+        result["expected_final_range"] = cr
+        result["ffprobe_result"] = cr
+        return result
+    except Exception as exc:
+        result["status"] = "probe_failed"
+        result["error"] = str(exc)
+        return result
+    finally:
+        try:
+            if out.exists():
+                out.unlink()
+        except OSError:
+            pass
+        if created:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _store_capability_entry(cache: dict[str, Any], env_key: str, identity: dict[str, Any],
+                            cap_key: str, probe: dict[str, Any]) -> None:
+    env = cache["environments"].setdefault(env_key, {})
+    env.setdefault("created_at_utc", _utc_now_text())
+    env["last_verified_at_utc"] = _utc_now_text()
+    env["ffmpeg_identity"] = {
+        "path": identity.get("ffmpeg_path", ""),
+        "version": identity.get("ffmpeg_version_line", ""),
+        "build_hash": identity.get("ffmpeg_build_hash", ""),
+    }
+    env["hardware_identity"] = {
+        "gpu": identity.get("gpu", "n/a"),
+        "driver": identity.get("nvidia_driver", "n/a"),
+    }
+    caps = env.setdefault("capabilities", {}).setdefault(CAPABILITY_GROUP, {})
+    caps[cap_key] = {
+        "status": probe["status"],
+        "expected_final_range": probe.get("expected_final_range"),
+        "probe_method": probe.get("probe_method"),
+        "verified_at_utc": probe.get("verified_at_utc"),
+        "encoder": probe.get("encoder"),
+        "container_family": probe.get("container_family"),
+        "sample_command_hash": probe.get("sample_command_hash"),
+        "ffprobe_result": probe.get("ffprobe_result"),
+        "error": probe.get("error"),
+    }
+
+
+def resolve_capability(answers: dict[str, Any], *, allow_probe: bool = True,
+                       force_reprobe: bool = False) -> dict[str, Any]:
+    """Resolve the 'do not force' final-range capability for the answers' encoder
+    and container, using the per-environment cache and lazy probing. Returns a
+    dict describing capability_source, status, expected_final_range, and the
+    environment fingerprint. Never raises; never blocks encoding."""
+    encoder = str(resolve_video_encoder(answers)[0]).lower()
+    ext = str(answers.get("output_ext", "")).lower()
+    family = container_family(ext)
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    ffprobe = answers.get("ffprobe") or "ffprobe"
+    identity, env_key = capability_environment_key(ffmpeg, ffprobe, encoder)
+    cap_key = "%s|%s" % (encoder, family)
+    memo_key = "%s::%s" % (env_key, cap_key)
+    result = {
+        "encoder": encoder, "container_family": family, "env_key": env_key,
+        "env_short": env_key[:12], "capability_source": "unavailable",
+        "status": "unknown", "expected_final_range": None, "verified_at_utc": None,
+    }
+    if encoder == "copy":
+        result["capability_source"] = "n/a (stream copy)"
+        return result
+    if not force_reprobe and memo_key in _CAPABILITY_SESSION_MEMO:
+        return dict(_CAPABILITY_SESSION_MEMO[memo_key])
+
+    cache = load_capability_cache()
+    entry = (cache["environments"].get(env_key, {})
+             .get("capabilities", {}).get(CAPABILITY_GROUP, {}).get(cap_key)
+             if not force_reprobe else None)
+    if entry:
+        # A cached entry from THIS environment only.
+        result.update(
+            capability_source="verified cache" if entry.get("status") == "verified" else "cache",
+            status=entry.get("status"),
+            expected_final_range=entry.get("expected_final_range"),
+            verified_at_utc=entry.get("verified_at_utc"),
+        )
+        if entry.get("status") in {"verified", "unsupported", "probe_failed"}:
+            _CAPABILITY_SESSION_MEMO[memo_key] = dict(result)
+            return dict(result)
+
+    if not allow_probe:
+        _CAPABILITY_SESSION_MEMO[memo_key] = dict(result)
+        return dict(result)
+
+    note("Checking encoder/container range-signaling behavior...")
+    probe = probe_color_range_capability(ffmpeg, ffprobe, encoder, ext)
+    _store_capability_entry(cache, env_key, identity, cap_key, probe)
+    save_capability_cache(cache)
+    result.update(
+        capability_source="fresh probe", status=probe["status"],
+        expected_final_range=probe.get("expected_final_range"),
+        verified_at_utc=probe.get("verified_at_utc"),
+    )
+    if probe["status"] == "verified":
+        note("Capability verified and cached.")
+    else:
+        note("Capability probe unavailable; final encoder signaling will be treated "
+             "as unknown until verified.")
+    _CAPABILITY_SESSION_MEMO[memo_key] = dict(result)
+    return dict(result)
+
+
+def invalidate_capability_entry(answers: dict[str, Any]) -> None:
+    """Mark the cached entry for the current encoder/container stale (remove it).
+    Used when a real output inspection contradicts the cached expectation."""
+    encoder = str(resolve_video_encoder(answers)[0]).lower()
+    family = container_family(answers.get("output_ext"))
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    ffprobe = answers.get("ffprobe") or "ffprobe"
+    _identity, env_key = capability_environment_key(ffmpeg, ffprobe, encoder)
+    cap_key = "%s|%s" % (encoder, family)
+    _CAPABILITY_SESSION_MEMO.pop("%s::%s" % (env_key, cap_key), None)
+    cache = load_capability_cache()
+    caps = (cache["environments"].get(env_key, {})
+            .get("capabilities", {}).get(CAPABILITY_GROUP, {}))
+    if cap_key in caps:
+        del caps[cap_key]
+        save_capability_cache(cache)
+        log_warn("Capability cache entry %s invalidated (output inspection mismatch)." % cap_key)
 
 
 # ------------------------------------------------------------------
@@ -4727,8 +5051,10 @@ def log_and_warn_pixel_format(answers: dict[str, Any], announce: bool = True) ->
 
 
 def parse_rational(text: Any) -> float | None:
-    """Parse 'N:M', 'N/M', or a float to a positive float. Return None for
-    unknown/empty/invalid/zero/negative values (so callers can detect them)."""
+    """Parse 'N:M', 'N/M', or a float to a positive finite float. Return None for
+    unknown/empty/invalid/zero/negative/non-finite values (so callers can detect
+    them). Examples accepted: 1:1, 9:16, 16:15, 64:45, 30000/1001, decimals.
+    Rejected: 0:1, zero/negative denominators, malformed values, NaN, infinity."""
     if text is None:
         return None
     raw = str(text).strip()
@@ -4738,14 +5064,52 @@ def parse_rational(text: Any) -> float | None:
     if match:
         num = float(match.group(1))
         den = float(match.group(2))
-        if num > 0 and den > 0:
+        if num > 0 and den > 0 and math.isfinite(num) and math.isfinite(den):
             return num / den
         return None
     try:
         val = float(raw)
     except (TypeError, ValueError):
         return None
-    return val if val > 0 else None
+    return val if (val > 0 and math.isfinite(val)) else None
+
+
+# SAR/DAR rational approximation tuning. A bounded denominator keeps derived
+# ratios stable for anamorphic sources while snapping to clean standard ratios.
+SAR_DAR_MAX_DENOMINATOR = 1000
+SAR_DAR_TOLERANCE = 0.01
+# Common pixel/display aspect ratios used for snapping (value -> "W:H").
+_COMMON_RATIOS: list[tuple[float, str]] = [
+    (1.0, "1:1"), (4 / 3, "4:3"), (16 / 9, "16:9"), (9 / 16, "9:16"),
+    (21 / 9, "21:9"), (3 / 2, "3:2"), (2 / 3, "2:3"), (5 / 4, "5:4"),
+    (16 / 15, "16:15"), (64 / 45, "64:45"), (32 / 27, "32:27"),
+    (8 / 9, "8:9"), (40 / 33, "40:33"), (2.0, "2:1"), (0.5, "1:2"),
+    (2.39, "239:100"),
+]
+
+
+def ratio_to_pair(value: float | None, max_den: int = SAR_DAR_MAX_DENOMINATOR) -> tuple[int, int] | None:
+    """Approximate a positive finite float as a reduced integer (num, den) pair.
+    Snaps to a clean common ratio within tolerance; otherwise uses a bounded
+    rational approximation reduced by GCD. Returns None for invalid input."""
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    for ratio, label in _COMMON_RATIOS:
+        if abs(value - ratio) <= SAR_DAR_TOLERANCE:
+            w, h = label.split(":")
+            return int(w), int(h)
+    frac = Fraction(value).limit_denominator(max_den)
+    if frac.numerator <= 0 or frac.denominator <= 0:
+        return None
+    return frac.numerator, frac.denominator
+
+
+def ratio_text(value: float | None) -> str:
+    """Render a positive ratio float as a compact 'W:H' rational, or 'unknown'."""
+    pair = ratio_to_pair(value)
+    if not pair:
+        return "unknown"
+    return f"{pair[0]}:{pair[1]}"
 
 
 def _format_ratio(value: float) -> str:
@@ -4764,12 +5128,20 @@ def _format_ratio(value: float) -> str:
 
 
 def sar_dar_info(answers: dict[str, Any]) -> dict[str, Any]:
-    """Compute SAR/DAR information for the source video stream.
+    """Resolve SAR/DAR geometry for the source video stream with explicit
+    provenance. Deterministic priority:
 
-    Source-of-truth order for DAR:
-      1. valid coded width/height + valid SAR -> calculated
-      2. valid ffprobe DAR
-      3. width/height with assumed SAR 1:1 (fallback, reported)
+      Case 1: valid coded dims + valid SAR -> DAR = (w/h) * SAR (calculated).
+              If ffprobe also reports DAR, compare; on disagreement the coded
+              dims + SAR win and the discrepancy is recorded (not overwritten).
+      Case 2: valid coded dims, SAR unknown, valid DAR -> SAR = DAR / (w/h).
+      Case 3: valid coded dims, valid SAR, DAR unknown -> DAR calculated.
+      Case 4: valid coded dims, SAR and DAR unknown -> assume square pixels
+              (SAR 1:1), clearly labeled as a fallback.
+      Case 5: invalid/missing coded dims -> unresolved geometry, no crash.
+
+    Returns a structured result with both detected and resolved values, their
+    sources, the effective DAR decimal, pixel shape, and any warning.
     """
     stream = source_video_stream(answers) or {}
     try:
@@ -4777,43 +5149,92 @@ def sar_dar_info(answers: dict[str, Any]) -> dict[str, Any]:
         coded_h = int(stream.get("height") or 0)
     except (TypeError, ValueError):
         coded_w = coded_h = 0
-    sar = parse_rational(stream.get("sample_aspect_ratio"))
-    probe_dar = parse_rational(stream.get("display_aspect_ratio"))
+    detected_sar = parse_rational(stream.get("sample_aspect_ratio"))
+    detected_dar = parse_rational(stream.get("display_aspect_ratio"))
 
     info: dict[str, Any] = {
         "coded_w": coded_w or None,
         "coded_h": coded_h or None,
-        "sar": sar,
-        "sar_text": _format_ratio(sar) if sar else "unknown",
-        "probe_dar": probe_dar,
-        "dar": None,
-        "dar_text": "unknown",
+        "detected_sar": detected_sar,
+        "detected_dar": detected_dar,
+        "resolved_sar": None,
+        "resolved_dar": None,
+        "effective_dar_decimal": None,
+        "sar_source": "unknown",
         "dar_source": "unknown",
         "pixel_shape": "unknown",
+        "fallback_used": False,
+        "discrepancy_detected": False,
+        "warning": None,
+        # Backwards-compatible aliases for existing callers.
+        "sar": None,
+        "probe_dar": detected_dar,
+        "dar": None,
+        "sar_text": "unknown",
+        "dar_text": "unknown",
+        "detected_sar_text": ratio_text(detected_sar),
+        "detected_dar_text": ratio_text(detected_dar),
         "discrepancy": None,
     }
 
-    calc_dar = None
-    if coded_w > 0 and coded_h > 0 and sar:
-        calc_dar = (coded_w / coded_h) * sar
-        info["dar"] = calc_dar
+    if not (coded_w > 0 and coded_h > 0):
+        # Case 5: cannot safely divide; report unresolved geometry.
+        info["warning"] = "Source coded dimensions are missing or invalid; geometry unresolved."
+        return info
+
+    wh = coded_w / coded_h
+    resolved_sar = None
+    resolved_dar = None
+
+    if detected_sar:
+        # Case 1 / Case 3: SAR is authoritative; derive DAR from dims + SAR.
+        resolved_sar = detected_sar
+        info["sar_source"] = "detected by ffprobe"
+        calc_dar = wh * detected_sar
+        resolved_dar = calc_dar
         info["dar_source"] = "calculated from coded resolution and SAR"
-    elif probe_dar:
-        info["dar"] = probe_dar
-        info["dar_source"] = "ffprobe"
-    elif coded_w > 0 and coded_h > 0:
-        info["dar"] = coded_w / coded_h
-        info["dar_source"] = "width/height fallback (assumed SAR 1:1)"
+        if detected_dar:
+            if abs(calc_dar - detected_dar) <= 0.02:
+                # Case 1 agreement: keep calculated value, note agreement.
+                info["dar_source"] = "calculated from coded resolution and SAR (ffprobe DAR agrees)"
+            else:
+                # Case 1 disagreement: dims + SAR win; record discrepancy.
+                info["discrepancy_detected"] = True
+                info["discrepancy"] = (calc_dar, detected_dar)
+                info["warning"] = (
+                    "SAR/DAR discrepancy: calculated DAR %.6f disagrees with ffprobe DAR %.6f; "
+                    "using coded resolution + SAR as the source of truth."
+                    % (calc_dar, detected_dar)
+                )
+    elif detected_dar:
+        # Case 2: derive SAR from coded dims + DAR.
+        resolved_dar = detected_dar
+        info["dar_source"] = "detected by ffprobe"
+        resolved_sar = detected_dar / wh
+        info["sar_source"] = "calculated from coded resolution and DAR"
+    else:
+        # Case 4: nothing known; assume square pixels (honest fallback).
+        resolved_sar = 1.0
+        info["sar_source"] = "fallback assumption"
+        resolved_dar = wh
+        info["dar_source"] = "calculated from coded resolution and fallback SAR"
+        info["fallback_used"] = True
+        info["warning"] = "Source SAR and DAR are unavailable; assuming square pixels (SAR 1:1)."
 
-    if info["dar"]:
-        info["dar_text"] = _format_ratio(info["dar"])
+    info["resolved_sar"] = resolved_sar
+    info["resolved_dar"] = resolved_dar
+    info["effective_dar_decimal"] = resolved_dar
+    info["sar"] = resolved_sar
+    info["dar"] = resolved_dar
+    info["sar_text"] = ratio_text(resolved_sar)
+    info["dar_text"] = ratio_text(resolved_dar)
 
-    # When ffprobe also reports a DAR and we calculated one, flag disagreement.
-    if calc_dar and probe_dar and abs(calc_dar - probe_dar) > 0.02:
-        info["discrepancy"] = (calc_dar, probe_dar)
-
-    if sar is not None:
-        info["pixel_shape"] = "square" if abs(sar - 1.0) < 1e-3 else "non-square"
+    if resolved_sar is not None:
+        square = abs(resolved_sar - 1.0) < SAR_DAR_TOLERANCE
+        if info["fallback_used"]:
+            info["pixel_shape"] = "square (assumed)"
+        else:
+            info["pixel_shape"] = "square" if square else "non-square"
 
     return info
 
@@ -6801,16 +7222,19 @@ def print_source_info(answers: dict[str, Any]) -> None:
                     f"{info['coded_w']}x{info['coded_h']}"
                     if info.get("coded_w") and info.get("coded_h") else "unknown"
                 )
-                eff = f"{info['dar']:.6f}" if info.get("dar") else "unknown"
+                eff = f"{info['effective_dar_decimal']:.6f}" if info.get("effective_dar_decimal") else "unknown"
+                sar_display = f"{info['sar_text']} ({info['sar_source']})"
+                dar_display = f"{info['dar_text']} ({info['dar_source']})"
                 print(
                     "     "
                     f"{field_text('coded resolution', coded, Color.LIME)} | "
-                    f"{field_text('SAR', info['sar_text'], Color.AQUA)} | "
-                    f"{field_text('DAR', info['dar_text'], Color.AQUA)} | "
+                    f"{field_text('SAR', sar_display, Color.AQUA)} | "
+                    f"{field_text('DAR', dar_display, Color.AQUA)} | "
                     f"{field_text('effective DAR', eff, Color.AQUA)} | "
-                    f"{field_text('pixel shape', info['pixel_shape'], Color.PINK)} | "
-                    f"{field_text('DAR source', info['dar_source'], Color.DIM)}"
+                    f"{field_text('pixel shape', info['pixel_shape'], Color.PINK)}"
                 )
+                if info.get("warning"):
+                    print("     " + field_text("geometry warning", info["warning"], Color.YELLOW))
                 log_info(
                     "Source SAR/DAR: coded=%s; SAR=%s; DAR=%s; effective_DAR=%s; "
                     "pixel_shape=%s; DAR_source=%s"
@@ -14586,16 +15010,24 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
                 filters.append(f"setsar={FORCE_SAR}")
         else:
             info = sar_dar_info(answers)
-            sar = info.get("sar")
-            if sar is not None and abs(sar - 1.0) >= 1e-3:
+            sar = info.get("resolved_sar")
+            if info.get("fallback_used"):
                 log_info(
-                    f"SAR: no-resize path preserves source non-square SAR "
-                    f"{info.get('sar_text')} (no setsar forced)."
+                    "SAR: source SAR/DAR unavailable; no-resize command generation assumes a "
+                    "square-pixel source (SAR 1:1); no setsar forced."
+                )
+            elif sar is not None and abs(sar - 1.0) >= SAR_DAR_TOLERANCE:
+                log_info(
+                    f"SAR: no-resize path preserves resolved non-square SAR "
+                    f"{info.get('sar_text')} ({info.get('sar_source')}); no setsar forced."
                 )
             elif sar is None:
-                log_info("SAR: source SAR unknown; no setsar forced in no-resize path.")
+                log_info("SAR: source SAR unresolved; no setsar forced in no-resize path.")
             else:
-                log_info("SAR: source pixels are square; setsar omitted as redundant.")
+                log_info(
+                    f"SAR: resolved source pixels are square ({info.get('sar_source')}); "
+                    f"setsar omitted as redundant."
+                )
 
     filters.append(f"format={cpu_pixel_format_for_output(answers)}")
     return ",".join(filters) if filters else None
@@ -16158,18 +16590,23 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             print("  " + field_text(
                 "output color-range metadata", f"{detected_range} (preserved from copied stream)", Color.COLOR_RANGE_VALUE))
         elif range_source == "user choice":
-            # "Do not force a range in FFmWiz" (option 2). Report capability-aware
-            # expected behavior; never claim 'unspecified' for an encoder that
-            # writes a default range. Pre-execution, this is the EXPECTED result.
+            # "Do not force a range in FFmWiz" (option 2). Capability is resolved
+            # from the per-environment FFmpeg cache (lazy probe). Without a
+            # verified result we report conservatively rather than guessing.
+            cap = resolve_capability(answers, allow_probe=not answers.get("_no_capability_probe"))
             print("  " + field_text("requested color-range policy", "do not force", Color.COLOR_RANGE_VALUE))
             print("  " + field_text("FFmWiz explicit color-range option", "omitted", Color.COLOR_RANGE_VALUE))
-            if encoder_preserves_unspecified_range(answers):
-                print("  " + field_text("encoder range-signaling behavior", "unspecified supported", Color.COLOR_RANGE_VALUE))
-                print("  " + field_text("expected encoder-reported final range", "unspecified", Color.COLOR_RANGE_VALUE))
+            print("  " + field_text("capability source", cap["capability_source"], Color.COLOR_RANGE_VALUE))
+            print("  " + field_text("capability environment fingerprint", cap["env_short"], Color.DIM))
+            if cap.get("status") == "verified" and cap.get("expected_final_range") is not None:
+                fr = cap["expected_final_range"]
+                shown = "unspecified" if fr in {"unknown", "", None} else fr
+                print("  " + field_text("expected encoder-reported final range", shown, Color.COLOR_RANGE_VALUE))
+                if cap.get("verified_at_utc"):
+                    print("  " + field_text("verified probe timestamp", cap["verified_at_utc"], Color.DIM))
             else:
-                exp = expected_unforced_range(answers) or "unspecified"
-                print("  " + field_text("encoder range-signaling behavior", "encoder default", Color.COLOR_RANGE_VALUE))
-                print("  " + field_text("expected encoder-reported final range", f"{exp} (encoder default)", Color.COLOR_RANGE_VALUE))
+                print("  " + field_text("expected encoder-reported final range",
+                                        "unknown until verified", Color.COLOR_RANGE_VALUE))
         else:
             print("  " + field_text(
                 "resolved color range",
@@ -16184,10 +16621,20 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         print("  " + field_text("pixel-value range conversion", "no", Color.DIM))
         _sd = sar_dar_info(answers)
         print("  " + field_text(
-            "source SAR / DAR",
-            f"{_sd['sar_text']} / {_sd['dar_text']} ({_sd['dar_source']})",
+            "source SAR",
+            f"{_sd['sar_text']} ({_sd['sar_source']})",
             Color.AQUA,
         ))
+        print("  " + field_text(
+            "source DAR",
+            f"{_sd['dar_text']} ({_sd['dar_source']})",
+            Color.AQUA,
+        ))
+        if _sd.get("effective_dar_decimal"):
+            print("  " + field_text("effective DAR", f"{_sd['effective_dar_decimal']:.6f}", Color.AQUA))
+        print("  " + field_text("pixel shape", _sd["pixel_shape"], Color.PINK))
+        if _sd.get("warning"):
+            print("  " + field_text("geometry warning", _sd["warning"], Color.YELLOW))
         # Pixel-format operation summary.
         try:
             if str(resolve_video_encoder(answers)[0]).lower() != "copy":
@@ -17794,6 +18241,101 @@ def run_metadata_editor_mode(base_answers: dict[str, Any]) -> tuple[int, float] 
             error(str(exc))
 
 
+def run_capability_cache_menu(base_answers: dict[str, Any]) -> None:
+    """Diagnostics sub-menu for the FFmpeg capability cache. View / re-probe /
+    clear, using the existing 0=Back convention. Never affects user settings,
+    logs, or secrets."""
+    ffmpeg = base_answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg"
+    ffprobe = base_answers.get("ffprobe") or shutil.which("ffprobe") or "ffprobe"
+    while True:
+        print()
+        print(paint("FFmpeg capability cache:", Color.BOLD + Color.LIGHT_BLUE))
+        print(f"  {paint('1.', Color.LIGHT_BLUE)} View cached capability results")
+        print(f"  {paint('2.', Color.LIGHT_BLUE)} Re-probe current encoder/container capabilities")
+        print(f"  {paint('3.', Color.LIGHT_BLUE)} Clear capability cache")
+        print(f"  {paint('0.', Color.LIGHT_BLUE)} Back")
+        value = ask_raw(f"{paint('Selection', Color.BOLD)} {paint('[0]', Color.GREEN)} "
+                        f"{back_text('quit=exit')}: ").strip().lower()
+        if value in {"", "0", "b", "back"}:
+            return
+        if value == "1":
+            _capability_cache_view(ffmpeg, ffprobe)
+        elif value == "2":
+            _capability_cache_reprobe(ffmpeg, ffprobe)
+        elif value == "3":
+            _capability_cache_clear()
+        else:
+            error("Enter 0, 1, 2, or 3.")
+
+
+def _capability_cache_view(ffmpeg: str, ffprobe: str) -> None:
+    path = capability_cache_path()
+    print()
+    print("  " + field_text("cache file", str(path), Color.AQUA))
+    cache = load_capability_cache()
+    envs = cache.get("environments", {})
+    if not envs:
+        note("No cached capability results yet.")
+        return
+    # Show the current environment identity for both CPU and NVENC bindings.
+    for enc_label, sample_encoder in (("CPU encoders", "libx265"), ("NVENC encoders", "hevc_nvenc")):
+        _identity, key = capability_environment_key(ffmpeg, ffprobe, sample_encoder)
+        print("  " + field_text("environment (%s)" % enc_label, key[:12], Color.DIM))
+    for env_key, env in envs.items():
+        print(paint("  Environment %s" % env_key[:12], Color.BOLD + Color.LIME))
+        ident = env.get("ffmpeg_identity", {})
+        print("    " + field_text("ffmpeg", ident.get("version", "?"), Color.WHITE))
+        hw = env.get("hardware_identity", {})
+        if hw.get("gpu") not in (None, "n/a"):
+            print("    " + field_text("gpu/driver", f"{hw.get('gpu')} / {hw.get('driver')}", Color.WHITE))
+        caps = env.get("capabilities", {}).get(CAPABILITY_GROUP, {})
+        for combo, entry in caps.items():
+            fr = entry.get("expected_final_range")
+            shown = "unspecified" if fr in {"unknown", "", None} else fr
+            print("    " + field_text(
+                combo,
+                f"status={entry.get('status')}; expected_final_range={shown}; "
+                f"verified={entry.get('verified_at_utc')}",
+                Color.AQUA,
+            ))
+
+
+def _capability_cache_reprobe(ffmpeg: str, ffprobe: str) -> None:
+    print()
+    encoders = ["libx264", "libx265", "h264_nvenc", "hevc_nvenc"]
+    containers = ["mp4", "mkv"]
+    cache = load_capability_cache()
+    for encoder in encoders:
+        identity, env_key = capability_environment_key(ffmpeg, ffprobe, encoder)
+        for ext in containers:
+            note("Re-probing %s + %s ..." % (encoder, ext))
+            probe = probe_color_range_capability(ffmpeg, ffprobe, encoder, ext)
+            cap_key = "%s|%s" % (encoder, container_family(ext))
+            _store_capability_entry(cache, env_key, identity, cap_key, probe)
+            _CAPABILITY_SESSION_MEMO.pop("%s::%s" % (env_key, cap_key), None)
+            fr = probe.get("expected_final_range")
+            shown = "unspecified" if fr in {"unknown", "", None} else fr
+            print("    " + field_text(cap_key, "%s -> %s" % (probe["status"], shown), Color.AQUA))
+    save_capability_cache(cache)
+    note("Re-probe complete; results cached for the current FFmpeg environment.")
+
+
+def _capability_cache_clear() -> None:
+    path = capability_cache_path()
+    if not path.exists():
+        note("Capability cache is already empty.")
+        return
+    if not ask_yes_no("Clear the FFmpeg capability cache? (y/n) [n]: ", False):
+        note("Capability cache not cleared.")
+        return
+    try:
+        path.unlink()
+        _CAPABILITY_SESSION_MEMO.clear()
+        note("Capability cache cleared. User settings, logs, and secrets are untouched.")
+    except OSError as exc:
+        error("Could not clear capability cache: %s" % exc)
+
+
 def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print()
     print(paint("FFmWiz Main menu:", Color.BOLD + Color.LIGHT_BLUE))
@@ -17810,6 +18352,7 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print(f"  {paint('11.', Color.LIGHT_BLUE)} Audio Cut / Speed / Reverse")
     print(f"  {paint('12.', Color.LIGHT_BLUE)} Join Videos")
     print(f"  {paint('13.', Color.LIGHT_BLUE)} Metadata Editor")
+    print(f"  {paint('14.', Color.LIGHT_BLUE)} FFmpeg capability cache (diagnostics)")
     print()
     # The main menu has no previous step, so '0=back' is intentionally not
     # advertised. Submenus continue to support 0=back where it makes sense.
@@ -17820,9 +18363,9 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
         )
         if not value:
             return 1
-        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"}:
+        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"}:
             return int(value)
-        error("Enter a menu number from 1 to 13.")
+        error("Enter a menu number from 1 to 14.")
 
 
 # Kept as a thin wrapper for backwards compatibility with any external caller.
@@ -21223,6 +21766,9 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     answers = dict(base_answers)
     answers["_question_number"] = 1
     start_mode = ask_main_menu(answers, config_path)
+    if start_mode == 14:
+        run_capability_cache_menu(base_answers)
+        return None
     if start_mode == 13:
         return run_metadata_editor_mode(base_answers)
     if start_mode == 12:
