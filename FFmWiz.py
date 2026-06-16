@@ -1456,6 +1456,139 @@ def step_color_range(answers: dict[str, Any]) -> None:
         return
 
 
+def folder_items_with_unknown_color_range(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the folder items whose source video color range is unknown."""
+    unknown: list[dict[str, Any]] = []
+    for item in answers.get("_folder_items") or []:
+        streams = (item.get("answers") or {}).get("video_streams") or []
+        if not streams:
+            continue
+        if normalize_color_range(streams[0].get("color_range")) not in {"tv", "pc"}:
+            unknown.append(item)
+    return unknown
+
+
+def folder_batch_color_range_applicable(answers: dict[str, Any]) -> bool:
+    """Show the batch color-range menu only when the folder re-encodes video and
+    at least one file has an unknown source color range."""
+    if not output_has_video(answers):
+        return False
+    codec = str(answers.get("video_codec") or "").strip().lower()
+    if codec in {"copy", "n"} and not video_filters_required(answers):
+        return False
+    return bool(folder_items_with_unknown_color_range(answers))
+
+
+def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
+    """Batch policy for files with an unknown color range. Asked once; the
+    choice is stored and reused for every file (and every Split Part / two-pass
+    pass) of this batch."""
+    unknown_items = folder_items_with_unknown_color_range(answers)
+    if not unknown_items:
+        return
+    previous = str(answers.get("_batch_color_range_policy") or "").strip().lower()
+    default_choice = {"tv": "1", "unspecified": "2", "pc": "3", "each": "4"}.get(previous, "1")
+    print()
+    note(f"One or more input videos have an unknown color range ({len(unknown_items)} file(s)):")
+    print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited for unknown files", Color.HINT_YELLOW))
+    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Keep unknown files unspecified", Color.HINT_YELLOW))
+    print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full for unknown files", Color.HINT_YELLOW))
+    print("  " + paint("4", Color.OPT_KEY_CORAL) + paint(". Ask separately for each unknown file", Color.HINT_YELLOW))
+    mapping = {"1": "tv", "2": "unspecified", "3": "pc", "4": "each"}
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Select batch color-range policy for unknown files",
+                "1=TV/Limited; 2=Keep unspecified; 3=PC/Full; 4=Ask per file",
+                default_choice,
+                back="back=b, quit=exit",
+            )
+        )
+        lowered = value.strip().lower()
+        if lowered in {"b", "back"}:
+            raise Back()
+        if not lowered:
+            lowered = default_choice
+        policy = mapping.get(lowered)
+        if not policy:
+            error("Enter 1, 2, 3, or 4. Use b to go back.")
+            continue
+        answers["_batch_color_range_policy"] = policy
+        if policy == "each":
+            per_file: dict[str, str] = {}
+            sub_mapping = {"1": "tv", "2": "unspecified", "3": "pc"}
+            for item in unknown_items:
+                print()
+                note(f"Source color range is unknown: {item['path'].name}")
+                print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited", Color.HINT_YELLOW))
+                print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Keep unspecified", Color.HINT_YELLOW))
+                print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full", Color.HINT_YELLOW))
+                while True:
+                    sub = ask_raw(
+                        question_prompt(
+                            answers,
+                            "Select color range for this file",
+                            "1=Assume TV/Limited; 2=Keep unspecified; 3=Assume PC/Full",
+                            "1",
+                            back="back=b, quit=exit",
+                        )
+                    ).strip().lower()
+                    if sub in {"b", "back"}:
+                        raise Back()
+                    if not sub:
+                        sub = "1"
+                    file_choice = sub_mapping.get(sub)
+                    if not file_choice:
+                        error("Enter 1, 2, or 3. Use b to go back.")
+                        continue
+                    per_file[str(item["path"])] = file_choice
+                    break
+            answers["_batch_color_range_per_file"] = per_file
+        else:
+            answers.pop("_batch_color_range_per_file", None)
+        log_info(
+            "Batch color-range policy resolved: policy=%s; unknown_files=%d"
+            % (policy, len(unknown_items))
+        )
+        note(
+            "Batch color range policy: "
+            + {"tv": "Assume TV/Limited", "unspecified": "Keep unspecified",
+               "pc": "Assume PC/Full", "each": "Ask per file"}[policy]
+            + " (applies to unknown-range files only; detected ranges are kept)."
+        )
+        return
+
+
+def apply_folder_batch_color_range(job: dict[str, Any], settings_answers: dict[str, Any], item: dict[str, Any]) -> None:
+    """Resolve a folder job's color-range choice from the batch policy. Known
+    per-file ranges are never overwritten by the batch assumption."""
+    if not output_has_video(job):
+        return
+    if source_color_range_known(job):
+        # Detected range is authoritative; do not let the batch override it.
+        job.pop("color_range_choice", None)
+        return
+    policy = str(settings_answers.get("_batch_color_range_policy") or "").strip().lower()
+    if not policy:
+        return
+    job["_color_range_from_batch"] = True
+    if policy == "each":
+        per_file = settings_answers.get("_batch_color_range_per_file") or {}
+        choice = per_file.get(str(item.get("path")))
+        if choice:
+            job["color_range_choice"] = choice
+            job["_color_range_from_batch"] = False  # per-file is a direct user choice
+    elif policy in {"tv", "pc", "unspecified"}:
+        job["color_range_choice"] = policy
+    resolved, source = resolve_color_range(job)
+    log_info(
+        "Folder file color range: file=%s; detected=unknown; resolved=%s; "
+        "resolution_source=%s; output_metadata=%s; pixel_value_range_conversion=no"
+        % (item.get("path"), resolved or "unspecified", source, resolved or "omitted")
+    )
+
+
 def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_audio: bool) -> None:
     if not has_audio:
         cmd.append("-an")
@@ -4262,14 +4395,16 @@ def resolve_color_range(answers: dict[str, Any]) -> tuple[str, str]:
     """Resolve the output color-range decision.
 
     Returns (resolved, source) where resolved is 'tv', 'pc', or '' (omit), and
-    source is one of: 'detected', 'user assumption', 'user choice', 'default'.
+    source is one of: 'detected', 'user assumption', 'batch user assumption',
+    'user choice', 'compatibility fallback'.
 
     - Known source range -> use it (detected).
-    - Unknown source + a stored wizard choice:
-        'tv'/'pc'  -> user assumption (metadata only, no pixel conversion)
+    - Unknown source + a stored wizard/batch choice:
+        'tv'/'pc'  -> assumption (metadata only, no pixel conversion)
         'unspecified' -> omit any forced range (user choice)
     - Unknown source + no stored choice (command builders / non-interactive):
-        fall back to the historical default (tv) so existing behavior is kept.
+        fall back to the historical default (tv), reported explicitly as a
+        'compatibility fallback' so it never masquerades as a detected value.
     """
     stream = source_video_stream(answers) or {}
     detected = normalize_color_range(stream.get("color_range"))
@@ -4279,8 +4414,9 @@ def resolve_color_range(answers: dict[str, Any]) -> tuple[str, str]:
     if choice == "unspecified":
         return "", "user choice"
     if choice in {"tv", "pc"}:
-        return choice, "user assumption"
-    return COLOR_RANGE, "default"
+        source = "batch user assumption" if answers.get("_color_range_from_batch") else "user assumption"
+        return choice, source
+    return COLOR_RANGE, "compatibility fallback"
 
 
 def color_range_output_args(answers: dict[str, Any], spec: str = ":v:0") -> list[str]:
@@ -4292,6 +4428,169 @@ def color_range_output_args(answers: dict[str, Any], spec: str = ":v:0") -> list
     if resolved in {"tv", "pc"}:
         return [f"-color_range{spec}", resolved]
     return []
+
+
+# ------------------------------------------------------------------
+# Shared pixel-format analysis. Classifies the source and target pixel formats
+# and decides whether a format filter is a no-op compatibility constraint or a
+# real conversion (bit-depth / chroma-subsampling / colour-model change).
+# ------------------------------------------------------------------
+
+# Chroma-subsampling ordering for "reduction" detection (higher = more chroma
+# detail). 4:4:4 > 4:2:2 > 4:2:0 / 4:1:1.
+_CHROMA_RANK = {"4:4:4": 3, "4:2:2": 2, "4:2:0": 1, "4:1:1": 1}
+
+
+def pix_fmt_descriptor(pix_fmt: Any) -> dict[str, Any]:
+    """Describe a pixel format: bit depth, chroma label, and colour model.
+    Unknown formats are reported as such and never raise."""
+    fmt = str(pix_fmt or "").strip().lower()
+    desc: dict[str, Any] = {"pix_fmt": fmt or "unknown", "bit_depth": None,
+                            "chroma": "unknown", "kind": "unknown"}
+    if not fmt or fmt in {"unknown", "none"}:
+        return desc
+
+    # Bit depth: explicit suffix (10le/12le/16le) or pNNN family, else 8.
+    depth = 8
+    m = re.search(r"(\d{1,2})(?:le|be)?$", fmt)
+    if m and fmt not in {"nv12", "nv21", "nv16", "nv24", "nv42"}:
+        token = int(m.group(1))
+        if token in (9, 10, 12, 14, 16):
+            depth = token
+    if fmt in {"p010", "p010le", "p010be", "p210", "p210le", "p410", "p410le"}:
+        depth = 10
+    if fmt in {"p016", "p016le", "p216", "p416"}:
+        depth = 16
+
+    if fmt.startswith(("rgb", "bgr", "gbr", "argb", "abgr", "rgba", "bgra",
+                       "0rgb", "0bgr", "rgb0", "bgr0")):
+        desc.update(bit_depth=depth, chroma="RGB", kind="rgb")
+        return desc
+    if fmt.startswith(("gray", "ya")) or fmt in {"monow", "monob"}:
+        desc.update(bit_depth=depth, chroma="gray", kind="gray")
+        return desc
+    if fmt in {"nv12", "nv21", "p010", "p010le", "p010be", "p016", "p016le"}:
+        desc.update(bit_depth=depth, chroma="4:2:0", kind="yuv")
+        return desc
+    if fmt in {"nv16", "p210", "p210le", "yuyv422", "uyvy422", "yvyu422"}:
+        desc.update(bit_depth=depth, chroma="4:2:2", kind="yuv")
+        return desc
+    if fmt in {"nv24", "nv42", "p410", "p410le", "p416"}:
+        desc.update(bit_depth=depth, chroma="4:4:4", kind="yuv")
+        return desc
+    for token, chroma in (("444", "4:4:4"), ("440", "4:4:0"), ("422", "4:2:2"),
+                          ("411", "4:1:1"), ("410", "4:1:0"), ("420", "4:2:0")):
+        if token in fmt:
+            desc.update(bit_depth=depth, chroma=chroma, kind="yuv")
+            return desc
+    desc.update(bit_depth=depth)
+    return desc
+
+
+def compare_pixel_formats(source_fmt: Any, target_fmt: Any) -> dict[str, Any]:
+    """Compare a source and target pixel format and classify the operation.
+
+    Returns a dict with: source/target descriptors, operation
+    ('none' | 'no-op compatibility constraint' | 'conversion' | 'unknown'),
+    bit_depth_conversion, chroma_conversion, and a list of human warnings for
+    precision/chroma/colour-model reductions."""
+    src = pix_fmt_descriptor(source_fmt)
+    tgt = pix_fmt_descriptor(target_fmt)
+    result: dict[str, Any] = {
+        "source": src,
+        "target": tgt,
+        "operation": "conversion",
+        "bit_depth_conversion": "no",
+        "chroma_conversion": "no",
+        "warnings": [],
+    }
+
+    if src["kind"] == "unknown" or not src["pix_fmt"] or src["pix_fmt"] == "unknown":
+        result["operation"] = "unknown"
+        return result
+    if tgt["kind"] == "unknown" or tgt["pix_fmt"] == "unknown":
+        result["operation"] = "unknown"
+        return result
+
+    same_fmt = src["pix_fmt"] == tgt["pix_fmt"]
+    same_geom = (src["bit_depth"] == tgt["bit_depth"]
+                 and src["chroma"] == tgt["chroma"]
+                 and src["kind"] == tgt["kind"])
+
+    if same_fmt:
+        result["operation"] = "none"
+    elif same_geom:
+        # Same bit depth + chroma + colour model, only a format relabel
+        # (e.g. yuv420p <-> nv12) -> harmless compatibility constraint.
+        result["operation"] = "no-op compatibility constraint"
+    else:
+        result["operation"] = "conversion"
+
+    # Bit-depth reduction.
+    if (src["bit_depth"] and tgt["bit_depth"] and src["bit_depth"] > tgt["bit_depth"]):
+        result["bit_depth_conversion"] = f"{src['bit_depth']}-bit -> {tgt['bit_depth']}-bit"
+        result["warnings"].append(
+            f"Video bit depth will be reduced from {src['bit_depth']}-bit to {tgt['bit_depth']}-bit."
+        )
+
+    # Chroma reduction (only meaningful for YUV->YUV).
+    if src["kind"] == "yuv" and tgt["kind"] == "yuv":
+        s_rank = _CHROMA_RANK.get(src["chroma"], 0)
+        t_rank = _CHROMA_RANK.get(tgt["chroma"], 0)
+        if s_rank and t_rank and s_rank > t_rank:
+            result["chroma_conversion"] = f"{src['chroma']} -> {tgt['chroma']}"
+            result["warnings"].append(
+                f"Chroma subsampling will be reduced from {src['chroma']} to {tgt['chroma']}."
+            )
+
+    # Colour-model change (RGB/gray -> YUV).
+    if src["kind"] in {"rgb", "gray"} and tgt["kind"] == "yuv":
+        label = "RGB" if src["kind"] == "rgb" else "grayscale"
+        result["warnings"].append(
+            f"{label} video will be converted to YUV {tgt['chroma']}."
+        )
+
+    return result
+
+
+def target_pixel_format_for_answers(answers: dict[str, Any]) -> str:
+    """The pixel format the resolved encoder will output (CPU or NVENC)."""
+    video_encoder, _tag, _profile = resolve_video_encoder(answers)
+    if str(video_encoder).endswith("_nvenc"):
+        return cuda_pixel_format_for_output(answers)
+    return cpu_pixel_format_for_output(answers)
+
+
+def pixel_format_analysis(answers: dict[str, Any]) -> dict[str, Any]:
+    """Analyse the source vs target pixel format for the current workflow."""
+    stream = source_video_stream(answers) or {}
+    return compare_pixel_formats(stream.get("pix_fmt"), target_pixel_format_for_answers(answers))
+
+
+def log_and_warn_pixel_format(answers: dict[str, Any], announce: bool = True) -> dict[str, Any]:
+    """Log the pixel-format decision and surface lossy-conversion warnings before
+    command generation. No-op compatibility constraints are logged, not warned."""
+    if not output_has_video(answers):
+        return {}
+    if str(resolve_video_encoder(answers)[0]).lower() == "copy":
+        return {}
+    info = pixel_format_analysis(answers)
+    src = info["source"]
+    tgt = info["target"]
+    log_info(
+        "Pixel format: source=%s (%s, %s); target=%s (%s, %s); operation=%s; "
+        "bit_depth_conversion=%s; chroma_subsampling_conversion=%s"
+        % (
+            src["pix_fmt"], f"{src['bit_depth']}-bit" if src["bit_depth"] else "unknown-bit", src["chroma"],
+            tgt["pix_fmt"], f"{tgt['bit_depth']}-bit" if tgt["bit_depth"] else "unknown-bit", tgt["chroma"],
+            info["operation"], info["bit_depth_conversion"], info["chroma_conversion"],
+        )
+    )
+    for warning in info["warnings"]:
+        log_warn("Pixel format: " + warning)
+        if announce:
+            note("Warning: " + warning)
+    return info
 
 
 # ------------------------------------------------------------------
@@ -9696,6 +9995,10 @@ def prepare_folder_job_answers(
     job.pop("output_name_stem", None)
     job.pop("output_path", None)
     job.pop("cmd", None)
+    # Resolve this file's color range from the batch policy (known ranges win).
+    job.pop("color_range_choice", None)
+    job.pop("_color_range_from_batch", None)
+    apply_folder_batch_color_range(job, settings_answers, item)
 
     if settings_answers.get("output_format_keep_input"):
         input_ext = job["input_path"].suffix.lstrip(".") or ("mp4" if job.get("video_streams") else "mp3")
@@ -15280,6 +15583,7 @@ def step_start_now(answers: dict[str, Any]) -> None:
             cmd = build_ffmpeg_command(answers)
     answers["cmd"] = cmd
     log_crop_normalization_summary(answers)
+    log_and_warn_pixel_format(answers)
     print_summary(answers, cmd)
     answers["start_now"] = ask_yes_no(
         question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
@@ -15731,6 +16035,26 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             f"{_sd['sar_text']} / {_sd['dar_text']} ({_sd['dar_source']})",
             Color.AQUA,
         ))
+        # Pixel-format operation summary.
+        try:
+            if str(resolve_video_encoder(answers)[0]).lower() != "copy":
+                _pf = pixel_format_analysis(answers)
+                _src, _tgt = _pf["source"], _pf["target"]
+                print("  " + field_text(
+                    "source pixel format",
+                    f"{_src['pix_fmt']} ({(str(_src['bit_depth']) + '-bit') if _src['bit_depth'] else 'unknown-bit'}, {_src['chroma']})",
+                    Color.ORANGE,
+                ))
+                print("  " + field_text(
+                    "target pixel format",
+                    f"{_tgt['pix_fmt']} ({(str(_tgt['bit_depth']) + '-bit') if _tgt['bit_depth'] else 'unknown-bit'}, {_tgt['chroma']})",
+                    Color.ORANGE,
+                ))
+                print("  " + field_text("pixel-format operation", _pf["operation"], Color.PINK))
+                print("  " + field_text("bit-depth conversion", _pf["bit_depth_conversion"], Color.PINK))
+                print("  " + field_text("chroma-subsampling conversion", _pf["chroma_conversion"], Color.PINK))
+        except Exception:
+            pass
         print("  " + field_text("fps", answers.get("fps") or "source", Color.MAGENTA))
         if video_speed_transform_enabled(answers):
             print("  " + field_text("video speed", f"{encode_video_speed_factor(answers) * 100:.0f}%", Color.MAGENTA))
@@ -18245,6 +18569,7 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
         Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
         Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
         Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
+        Step("color_range", folder_batch_color_range_applicable, step_folder_batch_color_range),
         Step("start_now", lambda a: True, step_start_folder_now),
     ]
 
@@ -18362,6 +18687,7 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
         print(paint(f"Folder Encode [{index}/{total}]: {input_path.name}", Color.BOLD + Color.LIGHT_BLUE))
         try:
             job_answers = prepare_folder_job_answers(answers, item)
+            log_and_warn_pixel_format(job_answers)
             cmd = build_ffmpeg_command(job_answers)
         except Exception as exc:
             failures += 1
@@ -19827,6 +20153,7 @@ def step_hardsub_audio_container_policy(answers: dict[str, Any]) -> None:
 
 
 def step_hardsub_start_now(answers: dict[str, Any]) -> None:
+    log_and_warn_pixel_format(answers)
     cmd = build_hardsub_command(answers)
     answers["cmd"] = cmd
     print()
