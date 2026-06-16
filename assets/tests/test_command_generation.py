@@ -4077,6 +4077,225 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertEqual(vfilt(first), vfilt(second))
             self.assertIn("format=yuv420p", vfilt(first))
 
+    # ===================================================================
+    # Color-range resolution contract (strict vs compatibility fallback)
+    # ===================================================================
+
+    def _unknown_range_encode(self, output_dir: str, use_gpu: bool = False) -> dict:
+        """base_answers variant whose source color range is unknown."""
+        answers = self.base_answers(output_dir)
+        answers["use_gpu"] = use_gpu
+        for stream in answers["video_streams"]:
+            stream.pop("color_range", None)
+        return answers
+
+    def test_strict_resolve_raises_when_unresolved(self):
+        """Strict mode raises instead of silently assuming a range."""
+        job = self._folder_job(color_range=None)
+        with self.assertRaises(FFmWiz.ColorRangeUnresolvedError):
+            FFmWiz.resolve_color_range(job, allow_compatibility_fallback=False)
+
+    def test_strict_resolve_ok_after_user_choice(self):
+        """After a wizard choice, strict mode resolves without raising."""
+        job = self._folder_job(color_range=None)
+        job["color_range_choice"] = "tv"
+        resolved, source = FFmWiz.resolve_color_range(job, allow_compatibility_fallback=False)
+        self.assertEqual(resolved, "tv")
+        self.assertEqual(source, "user assumption")
+        job["color_range_choice"] = "unspecified"
+        self.assertEqual(
+            FFmWiz.resolve_color_range(job, allow_compatibility_fallback=False),
+            ("", "user choice"),
+        )
+
+    def test_strict_resolve_ok_after_batch_choice(self):
+        """After a batch policy, strict mode reports a batch user assumption."""
+        settings = self._folder_settings(policy="pc")
+        job = self._folder_job(color_range=None)
+        FFmWiz.apply_folder_batch_color_range(job, settings, {"path": Path("a.mkv")})
+        resolved, source = FFmWiz.resolve_color_range(job, allow_compatibility_fallback=False)
+        self.assertEqual(resolved, "pc")
+        self.assertEqual(source, "batch user assumption")
+
+    def test_strict_resolve_ok_when_detected(self):
+        """A detected source range satisfies the strict guard."""
+        job = self._folder_job(color_range="tv")
+        self.assertEqual(
+            FFmWiz.resolve_color_range(job, allow_compatibility_fallback=False),
+            ("tv", "detected"),
+        )
+
+    def test_entry_guard_raises_on_unresolved_reencode(self):
+        """The production entry guard rejects an unresolved re-encode workflow."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp)
+            with self.assertRaises(FFmWiz.ColorRangeUnresolvedError):
+                FFmWiz.ensure_color_range_resolved(answers)
+
+    def test_entry_guard_passes_after_choice(self):
+        """The entry guard is a no-op once a choice is recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp)
+            answers["color_range_choice"] = "unspecified"
+            FFmWiz.ensure_color_range_resolved(answers)  # must not raise
+
+    def test_entry_guard_noop_for_stream_copy(self):
+        """Stream-copy output never triggers the color-range guard."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp)
+            answers["video_codec"] = "copy"
+            answers["crop_enabled"] = False
+            FFmWiz.ensure_color_range_resolved(answers)  # must not raise
+
+    def test_build_command_unknown_range_defaults_to_fallback(self):
+        """Direct build_ffmpeg_command keeps the legacy compatibility fallback
+        so non-interactive/legacy callers never crash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=False)
+            text = self.command_text(answers)
+            self.assertIn("-color_range:v:0 tv", text)
+
+    # ===================================================================
+    # 'Keep unspecified' omits -color_range in rendered commands
+    # ===================================================================
+
+    def test_unspecified_omits_color_range_cpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=False)
+            answers["color_range_choice"] = "unspecified"
+            self.assertNotIn("-color_range", self.command_text(answers))
+
+    def test_unspecified_omits_color_range_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=True)
+            answers["color_range_choice"] = "unspecified"
+            self.assertNotIn("-color_range", self.command_text(answers))
+
+    def test_unspecified_omits_color_range_two_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=False)
+            answers["color_range_choice"] = "unspecified"
+            cmd = self.command_for(answers)
+            first, second, _ = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+            self.assertNotIn("-color_range", " ".join(first))
+            self.assertNotIn("-color_range", " ".join(second))
+
+    def test_unspecified_omits_color_range_folder(self):
+        settings = self._folder_settings(policy="unspecified")
+        job = self._folder_job(color_range=None)
+        FFmWiz.apply_folder_batch_color_range(job, settings, {"path": Path("a.mkv")})
+        self.assertEqual(FFmWiz.color_range_output_args(job), [])
+
+    def test_tv_choice_emits_color_range_cpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=False)
+            answers["color_range_choice"] = "tv"
+            self.assertIn("-color_range:v:0 tv", self.command_text(answers))
+
+    # ===================================================================
+    # 10-bit NVENC rendered command: p010le + main10, no 8-bit override
+    # ===================================================================
+
+    def _tenbit_answers(self, output_dir: str, use_gpu: bool) -> dict:
+        answers = self.base_answers(output_dir)
+        answers["use_gpu"] = use_gpu
+        for stream in answers["video_streams"]:
+            stream["codec_name"] = "hevc"
+            stream["pix_fmt"] = "yuv420p10le"
+        return answers
+
+    def test_10bit_nvenc_rendered_command_uses_p010_main10(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._tenbit_answers(tmp, use_gpu=True)
+            text = self.command_text(answers)
+            self.assertIn("format=p010le", text)
+            self.assertIn("main10", text)
+            self.assert_not_contains_any(
+                text, ["format=nv12", "format=yuv420p ", "-pix_fmt yuv420p", "-profile:v main "]
+            )
+            self.assertNotIn("-profile:v main\n", text)
+
+    def test_10bit_cpu_rendered_command_uses_yuv420p10le_main10(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._tenbit_answers(tmp, use_gpu=False)
+            text = self.command_text(answers)
+            self.assertIn("format=yuv420p10le", text)
+            self.assertIn("main10", text)
+            self.assert_not_contains_any(text, ["format=nv12", "-pix_fmt yuv420p "])
+
+    def test_8bit_nvenc_rendered_command_uses_nv12_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = True
+            for stream in answers["video_streams"]:
+                stream["pix_fmt"] = "yuv420p"
+            text = self.command_text(answers)
+            self.assertIn("format=nv12", text)
+            self.assertNotIn("format=p010le", text)
+            self.assertNotIn("main10", text)
+
+    # ===================================================================
+    # Two-pass geometry + pixel-format parity (8-bit and 10-bit)
+    # ===================================================================
+
+    def _two_pass_field(self, cmd: list[str], flag: str) -> str:
+        return cmd[cmd.index(flag) + 1] if flag in cmd else ""
+
+    def _assert_two_pass_parity(self, answers: dict) -> None:
+        cmd = self.command_for(answers)
+        first, second, _ = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+        for flag in ("-filter:v", "-profile:v", "-b:v", "-maxrate:v", "-bufsize:v"):
+            self.assertEqual(
+                self._two_pass_field(first, flag),
+                self._two_pass_field(second, flag),
+                msg=f"two-pass mismatch for {flag}",
+            )
+
+    def test_two_pass_parity_8bit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = False
+            self._assert_two_pass_parity(answers)
+
+    def test_two_pass_parity_10bit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._tenbit_answers(tmp, use_gpu=False)
+            self._assert_two_pass_parity(answers)
+            first, second, _ = FFmWiz.build_cpu_two_pass_commands(
+                self.command_for(answers), answers
+            )
+            self.assertIn("format=yuv420p10le", self._two_pass_field(first, "-filter:v"))
+            self.assertEqual(self._two_pass_field(first, "-profile:v"), "main10")
+
+    # ===================================================================
+    # Pixel-format no-op (no destructive warning)
+    # ===================================================================
+
+    def test_pixfmt_420_to_nv12_no_destructive_warning(self):
+        """yuv420p -> nv12 is a relabel: no bit-depth/chroma warning."""
+        info = FFmWiz.compare_pixel_formats("yuv420p", "nv12")
+        self.assertEqual(info["warnings"], [])
+        self.assertEqual(info["bit_depth_conversion"], "no")
+        self.assertEqual(info["chroma_conversion"], "no")
+
+    # ===================================================================
+    # HardSub pixel-format warnings
+    # ===================================================================
+
+    def test_hardsub_8bit_no_warning(self):
+        info = FFmWiz.compare_pixel_formats("yuv420p", "yuv420p")
+        self.assertEqual(info["warnings"], [])
+
+    def test_hardsub_10bit_to_8bit_warns(self):
+        info = FFmWiz.compare_pixel_formats("yuv420p10le", "yuv420p")
+        self.assertTrue(any("bit depth will be reduced" in w for w in info["warnings"]))
+
+    def test_hardsub_444_to_420_warns(self):
+        info = FFmWiz.compare_pixel_formats("yuv444p", "yuv420p")
+        self.assertTrue(
+            any("Chroma subsampling will be reduced from 4:4:4 to 4:2:0" in w for w in info["warnings"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
