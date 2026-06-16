@@ -57,7 +57,20 @@ class CommandGenerationTests(unittest.TestCase):
             "format": {"duration": "6074.221"},
         }
 
+    def _ensure_test_color_range(self, answers: dict) -> None:
+        """Synthetic test sources frequently omit color_range. Real completed
+        wizard/job state always resolves the range before reaching a builder
+        (detected source range, or an explicit wizard/batch choice), so default
+        an otherwise-unresolved fixture to a TV/Limited assumption. Tests that
+        exercise color-range behavior set their own stream range or
+        color_range_choice and are therefore left untouched."""
+        stream = (answers.get("video_streams") or [{}])[0]
+        has_range = FFmWiz.normalize_color_range(stream.get("color_range")) in {"tv", "pc"}
+        if not has_range and not str(answers.get("color_range_choice") or "").strip():
+            answers["color_range_choice"] = "tv"
+
     def command_for(self, answers: dict) -> list[str]:
+        self._ensure_test_color_range(answers)
         return FFmWiz.build_ffmpeg_command(answers)
 
     def command_text(self, answers: dict) -> str:
@@ -821,7 +834,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "a.mp4"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             audio = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": "48000"}
             answers = {
                 "ffmpeg": "ffmpeg",
@@ -855,7 +868,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "b.mkv"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             audio = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": "48000"}
             answers = {
                 "ffmpeg": "ffmpeg",
@@ -899,6 +912,7 @@ class CommandGenerationTests(unittest.TestCase):
                 "avg_frame_rate": "30/1",
                 "pix_fmt": "yuv420p10le",
                 "bits_per_raw_sample": "10",
+                "color_range": "tv",
             }
             audio = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": "48000"}
             answers = {
@@ -933,7 +947,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "b.mkv"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             audio = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": "48000"}
             answers = {
                 "ffmpeg": "ffmpeg",
@@ -983,7 +997,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "b.mkv"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             audio = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": "48000"}
             answers = {
                 "ffmpeg": "ffmpeg",
@@ -1024,7 +1038,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "b.mkv"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             audio = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": "48000"}
             answers = {
                 "ffmpeg": "ffmpeg",
@@ -1062,7 +1076,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "b.mkv"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             answers = {
                 "ffmpeg": "ffmpeg",
                 "input_path": first,
@@ -1097,7 +1111,7 @@ class CommandGenerationTests(unittest.TestCase):
             second = base / "b.mkv"
             first.write_bytes(b"")
             second.write_bytes(b"")
-            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1"}
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "color_range": "tv"}
             answers = {
                 "ffmpeg": "ffmpeg",
                 "input_path": first,
@@ -1431,7 +1445,7 @@ class CommandGenerationTests(unittest.TestCase):
             "output_ext": output_ext,
             "video_codec": "H265",
             "use_gpu": False,
-            "video_streams": [{"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}],
+            "video_streams": [{"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080, "color_range": "tv"}],
             "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}],
             "hardsub_subtitle_source": "external",
             "hardsub_subtitle_path": subtitle_path,
@@ -3977,10 +3991,11 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertTrue(FFmWiz.folder_batch_color_range_applicable(mixed))
 
     def test_nonint_builder_unknown_is_compatibility_fallback(self):
-        """Test 11: a builder with no policy/state reports a logged compatibility
+        """Test 11: the legacy/direct API compatibility fallback must be opted
+        into explicitly; when enabled it reports a logged compatibility
         fallback, never a silent 'detected' tv."""
         job = self._folder_job(color_range=None)
-        resolved, source = FFmWiz.resolve_color_range(job)
+        resolved, source = FFmWiz.resolve_color_range(job, allow_compatibility_fallback=True)
         self.assertEqual(resolved, "tv")
         self.assertEqual(source, "compatibility fallback")
 
@@ -4147,13 +4162,45 @@ class CommandGenerationTests(unittest.TestCase):
             answers["crop_enabled"] = False
             FFmWiz.ensure_color_range_resolved(answers)  # must not raise
 
-    def test_build_command_unknown_range_defaults_to_fallback(self):
-        """Direct build_ffmpeg_command keeps the legacy compatibility fallback
-        so non-interactive/legacy callers never crash."""
+    def test_build_command_unknown_range_raises_by_default(self):
+        """Production builder: an unresolved unknown range must raise instead of
+        silently falling back. (command_for/command_text inject a resolved test
+        choice, so this calls the production builder directly.)"""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._unknown_range_encode(tmp, use_gpu=False)
-            text = self.command_text(answers)
-            self.assertIn("-color_range:v:0 tv", text)
+            with self.assertRaises(FFmWiz.ColorRangeUnresolvedError):
+                FFmWiz.build_ffmpeg_command(answers)
+
+    def test_legacy_opt_in_color_range_output_args(self):
+        """Legacy/direct API opt-in still returns the labeled fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=False)
+            self.assertEqual(
+                FFmWiz.color_range_output_args(answers, ":v:0", allow_compatibility_fallback=True),
+                ["-color_range:v:0", "tv"],
+            )
+
+    def test_color_range_helpers_default_disabled_fallback(self):
+        """resolve_color_range and color_range_output_args default to strict."""
+        job = self._folder_job(color_range=None)
+        with self.assertRaises(FFmWiz.ColorRangeUnresolvedError):
+            FFmWiz.resolve_color_range(job)
+        with self.assertRaises(FFmWiz.ColorRangeUnresolvedError):
+            FFmWiz.color_range_output_args(job)
+
+    def test_color_range_error_message_identifies_context(self):
+        """The unresolved error names source path, stream, range, and workflow."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._unknown_range_encode(tmp, use_gpu=False)
+            try:
+                FFmWiz.resolve_color_range(answers, workflow="UnitTest")
+                self.fail("expected ColorRangeUnresolvedError")
+            except FFmWiz.ColorRangeUnresolvedError as exc:
+                msg = str(exc)
+                self.assertIn("UnitTest", msg)
+                self.assertIn("source path=", msg)
+                self.assertIn("detected range=unknown", msg)
+                self.assertIn("color_range_choice", msg)
 
     # ===================================================================
     # 'Keep unspecified' omits -color_range in rendered commands
