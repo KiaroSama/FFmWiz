@@ -4880,6 +4880,90 @@ def invalidate_capability_entry(answers: dict[str, Any]) -> None:
         log_warn("Capability cache entry %s invalidated (output inspection mismatch)." % cap_key)
 
 
+# Ownership marker written into temporary cache directories created by tests or
+# practical validation, so cleanup can prove it owns a directory before removal.
+TEST_CACHE_OWNER_MARKER = ".ffmwiz_test_cache_owner"
+
+
+def protected_cleanup_paths() -> set[Path]:
+    """Resolved absolute paths that cleanup helpers must never delete: the
+    project root, the project/default capability-cache directory, the user home,
+    the current working directory, the system temp root, and filesystem roots."""
+    project_root = Path(__file__).resolve().parent
+    protected: set[Path] = {
+        project_root,
+        project_root / CAPABILITY_CACHE_DIRNAME,  # default runtime capability cache
+        Path.home().resolve(),
+        Path.cwd().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    }
+    # Filesystem roots / drive anchors for the candidate and protected paths.
+    for base in (project_root, Path.cwd().resolve(), Path.home().resolve()):
+        anchor = base.anchor
+        if anchor:
+            protected.add(Path(anchor))
+    return protected
+
+
+def safe_remove_owned_temp_dir(owned_path: Any, expected_marker: str,
+                               allowed_temp_root: Any) -> bool:
+    """Safely remove ONLY a temporary directory created and owned by the caller.
+
+    Refuses to delete protected paths, anything outside allowed_temp_root, or a
+    directory whose ownership marker is missing or does not match. Resolves
+    symlinks before validation (a symlink to a protected directory is refused).
+    Idempotent: returns False if the owned path is already absent. Returns True
+    when a directory was actually removed.
+    """
+    if not owned_path or not str(owned_path).strip():
+        raise ValueError("Cleanup safety: refusing to act on an empty path.")
+    if not expected_marker or not str(expected_marker).strip():
+        raise ValueError("Cleanup safety: an ownership marker value is required.")
+    owned = Path(owned_path).resolve()
+    temp_root = Path(allowed_temp_root).resolve()
+
+    # Protection checks run BEFORE any existence short-circuit so a protected
+    # path is refused even when it does not currently exist.
+    protected = protected_cleanup_paths()
+    for parent in [owned, *owned.parents]:
+        if parent == parent.parent:  # filesystem root / drive anchor
+            protected.add(parent)
+    if owned in protected:
+        raise RuntimeError("Cleanup safety: refusing to delete protected path: %s" % owned)
+    if owned == temp_root:
+        raise RuntimeError("Cleanup safety: refusing to delete the temp root itself: %s" % owned)
+    try:
+        owned.relative_to(temp_root)
+    except ValueError:
+        raise RuntimeError(
+            "Cleanup safety: %s is outside the allowed temp root %s" % (owned, temp_root))
+
+    if not owned.exists():
+        return False  # idempotent for a legitimate, already-removed owned path
+
+    marker = owned / TEST_CACHE_OWNER_MARKER
+    if not marker.is_file():
+        raise RuntimeError("Cleanup safety: ownership marker missing in %s" % owned)
+    try:
+        recorded = marker.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError("Cleanup safety: cannot read ownership marker in %s (%s)" % (owned, exc))
+    if recorded != str(expected_marker).strip():
+        raise RuntimeError("Cleanup safety: ownership marker mismatch in %s" % owned)
+
+    shutil.rmtree(owned)
+    log_info("Removed owned temporary directory: %s" % owned)
+    return True
+
+
+def create_owned_temp_cache_dir(run_id: str) -> str:
+    """Create a unique temporary cache directory under the system temp root and
+    stamp it with an ownership marker so it can be safely removed later."""
+    path = tempfile.mkdtemp(prefix="ffmwiz_test_cache_")
+    (Path(path) / TEST_CACHE_OWNER_MARKER).write_text(str(run_id), encoding="utf-8")
+    return path
+
+
 # ------------------------------------------------------------------
 # Shared pixel-format analysis. Classifies the source and target pixel formats
 # and decides whether a format filter is a no-op compatibility constraint or a
@@ -18337,19 +18421,27 @@ def _capability_cache_reprobe(ffmpeg: str, ffprobe: str) -> None:
 
 
 def _capability_cache_clear() -> None:
+    # Delete only the FFmWiz-owned capability-cache file (and its corrupt
+    # sidecar). Never remove the enclosing .cache directory or unrelated files.
     path = capability_cache_path()
-    if not path.exists():
+    owned_files = [path, path.with_suffix(".corrupt")]
+    if not any(p.exists() for p in owned_files):
         note("Capability cache is already empty.")
         return
     if not ask_yes_no("Clear the FFmpeg capability cache? (y/n) [n]: ", False):
         note("Capability cache not cleared.")
         return
-    try:
-        path.unlink()
-        _CAPABILITY_SESSION_MEMO.clear()
-        note("Capability cache cleared. User settings, logs, and secrets are untouched.")
-    except OSError as exc:
-        error("Could not clear capability cache: %s" % exc)
+    removed = []
+    for p in owned_files:
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except OSError as exc:
+            error("Could not clear capability cache file %s: %s" % (p.name, exc))
+    _CAPABILITY_SESSION_MEMO.clear()
+    note("Capability cache cleared (%s). The .cache directory, user settings, logs, "
+         "and unrelated files are untouched." % (", ".join(removed) or "nothing"))
 
 
 def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
@@ -20355,7 +20447,24 @@ def build_hardsub_video_filter(answers: dict[str, Any], video_encoder: str) -> s
         source_range = str((answers.get("video_streams") or [{}])[0].get("color_range") or "").lower()
         if source_range in {"tv", "pc"}:
             filters.append(f"setparams=range={source_range}")
-    if FORCE_SAR:
+    # SAR handling: HardSub burns subtitles without resizing, so a blanket
+    # setsar=1 would destroy a valid non-square source SAR. Preserve a resolved
+    # non-square SAR explicitly; only assert square pixels for square or
+    # fallback-assumed sources.
+    geo = sar_dar_info(answers)
+    resolved_sar = geo.get("resolved_sar")
+    if (resolved_sar is not None and not geo.get("fallback_used")
+            and abs(resolved_sar - 1.0) >= SAR_DAR_TOLERANCE):
+        pair = ratio_to_pair(resolved_sar)
+        if pair:
+            filters.append(f"setsar={pair[0]}/{pair[1]}")
+            log_info(
+                "HardSub: preserving resolved non-square SAR %d/%d (%s); no square reset forced."
+                % (pair[0], pair[1], geo.get("sar_source"))
+            )
+        elif FORCE_SAR:
+            filters.append(f"setsar={FORCE_SAR}")
+    elif FORCE_SAR:
         filters.append(f"setsar={FORCE_SAR}")
     return ",".join(filters)
 
