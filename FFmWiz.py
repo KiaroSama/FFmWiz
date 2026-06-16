@@ -1425,9 +1425,6 @@ def step_color_range(answers: dict[str, Any]) -> None:
     default_choice = {"tv": "1", "unspecified": "2", "pc": "3"}.get(previous, "1")
     print()
     note("Source color range is unknown:")
-    print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited", Color.HINT_YELLOW))
-    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Do not force a range in FFmWiz", Color.HINT_YELLOW))
-    print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full", Color.HINT_YELLOW))
     mapping = {"1": "tv", "2": "unspecified", "3": "pc", "۱": "tv", "۲": "unspecified", "۳": "pc"}
     while True:
         value = ask_raw(
@@ -1436,17 +1433,16 @@ def step_color_range(answers: dict[str, Any]) -> None:
                 "Select source color range",
                 "1=Assume TV/Limited; 2=Do not force a range; 3=Assume PC/Full",
                 default_choice,
-                back="back=b, quit=exit",
             )
         )
         lowered = value.strip().lower()
-        if lowered in {"b", "back"}:
+        if is_back_value(value):
             raise Back()
         if not lowered:
             lowered = default_choice
         choice = mapping.get(lowered)
         if not choice:
-            error("Enter 1, 2, or 3. Use b to go back.")
+            error("Enter 1, 2, or 3. Use 0 to go back.")
             continue
         answers["color_range_choice"] = choice
         resolved, source = resolve_color_range(answers)
@@ -1512,10 +1508,6 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
     default_choice = {"tv": "1", "unspecified": "2", "pc": "3", "each": "4"}.get(previous, "1")
     print()
     note(f"One or more input videos have an unknown color range ({len(unknown_items)} file(s)):")
-    print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited for unknown files", Color.HINT_YELLOW))
-    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Do not force a range in FFmWiz for unknown files", Color.HINT_YELLOW))
-    print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full for unknown files", Color.HINT_YELLOW))
-    print("  " + paint("4", Color.OPT_KEY_CORAL) + paint(". Ask separately for each unknown file", Color.HINT_YELLOW))
     mapping = {"1": "tv", "2": "unspecified", "3": "pc", "4": "each"}
     while True:
         value = ask_raw(
@@ -1524,17 +1516,16 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
                 "Select batch color-range policy for unknown files",
                 "1=TV/Limited; 2=Do not force a range; 3=PC/Full; 4=Ask per file",
                 default_choice,
-                back="back=b, quit=exit",
             )
         )
         lowered = value.strip().lower()
-        if lowered in {"b", "back"}:
+        if is_back_value(value):
             raise Back()
         if not lowered:
             lowered = default_choice
         policy = mapping.get(lowered)
         if not policy:
-            error("Enter 1, 2, 3, or 4. Use b to go back.")
+            error("Enter 1, 2, 3, or 4. Use 0 to go back.")
             continue
         answers["_batch_color_range_policy"] = policy
         if policy == "each":
@@ -1543,9 +1534,6 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
             for item in unknown_items:
                 print()
                 note(f"Source color range is unknown: {item['path'].name}")
-                print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited", Color.HINT_YELLOW))
-                print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Do not force a range in FFmWiz", Color.HINT_YELLOW))
-                print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full", Color.HINT_YELLOW))
                 while True:
                     sub = ask_raw(
                         question_prompt(
@@ -1553,16 +1541,15 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
                             "Select color range for this file",
                             "1=Assume TV/Limited; 2=Do not force a range; 3=Assume PC/Full",
                             "1",
-                            back="back=b, quit=exit",
                         )
                     ).strip().lower()
-                    if sub in {"b", "back"}:
+                    if is_back_value(sub):
                         raise Back()
                     if not sub:
                         sub = "1"
                     file_choice = sub_mapping.get(sub)
                     if not file_choice:
-                        error("Enter 1, 2, or 3. Use b to go back.")
+                        error("Enter 1, 2, or 3. Use 0 to go back.")
                         continue
                     per_file[str(item["path"])] = file_choice
                     break

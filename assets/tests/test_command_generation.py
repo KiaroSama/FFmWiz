@@ -4392,20 +4392,44 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(FFmWiz.expected_unforced_range(a("H265", True, "mkv")), "tv")
 
     def test_do_not_force_label_in_color_range_menu(self):
-        """The option-2 label reads 'Do not force a range in FFmWiz'."""
+        """The option-2 label reads 'Do not force a range in FFmWiz'; the prompt
+        uses 0=back (not b) and prints no separate option list."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
+            captured = {}
+
+            def fake_ask(prompt):
+                captured["prompt"] = prompt
+                return "2"
+
             buf = io.StringIO()
-            with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
                     contextlib.redirect_stdout(buf):
                 FFmWiz.step_color_range(answers)
             out = buf.getvalue()
-            self.assertIn("Do not force a range in FFmWiz", out)
+            prompt = captured["prompt"]
+            self.assertIn("2=Do not force a range", prompt)
+            self.assertIn("back=0", prompt)
+            self.assertNotIn("back=b", prompt)
+            # No separate numbered option list is printed to stdout anymore.
+            self.assertNotIn(". Assume TV/Limited", out)
+            self.assertNotIn(". Assume PC/Full", out)
+            self.assertIn("Do not force a range in FFmWiz", out)  # confirmation note
             self.assertNotIn("Keep unspecified", out)
             self.assertEqual(answers["color_range_choice"], "unspecified")
 
+    def test_color_range_menu_zero_goes_back(self):
+        """Entering 0 at the color-range menu navigates back."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            with mock.patch.object(FFmWiz, "ask_raw", return_value="0"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(FFmWiz.Back):
+                    FFmWiz.step_color_range(answers)
+
     def test_folder_batch_menu_corrected_wording(self):
-        """The Folder Encode batch menu uses the corrected option-2 wording."""
+        """The Folder Encode batch menu uses the corrected option-2 wording and
+        a 0=back token (no separate printed option list)."""
         answers = {
             "video_codec": "H265", "use_gpu": False,
             "video_streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
@@ -4413,13 +4437,26 @@ class CommandGenerationTests(unittest.TestCase):
                 {"path": Path("a.mkv"), "answers": {"video_streams": [{"codec_type": "video"}]}},
             ],
         }
+        captured = {}
+
+        def fake_ask(prompt):
+            captured["prompt"] = prompt
+            return "2"
+
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
                 contextlib.redirect_stdout(buf):
             FFmWiz.step_folder_batch_color_range(answers)
         out = buf.getvalue()
-        self.assertIn("Do not force a range in FFmWiz for unknown files", out)
+        prompt = captured["prompt"]
+        # Prompt presents the choices and uses 0=back (b is not used here).
+        self.assertIn("2=Do not force a range", prompt)
+        self.assertIn("back=0", prompt)
+        self.assertNotIn("back=b", prompt)
+        # The confirmation note uses the corrected wording; old wording is gone.
+        self.assertIn("Do not force a range in FFmWiz", out)
         self.assertNotIn("Keep unknown files unspecified", out)
+        self.assertNotIn("Keep unspecified", out)
         self.assertEqual(answers["_batch_color_range_policy"], "unspecified")
 
     def test_back_nav_preserves_do_not_force_default(self):
