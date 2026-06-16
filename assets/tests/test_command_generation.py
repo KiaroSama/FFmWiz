@@ -1,5 +1,7 @@
 import contextlib
 import io
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,15 @@ import FFmWiz
 class CommandGenerationTests(unittest.TestCase):
     def setUp(self):
         FFmWiz.USE_COLOR = False
+        # Isolate the FFmpeg capability cache so tests never touch the real one.
+        self._cache_dir = tempfile.mkdtemp(prefix="ffmwiz_test_cache_")
+        os.environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
+        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+
+    def tearDown(self):
+        os.environ.pop("FFMWIZ_CACHE_DIR", None)
+        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        shutil.rmtree(self._cache_dir, ignore_errors=True)
 
     def base_answers(self, output_dir: str) -> dict:
         return {
@@ -3877,12 +3888,15 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertAlmostEqual(info["dar"], 4 / 3, places=4)
 
     def test_sar_dar_unknown_fallback(self):
-        """Test 16: unknown SAR -> width/height fallback reported, no crash."""
+        """Test 16/Case 4: both SAR and DAR unknown -> SAR 1:1 fallback, labeled."""
         answers = {"video_streams": [{"width": 1920, "height": 1080}]}
         info = FFmWiz.sar_dar_info(answers)
-        self.assertEqual(info["sar_text"], "unknown")
-        self.assertEqual(info["pixel_shape"], "unknown")
-        self.assertEqual(info["dar_source"], "width/height fallback (assumed SAR 1:1)")
+        self.assertEqual(info["sar_text"], "1:1")
+        self.assertEqual(info["sar_source"], "fallback assumption")
+        self.assertTrue(info["fallback_used"])
+        self.assertEqual(info["pixel_shape"], "square (assumed)")
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and fallback SAR")
+        self.assertEqual(info["dar_text"], "16:9")
 
     def test_no_resize_nonsquare_sar_omits_setsar(self):
         """Test 11: 720x576 SAR 16:15 no-resize -> source SAR preserved, no setsar=1."""
@@ -4421,29 +4435,32 @@ class CommandGenerationTests(unittest.TestCase):
             FFmWiz.print_summary(answers, cmd)
         return buf.getvalue()
 
-    def test_summary_hevc_option2_reports_encoder_default(self):
-        """HEVC + 'do not force': summary must not claim unspecified final range."""
+    def test_summary_option2_conservative_without_verified_capability(self):
+        """Without a verified capability, the summary reports conservatively."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)  # H265, CPU
             answers["color_range_choice"] = "unspecified"
+            answers["_no_capability_probe"] = True
             out = self._summary_text(answers)
             self.assertIn("requested color-range policy: do not force", out)
             self.assertIn("FFmWiz explicit color-range option: omitted", out)
-            self.assertIn("encoder range-signaling behavior: encoder default", out)
-            self.assertIn("expected encoder-reported final range: tv (encoder default)", out)
-            self.assertNotIn("unspecified supported", out)
-            self.assertNotIn("output color-range metadata: unspecified", out)
+            self.assertIn("capability source: unavailable", out)
+            self.assertIn("expected encoder-reported final range: unknown until verified", out)
 
-    def test_summary_h264_option2_reports_unspecified_supported(self):
-        """H.264 + 'do not force': summary reports a genuinely unspecified range."""
+    def test_summary_option2_uses_verified_cache(self):
+        """A verified capability result is surfaced in the summary."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
-            answers["video_codec"] = "H264"
             answers["color_range_choice"] = "unspecified"
-            out = self._summary_text(answers)
-            self.assertIn("encoder range-signaling behavior: unspecified supported", out)
-            self.assertIn("expected encoder-reported final range: unspecified", out)
-            self.assertNotIn("encoder default", out)
+            fake = {"capability_source": "verified cache", "env_short": "abc123def456",
+                    "status": "verified", "expected_final_range": "tv",
+                    "verified_at_utc": "2026-01-01 00:00:00 UTC"}
+            with mock.patch.object(FFmWiz, "resolve_capability", return_value=fake):
+                out = self._summary_text(answers)
+            self.assertIn("capability source: verified cache", out)
+            self.assertIn("capability environment fingerprint: abc123def456", out)
+            self.assertIn("expected encoder-reported final range: tv", out)
+            self.assertIn("verified probe timestamp: 2026-01-01 00:00:00 UTC", out)
 
     def test_summary_stream_copy_reports_preserved_range(self):
         """Stream copy reports the source range as preserved, not menu semantics."""
@@ -4466,6 +4483,285 @@ class CommandGenerationTests(unittest.TestCase):
             first, second, _ = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
             self.assertNotIn("-color_range", " ".join(first))
             self.assertNotIn("-color_range", " ".join(second))
+
+    # ===================================================================
+    # Corrected SAR/DAR inference (provenance-aware)
+    # ===================================================================
+
+    def test_sar_derived_from_dar_vertical_video(self):
+        """2160x3840, SAR unknown, DAR 9:16 -> SAR 1:1 derived, square pixels."""
+        answers = {"video_streams": [{"width": 2160, "height": 3840,
+                                       "display_aspect_ratio": "9:16"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["sar_text"], "1:1")
+        self.assertEqual(info["sar_source"], "calculated from coded resolution and DAR")
+        self.assertEqual(info["dar_text"], "9:16")
+        self.assertEqual(info["dar_source"], "detected by ffprobe")
+        self.assertEqual(info["pixel_shape"], "square")
+        self.assertAlmostEqual(info["effective_dar_decimal"], 0.5625, places=4)
+        self.assertFalse(info["fallback_used"])
+
+    def test_dar_derived_from_sar_when_dar_missing(self):
+        """720x576, SAR 16:15, DAR unknown -> DAR 4:3 derived, no fallback."""
+        answers = {"video_streams": [{"width": 720, "height": 576,
+                                       "sample_aspect_ratio": "16:15"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["sar_text"], "16:15")
+        self.assertEqual(info["sar_source"], "detected by ffprobe")
+        self.assertEqual(info["dar_text"], "4:3")
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and SAR")
+        self.assertEqual(info["pixel_shape"], "non-square")
+        self.assertFalse(info["fallback_used"])
+
+    def test_sar_dar_matching_no_discrepancy(self):
+        """Valid SAR and matching ffprobe DAR -> no discrepancy flagged."""
+        answers = {"video_streams": [{"width": 1920, "height": 1080,
+                                       "sample_aspect_ratio": "1:1",
+                                       "display_aspect_ratio": "16:9"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertFalse(info["discrepancy_detected"])
+        self.assertIn("ffprobe DAR agrees", info["dar_source"])
+
+    def test_sar_dar_conflict_dimensions_and_sar_win(self):
+        """Valid SAR conflicting with ffprobe DAR -> discrepancy logged, SAR wins."""
+        answers = {"video_streams": [{"width": 720, "height": 576,
+                                       "sample_aspect_ratio": "16:15",
+                                       "display_aspect_ratio": "16:9"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertTrue(info["discrepancy_detected"])
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and SAR")
+        self.assertAlmostEqual(info["resolved_dar"], 4 / 3, places=4)
+        self.assertIsNotNone(info["warning"])
+
+    def test_sar_dar_invalid_rationals_no_crash(self):
+        """Malformed/zero/non-finite rationals are rejected without crashing."""
+        for bad in ("0:1", "1:0", "-2:1", "abc", "inf", "nan", "0", ""):
+            self.assertIsNone(FFmWiz.parse_rational(bad))
+        # Invalid coded dims -> unresolved geometry, no crash.
+        info = FFmWiz.sar_dar_info({"video_streams": [{"width": 0, "height": 0}]})
+        self.assertEqual(info["sar_source"], "unknown")
+        self.assertIsNotNone(info["warning"])
+
+    def test_derived_non_square_sar_from_dar(self):
+        """720x576 + DAR 16:9 -> derived SAR 64:45 (non-square)."""
+        answers = {"video_streams": [{"width": 720, "height": 576,
+                                       "display_aspect_ratio": "16:9"}]}
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["sar_text"], "64:45")
+        self.assertEqual(info["sar_source"], "calculated from coded resolution and DAR")
+        self.assertEqual(info["pixel_shape"], "non-square")
+
+    def test_resize_uses_resolved_effective_dar(self):
+        """effective_source_dar reflects the resolved DAR from a derived SAR."""
+        answers = {"video_streams": [{"width": 2160, "height": 3840,
+                                       "display_aspect_ratio": "9:16"}]}
+        self.assertAlmostEqual(FFmWiz.effective_source_dar(answers), 0.5625, places=4)
+
+    def test_no_resize_preserves_derived_non_square_sar(self):
+        """No-resize with a DAR-derived non-square SAR omits setsar (preserved)."""
+        answers = {
+            "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                               "width": 720, "height": 576, "display_aspect_ratio": "16:9"}],
+            "resolution": "n", "crop_enabled": False,
+        }
+        vf = FFmWiz.build_cpu_video_filter(answers) or ""
+        self.assertNotIn("setsar", vf)
+
+    def test_sar_dar_no_contradictory_states(self):
+        """When resolved, neither SAR nor pixel shape remains 'unknown'."""
+        info = FFmWiz.sar_dar_info({"video_streams": [{"width": 2160, "height": 3840,
+                                                       "display_aspect_ratio": "9:16"}]})
+        self.assertNotEqual(info["sar_text"], "unknown")
+        self.assertNotEqual(info["pixel_shape"], "unknown")
+        self.assertNotEqual(info["sar_source"], "unknown")
+
+    # ===================================================================
+    # FFmpeg capability cache
+    # ===================================================================
+
+    def _cap_answers(self, codec="H265", gpu=False, ext="mkv"):
+        return {"video_codec": codec, "use_gpu": gpu, "output_ext": ext,
+                "ffmpeg": "ffmpeg", "ffprobe": "ffprobe",
+                "video_streams": [{"codec_type": "video", "width": 1920, "height": 1080}]}
+
+    def _fake_identity(self, **over):
+        base = {"os": "Windows", "arch": "AMD64", "ffmpeg_path": "C:/ff/ffmpeg.exe",
+                "ffmpeg_size": 100, "ffmpeg_mtime": 1, "ffmpeg_version_line": "ffmpeg 8.1.1",
+                "ffmpeg_build_hash": "abcd", "ffprobe_version_line": "ffprobe 8.1.1"}
+        base.update(over)
+        return base
+
+    def test_environment_fingerprint_stable(self):
+        with mock.patch.object(FFmWiz, "capability_environment_identity",
+                               return_value=self._fake_identity()):
+            _, k1 = FFmWiz.capability_environment_key("ffmpeg", "ffprobe", "libx265")
+            _, k2 = FFmWiz.capability_environment_key("ffmpeg", "ffprobe", "libx265")
+        self.assertEqual(k1, k2)
+
+    def test_environment_fingerprint_path_invalidates(self):
+        def ident(ffmpeg, ffprobe, *, include_gpu):
+            return self._fake_identity(ffmpeg_path=ffmpeg)
+        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
+            _, k1 = FFmWiz.capability_environment_key("C:/a/ffmpeg.exe", "ffprobe", "libx265")
+            _, k2 = FFmWiz.capability_environment_key("C:/b/ffmpeg.exe", "ffprobe", "libx265")
+        self.assertNotEqual(k1, k2)
+
+    def test_environment_fingerprint_build_invalidates(self):
+        def ident(ffmpeg, ffprobe, *, include_gpu):
+            return self._fake_identity(ffmpeg_build_hash="v1" if "a" in ffmpeg else "v2")
+        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
+            _, k1 = FFmWiz.capability_environment_key("a", "ffprobe", "libx265")
+            _, k2 = FFmWiz.capability_environment_key("b", "ffprobe", "libx265")
+        self.assertNotEqual(k1, k2)
+
+    def test_environment_driver_invalidates_nvenc(self):
+        calls = {}
+        def ident(ffmpeg, ffprobe, *, include_gpu):
+            calls["gpu"] = include_gpu
+            d = self._fake_identity()
+            if include_gpu:
+                d["gpu"] = "RTX"
+                d["nvidia_driver"] = "550" if "a" in ffmpeg else "560"
+            return d
+        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
+            _, k1 = FFmWiz.capability_environment_key("a", "ffprobe", "hevc_nvenc")
+            _, k2 = FFmWiz.capability_environment_key("b", "ffprobe", "hevc_nvenc")
+        self.assertTrue(calls["gpu"])
+        self.assertNotEqual(k1, k2)
+
+    def test_cpu_entry_does_not_include_gpu(self):
+        captured = {}
+        def ident(ffmpeg, ffprobe, *, include_gpu):
+            captured["include_gpu"] = include_gpu
+            return self._fake_identity()
+        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
+            FFmWiz.capability_environment_key("ffmpeg", "ffprobe", "libx265")
+        self.assertFalse(captured["include_gpu"])
+
+    def test_lazy_probe_runs_once_and_caches(self):
+        verified = {"status": "verified", "expected_final_range": "tv",
+                    "probe_method": "real encode + ffprobe", "encoder": "libx265",
+                    "container_family": "mkv", "sample_command_hash": "h",
+                    "ffprobe_result": "tv", "verified_at_utc": "t", "error": None}
+        with mock.patch.object(FFmWiz, "capability_environment_identity",
+                               return_value=self._fake_identity()), \
+                mock.patch.object(FFmWiz, "probe_color_range_capability",
+                                  return_value=verified) as probe:
+            a = self._cap_answers()
+            r1 = FFmWiz.resolve_capability(a)
+            r2 = FFmWiz.resolve_capability(a)  # session memo -> no second probe
+            FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+            r3 = FFmWiz.resolve_capability(a)  # file cache -> still no probe
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(r1["capability_source"], "fresh probe")
+        self.assertEqual(r2["capability_source"], "fresh probe")  # memoized copy
+        self.assertEqual(r3["capability_source"], "verified cache")
+        self.assertEqual(r3["expected_final_range"], "tv")
+
+    def test_entry_from_other_environment_not_reused(self):
+        # Seed cache under a different env key.
+        cache = {"schema_version": 1, "environments": {"OTHER": {"capabilities": {
+            "color_range_do_not_force": {"libx265|mkv": {"status": "verified",
+                                                          "expected_final_range": "pc"}}}}}}
+        FFmWiz.save_capability_cache(cache)
+        verified = {"status": "verified", "expected_final_range": "tv",
+                    "probe_method": "m", "encoder": "libx265", "container_family": "mkv",
+                    "sample_command_hash": "h", "ffprobe_result": "tv",
+                    "verified_at_utc": "t", "error": None}
+        with mock.patch.object(FFmWiz, "capability_environment_identity",
+                               return_value=self._fake_identity()), \
+                mock.patch.object(FFmWiz, "probe_color_range_capability",
+                                  return_value=verified) as probe:
+            r = FFmWiz.resolve_capability(self._cap_answers())
+        self.assertEqual(probe.call_count, 1)  # other env not reused
+        self.assertEqual(r["expected_final_range"], "tv")
+
+    def test_probe_once_for_split_two_pass_folder(self):
+        """Multiple resolve calls for the same combo (parts/passes/files) probe once."""
+        verified = {"status": "verified", "expected_final_range": "tv", "probe_method": "m",
+                    "encoder": "libx265", "container_family": "mkv", "sample_command_hash": "h",
+                    "ffprobe_result": "tv", "verified_at_utc": "t", "error": None}
+        with mock.patch.object(FFmWiz, "capability_environment_identity",
+                               return_value=self._fake_identity()), \
+                mock.patch.object(FFmWiz, "probe_color_range_capability",
+                                  return_value=verified) as probe:
+            a = self._cap_answers()
+            for _ in range(5):  # 5 split parts / passes / files
+                FFmWiz.resolve_capability(a)
+        self.assertEqual(probe.call_count, 1)
+
+    def test_nvenc_unavailable_stores_unsupported(self):
+        unsupported = {"status": "unsupported", "expected_final_range": None, "probe_method": "m",
+                       "encoder": "hevc_nvenc", "container_family": "mp4", "sample_command_hash": "h",
+                       "ffprobe_result": None, "verified_at_utc": "t", "error": "no nvenc"}
+        with mock.patch.object(FFmWiz, "capability_environment_identity",
+                               return_value=self._fake_identity(gpu="x", nvidia_driver="1")), \
+                mock.patch.object(FFmWiz, "probe_color_range_capability", return_value=unsupported):
+            r = FFmWiz.resolve_capability(self._cap_answers(codec="H265", gpu=True, ext="mp4"))
+        self.assertEqual(r["status"], "unsupported")
+        cache = FFmWiz.load_capability_cache()
+        entry = next(iter(cache["environments"].values()))["capabilities"]["color_range_do_not_force"]["hevc_nvenc|mp4"]
+        self.assertEqual(entry["status"], "unsupported")
+
+    def test_probe_failure_does_not_abort(self):
+        failed = {"status": "probe_failed", "expected_final_range": None, "probe_method": "m",
+                  "encoder": "libx265", "container_family": "mkv", "sample_command_hash": "h",
+                  "ffprobe_result": None, "verified_at_utc": "t", "error": "boom"}
+        with mock.patch.object(FFmWiz, "capability_environment_identity",
+                               return_value=self._fake_identity()), \
+                mock.patch.object(FFmWiz, "probe_color_range_capability", return_value=failed):
+            r = FFmWiz.resolve_capability(self._cap_answers())
+        self.assertEqual(r["status"], "probe_failed")
+        self.assertIsNone(r["expected_final_range"])
+
+    def test_corrupted_cache_does_not_crash(self):
+        Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).write_text("{not json", encoding="utf-8")
+        data = FFmWiz.load_capability_cache()
+        self.assertEqual(data["environments"], {})
+
+    def test_atomic_cache_write_roundtrip(self):
+        data = {"schema_version": 1, "environments": {"E": {"capabilities": {}}}}
+        self.assertTrue(FFmWiz.save_capability_cache(data))
+        self.assertTrue(Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).exists())
+        self.assertEqual(FFmWiz.load_capability_cache()["environments"], {"E": {"capabilities": {}}})
+
+    def test_clear_removes_only_capability_cache(self):
+        FFmWiz.save_capability_cache({"schema_version": 1, "environments": {"E": {}}})
+        sibling = Path(self._cache_dir, "user_setting.json")
+        sibling.write_text("{}", encoding="utf-8")
+        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz._capability_cache_clear()
+        self.assertFalse(Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).exists())
+        self.assertTrue(sibling.exists())
+
+    def test_view_cache_output_accurate(self):
+        cache = {"schema_version": 1, "environments": {"ENVKEY123456": {
+            "ffmpeg_identity": {"version": "ffmpeg 8.1.1", "build_hash": "x", "path": "p"},
+            "hardware_identity": {"gpu": "n/a", "driver": "n/a"},
+            "capabilities": {"color_range_do_not_force": {
+                "libx265|mkv": {"status": "verified", "expected_final_range": "tv",
+                                "verified_at_utc": "t"}}}}}}
+        FFmWiz.save_capability_cache(cache)
+        buf = io.StringIO()
+        with mock.patch.object(FFmWiz, "capability_environment_key", return_value=({}, "ENVKEY123456")), \
+                contextlib.redirect_stdout(buf):
+            FFmWiz._capability_cache_view("ffmpeg", "ffprobe")
+        out = buf.getvalue()
+        self.assertIn("libx265|mkv", out)
+        self.assertIn("status=verified", out)
+        self.assertIn("expected_final_range=tv", out)
+
+    def test_stale_mismatch_invalidates_entry(self):
+        cache = {"schema_version": 1, "environments": {"K": {"capabilities": {
+            "color_range_do_not_force": {"libx265|mkv": {"status": "verified",
+                                                         "expected_final_range": "tv"}}}}}}
+        FFmWiz.save_capability_cache(cache)
+        with mock.patch.object(FFmWiz, "capability_environment_key", return_value=({}, "K")):
+            FFmWiz.invalidate_capability_entry(self._cap_answers())
+        data = FFmWiz.load_capability_cache()
+        self.assertNotIn("libx265|mkv",
+                         data["environments"]["K"]["capabilities"]["color_range_do_not_force"])
 
 
 if __name__ == "__main__":

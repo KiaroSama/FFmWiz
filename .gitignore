@@ -22,11 +22,16 @@ ffmwiz-ffmpeg-reference.txt
 .coverage
 .pytest_cache/
 .tmp_tests/
+.tmp_validation/
 .mypy_cache/
 .ruff_cache/
 build/
 dist/
 *.egg-info/
+
+# Local FFmpeg capability cache (environment-specific; safe to delete).
+.cache/
+ffmpeg_capabilities.json
 
 output/
 outputs/
