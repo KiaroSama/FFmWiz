@@ -1424,7 +1424,7 @@ def step_color_range(answers: dict[str, Any]) -> None:
     print()
     note("Source color range is unknown:")
     print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited", Color.HINT_YELLOW))
-    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Keep unspecified", Color.HINT_YELLOW))
+    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Do not force a range in FFmWiz", Color.HINT_YELLOW))
     print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full", Color.HINT_YELLOW))
     mapping = {"1": "tv", "2": "unspecified", "3": "pc", "۱": "tv", "۲": "unspecified", "۳": "pc"}
     while True:
@@ -1432,7 +1432,7 @@ def step_color_range(answers: dict[str, Any]) -> None:
             question_prompt(
                 answers,
                 "Select source color range",
-                "1=Assume TV/Limited; 2=Keep unspecified; 3=Assume PC/Full",
+                "1=Assume TV/Limited; 2=Do not force a range; 3=Assume PC/Full",
                 default_choice,
                 back="back=b, quit=exit",
             )
@@ -1453,13 +1453,26 @@ def step_color_range(answers: dict[str, Any]) -> None:
             "output_metadata=%s; pixel_value_range_conversion=no"
             % (resolved or "unspecified", source, resolved or "omitted")
         )
-        note(
-            "Color range: "
-            + ("Assume TV/Limited" if choice == "tv"
-               else "Keep unspecified" if choice == "unspecified"
-               else "Assume PC/Full")
-            + " (user-assumed, no pixel-value conversion)."
-        )
+        if choice == "tv":
+            note("Color range: Assume TV/Limited (user-assumed, no pixel-value conversion).")
+        elif choice == "pc":
+            note("Color range: Assume PC/Full (user-assumed, no pixel-value conversion).")
+        else:
+            # "Do not force a range in FFmWiz": FFmWiz omits -color_range, but
+            # the selected encoder may still write its own default signaling.
+            if encoder_preserves_unspecified_range(answers):
+                note(
+                    "Color range: Do not force a range in FFmWiz. FFmWiz will not pass "
+                    "an explicit color-range option; the selected encoder is expected to "
+                    "leave the final range unspecified. No pixel-value conversion."
+                )
+            else:
+                note(
+                    "Color range: Do not force a range in FFmWiz. FFmWiz will not pass "
+                    "an explicit color-range option; the selected encoder may still write "
+                    "its own default range signaling (expected: %s). No pixel-value conversion."
+                    % (expected_unforced_range(answers) or "unspecified")
+                )
         return
 
 
@@ -1498,7 +1511,7 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
     print()
     note(f"One or more input videos have an unknown color range ({len(unknown_items)} file(s)):")
     print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited for unknown files", Color.HINT_YELLOW))
-    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Keep unknown files unspecified", Color.HINT_YELLOW))
+    print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Do not force a range in FFmWiz for unknown files", Color.HINT_YELLOW))
     print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full for unknown files", Color.HINT_YELLOW))
     print("  " + paint("4", Color.OPT_KEY_CORAL) + paint(". Ask separately for each unknown file", Color.HINT_YELLOW))
     mapping = {"1": "tv", "2": "unspecified", "3": "pc", "4": "each"}
@@ -1507,7 +1520,7 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
             question_prompt(
                 answers,
                 "Select batch color-range policy for unknown files",
-                "1=TV/Limited; 2=Keep unspecified; 3=PC/Full; 4=Ask per file",
+                "1=TV/Limited; 2=Do not force a range; 3=PC/Full; 4=Ask per file",
                 default_choice,
                 back="back=b, quit=exit",
             )
@@ -1529,14 +1542,14 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
                 print()
                 note(f"Source color range is unknown: {item['path'].name}")
                 print("  " + paint("1", Color.OPT_KEY_CORAL) + paint(". Assume TV/Limited", Color.HINT_YELLOW))
-                print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Keep unspecified", Color.HINT_YELLOW))
+                print("  " + paint("2", Color.OPT_KEY_CORAL) + paint(". Do not force a range in FFmWiz", Color.HINT_YELLOW))
                 print("  " + paint("3", Color.OPT_KEY_CORAL) + paint(". Assume PC/Full", Color.HINT_YELLOW))
                 while True:
                     sub = ask_raw(
                         question_prompt(
                             answers,
                             "Select color range for this file",
-                            "1=Assume TV/Limited; 2=Keep unspecified; 3=Assume PC/Full",
+                            "1=Assume TV/Limited; 2=Do not force a range; 3=Assume PC/Full",
                             "1",
                             back="back=b, quit=exit",
                         )
@@ -1560,7 +1573,7 @@ def step_folder_batch_color_range(answers: dict[str, Any]) -> None:
         )
         note(
             "Batch color range policy: "
-            + {"tv": "Assume TV/Limited", "unspecified": "Keep unspecified",
+            + {"tv": "Assume TV/Limited", "unspecified": "Do not force a range in FFmWiz",
                "pc": "Assume PC/Full", "each": "Ask per file"}[policy]
             + " (applies to unknown-range files only; detected ranges are kept)."
         )
@@ -4502,6 +4515,45 @@ def ensure_color_range_resolved(answers: dict[str, Any], workflow: str | None = 
         "Color range entry check: workflow=%s; resolved=%s; resolution_source=%s"
         % (workflow or "unknown", resolved or "unspecified", source)
     )
+
+
+# Encoder + container color-range signaling capability. Verified empirically
+# against the installed FFmpeg 8.1.1 build by re-encoding the real source and
+# inspecting the output with ffprobe:
+#
+#   container  libx264/h264_nvenc   libx265/hevc_nvenc
+#   --------   ------------------   ------------------
+#   mp4-like   color_range=unknown  color_range=tv
+#   mkv        color_range=tv       color_range=tv
+#
+# So when FFmWiz omits -color_range, a genuinely unspecified final range is
+# only achievable with an H.264 encoder writing to an MP4-like container. HEVC
+# encoders always write a default 'tv' VUI range, and the Matroska muxer writes
+# a default Colour Range element for limited-range YUV regardless of codec.
+# Neither can be suppressed without altering signaling or pixel values
+# (-color_range unknown and x265-params do not change this). The "do not force"
+# policy is therefore reported honestly per encoder/container combination
+# instead of universally claiming an unspecified final range.
+_UNSPECIFIED_RANGE_PRESERVING_ENCODERS = {"libx264", "h264_nvenc"}
+
+
+def encoder_preserves_unspecified_range(answers: dict[str, Any]) -> bool:
+    """True when the resolved encoder and output container together leave the
+    final color range genuinely unspecified if no -color_range option is passed
+    (H.264 encoder + MP4-like container only)."""
+    encoder = str(resolve_video_encoder(answers)[0]).lower()
+    if encoder not in _UNSPECIFIED_RANGE_PRESERVING_ENCODERS:
+        return False
+    return str(answers.get("output_ext", "")).strip().lower() in MP4_LIKE_EXTS
+
+
+def expected_unforced_range(answers: dict[str, Any]) -> str:
+    """The color range expected in the final file when FFmWiz forces none.
+    Empty string when the encoder/container preserves an unspecified range;
+    otherwise the verified default ('tv')."""
+    if encoder_preserves_unspecified_range(answers):
+        return ""
+    return "tv"
 
 
 # ------------------------------------------------------------------
@@ -16097,17 +16149,38 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         except ColorRangeUnresolvedError:
             resolved_range, range_source = "", "unresolved (no metadata written)"
         detected_range = display_color_range((source_video_stream(answers) or {}).get("color_range"))
+        is_copy = str(resolve_video_encoder(answers)[0]).lower() == "copy"
         print("  " + field_text("detected source color range", detected_range, Color.COLOR_RANGE_VALUE))
-        print("  " + field_text(
-            "resolved color range",
-            (resolved_range or "unspecified") + f" ({range_source})",
-            Color.COLOR_RANGE_VALUE,
-        ))
-        print("  " + field_text(
-            "output color-range metadata",
-            resolved_range if resolved_range else "omitted",
-            Color.COLOR_RANGE_VALUE,
-        ))
+        if is_copy:
+            # Stream copy: bitstream range signaling is preserved from the source;
+            # the re-encode menu semantics do not apply.
+            print("  " + field_text("color-range policy", "stream copy (preserved from source)", Color.COLOR_RANGE_VALUE))
+            print("  " + field_text(
+                "output color-range metadata", f"{detected_range} (preserved from copied stream)", Color.COLOR_RANGE_VALUE))
+        elif range_source == "user choice":
+            # "Do not force a range in FFmWiz" (option 2). Report capability-aware
+            # expected behavior; never claim 'unspecified' for an encoder that
+            # writes a default range. Pre-execution, this is the EXPECTED result.
+            print("  " + field_text("requested color-range policy", "do not force", Color.COLOR_RANGE_VALUE))
+            print("  " + field_text("FFmWiz explicit color-range option", "omitted", Color.COLOR_RANGE_VALUE))
+            if encoder_preserves_unspecified_range(answers):
+                print("  " + field_text("encoder range-signaling behavior", "unspecified supported", Color.COLOR_RANGE_VALUE))
+                print("  " + field_text("expected encoder-reported final range", "unspecified", Color.COLOR_RANGE_VALUE))
+            else:
+                exp = expected_unforced_range(answers) or "unspecified"
+                print("  " + field_text("encoder range-signaling behavior", "encoder default", Color.COLOR_RANGE_VALUE))
+                print("  " + field_text("expected encoder-reported final range", f"{exp} (encoder default)", Color.COLOR_RANGE_VALUE))
+        else:
+            print("  " + field_text(
+                "resolved color range",
+                (resolved_range or "unspecified") + f" ({range_source})",
+                Color.COLOR_RANGE_VALUE,
+            ))
+            print("  " + field_text(
+                "output color-range metadata",
+                resolved_range if resolved_range else "omitted",
+                Color.COLOR_RANGE_VALUE,
+            ))
         print("  " + field_text("pixel-value range conversion", "no", Color.DIM))
         _sd = sar_dar_info(answers)
         print("  " + field_text(

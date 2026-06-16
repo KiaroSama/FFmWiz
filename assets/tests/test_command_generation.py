@@ -3749,7 +3749,7 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertIn("-color_range:v:0 tv", self.command_text(answers))
 
     def test_color_range_unknown_keep_unspecified(self):
-        """Test 2: unknown range + Keep unspecified -> no forced tv/pc."""
+        """Test 2: unknown range + Do not force -> no forced tv/pc."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
             with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
@@ -4203,7 +4203,7 @@ class CommandGenerationTests(unittest.TestCase):
                 self.assertIn("color_range_choice", msg)
 
     # ===================================================================
-    # 'Keep unspecified' omits -color_range in rendered commands
+    # 'Do not force a range' omits -color_range in rendered commands
     # ===================================================================
 
     def test_unspecified_omits_color_range_cpu(self):
@@ -4342,6 +4342,130 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertTrue(
             any("Chroma subsampling will be reduced from 4:4:4 to 4:2:0" in w for w in info["warnings"])
         )
+
+    # ===================================================================
+    # Encoder color-range signaling capability ("do not force" honesty)
+    # ===================================================================
+
+    def test_encoder_capability_model(self):
+        """True unspecified is only achievable with an H.264 encoder writing to
+        an MP4-like container; HEVC or MKV always yields a default 'tv'."""
+        def a(codec, gpu, ext):
+            return {"video_codec": codec, "use_gpu": gpu, "output_ext": ext,
+                    "video_streams": [{"codec_type": "video", "width": 1920, "height": 1080}]}
+        # H.264 + MP4-like -> genuinely unspecified.
+        self.assertTrue(FFmWiz.encoder_preserves_unspecified_range(a("H264", False, "mp4")))
+        self.assertTrue(FFmWiz.encoder_preserves_unspecified_range(a("H264", True, "mov")))
+        self.assertEqual(FFmWiz.expected_unforced_range(a("H264", False, "mp4")), "")
+        # H.264 + MKV -> Matroska writes a default range.
+        self.assertFalse(FFmWiz.encoder_preserves_unspecified_range(a("H264", False, "mkv")))
+        self.assertEqual(FFmWiz.expected_unforced_range(a("H264", False, "mkv")), "tv")
+        # HEVC -> encoder default regardless of container.
+        self.assertFalse(FFmWiz.encoder_preserves_unspecified_range(a("H265", False, "mp4")))
+        self.assertFalse(FFmWiz.encoder_preserves_unspecified_range(a("H265", True, "mkv")))
+        self.assertEqual(FFmWiz.expected_unforced_range(a("H265", False, "mp4")), "tv")
+        self.assertEqual(FFmWiz.expected_unforced_range(a("H265", True, "mkv")), "tv")
+
+    def test_do_not_force_label_in_color_range_menu(self):
+        """The option-2 label reads 'Do not force a range in FFmWiz'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            buf = io.StringIO()
+            with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+                    contextlib.redirect_stdout(buf):
+                FFmWiz.step_color_range(answers)
+            out = buf.getvalue()
+            self.assertIn("Do not force a range in FFmWiz", out)
+            self.assertNotIn("Keep unspecified", out)
+            self.assertEqual(answers["color_range_choice"], "unspecified")
+
+    def test_folder_batch_menu_corrected_wording(self):
+        """The Folder Encode batch menu uses the corrected option-2 wording."""
+        answers = {
+            "video_codec": "H265", "use_gpu": False,
+            "video_streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+            "_folder_items": [
+                {"path": Path("a.mkv"), "answers": {"video_streams": [{"codec_type": "video"}]}},
+            ],
+        }
+        buf = io.StringIO()
+        with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+                contextlib.redirect_stdout(buf):
+            FFmWiz.step_folder_batch_color_range(answers)
+        out = buf.getvalue()
+        self.assertIn("Do not force a range in FFmWiz for unknown files", out)
+        self.assertNotIn("Keep unknown files unspecified", out)
+        self.assertEqual(answers["_batch_color_range_policy"], "unspecified")
+
+    def test_back_nav_preserves_do_not_force_default(self):
+        """Re-entering the menu with a stored 'unspecified' choice defaults to 2."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            answers["color_range_choice"] = "unspecified"
+            captured = {}
+
+            def fake_ask(prompt):
+                captured["prompt"] = prompt
+                return ""  # Enter keeps the default.
+
+            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_color_range(answers)
+            self.assertIn("[2]", captured["prompt"])
+            self.assertEqual(answers["color_range_choice"], "unspecified")
+
+    def _summary_text(self, answers):
+        cmd = self.command_for(answers)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            FFmWiz.print_summary(answers, cmd)
+        return buf.getvalue()
+
+    def test_summary_hevc_option2_reports_encoder_default(self):
+        """HEVC + 'do not force': summary must not claim unspecified final range."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)  # H265, CPU
+            answers["color_range_choice"] = "unspecified"
+            out = self._summary_text(answers)
+            self.assertIn("requested color-range policy: do not force", out)
+            self.assertIn("FFmWiz explicit color-range option: omitted", out)
+            self.assertIn("encoder range-signaling behavior: encoder default", out)
+            self.assertIn("expected encoder-reported final range: tv (encoder default)", out)
+            self.assertNotIn("unspecified supported", out)
+            self.assertNotIn("output color-range metadata: unspecified", out)
+
+    def test_summary_h264_option2_reports_unspecified_supported(self):
+        """H.264 + 'do not force': summary reports a genuinely unspecified range."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            answers["video_codec"] = "H264"
+            answers["color_range_choice"] = "unspecified"
+            out = self._summary_text(answers)
+            self.assertIn("encoder range-signaling behavior: unspecified supported", out)
+            self.assertIn("expected encoder-reported final range: unspecified", out)
+            self.assertNotIn("encoder default", out)
+
+    def test_summary_stream_copy_reports_preserved_range(self):
+        """Stream copy reports the source range as preserved, not menu semantics."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range="tv", resolution="n")
+            answers["video_codec"] = "copy"
+            answers["audio_codec"] = "copy"
+            answers["crop_enabled"] = False
+            answers["fps"] = None
+            out = self._summary_text(answers)
+            self.assertIn("stream copy (preserved from source)", out)
+            self.assertNotIn("do not force", out)
+
+    def test_two_pass_option2_no_color_range_both_passes(self):
+        """CPU two-pass 'do not force': neither pass emits -color_range."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._encode_answers(tmp, color_range=None)
+            answers["color_range_choice"] = "unspecified"
+            cmd = self.command_for(answers)
+            first, second, _ = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+            self.assertNotIn("-color_range", " ".join(first))
+            self.assertNotIn("-color_range", " ".join(second))
 
 
 if __name__ == "__main__":
