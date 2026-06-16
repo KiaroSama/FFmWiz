@@ -3902,6 +3902,181 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertIn("scale=1280:720", vf)
         self.assertIn("setsar=1", vf)
 
+    # ===================================================================
+    # Folder/batch color-range policy
+    # ===================================================================
+
+    def _folder_settings(self, policy=None, per_file=None, codec="H265"):
+        s = {"video_codec": codec, "folder_output_location": Path("."), "use_gpu": False}
+        if policy:
+            s["_batch_color_range_policy"] = policy
+        if per_file:
+            s["_batch_color_range_per_file"] = per_file
+        return s
+
+    def _folder_job(self, color_range=None):
+        stream = {"codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080}
+        if color_range is not None:
+            stream["color_range"] = color_range
+        return {"video_streams": [stream], "video_codec": "H265"}
+
+    def test_batch_policy_tv_unknown_resolves_tv_known_preserved(self):
+        """Tests 3/4: option 1 -> unknown becomes tv; known is never overwritten."""
+        settings = self._folder_settings(policy="tv")
+        unknown = self._folder_job(color_range=None)
+        FFmWiz.apply_folder_batch_color_range(unknown, settings, {"path": Path("a.mkv")})
+        self.assertEqual(unknown["color_range_choice"], "tv")
+        self.assertEqual(FFmWiz.resolve_color_range(unknown), ("tv", "batch user assumption"))
+        known_pc = self._folder_job(color_range="pc")
+        FFmWiz.apply_folder_batch_color_range(known_pc, settings, {"path": Path("b.mkv")})
+        self.assertNotIn("color_range_choice", known_pc)
+        self.assertEqual(FFmWiz.resolve_color_range(known_pc), ("pc", "detected"))
+
+    def test_batch_policy_unspecified_omits_color_range(self):
+        """Test 5: option 2 -> unknown files omit -color_range."""
+        settings = self._folder_settings(policy="unspecified")
+        job = self._folder_job(color_range=None)
+        FFmWiz.apply_folder_batch_color_range(job, settings, {"path": Path("a.mkv")})
+        self.assertEqual(job["color_range_choice"], "unspecified")
+        self.assertEqual(FFmWiz.color_range_output_args(job), [])
+
+    def test_batch_policy_pc_unknown_resolves_pc(self):
+        """Test 6: option 3 -> unknown files use pc."""
+        settings = self._folder_settings(policy="pc")
+        job = self._folder_job(color_range=None)
+        FFmWiz.apply_folder_batch_color_range(job, settings, {"path": Path("a.mkv")})
+        self.assertEqual(FFmWiz.color_range_output_args(job), ["-color_range:v:0", "pc"])
+
+    def test_batch_policy_each_uses_per_file_choice(self):
+        """Test 7: option 4 -> each unknown file uses its own choice."""
+        settings = self._folder_settings(policy="each", per_file={str(Path("a.mkv")): "pc"})
+        job = self._folder_job(color_range=None)
+        FFmWiz.apply_folder_batch_color_range(job, settings, {"path": Path("a.mkv")})
+        self.assertEqual(job["color_range_choice"], "pc")
+        self.assertEqual(FFmWiz.resolve_color_range(job)[0], "pc")
+
+    def test_batch_applicable_only_with_unknown_files(self):
+        """Tests 1/2: all-known folders do not trigger the batch menu."""
+        all_known = {
+            "video_codec": "H265",
+            "video_streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+            "_folder_items": [
+                {"answers": {"video_streams": [{"color_range": "tv"}]}},
+                {"answers": {"video_streams": [{"color_range": "pc"}]}},
+            ],
+        }
+        self.assertFalse(FFmWiz.folder_batch_color_range_applicable(all_known))
+        mixed = {
+            "video_codec": "H265",
+            "video_streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+            "_folder_items": [
+                {"answers": {"video_streams": [{"color_range": "tv"}]}},
+                {"answers": {"video_streams": [{}]}},
+            ],
+        }
+        self.assertTrue(FFmWiz.folder_batch_color_range_applicable(mixed))
+
+    def test_nonint_builder_unknown_is_compatibility_fallback(self):
+        """Test 11: a builder with no policy/state reports a logged compatibility
+        fallback, never a silent 'detected' tv."""
+        job = self._folder_job(color_range=None)
+        resolved, source = FFmWiz.resolve_color_range(job)
+        self.assertEqual(resolved, "tv")
+        self.assertEqual(source, "compatibility fallback")
+
+    # ===================================================================
+    # Pixel-format analysis and warnings
+    # ===================================================================
+
+    def test_pixfmt_descriptor(self):
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("yuv420p")["chroma"], "4:2:0")
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("yuv420p10le")["bit_depth"], 10)
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("yuv422p")["chroma"], "4:2:2")
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("yuv444p10le")["chroma"], "4:4:4")
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("nv12")["bit_depth"], 8)
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("p010le")["bit_depth"], 10)
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("rgb24")["kind"], "rgb")
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("gray")["kind"], "gray")
+        self.assertEqual(FFmWiz.pix_fmt_descriptor("totally-unknown")["kind"], "unknown")
+
+    def test_pixfmt_noop_8bit_420(self):
+        """Test 13: yuv420p -> yuv420p is a no-op (none), no warning."""
+        info = FFmWiz.compare_pixel_formats("yuv420p", "yuv420p")
+        self.assertEqual(info["operation"], "none")
+        self.assertEqual(info["warnings"], [])
+        self.assertEqual(info["bit_depth_conversion"], "no")
+        self.assertEqual(info["chroma_conversion"], "no")
+
+    def test_pixfmt_relabel_is_no_op_constraint(self):
+        """nv12 <-> yuv420p (same geometry) is a no-op compatibility constraint."""
+        info = FFmWiz.compare_pixel_formats("nv12", "yuv420p")
+        self.assertEqual(info["operation"], "no-op compatibility constraint")
+        self.assertEqual(info["warnings"], [])
+
+    def test_pixfmt_10bit_to_8bit_warns(self):
+        """Test 14: yuv420p10le -> yuv420p warns about bit-depth reduction."""
+        info = FFmWiz.compare_pixel_formats("yuv420p10le", "yuv420p")
+        self.assertEqual(info["bit_depth_conversion"], "10-bit -> 8-bit")
+        self.assertTrue(any("bit depth will be reduced from 10-bit to 8-bit" in w for w in info["warnings"]))
+
+    def test_pixfmt_422_to_420_warns(self):
+        """Test 15: yuv422p -> yuv420p warns about chroma reduction."""
+        info = FFmWiz.compare_pixel_formats("yuv422p", "yuv420p")
+        self.assertEqual(info["chroma_conversion"], "4:2:2 -> 4:2:0")
+        self.assertTrue(any("Chroma subsampling will be reduced from 4:2:2 to 4:2:0" in w for w in info["warnings"]))
+
+    def test_pixfmt_444_10bit_to_420_warns_both(self):
+        """Test 16: yuv444p10le -> yuv420p warns about bit depth and chroma."""
+        info = FFmWiz.compare_pixel_formats("yuv444p10le", "yuv420p")
+        self.assertTrue(any("bit depth" in w for w in info["warnings"]))
+        self.assertTrue(any("Chroma subsampling will be reduced from 4:4:4 to 4:2:0" in w for w in info["warnings"]))
+
+    def test_pixfmt_rgb_to_yuv_warns(self):
+        """Test 17: rgb24 -> yuv420p warns about RGB->YUV conversion."""
+        info = FFmWiz.compare_pixel_formats("rgb24", "yuv420p")
+        self.assertTrue(any("RGB video will be converted to YUV 4:2:0" in w for w in info["warnings"]))
+
+    def test_pixfmt_unknown_does_not_crash(self):
+        """Test 18: unknown source pixel format -> no crash, operation unknown."""
+        info = FFmWiz.compare_pixel_formats(None, "yuv420p")
+        self.assertEqual(info["operation"], "unknown")
+        self.assertEqual(info["warnings"], [])
+
+    def test_pixfmt_10bit_cpu_uses_yuv420p10le_and_main10(self):
+        """Test 19: 10-bit CPU HEVC output uses yuv420p10le + Main10."""
+        answers = {"video_streams": [{"codec_type": "video", "codec_name": "hevc",
+                                       "width": 1920, "height": 1080, "pix_fmt": "yuv420p10le"}],
+                   "video_codec": "H265", "use_gpu": False}
+        self.assertEqual(FFmWiz.cpu_pixel_format_for_output(answers), "yuv420p10le")
+        self.assertEqual(FFmWiz.hevc_profile_for_output(answers, "main"), "main10")
+        self.assertEqual(FFmWiz.target_pixel_format_for_answers(answers), "yuv420p10le")
+
+    def test_pixfmt_10bit_nvenc_uses_p010(self):
+        """Test 20: 10-bit NVENC output uses p010le."""
+        answers = {"video_streams": [{"codec_type": "video", "codec_name": "hevc",
+                                       "width": 1920, "height": 1080, "pix_fmt": "yuv420p10le"}],
+                   "video_codec": "H265", "use_gpu": True}
+        self.assertEqual(FFmWiz.target_pixel_format_for_answers(answers), "p010le")
+
+    def test_pixfmt_8bit_nvenc_uses_nv12(self):
+        """Test 21: 8-bit NVENC output uses nv12."""
+        answers = {"video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                       "width": 1920, "height": 1080, "pix_fmt": "yuv420p"}],
+                   "video_codec": "H265", "use_gpu": True}
+        self.assertEqual(FFmWiz.target_pixel_format_for_answers(answers), "nv12")
+
+    def test_pixfmt_cpu_two_pass_identical_format_filters(self):
+        """Test 22: CPU two-pass uses identical pixel-format filters in both passes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = False
+            cmd = self.command_for(answers)
+            first, second, _ = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+            def vfilt(c):
+                return c[c.index("-filter:v") + 1] if "-filter:v" in c else ""
+            self.assertEqual(vfilt(first), vfilt(second))
+            self.assertIn("format=yuv420p", vfilt(first))
+
 
 if __name__ == "__main__":
     unittest.main()
