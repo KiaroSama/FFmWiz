@@ -1,9 +1,9 @@
 import contextlib
 import io
 import os
-import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -13,15 +13,20 @@ import FFmWiz
 class CommandGenerationTests(unittest.TestCase):
     def setUp(self):
         FFmWiz.USE_COLOR = False
-        # Isolate the FFmpeg capability cache so tests never touch the real one.
-        self._cache_dir = tempfile.mkdtemp(prefix="ffmwiz_test_cache_")
+        # Isolate the FFmpeg capability cache in a uniquely-owned temp directory
+        # so tests can never touch the real/default cache. The directory carries
+        # an ownership marker and is removed only via the safe cleanup helper.
+        self._cache_run_id = uuid.uuid4().hex
+        self._cache_dir = FFmWiz.create_owned_temp_cache_dir(self._cache_run_id)
         os.environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
         FFmWiz._CAPABILITY_SESSION_MEMO.clear()
 
     def tearDown(self):
         os.environ.pop("FFMWIZ_CACHE_DIR", None)
         FFmWiz._CAPABILITY_SESSION_MEMO.clear()
-        shutil.rmtree(self._cache_dir, ignore_errors=True)
+        # Safe, ownership-verified removal of only this test's temp cache dir.
+        FFmWiz.safe_remove_owned_temp_dir(
+            self._cache_dir, self._cache_run_id, tempfile.gettempdir())
 
     def base_answers(self, output_dir: str) -> dict:
         return {
@@ -4853,6 +4858,324 @@ class CommandGenerationTests(unittest.TestCase):
         # Original raw streams unchanged.
         self.assertEqual(s1.get("display_aspect_ratio"), "9:16")
         self.assertNotIn("display_aspect_ratio", s2)
+
+    # ===================================================================
+    # Workflow-level SAR/DAR provenance (end-to-end through production paths)
+    # ===================================================================
+
+    def _assert_raw_immutable(self, stream, sar_before, dar_before):
+        self.assertEqual(stream.get("sample_aspect_ratio"), sar_before)
+        self.assertEqual(stream.get("display_aspect_ratio"), dar_before)
+
+    def _assert_detected_label_only_when_raw_valid(self, info):
+        """A 'detected by ffprobe' label is allowed only when the matching raw
+        ffprobe field was valid."""
+        if "detected by ffprobe" == info["sar_source"]:
+            self.assertIsNotNone(info["raw_ffprobe_sar"])
+        if "detected by ffprobe" == info["dar_source"]:
+            self.assertIsNotNone(info["raw_ffprobe_dar"])
+        if info["fallback_used"]:
+            self.assertNotIn("detected by ffprobe", info["sar_source"])
+            self.assertNotIn("detected by ffprobe", info["dar_source"])
+
+    def test_workflow_folder_encode_provenance_independent(self):
+        """Folder Encode resolves each file independently; provenance never leaks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self.base_answers(tmp)
+            settings["use_gpu"] = False
+            settings["crop_enabled"] = False
+            settings["folder_output_location"] = Path(tmp)
+            s1 = {"codec_type": "video", "codec_name": "h264", "width": 2160,
+                  "height": 3840, "display_aspect_ratio": "9:16"}
+            s2 = {"codec_type": "video", "codec_name": "h264", "width": 2160, "height": 3840}
+            audio = {"codec_type": "audio", "codec_name": "aac"}
+            item1 = {"path": Path(tmp) / "a.mkv",
+                     "answers": {"input_path": Path(tmp) / "a.mkv", "video_streams": [s1],
+                                 "audio_streams": [audio], "format": {"duration": "10"}}}
+            item2 = {"path": Path(tmp) / "b.mkv",
+                     "answers": {"input_path": Path(tmp) / "b.mkv", "video_streams": [s2],
+                                 "audio_streams": [audio], "format": {"duration": "10"}}}
+            job1 = FFmWiz.prepare_folder_job_answers(settings, item1)
+            job2 = FFmWiz.prepare_folder_job_answers(settings, item2)
+            i1 = FFmWiz.sar_dar_info(job1)
+            i2 = FFmWiz.sar_dar_info(job2)
+            self.assertEqual(i1["sar_source"], "calculated from coded resolution and detected DAR")
+            self.assertEqual(i1["dar_source"], "detected by ffprobe")
+            self.assertFalse(i1["fallback_used"])
+            self.assertEqual(i2["sar_source"], "fallback assumption")
+            self.assertTrue(i2["fallback_used"])
+            # Same numerical DAR, different provenance.
+            self.assertAlmostEqual(i1["effective_dar_decimal"], i2["effective_dar_decimal"], places=6)
+            # Original raw streams immutable; no leakage.
+            self._assert_raw_immutable(s1, None, "9:16")
+            self._assert_raw_immutable(s2, None, None)
+            self._assert_detected_label_only_when_raw_valid(i1)
+            self._assert_detected_label_only_when_raw_valid(i2)
+
+    def test_workflow_split_reuses_resolved_geometry(self):
+        """Split Parts reuse the same resolved geometry/provenance per workflow."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = False
+            answers["crop_enabled"] = False
+            answers["color_range_choice"] = "tv"
+            answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264",
+                                         "width": 2160, "height": 3840, "display_aspect_ratio": "9:16"}]
+            answers["resolution"] = "n"
+            answers["separator_points"] = [3.0, 6.0]
+            answers["format"] = {"duration": "10.0"}
+            text = self.command_text(answers)
+            # The resolver is pure: every Part sees the same provenance.
+            i = FFmWiz.sar_dar_info(answers)
+            self.assertEqual(i["sar_source"], "calculated from coded resolution and detected DAR")
+            self.assertEqual(i["dar_source"], "detected by ffprobe")
+            self.assertFalse(i["fallback_used"])
+            self.assertGreater(text.count("-c:v libx265"), 1)  # multiple Parts
+            self._assert_raw_immutable(answers["video_streams"][0], None, "9:16")
+            # Fallback variant stays fallback for every Part.
+            answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264",
+                                         "width": 2160, "height": 3840}]
+            i2 = FFmWiz.sar_dar_info(answers)
+            self.assertTrue(i2["fallback_used"])
+            self.assertEqual(i2["sar_source"], "fallback assumption")
+
+    def test_workflow_cpu_two_pass_identical_provenance(self):
+        """CPU two-pass: identical resolved geometry; raw metadata immutable."""
+        for raw_dar, expect_fallback in (("9:16", False), (None, True)):
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                answers["use_gpu"] = False
+                answers["crop_enabled"] = False
+                answers["color_range_choice"] = "tv"
+                stream = {"codec_type": "video", "codec_name": "h264",
+                          "width": 2160, "height": 3840}
+                if raw_dar:
+                    stream["display_aspect_ratio"] = raw_dar
+                answers["video_streams"] = [stream]
+                cmd = self.command_for(answers)
+                first, second, _ = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+
+                def vf(c):
+                    return c[c.index("-filter:v") + 1] if "-filter:v" in c else ""
+
+                self.assertEqual(vf(first), vf(second))
+                info = FFmWiz.sar_dar_info(answers)
+                self.assertEqual(info["fallback_used"], expect_fallback)
+                self._assert_detected_label_only_when_raw_valid(info)
+                self._assert_raw_immutable(stream, None, raw_dar)
+
+    def test_workflow_hardsub_provenance(self):
+        """HardSub uses the shared resolver; non-square SAR preserved (no setsar=1)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.hardsub_answers(tmp, output_ext="mkv")
+            answers["color_range_choice"] = "tv"
+            answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264",
+                                         "width": 720, "height": 576, "sample_aspect_ratio": "16:15"}]
+            info = FFmWiz.sar_dar_info(answers)
+            self.assertEqual(info["sar_source"], "detected by ffprobe")
+            self.assertEqual(info["dar_text"], "4:3")
+            self.assertEqual(info["dar_source"], "calculated from coded resolution and SAR")
+            self.assertFalse(info["fallback_used"])
+            cmd = FFmWiz.build_hardsub_command(answers)
+            cmd_text = " ".join(cmd)
+            # Non-square SAR is preserved explicitly, not reset to square 1:1.
+            self.assertIn("setsar=16/15", cmd_text)
+            self.assertNotIn("setsar=1,", cmd_text)
+            self.assertNotIn("setsar=1 ", cmd_text)
+            self._assert_raw_immutable(answers["video_streams"][0], "16:15", None)
+        # Vertical detected-DAR fixture through HardSub.
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.hardsub_answers(tmp, output_ext="mkv")
+            answers["color_range_choice"] = "tv"
+            answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264",
+                                         "width": 2160, "height": 3840, "display_aspect_ratio": "9:16"}]
+            info = FFmWiz.sar_dar_info(answers)
+            self.assertEqual(info["sar_source"], "calculated from coded resolution and detected DAR")
+            self.assertEqual(info["dar_source"], "detected by ffprobe")
+
+    def test_workflow_preserve_fit_resize_uses_resolved_dar(self):
+        """Preserve/Fit resize uses resolved DAR from a derived non-square SAR."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = False
+            answers["crop_enabled"] = False
+            answers["color_range_choice"] = "tv"
+            stream = {"codec_type": "video", "codec_name": "h264",
+                      "width": 720, "height": 576, "display_aspect_ratio": "16:9"}
+            answers["video_streams"] = [stream]
+            answers["resolution"] = FFmWiz.parse_resolution("480p")
+            info = FFmWiz.sar_dar_info(answers)
+            self.assertEqual(info["sar_text"], "64:45")
+            self.assertEqual(info["pixel_shape"], "non-square")
+            self.assertAlmostEqual(info["resolved_dar"], 16 / 9, places=4)
+            text = self.command_text(answers)
+            self.assertIn("reset_sar=1", text)
+            self.assertNotIn("setsar=1,scale", text)  # not a forced stretch
+            self._assert_raw_immutable(stream, None, "16:9")
+
+    def test_workflow_no_resize_preserves_derived_sar(self):
+        """No-resize keeps the derived non-square SAR; source not claimed detected."""
+        answers = {
+            "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                               "width": 720, "height": 576, "display_aspect_ratio": "16:9"}],
+            "resolution": "n", "crop_enabled": False,
+        }
+        info = FFmWiz.sar_dar_info(answers)
+        self.assertEqual(info["sar_source"], "calculated from coded resolution and detected DAR")
+        vf = FFmWiz.build_cpu_video_filter(answers) or ""
+        self.assertNotIn("setsar", vf)
+        self._assert_raw_immutable(answers["video_streams"][0], None, "16:9")
+
+    def test_workflow_crop_does_not_overwrite_raw_geometry(self):
+        """Crop keeps normalization and never writes post-crop DAR into raw fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = False
+            answers["color_range_choice"] = "tv"
+            stream = {"codec_type": "video", "codec_name": "h264",
+                      "width": 720, "height": 576, "sample_aspect_ratio": "16:15"}
+            answers["video_streams"] = [stream]
+            answers["resolution"] = "n"
+            answers["crop_enabled"] = True
+            answers["crop_top"] = 2
+            answers["crop_bottom"] = 2
+            answers["crop_left"] = 4
+            answers["crop_right"] = 4
+            text = self.command_text(answers)
+            self.assertIn("crop=", text)
+            self.assertNotIn("pad=", text)  # no black compatibility padding
+            # Raw source SAR is not overwritten by any post-crop geometry.
+            self._assert_raw_immutable(stream, "16:15", None)
+            info = FFmWiz.sar_dar_info(answers)
+            self.assertEqual(info["raw_ffprobe_sar"], 16 / 15)
+            self.assertEqual(info["sar_source"], "detected by ffprobe")
+
+    def test_crop_output_dar_cannot_masquerade_as_raw(self):
+        """The resolver only reads raw stream fields; post-crop geometry can never
+        be fed back as raw ffprobe metadata."""
+        stream = {"codec_type": "video", "codec_name": "h264", "width": 720, "height": 576,
+                  "sample_aspect_ratio": "16:15"}
+        before_sar = stream.get("sample_aspect_ratio")
+        before_dar = stream.get("display_aspect_ratio")
+        # Simulate crop changing coded dims downstream (separate storage only).
+        cropped = dict(stream)
+        cropped["width"] = 712
+        cropped["height"] = 572
+        info = FFmWiz.sar_dar_info({"video_streams": [stream]})
+        # Original raw fields are untouched and still drive provenance.
+        self.assertEqual(stream.get("sample_aspect_ratio"), before_sar)
+        self.assertEqual(stream.get("display_aspect_ratio"), before_dar)
+        self.assertEqual(info["raw_ffprobe_dar"], None)
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and SAR")
+
+    # ===================================================================
+    # Cleanup-safety: owned temp cache only; protected paths refused
+    # ===================================================================
+
+    def test_cleanup_isolated_temp_cache_created_with_marker(self):
+        run_id = "run-" + os.urandom(4).hex()
+        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        try:
+            p = Path(path)
+            self.assertTrue(p.is_dir())
+            self.assertEqual(Path(tempfile.gettempdir()).resolve(), p.resolve().parent)
+            marker = p / FFmWiz.TEST_CACHE_OWNER_MARKER
+            self.assertTrue(marker.is_file())
+            self.assertEqual(marker.read_text(encoding="utf-8").strip(), run_id)
+        finally:
+            FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
+
+    def test_cleanup_owned_delete_and_idempotent(self):
+        run_id = "run-" + os.urandom(4).hex()
+        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        self.assertTrue(FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir()))
+        self.assertFalse(Path(path).exists())
+        # Idempotent second call.
+        self.assertFalse(FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir()))
+
+    def test_cleanup_marker_mismatch_blocks(self):
+        run_id = "run-" + os.urandom(4).hex()
+        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        try:
+            with self.assertRaises(RuntimeError):
+                FFmWiz.safe_remove_owned_temp_dir(path, "WRONG-ID", tempfile.gettempdir())
+            self.assertTrue(Path(path).exists())
+        finally:
+            FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
+
+    def test_cleanup_missing_marker_blocks(self):
+        run_id = "run-" + os.urandom(4).hex()
+        path = FFmWiz.create_owned_temp_cache_dir(run_id)
+        try:
+            (Path(path) / FFmWiz.TEST_CACHE_OWNER_MARKER).unlink()
+            with self.assertRaises(RuntimeError):
+                FFmWiz.safe_remove_owned_temp_dir(path, run_id, tempfile.gettempdir())
+            self.assertTrue(Path(path).exists())
+        finally:
+            import shutil as _sh
+            _sh.rmtree(path, ignore_errors=True)
+
+    def test_cleanup_refuses_protected_paths(self):
+        root = tempfile.gettempdir()
+        project_root = Path(FFmWiz.__file__).resolve().parent
+        protected_candidates = [
+            project_root,                                  # project root
+            project_root / FFmWiz.CAPABILITY_CACHE_DIRNAME,  # project .cache
+            Path.home(),                                   # home
+            Path(project_root.anchor),                     # filesystem root
+            Path(tempfile.gettempdir()),                   # temp root itself
+        ]
+        for candidate in protected_candidates:
+            with self.assertRaises(RuntimeError):
+                FFmWiz.safe_remove_owned_temp_dir(candidate, "any", root)
+
+    def test_cleanup_refuses_path_outside_temp_root(self):
+        project_root = Path(FFmWiz.__file__).resolve().parent
+        with self.assertRaises(RuntimeError):
+            FFmWiz.safe_remove_owned_temp_dir(project_root / "some_sub", "any", tempfile.gettempdir())
+
+    def test_cleanup_refuses_symlink_to_protected(self):
+        run_id = "run-" + os.urandom(4).hex()
+        link_parent = FFmWiz.create_owned_temp_cache_dir(run_id)
+        link = Path(link_parent) / "link_to_cache"
+        target = Path(FFmWiz.__file__).resolve().parent / FFmWiz.CAPABILITY_CACHE_DIRNAME
+        try:
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation not permitted on this system")
+            # Resolves to project .cache -> protected -> refused.
+            with self.assertRaises(RuntimeError):
+                FFmWiz.safe_remove_owned_temp_dir(link, run_id, tempfile.gettempdir())
+        finally:
+            FFmWiz.safe_remove_owned_temp_dir(link_parent, run_id, tempfile.gettempdir())
+
+    def test_capability_clear_removes_only_owned_file(self):
+        FFmWiz.save_capability_cache({"schema_version": 1, "environments": {"E": {}}})
+        unrelated = Path(self._cache_dir, "unrelated_user_file.json")
+        unrelated.write_text("{}", encoding="utf-8")
+        marker = Path(self._cache_dir, FFmWiz.TEST_CACHE_OWNER_MARKER)
+        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz._capability_cache_clear()
+        self.assertFalse(Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).exists())
+        self.assertTrue(unrelated.exists())          # unrelated file survives
+        self.assertTrue(marker.exists())             # ownership marker survives
+        self.assertTrue(Path(self._cache_dir).is_dir())  # .cache dir survives
+
+    def test_corrupted_cache_recovery_keeps_unrelated_files(self):
+        Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).write_text("{bad", encoding="utf-8")
+        unrelated = Path(self._cache_dir, "keep_me.txt")
+        unrelated.write_text("data", encoding="utf-8")
+        FFmWiz.load_capability_cache()  # moves corrupt aside, does not delete others
+        self.assertTrue(unrelated.exists())
+
+    def test_teardown_uses_isolated_cache_not_real(self):
+        """The active cache path resolves under the owned temp dir, not project."""
+        active = FFmWiz.capability_cache_path().resolve()
+        self.assertEqual(active.parent, Path(self._cache_dir).resolve())
+        project_cache = Path(FFmWiz.__file__).resolve().parent / FFmWiz.CAPABILITY_CACHE_DIRNAME
+        self.assertNotEqual(active.parent, project_cache)
 
 
 if __name__ == "__main__":
