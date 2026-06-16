@@ -5127,36 +5127,34 @@ def _format_ratio(value: float) -> str:
     return f"{value:.3f}"
 
 
-def sar_dar_info(answers: dict[str, Any]) -> dict[str, Any]:
-    """Resolve SAR/DAR geometry for the source video stream with explicit
-    provenance. Deterministic priority:
+def resolve_video_geometry(
+    coded_width: int | None,
+    coded_height: int | None,
+    raw_ffprobe_sar: float | None,
+    raw_ffprobe_dar: float | None,
+) -> dict[str, Any]:
+    """Pure one-way SAR/DAR resolver.
 
-      Case 1: valid coded dims + valid SAR -> DAR = (w/h) * SAR (calculated).
-              If ffprobe also reports DAR, compare; on disagreement the coded
-              dims + SAR win and the discrepancy is recorded (not overwritten).
-      Case 2: valid coded dims, SAR unknown, valid DAR -> SAR = DAR / (w/h).
-      Case 3: valid coded dims, valid SAR, DAR unknown -> DAR calculated.
-      Case 4: valid coded dims, SAR and DAR unknown -> assume square pixels
-              (SAR 1:1), clearly labeled as a fallback.
-      Case 5: invalid/missing coded dims -> unresolved geometry, no crash.
+    Inputs are the coded dimensions and the RAW ffprobe SAR/DAR values, already
+    parsed to positive floats (or None when ffprobe reported nothing valid).
+    This function never mutates its inputs and must never be fed its own
+    resolved output as raw metadata: a calculated/fallback DAR can therefore
+    never masquerade as a detected ffprobe DAR.
 
-    Returns a structured result with both detected and resolved values, their
-    sources, the effective DAR decimal, pixel shape, and any warning.
+    Deterministic cases:
+      A: raw SAR valid                 -> SAR detected; DAR calculated from SAR.
+         (raw DAR, if valid, is compared; coded dims + raw SAR win on conflict)
+      B: raw SAR missing, raw DAR valid -> SAR calculated from DETECTED DAR.
+      C: raw SAR valid, raw DAR missing -> DAR calculated from SAR (Case A).
+      D: both raw values missing        -> assume square pixels (SAR 1:1),
+         labeled as a fallback; DAR calculated from the fallback SAR.
+      E: invalid/missing dims           -> unresolved geometry, no division.
     """
-    stream = source_video_stream(answers) or {}
-    try:
-        coded_w = int(stream.get("width") or 0)
-        coded_h = int(stream.get("height") or 0)
-    except (TypeError, ValueError):
-        coded_w = coded_h = 0
-    detected_sar = parse_rational(stream.get("sample_aspect_ratio"))
-    detected_dar = parse_rational(stream.get("display_aspect_ratio"))
-
-    info: dict[str, Any] = {
-        "coded_w": coded_w or None,
-        "coded_h": coded_h or None,
-        "detected_sar": detected_sar,
-        "detected_dar": detected_dar,
+    result: dict[str, Any] = {
+        "coded_width": coded_width or None,
+        "coded_height": coded_height or None,
+        "raw_ffprobe_sar": raw_ffprobe_sar,
+        "raw_ffprobe_dar": raw_ffprobe_dar,
         "resolved_sar": None,
         "resolved_dar": None,
         "effective_dar_decimal": None,
@@ -5166,76 +5164,94 @@ def sar_dar_info(answers: dict[str, Any]) -> dict[str, Any]:
         "fallback_used": False,
         "discrepancy_detected": False,
         "warning": None,
-        # Backwards-compatible aliases for existing callers.
-        "sar": None,
-        "probe_dar": detected_dar,
-        "dar": None,
-        "sar_text": "unknown",
-        "dar_text": "unknown",
-        "detected_sar_text": ratio_text(detected_sar),
-        "detected_dar_text": ratio_text(detected_dar),
         "discrepancy": None,
     }
 
-    if not (coded_w > 0 and coded_h > 0):
-        # Case 5: cannot safely divide; report unresolved geometry.
-        info["warning"] = "Source coded dimensions are missing or invalid; geometry unresolved."
-        return info
+    if not (coded_width and coded_height and coded_width > 0 and coded_height > 0):
+        # Case E: cannot safely divide; report unresolved geometry.
+        result["warning"] = "Source coded dimensions are missing or invalid; geometry unresolved."
+        return result
 
-    wh = coded_w / coded_h
-    resolved_sar = None
-    resolved_dar = None
+    wh = coded_width / coded_height
 
-    if detected_sar:
-        # Case 1 / Case 3: SAR is authoritative; derive DAR from dims + SAR.
-        resolved_sar = detected_sar
-        info["sar_source"] = "detected by ffprobe"
-        calc_dar = wh * detected_sar
-        resolved_dar = calc_dar
-        info["dar_source"] = "calculated from coded resolution and SAR"
-        if detected_dar:
-            if abs(calc_dar - detected_dar) <= 0.02:
-                # Case 1 agreement: keep calculated value, note agreement.
-                info["dar_source"] = "calculated from coded resolution and SAR (ffprobe DAR agrees)"
+    if raw_ffprobe_sar:
+        # Case A / Case C: raw SAR is authoritative; DAR derived from dims + SAR.
+        result["resolved_sar"] = raw_ffprobe_sar
+        result["sar_source"] = "detected by ffprobe"
+        calc_dar = wh * raw_ffprobe_sar
+        result["resolved_dar"] = calc_dar
+        result["dar_source"] = "calculated from coded resolution and SAR"
+        if raw_ffprobe_dar:
+            if abs(calc_dar - raw_ffprobe_dar) <= 0.02:
+                result["dar_source"] = "calculated from coded resolution and SAR (ffprobe DAR agrees)"
             else:
-                # Case 1 disagreement: dims + SAR win; record discrepancy.
-                info["discrepancy_detected"] = True
-                info["discrepancy"] = (calc_dar, detected_dar)
-                info["warning"] = (
+                result["discrepancy_detected"] = True
+                result["discrepancy"] = (calc_dar, raw_ffprobe_dar)
+                result["warning"] = (
                     "SAR/DAR discrepancy: calculated DAR %.6f disagrees with ffprobe DAR %.6f; "
-                    "using coded resolution + SAR as the source of truth."
-                    % (calc_dar, detected_dar)
+                    "using coded resolution + raw SAR as the source of truth."
+                    % (calc_dar, raw_ffprobe_dar)
                 )
-    elif detected_dar:
-        # Case 2: derive SAR from coded dims + DAR.
-        resolved_dar = detected_dar
-        info["dar_source"] = "detected by ffprobe"
-        resolved_sar = detected_dar / wh
-        info["sar_source"] = "calculated from coded resolution and DAR"
+    elif raw_ffprobe_dar:
+        # Case B: derive SAR from a GENUINELY DETECTED ffprobe DAR only.
+        result["resolved_dar"] = raw_ffprobe_dar
+        result["dar_source"] = "detected by ffprobe"
+        result["resolved_sar"] = raw_ffprobe_dar / wh
+        result["sar_source"] = "calculated from coded resolution and detected DAR"
     else:
-        # Case 4: nothing known; assume square pixels (honest fallback).
-        resolved_sar = 1.0
-        info["sar_source"] = "fallback assumption"
-        resolved_dar = wh
-        info["dar_source"] = "calculated from coded resolution and fallback SAR"
-        info["fallback_used"] = True
-        info["warning"] = "Source SAR and DAR are unavailable; assuming square pixels (SAR 1:1)."
+        # Case D: neither raw value is available; assume square pixels (honest
+        # fallback). The DAR is derived from the fallback SAR and is never
+        # labeled as detected.
+        result["resolved_sar"] = 1.0
+        result["sar_source"] = "fallback assumption"
+        result["resolved_dar"] = wh
+        result["dar_source"] = "calculated from coded resolution and fallback SAR"
+        result["fallback_used"] = True
+        result["warning"] = "Source SAR and DAR are unavailable; assuming square pixels (SAR 1:1)."
 
-    info["resolved_sar"] = resolved_sar
-    info["resolved_dar"] = resolved_dar
-    info["effective_dar_decimal"] = resolved_dar
-    info["sar"] = resolved_sar
-    info["dar"] = resolved_dar
-    info["sar_text"] = ratio_text(resolved_sar)
-    info["dar_text"] = ratio_text(resolved_dar)
-
+    result["effective_dar_decimal"] = result["resolved_dar"]
+    resolved_sar = result["resolved_sar"]
     if resolved_sar is not None:
-        square = abs(resolved_sar - 1.0) < SAR_DAR_TOLERANCE
-        if info["fallback_used"]:
-            info["pixel_shape"] = "square (assumed)"
+        if result["fallback_used"]:
+            result["pixel_shape"] = "square (assumed)"
         else:
-            info["pixel_shape"] = "square" if square else "non-square"
+            result["pixel_shape"] = (
+                "square" if abs(resolved_sar - 1.0) < SAR_DAR_TOLERANCE else "non-square"
+            )
+    return result
 
+
+def sar_dar_info(answers: dict[str, Any]) -> dict[str, Any]:
+    """Resolve SAR/DAR geometry for the source video stream with explicit
+    provenance. Reads only RAW ffprobe metadata (sample_aspect_ratio /
+    display_aspect_ratio) from the stream, then delegates to the pure
+    resolve_video_geometry() so calculated/fallback values can never be fed
+    back in as detected metadata. Does not mutate the stream."""
+    stream = source_video_stream(answers) or {}
+    try:
+        coded_w = int(stream.get("width") or 0)
+        coded_h = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        coded_w = coded_h = 0
+    raw_ffprobe_sar = parse_rational(stream.get("sample_aspect_ratio"))
+    raw_ffprobe_dar = parse_rational(stream.get("display_aspect_ratio"))
+
+    geo = resolve_video_geometry(coded_w, coded_h, raw_ffprobe_sar, raw_ffprobe_dar)
+
+    # Public result: the pure geometry plus backwards-compatible aliases used by
+    # display, summary, command generation, and existing tests.
+    info: dict[str, Any] = dict(geo)
+    info["coded_w"] = geo["coded_width"]
+    info["coded_h"] = geo["coded_height"]
+    info["detected_sar"] = geo["raw_ffprobe_sar"]
+    info["detected_dar"] = geo["raw_ffprobe_dar"]
+    info["probe_dar"] = geo["raw_ffprobe_dar"]
+    info["sar"] = geo["resolved_sar"]
+    info["dar"] = geo["resolved_dar"]
+    info["sar_text"] = ratio_text(geo["resolved_sar"])
+    info["dar_text"] = ratio_text(geo["resolved_dar"])
+    info["detected_sar_text"] = ratio_text(geo["raw_ffprobe_sar"])
+    info["detected_dar_text"] = ratio_text(geo["raw_ffprobe_dar"])
     return info
 
 

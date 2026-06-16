@@ -4494,7 +4494,7 @@ class CommandGenerationTests(unittest.TestCase):
                                        "display_aspect_ratio": "9:16"}]}
         info = FFmWiz.sar_dar_info(answers)
         self.assertEqual(info["sar_text"], "1:1")
-        self.assertEqual(info["sar_source"], "calculated from coded resolution and DAR")
+        self.assertEqual(info["sar_source"], "calculated from coded resolution and detected DAR")
         self.assertEqual(info["dar_text"], "9:16")
         self.assertEqual(info["dar_source"], "detected by ffprobe")
         self.assertEqual(info["pixel_shape"], "square")
@@ -4548,7 +4548,7 @@ class CommandGenerationTests(unittest.TestCase):
                                        "display_aspect_ratio": "16:9"}]}
         info = FFmWiz.sar_dar_info(answers)
         self.assertEqual(info["sar_text"], "64:45")
-        self.assertEqual(info["sar_source"], "calculated from coded resolution and DAR")
+        self.assertEqual(info["sar_source"], "calculated from coded resolution and detected DAR")
         self.assertEqual(info["pixel_shape"], "non-square")
 
     def test_resize_uses_resolved_effective_dar(self):
@@ -4762,6 +4762,97 @@ class CommandGenerationTests(unittest.TestCase):
         data = FFmWiz.load_capability_cache()
         self.assertNotIn("libx265|mkv",
                          data["environments"]["K"]["capabilities"]["color_range_do_not_force"])
+
+    # ===================================================================
+    # SAR/DAR provenance separation (raw ffprobe vs resolved)
+    # ===================================================================
+
+    def test_raw_fields_unchanged_after_resolution(self):
+        """Raw ffprobe SAR/DAR are preserved exactly; resolved values are separate."""
+        stream = {"width": 720, "height": 576, "sample_aspect_ratio": "16:15"}
+        answers = {"video_streams": [stream]}
+        info = FFmWiz.sar_dar_info(answers)
+        # Raw SAR present (16:15 -> ~1.0667), raw DAR absent.
+        self.assertAlmostEqual(info["raw_ffprobe_sar"], 16 / 15, places=4)
+        self.assertIsNone(info["raw_ffprobe_dar"])
+        # Resolved values are stored separately and do not overwrite the stream.
+        self.assertIsNotNone(info["resolved_dar"])
+        self.assertEqual(stream.get("sample_aspect_ratio"), "16:15")
+        self.assertNotIn("display_aspect_ratio", stream)
+
+    def test_resolver_is_pure_and_idempotent(self):
+        """resolve_video_geometry never mutates input and is idempotent."""
+        g1 = FFmWiz.resolve_video_geometry(2160, 3840, None, 9 / 16)
+        g2 = FFmWiz.resolve_video_geometry(2160, 3840, None, 9 / 16)
+        self.assertEqual(g1, g2)
+        # Feeding the resolved DAR back as raw must NOT change Case-B provenance
+        # to a detected SAR-derived case; it is a different (legitimate) input,
+        # but the resolver never consumes its own dict.
+        self.assertEqual(g1["raw_ffprobe_dar"], 9 / 16)
+        self.assertEqual(g1["raw_ffprobe_sar"], None)
+
+    def test_fallback_dar_cannot_be_reused_as_detected(self):
+        """A both-unknown fallback result must not enter the detected-DAR branch
+        when its numeric DAR is treated as raw input by mistake. The fallback
+        result's raw_ffprobe_dar stays None."""
+        fallback = FFmWiz.resolve_video_geometry(2160, 3840, None, None)
+        self.assertTrue(fallback["fallback_used"])
+        self.assertIsNone(fallback["raw_ffprobe_dar"])
+        self.assertEqual(fallback["dar_source"], "calculated from coded resolution and fallback SAR")
+        self.assertEqual(fallback["sar_source"], "fallback assumption")
+        # The pure resolver only consumes raw scalars, so the fallback DAR value
+        # can never be passed as raw_ffprobe_dar from the resolver's own output.
+
+    def test_fixture_detected_dar_provenance(self):
+        """Fixture 1: raw DAR 9:16 detected -> SAR derived from detected DAR."""
+        info = FFmWiz.sar_dar_info({"video_streams": [{"width": 2160, "height": 3840,
+                                                       "display_aspect_ratio": "9:16"}]})
+        self.assertEqual(info["sar_text"], "1:1")
+        self.assertEqual(info["sar_source"], "calculated from coded resolution and detected DAR")
+        self.assertEqual(info["dar_text"], "9:16")
+        self.assertEqual(info["dar_source"], "detected by ffprobe")
+        self.assertEqual(info["pixel_shape"], "square")
+        self.assertFalse(info["fallback_used"])
+
+    def test_fixture_both_unknown_provenance(self):
+        """Fixture 2: no raw SAR/DAR -> fallback SAR 1:1, calculated DAR."""
+        info = FFmWiz.sar_dar_info({"video_streams": [{"width": 2160, "height": 3840}]})
+        self.assertEqual(info["sar_text"], "1:1")
+        self.assertEqual(info["sar_source"], "fallback assumption")
+        self.assertEqual(info["dar_text"], "9:16")
+        self.assertEqual(info["dar_source"], "calculated from coded resolution and fallback SAR")
+        self.assertEqual(info["pixel_shape"], "square (assumed)")
+        self.assertTrue(info["fallback_used"])
+
+    def test_both_fixtures_same_geometry_different_provenance(self):
+        """The two 2160x3840 fixtures match numerically but differ in provenance."""
+        detected = FFmWiz.sar_dar_info({"video_streams": [{"width": 2160, "height": 3840,
+                                                          "display_aspect_ratio": "9:16"}]})
+        fallback = FFmWiz.sar_dar_info({"video_streams": [{"width": 2160, "height": 3840}]})
+        self.assertAlmostEqual(detected["effective_dar_decimal"],
+                               fallback["effective_dar_decimal"], places=6)
+        self.assertNotEqual(detected["sar_source"], fallback["sar_source"])
+        self.assertNotEqual(detected["dar_source"], fallback["dar_source"])
+        self.assertFalse(detected["fallback_used"])
+        self.assertTrue(fallback["fallback_used"])
+
+    def test_no_report_labels_fallback_as_detected(self):
+        """A both-unknown result never labels SAR/DAR as detected by ffprobe."""
+        info = FFmWiz.sar_dar_info({"video_streams": [{"width": 2160, "height": 3840}]})
+        self.assertNotIn("detected by ffprobe", info["sar_source"])
+        self.assertNotIn("detected by ffprobe", info["dar_source"])
+
+    def test_provenance_independent_per_stream(self):
+        """Resolving one stream does not contaminate another (Folder Encode)."""
+        s1 = {"width": 2160, "height": 3840, "display_aspect_ratio": "9:16"}
+        s2 = {"width": 2160, "height": 3840}
+        i1 = FFmWiz.sar_dar_info({"video_streams": [s1]})
+        i2 = FFmWiz.sar_dar_info({"video_streams": [s2]})
+        self.assertEqual(i1["dar_source"], "detected by ffprobe")
+        self.assertTrue(i2["fallback_used"])
+        # Original raw streams unchanged.
+        self.assertEqual(s1.get("display_aspect_ratio"), "9:16")
+        self.assertNotIn("display_aspect_ratio", s2)
 
 
 if __name__ == "__main__":
