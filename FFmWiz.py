@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import concurrent.futures
 import csv
+import atexit
 import hashlib
 import html
 import json
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -3234,12 +3236,74 @@ def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
 # =====================================================================
 
 LOGS_DIR_NAME = "Logs"
+APP_VERSION = "1.3.0"
 _LOG_PATH: Path | None = None
 _LOGGER: logging.Logger | None = None
+_LOG_TO_CONSOLE_FALLBACK = False
+_EXECUTION_ID: str = ""
+_SESSION_START_MONOTONIC: float | None = None
+_SHUTDOWN_LOGGED = False
+_DEFAULT_LOG_COMPONENT = "FFmWiz"
 
 
 def _logs_dir() -> Path:
     return script_dir() / LOGS_DIR_NAME
+
+
+# Secret/credential redaction. Applied to every log record so sensitive values
+# never reach the log file even via DEBUG or third-party command echoes. The
+# patterns are conservative (a value is masked only when introduced by a known
+# sensitive key, a Bearer token, or embedded URL credentials) to avoid mangling
+# ordinary FFmpeg arguments such as crf=23.
+_SECRET_KEY_RE = re.compile(
+    r"(?i)\b(pass(?:word|wd)?|tokens?|api[_-]?keys?|secrets?|access[_-]?tokens?|"
+    r"refresh[_-]?tokens?|client[_-]?secrets?|private[_-]?keys?|authorization|"
+    r"signing[_-]?secret|webhook[_-]?secret)\b(\s*[:=]\s*|\s+)([^\s,;\"']+)"
+)
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+")
+_URL_CRED_RE = re.compile(r"://([^:@/\s]+):([^@/\s]+)@")
+
+
+def redact_secrets(text: Any) -> str:
+    """Mask credentials/tokens in a log string without altering ordinary text."""
+    if text is None:
+        return ""
+    out = str(text)
+    try:
+        # Bearer tokens first so 'Authorization: Bearer <jwt>' has the token
+        # removed before the key/value rule masks the rest of the field.
+        out = _BEARER_RE.sub("Bearer [REDACTED]", out)
+        out = _SECRET_KEY_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", out)
+        out = _URL_CRED_RE.sub(r"://\1:[REDACTED]@", out)
+    except Exception:
+        return out
+    return out
+
+
+class _LogContextFilter(logging.Filter):
+    """Guarantee a [COMPONENT] field on every record and redact secrets from the
+    fully-rendered message before it is written to the file."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "component") or not getattr(record, "component"):
+            record.component = _DEFAULT_LOG_COMPONENT
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = str(record.msg)
+        record.msg = redact_secrets(rendered)
+        record.args = None
+        return True
+
+
+class _UtcFormatter(logging.Formatter):
+    """Formatter whose timestamps are UTC, second-precision, no milliseconds."""
+
+    converter = time.gmtime
+
+    def formatTime(self, record, datefmt=None):  # noqa: N802 (Qt/py style)
+        ct = self.converter(record.created)
+        return time.strftime(datefmt or "%Y-%m-%d %H:%M:%S", ct)
 
 
 def _config_setting_for_logging(key: str, fallback: Any) -> Any:
@@ -3286,109 +3350,151 @@ def _prune_old_logs(logs_dir: Path, retention_days: int) -> None:
 
 
 def setup_logging() -> Path | None:
-    """Initialize the file logger (UTF-8, dated filename) and return the
-    log path. Subsequent calls are no-ops and return the existing path."""
-    global _LOG_PATH, _LOGGER
+    """Initialize the professional file logger and return the log path.
+
+    A new UTF-8 log file is created for every execution, named
+    ffmwiz_<UTC-timestamp>_UTC.log with a collision-resistant suffix. Entries
+    use the structure '[YYYY-MM-DD HH:mm:ss UTC] [LEVEL] [COMPONENT] message',
+    secrets are redacted, and handlers are flushed/closed at process exit.
+    Subsequent calls are no-ops and return the existing path."""
+    global _LOG_PATH, _LOGGER, _LOG_TO_CONSOLE_FALLBACK, _EXECUTION_ID, _SESSION_START_MONOTONIC
     if _LOGGER is not None:
         return _LOG_PATH
     if not _logging_enabled_from_config():
         _LOGGER = None
         _LOG_PATH = None
         return None
+    _EXECUTION_ID = uuid.uuid4().hex[:12]
+    _SESSION_START_MONOTONIC = time.monotonic()
     try:
         logs_dir = _logs_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
         _prune_old_logs(logs_dir, _log_retention_days_from_config())
-        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        _LOG_PATH = logs_dir / f"ffmwiz_{stamp}.log"
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+        # Collision-resistant: never overwrite a previous execution's log.
+        candidate = logs_dir / f"ffmwiz_{stamp}_UTC.log"
+        if candidate.exists():
+            candidate = logs_dir / f"ffmwiz_{stamp}_UTC_{_EXECUTION_ID}.log"
+        _LOG_PATH = candidate
         logger = logging.getLogger("ffmwiz")
         logger.setLevel(logging.DEBUG)
         # Wipe any handlers added by previous runs in the same process.
         for h in list(logger.handlers):
             logger.removeHandler(h)
         handler = logging.FileHandler(_LOG_PATH, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(message)s",
+        handler.setFormatter(_UtcFormatter(
+            "[%(asctime)s UTC] [%(levelname)s] [%(component)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         ))
+        handler.addFilter(_LogContextFilter())
         logger.addHandler(handler)
         logger.propagate = False
         _LOGGER = logger
-        log_info("FFmWiz started")
-        log_info(f"Python: {sys.version.replace(chr(10), ' ')}")
-        try:
-            log_info(f"OS: {platform.platform()}")
-        except Exception:
-            pass
-        log_info(f"Log file: {_LOG_PATH}")
-        log_info(f"Command line: {command_to_text(sys.argv)}")
+        _LOG_TO_CONSOLE_FALLBACK = False
+        atexit.register(shutdown_logging)
+        log_info("FFmWiz session started", component="Startup")
         return _LOG_PATH
-    except Exception:
-        # Logging must never break the wizard.
+    except Exception as exc:
+        # Logging must never break the wizard. Fall back to a clear console
+        # notice so the user knows persistent logging is unavailable.
         _LOGGER = None
         _LOG_PATH = None
+        _LOG_TO_CONSOLE_FALLBACK = True
+        try:
+            error(f"Persistent file logging is unavailable ({exc}). Continuing without a log file.")
+        except Exception:
+            pass
         return None
+
+
+def shutdown_logging(exit_code: Any = None) -> None:
+    """Flush and close all log handlers once, recording total session duration.
+    Safe to call multiple times (registered via atexit and callable manually)."""
+    global _SHUTDOWN_LOGGED
+    if _LOGGER is None or _SHUTDOWN_LOGGED:
+        return
+    _SHUTDOWN_LOGGED = True
+    try:
+        if _SESSION_START_MONOTONIC is not None:
+            elapsed = time.monotonic() - _SESSION_START_MONOTONIC
+            log_info(
+                f"FFmWiz session ended; total duration={elapsed:.2f}s"
+                + (f"; exit_code={exit_code}" if exit_code is not None else ""),
+                component="Shutdown",
+            )
+        for handler in list(_LOGGER.handlers):
+            try:
+                handler.flush()
+                handler.close()
+            except Exception:
+                pass
+            _LOGGER.removeHandler(handler)
+    except Exception:
+        pass
 
 
 def log_path() -> Path | None:
     return _LOG_PATH
 
 
-def log_info(msg: str) -> None:
-    if _LOGGER is not None:
-        try:
-            _LOGGER.info(msg)
-        except Exception:
-            pass
+def _emit_log(level: int, msg: str, component: str | None, exc_info: bool = False) -> None:
+    if _LOGGER is None:
+        return
+    try:
+        extra = {"component": component} if component else None
+        _LOGGER.log(level, msg, exc_info=exc_info, extra=extra)
+    except Exception:
+        pass
 
 
-def log_warn(msg: str) -> None:
-    if _LOGGER is not None:
-        try:
-            _LOGGER.warning(msg)
-        except Exception:
-            pass
+def log_info(msg: str, component: str | None = None) -> None:
+    _emit_log(logging.INFO, msg, component)
 
 
-def log_error(msg: str) -> None:
-    if _LOGGER is not None:
-        try:
-            _LOGGER.error(msg)
-        except Exception:
-            pass
+def log_warn(msg: str, component: str | None = None) -> None:
+    _emit_log(logging.WARNING, msg, component)
 
 
-def log_debug(msg: str) -> None:
-    if _LOGGER is not None:
-        try:
-            _LOGGER.debug(msg)
-        except Exception:
-            pass
+def log_error(msg: str, component: str | None = None) -> None:
+    _emit_log(logging.ERROR, msg, component)
 
 
-def log_exception(msg: str) -> None:
-    if _LOGGER is not None:
-        try:
-            _LOGGER.exception(msg)
-        except Exception:
-            pass
+def log_critical(msg: str, component: str | None = None) -> None:
+    _emit_log(logging.CRITICAL, msg, component)
+
+
+def log_debug(msg: str, component: str | None = None) -> None:
+    _emit_log(logging.DEBUG, msg, component)
+
+
+def log_exception(msg: str, component: str | None = None) -> None:
+    _emit_log(logging.ERROR, msg, component, exc_info=True)
 
 
 def log_environment(extra: dict[str, Any] | None = None) -> None:
-    """Log app/system/python/ffmpeg environment so every run is traceable."""
-    log_info("=" * 72)
-    log_info(f"FFmWiz session start at {datetime.datetime.now().isoformat()}")
+    """Log app/system/python/runtime environment so every run is traceable."""
+    log_info("=" * 72, component="Startup")
+    log_info(f"FFmWiz version: {APP_VERSION}", component="Startup")
+    log_info(f"Execution ID: {_EXECUTION_ID or '(none)'}", component="Startup")
+    log_info(f"Session start (UTC): {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", component="Startup")
     try:
-        log_info(f"OS: {platform.system()} {platform.release()} ({platform.version()})")
+        log_info(f"OS: {platform.system()} {platform.release()} ({platform.version()}); arch={platform.machine()}", component="Startup")
     except Exception:
         pass
-    log_info(f"Python: {sys.version.replace(chr(10), ' ')}")
-    log_info(f"Executable: {sys.executable}")
-    log_info(f"Script: {Path(__file__).resolve()}")
-    log_info(f"CWD: {Path.cwd()}")
+    log_info(f"Python: {sys.version.replace(chr(10), ' ')}", component="Startup")
+    log_info(f"Executable: {sys.executable}", component="Startup")
+    log_info(f"Script: {Path(__file__).resolve()}", component="Startup")
+    log_info(f"CWD: {Path.cwd()}", component="Startup")
+    try:
+        log_info(f"Process ID: {os.getpid()}", component="Startup")
+    except Exception:
+        pass
+    if _LOG_PATH is not None:
+        log_info(f"Log file: {_LOG_PATH}", component="Startup")
+    log_info(f"Command line: {command_to_text(sys.argv)}", component="Startup")
     if extra:
         for k, v in extra.items():
-            log_info(f"{k}: {v}")
+            log_info(f"{k}: {v}", component="Startup")
 
 
 def command_to_text(args: Any) -> str:
@@ -21968,8 +22074,17 @@ def main() -> int:
     log_environment({"CLI args": cli_args or "(none)"})
 
     ffmpeg, ffprobe = check_tools()
-    log_info(f"FFmpeg: {ffmpeg}")
-    log_info(f"FFprobe: {ffprobe}")
+    log_info(f"FFmpeg: {ffmpeg}", component="Startup")
+    log_info(f"FFprobe: {ffprobe}", component="Startup")
+    for label, binary in (("FFmpeg", ffmpeg), ("FFprobe", ffprobe)):
+        try:
+            _ver = subprocess.run([binary, "-hide_banner", "-version"],
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=15)
+            _first = (_ver.stdout or "").splitlines()
+            log_info(f"{label} version: {_first[0].strip() if _first else 'unknown'}", component="Startup")
+        except Exception as exc:
+            log_warn(f"Could not read {label} version: {exc}", component="Startup")
     config_path = default_config_path()
     launcher_path = default_launcher_path()
     reference_path = default_ffmpeg_reference_path()

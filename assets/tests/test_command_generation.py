@@ -5476,6 +5476,67 @@ class CommandGenerationTests(unittest.TestCase):
                     mock_cache, "any-id", tempfile.gettempdir())
             self.assertTrue(keep.exists())  # nothing deleted
 
+    # ===================================================================
+    # Professional logging (UTC, structured, redaction, shutdown)
+    # ===================================================================
+
+    def test_redact_secrets_masks_credentials_only(self):
+        r = FFmWiz.redact_secrets
+        self.assertNotIn("SECRET123", r("api_key=SECRET123"))
+        self.assertIn("[REDACTED]", r("api_key=SECRET123"))
+        self.assertNotIn("hunter2", r("password: hunter2"))
+        self.assertNotIn("tok_abc", r("access_token=tok_abc"))
+        self.assertNotIn("jwtpart", r("Authorization: Bearer jwtpart.more"))
+        self.assertEqual(r("://u:p4ss@host/x"), "://u:[REDACTED]@host/x")
+        # Ordinary FFmpeg arguments must not be touched.
+        self.assertEqual(r("crf=23 preset=medium scale=1280:720"),
+                         "crf=23 preset=medium scale=1280:720")
+        self.assertEqual(r(""), "")
+        self.assertEqual(r(None), "")
+
+    def test_logging_file_is_utc_structured_and_redacted(self):
+        prev = (FFmWiz._LOGGER, FFmWiz._LOG_PATH, FFmWiz._SHUTDOWN_LOGGED,
+                FFmWiz._EXECUTION_ID, FFmWiz._SESSION_START_MONOTONIC)
+        FFmWiz._LOGGER = None
+        FFmWiz._LOG_PATH = None
+        FFmWiz._SHUTDOWN_LOGGED = False
+        try:
+            with tempfile.TemporaryDirectory(prefix="ffmwiz_logtest_") as tmp, \
+                    mock.patch.object(FFmWiz, "_logs_dir", return_value=Path(tmp)), \
+                    mock.patch.object(FFmWiz, "_logging_enabled_from_config", return_value=True), \
+                    mock.patch.object(FFmWiz, "_log_retention_days_from_config", return_value=0):
+                path = FFmWiz.setup_logging()
+                self.assertIsNotNone(path)
+                self.assertTrue(path.name.startswith("ffmwiz_"))
+                self.assertTrue(path.name.endswith("_UTC.log"))
+                FFmWiz.log_info("hello world", component="UnitTest")
+                FFmWiz.log_warn("careful now", component="UnitTest")
+                FFmWiz.log_info("login api_key=TOPSECRETXYZ done", component="Net")
+                FFmWiz.shutdown_logging(exit_code=0)
+                text = path.read_text(encoding="utf-8")
+            import re as _re
+            self.assertRegex(
+                text,
+                r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\] \[INFO\] \[UnitTest\] hello world",
+            )
+            self.assertIn("[WARNING] [UnitTest] careful now", text)
+            self.assertNotIn("TOPSECRETXYZ", text)
+            self.assertIn("api_key=[REDACTED]", text)
+            self.assertNotRegex(text, r"\d{2}:\d{2}:\d{2}[.,]\d")  # no milliseconds
+            self.assertIn("[Shutdown]", text)
+            self.assertIn("total duration=", text)
+        finally:
+            # Restore module logging state so other tests are unaffected.
+            if FFmWiz._LOGGER is not None:
+                for h in list(FFmWiz._LOGGER.handlers):
+                    try:
+                        h.close()
+                    except Exception:
+                        pass
+                    FFmWiz._LOGGER.removeHandler(h)
+            (FFmWiz._LOGGER, FFmWiz._LOG_PATH, FFmWiz._SHUTDOWN_LOGGED,
+             FFmWiz._EXECUTION_ID, FFmWiz._SESSION_START_MONOTONIC) = prev
+
 
 if __name__ == "__main__":
     unittest.main()
