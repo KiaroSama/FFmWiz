@@ -520,6 +520,22 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(active_part, 1)
         self.assertAlmostEqual(current_seconds, 17.0, places=2)
 
+    def test_split_progress_ignores_tiny_next_part_header_write(self):
+        # Part 2's file was just created (small container header flush) while
+        # Part 1 is still being written. The active part must NOT jump forward,
+        # otherwise the aggregate percent jumps (e.g. 30% -> 59%).
+        current_seconds, active_part = FFmWiz._split_progress_seconds(
+            raw_current_s=3.0,
+            frame_seconds=3.0,
+            part_durations=[10.0, 10.0],
+            output_sizes=[400000, 20000],       # part1 paused this tick; part2 tiny header
+            previous_output_sizes=[400000, 0],
+            active_part=0,
+            previous_raw_s=2.5,
+        )
+        self.assertEqual(active_part, 0)
+        self.assertAlmostEqual(current_seconds, 3.0, places=2)
+
     def test_loudnorm_filter_uses_two_pass_values_when_available(self):
         # Use values where linear mode is feasible:
         # gain = -16 - (-18) = +2 dB; predicted_TP = -4.0 + 2 = -2.0 <= -1.5 target TP.

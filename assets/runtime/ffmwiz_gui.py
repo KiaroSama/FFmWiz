@@ -6774,7 +6774,9 @@ def build_unified_video_editor(request: dict[str, Any]):
             the paint path — no worker thread, so no GIL contention."""
             width_px = max(1, int(width_px)); wh = max(1, int(wh))
             cyl = wh / 2.0
-            half = wh * 0.47
+            # Leave a clear top/bottom margin inside the waveform lane so even a
+            # ceiling-clamped (loud) peak never touches the lane edges / borders.
+            half = wh * 0.42
             # Reverse preview: mirror the WHOLE clip around its midpoint — one single
             # consistent flip for the entire timeline (timeline t <-> source[dur - t]),
             # so moving the CTI never re-mirrors. Render the mirrored window + flip it.
@@ -7401,25 +7403,22 @@ def build_unified_video_editor(request: dict[str, Any]):
                     QPointF(cx + 9, arrow_top),
                     QPointF(cx, arrow_tip),
                 ]))
-                # Timecode pill on the SAME row as the ruler tick labels (e.g.
-                # 00:33:20.000), placed beside the centre arrow (to its right,
-                # flipping left near the ruler edge) so it never hides the arrow.
+                # Timecode pill centered horizontally on the centre marker, placed
+                # just below the ruler tick numbers (in the ruler->waveform gap)
+                # so it reads as the marker's label and never collides with the
+                # time labels above it.
                 _ctc = seconds_to_timecode(center_time)
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
-                pill_w = 118
+                pill_w = 124
                 pill_h = 16
-                pill_y = ruler.top() + 5
-                if cx + 12 + pill_w <= ruler.right() - 2:
-                    pill_x = cx + 12
-                else:
-                    pill_x = cx - 12 - pill_w
-                pill_x = max(ruler.left() + 2, min(pill_x, ruler.right() - pill_w - 2))
+                pill_y = ruler.bottom() + 3
+                pill_x = max(ruler.left() + 2, min(cx - pill_w / 2.0, ruler.right() - pill_w - 2))
                 _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
                 p.setBrush(QtGui.QBrush(QtGui.QColor(20, 12, 32, 235)))
                 p.setPen(QtGui.QPen(guide_color, 1))
                 p.drawRoundedRect(_pill, 4, 4)
                 p.setPen(QtGui.QPen(QtGui.QColor("#e9d5ff"), 1))
-                p.drawText(_pill, Qt.AlignCenter, f"center  {_ctc}")
+                p.drawText(_pill, Qt.AlignCenter, f"Center  {_ctc}")
             ph_x = self._time_to_x(self.playhead)
             if wave.left() - 4 <= ph_x <= wave.right() + 4:
                 halo = QtGui.QColor(PALETTE["playhead_halo"])
@@ -7814,10 +7813,22 @@ def build_unified_video_editor(request: dict[str, Any]):
             self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_unified_waveform_")
             self._wave_path = Path(self._wave_temp.name) / "waveform.pcm"
             self._wave_proc = None
-            self._cut_ranges: list[tuple[float, float]] = [
+            # FFmWiz hands back KEEP ranges (the segments to keep). Internally the
+            # editor stores CUT (removed) ranges, so convert KEEP -> CUT (the
+            # complement) here; otherwise reopening would store cuts inverted.
+            _initial_keep = [
                 (float(s), float(e)) for s, e in (req.get("initial_keep_ranges") or [])
                 if float(e) > float(s)
             ]
+            if _initial_keep:
+                self._cut_ranges: list[tuple[float, float]] = [
+                    (float(s), float(e))
+                    for s, e in invert_cuts_to_keep(
+                        normalize_ranges(_initial_keep, self.duration), self.duration
+                    )
+                ]
+            else:
+                self._cut_ranges = []
             self._separator_points: list[float] = sorted({
                 round(float(v), 6) for v in (req.get("initial_separator_points") or [])
                 if 0.0 < float(v) < self.duration
@@ -8083,19 +8094,19 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.btn_add_separator = self._btn("Add Split (S)", self.add_separator)
             self.btn_add_separator.setObjectName("separator")
             self.btn_add_separator.setToolTip("Add a Split point. Split divides the final processed output into multiple parts.")
-            self.btn_invert = self._btn("Invert Cuts", self.invert_cuts)
+            self.btn_invert = self._btn("Invert Cuts (Ctrl+Shift+I)", self.invert_cuts)
             self.btn_invert.setObjectName("purple")
             self.btn_invert.setToolTip("Invert cut ranges (Ctrl+Shift+I).")
-            self.btn_convert_marker = self._btn("Convert In/Out", self.convert_selected_marker)
+            self.btn_convert_marker = self._btn("Convert In/Out (Ctrl+I)", self.convert_selected_marker)
             self.btn_convert_marker.setObjectName("convertMarker")
-            self.btn_convert_marker.setToolTip("Select Mark In or Mark Out, then convert it to the opposite marker type.")
-            self.btn_delete_markers = self._btn("Del Marker(s)", self.delete_selected_markers)
+            self.btn_convert_marker.setToolTip("Select Mark In or Mark Out, then convert it to the opposite marker type (Ctrl+I).")
+            self.btn_delete_markers = self._btn("Del Marker(s) (Del)", self.delete_selected_markers)
             self.btn_delete_markers.setObjectName("danger")
             self.btn_delete_markers.setToolTip("Delete the selected Mark In or Mark Out marker (Del).")
-            self.btn_delete_separator = self._btn("Del Split", self.delete_selected_separator)
+            self.btn_delete_separator = self._btn("Del Split (Del)", self.delete_selected_separator)
             self.btn_delete_separator.setObjectName("dangerAlt")
-            self.btn_delete_separator.setToolTip("Delete the selected Split point. Shortcut: Delete")
-            self.btn_delete_cut = self._btn("Del Cut", self.delete_selected_cut)
+            self.btn_delete_separator.setToolTip("Delete the selected Split point (Del).")
+            self.btn_delete_cut = self._btn("Del Cut (Del)", self.delete_selected_cut)
             self.btn_delete_cut.setObjectName("dangerCut")
             self.btn_delete_cut.setToolTip("Delete the selected cut (Del).")
             self.btn_delete_all = self._btn("Del All Cuts", self.delete_all_cuts)
@@ -9781,16 +9792,16 @@ def build_unified_video_editor(request: dict[str, Any]):
             marker = self.timeline.selected_marker
             if marker == "in":
                 self.btn_convert_marker.setEnabled(True)
-                self.btn_convert_marker.setText("Convert to Out")
-                self.btn_convert_marker.setToolTip("Convert the selected Mark In marker to Mark Out.")
+                self.btn_convert_marker.setText("Convert to Out (Ctrl+I)")
+                self.btn_convert_marker.setToolTip("Convert the selected Mark In marker to Mark Out (Ctrl+I).")
             elif marker == "out":
                 self.btn_convert_marker.setEnabled(True)
-                self.btn_convert_marker.setText("Convert to In")
-                self.btn_convert_marker.setToolTip("Convert the selected Mark Out marker to Mark In.")
+                self.btn_convert_marker.setText("Convert to In (Ctrl+I)")
+                self.btn_convert_marker.setToolTip("Convert the selected Mark Out marker to Mark In (Ctrl+I).")
             else:
                 self.btn_convert_marker.setEnabled(False)
                 self.btn_convert_marker.setText("Select Marker")
-                self.btn_convert_marker.setToolTip("Select Mark In or Mark Out before converting.")
+                self.btn_convert_marker.setToolTip("Select Mark In or Mark Out before converting (Ctrl+I).")
 
         def _on_zoom_slider(self, value):
             if self._syncing_zoom:

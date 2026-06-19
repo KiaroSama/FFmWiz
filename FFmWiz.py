@@ -3826,10 +3826,16 @@ def _split_progress_seconds(
             max_delta = max(deltas)
         if max_delta > 0:
             growing_part = deltas.index(max_delta)
-            # Split outputs are written sequentially. Use the output file that
-            # is currently growing, but never move backwards if an earlier MP4
-            # part grows later while its moov atom is finalized.
+        # Split outputs are written sequentially. Only advance the active part
+        # when the growing file shows a MEANINGFUL delta (not just a later
+        # part's freshly-opened container header/moov flush) and only one part
+        # at a time. This prevents the aggregate percent from jumping forward
+        # (e.g. 30% -> 59%) when the next part's file is created early while the
+        # current part is still being written.
+        if growing_part is not None and max_delta > 65536 and growing_part <= active + 1:
             active = max(active, growing_part)
+        else:
+            growing_part = None
     elif previous_raw_s is not None and raw_current_s + 0.25 < previous_raw_s and active + 1 < len(durations):
         active += 1
 
