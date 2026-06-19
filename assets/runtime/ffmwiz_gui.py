@@ -71,20 +71,66 @@ def _debug_enabled() -> bool:
     return bool(os.environ.get("FFMWIZ_DEBUG") or os.environ.get("FFMWIZ_DEBUG_GUI"))
 
 
-def _gui_log_debug(message: str, *, force: bool = False) -> None:
-    debug_enabled = _debug_enabled()
-    if not force and not debug_enabled:
-        return
-    line = f"GUI DEBUG: {message}"
+# Secret/credential redaction so GUI log lines (appended to the shared FFmWiz
+# log file) never leak tokens. Conservative: only known sensitive keys, Bearer
+# tokens, and URL credentials are masked; ordinary text is left intact.
+_GUI_SECRET_KEY_RE = re.compile(
+    r"(?i)\b(pass(?:word|wd)?|tokens?|api[_-]?keys?|secrets?|access[_-]?tokens?|"
+    r"refresh[_-]?tokens?|client[_-]?secrets?|private[_-]?keys?|authorization|"
+    r"signing[_-]?secret|webhook[_-]?secret)\b(\s*[:=]\s*|\s+)([^\s,;\"']+)"
+)
+_GUI_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+")
+_GUI_URL_CRED_RE = re.compile(r"://([^:@/\s]+):([^@/\s]+)@")
+
+
+def _gui_redact_secrets(text: object) -> str:
+    if text is None:
+        return ""
+    out = str(text)
+    try:
+        out = _GUI_BEARER_RE.sub("Bearer [REDACTED]", out)
+        out = _GUI_SECRET_KEY_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", out)
+        out = _GUI_URL_CRED_RE.sub(r"://\1:[REDACTED]@", out)
+    except Exception:
+        return out
+    return out
+
+
+def _gui_write_log(level: str, message: str) -> bool:
+    """Append one structured, UTC, redacted line to the shared FFmWiz log file.
+    Format matches FFmWiz: '[YYYY-MM-DD HH:mm:ss UTC] [LEVEL] [GUI] message'.
+    Returns True when written to the file."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    line = f"[{stamp} UTC] [{level}] [GUI] {_gui_redact_secrets(message)}"
     if _GUI_LOG_PATH is not None:
         try:
             with _GUI_LOG_PATH.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
-            return
+            return True
         except Exception:
             pass
-    if debug_enabled:
-        print(line, file=sys.stderr)
+    return False
+
+
+def _gui_log_debug(message: str, *, force: bool = False) -> None:
+    debug_enabled = _debug_enabled()
+    if not force and not debug_enabled:
+        return
+    if _gui_write_log("DEBUG", message):
+        return
+    if debug_enabled or force:
+        print(f"GUI DEBUG: {_gui_redact_secrets(message)}", file=sys.stderr)
+
+
+def _gui_log_info(message: str) -> None:
+    # Important GUI lifecycle events are always recorded in the shared log.
+    if not _gui_write_log("INFO", message) and _debug_enabled():
+        print(f"GUI INFO: {_gui_redact_secrets(message)}", file=sys.stderr)
+
+
+def _gui_log_error(message: str) -> None:
+    if not _gui_write_log("ERROR", message):
+        print(f"GUI ERROR: {_gui_redact_secrets(message)}", file=sys.stderr)
 
 
 def _app_icon_path(prefer_ico: bool = False) -> Path | None:
@@ -10228,6 +10274,10 @@ def main() -> int:
     except Exception:
         _PARENT_PID = None
 
+    _gui_log_info(
+        f"GUI process started: mode={request.get('mode')}; pid={os.getpid()}; "
+        f"parent_pid={_PARENT_PID}"
+    )
     _set_windows_app_id()
     try:
         from PySide6.QtWidgets import QApplication  # type: ignore
@@ -10273,11 +10323,13 @@ def main() -> int:
         elif mode == "audio_cut":
             window = build_audio_cut_editor(request)
         else:
+            _gui_log_error(f"Unknown GUI mode requested: {mode}")
             _write_reply(reply_path, {"status": "error",
                                       "message": f"Unknown mode: {mode}"})
             return 2
     except Exception as exc:
         import traceback
+        _gui_log_error(f"GUI init failed for mode={mode}: {exc}")
         _write_reply(reply_path, {
             "status": "error",
             "message": f"GUI init failed: {exc}",
@@ -10377,6 +10429,10 @@ def main() -> int:
     app.exec()
 
     payload = getattr(window, "result", {"status": "canceled"})
+    _gui_log_info(
+        f"GUI process finished: mode={mode}; status={payload.get('status', 'unknown')}; "
+        f"elapsed={time.perf_counter() - gui_start:.2f}s"
+    )
     _write_reply(reply_path, payload)
     return 0
 
