@@ -20,17 +20,20 @@ Recommended usage:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -44,6 +47,61 @@ APP_VERSION = "1.3.0"
 
 LOGGER = logging.getLogger("MuxCls")
 LOG_FILE: Optional[Path] = None
+_EXECUTION_ID: str = ""
+_SESSION_START_MONOTONIC: Optional[float] = None
+_SHUTDOWN_LOGGED = False
+_DEFAULT_LOG_COMPONENT = "MuxCls"
+
+# Secret/credential redaction applied to every log record (conservative: a value
+# is masked only when introduced by a known sensitive key, a Bearer token, or
+# embedded URL credentials, so ordinary arguments such as crf=23 are untouched).
+_SECRET_KEY_RE = re.compile(
+    r"(?i)\b(pass(?:word|wd)?|tokens?|api[_-]?keys?|secrets?|access[_-]?tokens?|"
+    r"refresh[_-]?tokens?|client[_-]?secrets?|private[_-]?keys?|authorization|"
+    r"signing[_-]?secret|webhook[_-]?secret)\b(\s*[:=]\s*|\s+)([^\s,;\"']+)"
+)
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+")
+_URL_CRED_RE = re.compile(r"://([^:@/\s]+):([^@/\s]+)@")
+
+
+def redact_secrets(text: object) -> str:
+    """Mask credentials/tokens in a log string without altering ordinary text."""
+    if text is None:
+        return ""
+    out = str(text)
+    try:
+        out = _BEARER_RE.sub("Bearer [REDACTED]", out)
+        out = _SECRET_KEY_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", out)
+        out = _URL_CRED_RE.sub(r"://\1:[REDACTED]@", out)
+    except Exception:
+        return out
+    return out
+
+
+class _LogContextFilter(logging.Filter):
+    """Guarantee a [COMPONENT] field on every record and redact secrets from the
+    fully-rendered message before it is written to the file."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not getattr(record, "component", None):
+            record.component = _DEFAULT_LOG_COMPONENT
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = str(record.msg)
+        record.msg = redact_secrets(rendered)
+        record.args = None
+        return True
+
+
+class _UtcFormatter(logging.Formatter):
+    """Formatter whose timestamps are UTC, second-precision, no milliseconds."""
+
+    converter = time.gmtime
+
+    def formatTime(self, record, datefmt=None):  # noqa: N802
+        ct = self.converter(record.created)
+        return time.strftime(datefmt or "%Y-%m-%d %H:%M:%S", ct)
 
 
 # ANSI colors. No external dependency required.
@@ -236,8 +294,10 @@ def command_to_text(args: Sequence[object]) -> str:
 
 
 def setup_logging() -> Optional[Path]:
-    global LOG_FILE
+    global LOG_FILE, _EXECUTION_ID, _SESSION_START_MONOTONIC
 
+    _EXECUTION_ID = uuid.uuid4().hex[:12]
+    _SESSION_START_MONOTONIC = time.monotonic()
     try:
         embedded_log = os.environ.get("FFMWIZ_LOG_FILE")
         if embedded_log:
@@ -246,7 +306,11 @@ def setup_logging() -> Optional[Path]:
         else:
             log_root = Path(__file__).resolve().parent / "Logs"
             log_root.mkdir(parents=True, exist_ok=True)
-            LOG_FILE = log_root / f"muxcls_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            candidate = log_root / f"muxcls_{stamp}_UTC.log"
+            if candidate.exists():
+                candidate = log_root / f"muxcls_{stamp}_UTC_{_EXECUTION_ID}.log"
+            LOG_FILE = candidate
 
         LOGGER.setLevel(logging.DEBUG)
         LOGGER.handlers.clear()
@@ -254,22 +318,51 @@ def setup_logging() -> Optional[Path]:
 
         handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
         handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(message)s",
+        handler.setFormatter(_UtcFormatter(
+            "[%(asctime)s UTC] [%(levelname)s] [%(component)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         ))
+        handler.addFilter(_LogContextFilter())
         LOGGER.addHandler(handler)
+        atexit.register(shutdown_logging)
         LOGGER.info("MuxCls started")
         LOGGER.info("MuxCls version: %s", APP_VERSION)
+        LOGGER.info("Execution ID: %s", _EXECUTION_ID)
         LOGGER.info("Python: %s", sys.version.replace("\n", " "))
-        LOGGER.info("OS: %s", platform.platform())
+        LOGGER.info("OS: %s (arch=%s)", platform.platform(), platform.machine())
+        LOGGER.info("Process ID: %s", os.getpid())
         LOGGER.info("Log file: %s", LOG_FILE)
         LOGGER.info("Command line: %s", command_to_text(sys.argv))
         return LOG_FILE
     except OSError as exc:
-        print(warn(f"Logging disabled: {exc}"))
+        print(warn(f"Persistent file logging is unavailable: {exc}. Continuing without a log file."))
         LOG_FILE = None
         return None
+
+
+def shutdown_logging(exit_code: object = None) -> None:
+    """Flush and close all log handlers once, recording total session duration.
+    Safe to call multiple times (registered via atexit and callable manually)."""
+    global _SHUTDOWN_LOGGED
+    if _SHUTDOWN_LOGGED or not LOGGER.handlers:
+        return
+    _SHUTDOWN_LOGGED = True
+    try:
+        if _SESSION_START_MONOTONIC is not None:
+            elapsed = time.monotonic() - _SESSION_START_MONOTONIC
+            msg = f"MuxCls session ended; total duration={elapsed:.2f}s"
+            if exit_code is not None:
+                msg += f"; exit_code={exit_code}"
+            LOGGER.info(msg)
+        for handler in list(LOGGER.handlers):
+            try:
+                handler.flush()
+                handler.close()
+            except Exception:
+                pass
+            LOGGER.removeHandler(handler)
+    except Exception:
+        pass
 
 
 @dataclass
