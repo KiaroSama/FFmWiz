@@ -7355,14 +7355,19 @@ def build_unified_video_editor(request: dict[str, Any]):
                     QPointF(cx + 9, arrow_top),
                     QPointF(cx, arrow_tip),
                 ]))
-                # Timecode pill in the gap between the ruler and the waveform, so it
-                # is always shown and never collides with tick labels or the arrow.
+                # Timecode pill on the SAME row as the ruler tick labels (e.g.
+                # 00:33:20.000), placed beside the centre arrow (to its right,
+                # flipping left near the ruler edge) so it never hides the arrow.
                 _ctc = seconds_to_timecode(center_time)
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
                 pill_w = 118
                 pill_h = 16
-                pill_x = max(ruler.left() + 2, min(cx - pill_w / 2, ruler.right() - pill_w - 2))
-                pill_y = ruler.bottom() + (wave.top() - ruler.bottom() - pill_h) / 2.0
+                pill_y = ruler.top() + 5
+                if cx + 12 + pill_w <= ruler.right() - 2:
+                    pill_x = cx + 12
+                else:
+                    pill_x = cx - 12 - pill_w
+                pill_x = max(ruler.left() + 2, min(pill_x, ruler.right() - pill_w - 2))
                 _pill = QRectF(pill_x, pill_y, pill_w, pill_h)
                 p.setBrush(QtGui.QBrush(QtGui.QColor(20, 12, 32, 235)))
                 p.setPen(QtGui.QPen(guide_color, 1))
@@ -7763,10 +7768,26 @@ def build_unified_video_editor(request: dict[str, Any]):
             self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_unified_waveform_")
             self._wave_path = Path(self._wave_temp.name) / "waveform.pcm"
             self._wave_proc = None
-            self._cut_ranges: list[tuple[float, float]] = []
-            self._separator_points: list[float] = []
+            self._cut_ranges: list[tuple[float, float]] = [
+                (float(s), float(e)) for s, e in (req.get("initial_keep_ranges") or [])
+                if float(e) > float(s)
+            ]
+            self._separator_points: list[float] = sorted({
+                round(float(v), 6) for v in (req.get("initial_separator_points") or [])
+                if 0.0 < float(v) < self.duration
+            })
             self._mark_in: float | None = None
             self._mark_out: float | None = None
+            # Crop/speed/reverse/include-audio need their widgets, so they are
+            # applied after the UI is built (see _apply_initial_session_state).
+            # Reopening the editor restores the previous session's edits instead
+            # of starting from zero.
+            self._initial_margins = [int(v) for v in (req.get("initial_margins") or [0, 0, 0, 0])][:4]
+            while len(self._initial_margins) < 4:
+                self._initial_margins.append(0)
+            self._initial_speed = float(req.get("initial_speed") or 1.0)
+            self._initial_reverse = bool(req.get("initial_reverse"))
+            self._initial_include_audio = bool(req.get("initial_include_audio", req.get("has_audio")))
             self._history = HistoryStack(self._snapshot(), max_size=120)
             self._syncing_zoom = False
             self._syncing_view = False
@@ -7793,6 +7814,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             # ready, instead of the waveform appearing seconds after the window.
             self._start_waveform()
             self._build_ui()
+            self._apply_initial_session_state()
             self._refresh_all()
             QtCore.QTimer.singleShot(120, self._setup_player)
             # Stream the (already-built) side-column panels in after the first paint so
@@ -7835,6 +7857,24 @@ def build_unified_video_editor(request: dict[str, Any]):
             if getattr(self, "_restoring_snapshot", False):
                 return
             self._history.push(self._snapshot())
+            self._update_undo_redo()
+
+        def _apply_initial_session_state(self):
+            # Apply crop/cuts/split/speed/reverse/include-audio carried over from
+            # a previous session (passed in the request). Re-baseline history so
+            # the restored state is the clean starting point for undo/redo.
+            initial = UnifiedSnapshot(
+                margins=tuple(self._initial_margins),
+                cut_ranges=tuple(self._cut_ranges),
+                separators=tuple(self._separator_points),
+                mark_in=None,
+                mark_out=None,
+                speed=float(self._initial_speed),
+                reverse=bool(self._initial_reverse),
+                include_audio=bool(self._initial_include_audio),
+            )
+            self._restore_snapshot(initial)
+            self._history = HistoryStack(self._snapshot(), max_size=120)
             self._update_undo_redo()
 
         def _undo(self):
@@ -8468,6 +8508,13 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.status = QLabel("Unified timeline: video preview, crop overlay, cut ranges, audio waveform, speed, and reverse are edited together.")
             self.status.setObjectName("dim")
             footer.addWidget(self.status, 1)
+            btn_reset_all = QPushButton(" Reset All")
+            btn_reset_all.setToolTip("Reset every edit (crop, cuts, split points, markers, speed, reverse) to defaults.")
+            btn_reset_all.clicked.connect(self.reset_all)
+            btn_reset_all.setMinimumHeight(40)
+            btn_reset_all.setMinimumWidth(120)
+            btn_reset_all.setStyleSheet("font-size: 13px; font-weight: 700; padding: 8px 16px;")
+            footer.addWidget(btn_reset_all)
             btn_cancel = QPushButton("Cancel (Esc)")
             btn_cancel.setObjectName("danger")
             btn_cancel.clicked.connect(self.cancel)
@@ -9637,6 +9684,29 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.preview.reset_crop()
             self._commit_history()
             self._refresh_all()
+
+        def reset_all(self):
+            # Return every edit made in this editor to its zero/default state:
+            # crop, cuts, split points, in/out markers, speed, and reverse.
+            default = UnifiedSnapshot(
+                margins=(0, 0, 0, 0),
+                cut_ranges=(),
+                separators=(),
+                mark_in=None,
+                mark_out=None,
+                speed=1.0,
+                reverse=False,
+                include_audio=bool(self.request.get("has_audio")),
+            )
+            self.timeline.selected_cut = -1
+            self.timeline.selected_separator = -1
+            self.timeline.selected_marker = None
+            self._restore_snapshot(default)
+            self._commit_history()
+            self._refresh_all()
+            self.status.setText(
+                "All edits reset to defaults: crop, cuts, split points, markers, speed, and reverse cleared."
+            )
 
         def reset_view(self):
             self.preview.reset_view()
