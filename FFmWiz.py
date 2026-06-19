@@ -12474,6 +12474,26 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "log_path": str(log_path()) if log_path() is not None else "",
         "start_maximized": True,
+        # Carry the previous session's edits back into the editor so reopening it
+        # (e.g. after pressing back from a later step) restores the prior crop,
+        # cuts, split points, speed, and reverse instead of starting from zero.
+        "initial_margins": [
+            int(answers.get("crop_top", 0) or 0),
+            int(answers.get("crop_left", 0) or 0),
+            int(answers.get("crop_right", 0) or 0),
+            int(answers.get("crop_bottom", 0) or 0),
+        ],
+        "initial_keep_ranges": [
+            [float(s), float(e)] for s, e in (answers.get("_unified_cut_keep_ranges") or [])
+        ],
+        "initial_separator_points": [
+            float(v) for v in (answers.get("_unified_separator_points") or [])
+        ],
+        "initial_speed": float(answers.get("_unified_video_speed") or 1.0),
+        "initial_reverse": bool(answers.get("_unified_reverse_video")),
+        "initial_include_audio": bool(
+            answers.get("_unified_include_audio", bool(answers.get("audio_streams")))
+        ),
     }
     if join_segments:
         log_info(
