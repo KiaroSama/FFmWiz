@@ -4356,8 +4356,49 @@ def run_ffmpeg_with_progress(
                     )
                     split_previous_output_sizes = output_sizes
                     split_previous_raw_s = raw_current_s
-                    # Show which part is currently encoding.
-                    state["_ffmwiz_split_part_label"] = f"Part {split_active_part + 1}/{len(split_part_durations)}"
+                    # ROBUST AGGREGATE PROGRESS: FFmpeg's multi-output -progress
+                    # counters are unreliable for Split (frozen `frame`, frozen
+                    # `total_size`, and `out_time` that only covers one output),
+                    # which is far worse when Split is combined with cut
+                    # trim/concat. When a target bitrate is known, derive
+                    # monotonic, bitrate-accurate progress from the TOTAL bytes
+                    # written across all parts on disk vs the expected total
+                    # bytes (target bitrate x program duration). This does not
+                    # depend on FFmpeg's ambiguous counters at all.
+                    try:
+                        _target_kbps = float(state.get("_ffmwiz_target_bitrate_kbps", "0") or 0.0)
+                    except (TypeError, ValueError):
+                        _target_kbps = 0.0
+                    _total_out_bytes = sum(output_sizes)
+                    if _target_kbps > 0 and _total_out_bytes > 0 and total_duration and total_duration > 0:
+                        _expected_bps = _target_kbps * 1000.0 / 8.0
+                        if _expected_bps > 0:
+                            _fs_current_s = _total_out_bytes / _expected_bps
+                            # Hold just below 100% until FFmpeg signals end so a
+                            # bitrate overshoot cannot park the bar at 100% while
+                            # encoding is still running.
+                            if state.get("progress") != "end":
+                                _fs_current_s = min(_fs_current_s, float(total_duration) * 0.99)
+                            current_s = max(current_s, _fs_current_s)
+                    # Label the active part from the aggregate position so the
+                    # "Part X/Y" label matches the displayed percent (the
+                    # out_time reconstruction's active index can lag or stick).
+                    _cum = 0.0
+                    _disp_part = 0
+                    for _i, _d in enumerate(split_part_durations):
+                        _disp_part = _i
+                        if current_s < _cum + _d - 1e-6:
+                            break
+                        _cum += _d
+                    state["_ffmwiz_split_part_label"] = (
+                        f"Part {_disp_part + 1}/{len(split_part_durations)}"
+                    )
+                    log_debug(
+                        f"{label} split progress: raw_out_time={raw_current_s:.2f}s "
+                        f"frame_s={frame_seconds:.2f}s sizes={output_sizes} "
+                        f"target_kbps={_target_kbps:.1f} current_s={current_s:.2f}s "
+                        f"recon_active={split_active_part} disp_part={_disp_part}"
+                    )
                 elif frame_seconds > 0.0:
                     # Fallback for callers that only provide FPS. This avoids
                     # double-counting but cannot infer later Split parts.
