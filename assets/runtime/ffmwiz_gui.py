@@ -7872,6 +7872,23 @@ def build_unified_video_editor(request: dict[str, Any]):
             # PREVIEW: minimum wide enough for two 250px side columns plus the
             # 520px preview canvas (+ splitter handles/margins) so nothing clips.
             self.setMinimumSize(1120, 640)
+            # PERF / UX: show an empty window shell IMMEDIATELY so the editor
+            # appears within a fraction of a second instead of staying invisible
+            # during the cold-start cost of _build_ui (dominated by Windows font
+            # database initialization on the first text widget: ~2s warm, and up
+            # to ~18s on a fresh boot while Defender scans the font files). The
+            # real UI replaces this placeholder a moment later. Fully guarded so
+            # a failure here can never block the normal build path.
+            try:
+                _shell = QWidget()
+                self.setCentralWidget(_shell)
+                if self.request.get("start_maximized"):
+                    self.showMaximized()
+                else:
+                    self.show()
+                QtWidgets.QApplication.processEvents()
+            except Exception as exc:  # noqa: BLE001
+                _gui_log_debug(f"Early window shell show skipped: {exc}", force=True)
             # Kick off the waveform decode NOW (async ffmpeg) so it runs in PARALLEL
             # with building the UI. By the time the window is shown the PCM is usually
             # ready, instead of the waveform appearing seconds after the window.
@@ -10046,7 +10063,10 @@ def build_unified_video_editor(request: dict[str, Any]):
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
-            self.timeline.update()
+            # Guard: a resize can fire from the early empty-shell show() before
+            # _build_ui has created self.timeline.
+            if hasattr(self, "timeline"):
+                self.timeline.update()
 
         def keyPressEvent(self, event):
             if event.key() == Qt.Key_Alt:
