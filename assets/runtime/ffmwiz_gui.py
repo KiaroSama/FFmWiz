@@ -6238,7 +6238,13 @@ def _stop_embedded_editor(editor: Any) -> None:
 
 def build_unified_video_editor(request: dict[str, Any]):
     QtCore, QtGui, QtWidgets, _ = _import_qt()
-    QtMultimedia = _import_qt_multimedia()
+    # PERF: QtMultimedia pulls in the native multimedia backend (Qt6Multimedia +
+    # the bundled FFmpeg backend DLLs), which is the single most expensive cold
+    # load on first launch. Defer it so it does NOT block building/showing the
+    # window; it is imported lazily inside _setup_player (which itself runs ~120ms
+    # AFTER the window is shown). Every QtMultimedia use lives in player callbacks
+    # that only run once _setup_player has created self.player, so this is safe.
+    QtMultimedia = None
     Qt = QtCore.Qt
     Signal = QtCore.Signal
     QPointF = QtCore.QPointF
@@ -7869,10 +7875,20 @@ def build_unified_video_editor(request: dict[str, Any]):
             # Kick off the waveform decode NOW (async ffmpeg) so it runs in PARALLEL
             # with building the UI. By the time the window is shown the PCM is usually
             # ready, instead of the waveform appearing seconds after the window.
+            # PERF: each build phase is timed so the dominant cold-start cost is
+            # visible in the log (window-build vs deferred multimedia backend load).
+            _phase_t = time.perf_counter()
             self._start_waveform()
+            _gui_log_debug(f"unified _start_waveform in {time.perf_counter() - _phase_t:.3f}s", force=True)
+            _phase_t = time.perf_counter()
             self._build_ui()
+            _gui_log_debug(f"unified _build_ui in {time.perf_counter() - _phase_t:.3f}s", force=True)
+            _phase_t = time.perf_counter()
             self._apply_initial_session_state()
+            _gui_log_debug(f"unified _apply_initial_session_state in {time.perf_counter() - _phase_t:.3f}s", force=True)
+            _phase_t = time.perf_counter()
             self._refresh_all()
+            _gui_log_debug(f"unified _refresh_all in {time.perf_counter() - _phase_t:.3f}s", force=True)
             QtCore.QTimer.singleShot(120, self._setup_player)
             # Stream the (already-built) side-column panels in after the first paint so
             # the window appears fast instead of blocking on the column's layout/polish.
@@ -8941,6 +8957,17 @@ def build_unified_video_editor(request: dict[str, Any]):
                 QtCore.QTimer.singleShot(0, self._attach_next_panel)
 
         def _setup_player(self):
+            # Lazily load the multimedia backend the first time the player is
+            # created (deferred out of the synchronous window-build path). The
+            # cold native-DLL load is timed so its real cost is visible in the log.
+            nonlocal QtMultimedia
+            if QtMultimedia is None:
+                _mm_start = time.perf_counter()
+                QtMultimedia = _import_qt_multimedia()
+                _gui_log_debug(
+                    f"QtMultimedia backend loaded in {time.perf_counter() - _mm_start:.3f}s",
+                    force=True,
+                )
             self.player = QtMultimedia.QMediaPlayer(self)
             self.audio = QtMultimedia.QAudioOutput(self)
             self.audio.setVolume(self.volume_slider.value() / 100.0)
