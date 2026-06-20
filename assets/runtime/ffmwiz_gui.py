@@ -7975,6 +7975,19 @@ def build_unified_video_editor(request: dict[str, Any]):
             root.setContentsMargins(8, 5, 8, 5)
             root.setSpacing(4)
 
+            # PERF PROBE: the cold-start cost lives inside _build_ui. Isolate the two
+            # most likely first-touch costs so the next cold log pinpoints the cause:
+            #  - font database init (first text widget enumerates system fonts), and
+            #  - the image/SVG icon plugin load (first icon read).
+            _t = time.perf_counter()
+            _probe_lbl = QLabel("0")
+            _probe_lbl.fontMetrics().height()  # force QFontDatabase population
+            _gui_log_debug(f"unified probe font-db init in {time.perf_counter() - _t:.3f}s", force=True)
+            _probe_lbl.deleteLater()
+            _t = time.perf_counter()
+            self._icon("play", QStyle.SP_MediaPlay)  # force icon/image plugin + first asset read
+            _gui_log_debug(f"unified probe first-icon load in {time.perf_counter() - _t:.3f}s", force=True)
+
             header = QFrame()
             header.setObjectName("header")
             h = QHBoxLayout(header)
