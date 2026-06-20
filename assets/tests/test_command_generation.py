@@ -2384,7 +2384,7 @@ class CommandGenerationTests(unittest.TestCase):
 
     def test_step_join_back_resume_preserves_existing_join_items_and_number_extra(self):
         originals = {
-            "ask_yes_no": FFmWiz.ask_yes_no,
+            "ask_join_add_another": FFmWiz.ask_join_add_another,
             "ask_required": FFmWiz.ask_required,
         }
         item = {
@@ -2397,12 +2397,12 @@ class CommandGenerationTests(unittest.TestCase):
         }
         prompts: list[str] = []
 
-        def fake_yes_no(prompt, default):
+        def fake_add_another(prompt):
             prompts.append(prompt)
             return False
 
         try:
-            FFmWiz.ask_yes_no = fake_yes_no
+            FFmWiz.ask_join_add_another = fake_add_another
             FFmWiz.ask_required = lambda _prompt: (_ for _ in ()).throw(AssertionError("path prompt should not be shown"))
             answers = {
                 "_question_number": 5,
@@ -2419,6 +2419,58 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(answers["join_input_items"], [item])
         self.assertEqual(answers["_join_question_extra"], 2)
         self.assertIn("5. Add another video file?", prompts[0])
+        self.assertIn("folder=join all videos in folder", prompts[0])
+
+    def test_step_join_folder_option_and_b_undo(self):
+        # Verify the join collection: 'b' at the file prompt undoes the previous
+        # file and re-asks it, and 'folder' adds every video in a folder sorted
+        # by name. Uses real temp files; join_load_media_item is stubbed so no
+        # real ffprobe is needed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "in.mkv").write_bytes(b"x")
+            for name in ("a.mov", "b.mov", "c.mov"):
+                (root / name).write_bytes(b"x")
+            vids = root / "vids"
+            vids.mkdir()
+            # Intentionally out of order to prove name sorting.
+            for name in ("03_three.mp4", "01_one.mp4", "02_two.mp4"):
+                (vids / name).write_bytes(b"x")
+
+            original = FFmWiz.join_load_media_item
+            FFmWiz.join_load_media_item = lambda answers, path: {
+                "path": Path(path), "probe": {}, "format": {}, "streams": [],
+                "video_streams": [{"codec_type": "video"}], "audio_streams": [],
+                "subtitle_streams": [], "attachment_streams": [], "data_streams": [],
+                "duration": 10.0,
+            }
+            try:
+                # add a.mov; add b.mov; say yes; at the FILE prompt type 'b' to
+                # undo b.mov; re-enter c.mov; then 'folder' adds the 3 sorted
+                # videos; then no.
+                script = iter([
+                    "y", str(root / "a.mov"),
+                    "y", str(root / "b.mov"),
+                    "y", "b", str(root / "c.mov"),
+                    "folder", str(vids),
+                    "n",
+                ])
+                answers = {
+                    "ffprobe": "ffprobe",
+                    "input_path": root / "in.mkv",
+                    "video_streams": [{"codec_type": "video"}],
+                    "_question_number": 3,
+                }
+                with mock.patch("builtins.input", lambda _prompt="": next(script)):
+                    FFmWiz.step_join_additional_inputs_for_encode(answers)
+            finally:
+                FFmWiz.join_load_media_item = original
+
+            names = [Path(it["path"]).name for it in answers.get("join_input_items", [])]
+            self.assertEqual(
+                names,
+                ["a.mov", "c.mov", "01_one.mp4", "02_two.mp4", "03_three.mp4"],
+            )
 
     def test_graphical_video_requests_include_chapters(self):
         with tempfile.TemporaryDirectory() as tmp:

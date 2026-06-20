@@ -13994,6 +13994,97 @@ def step_output_location(answers: dict[str, Any]) -> None:
         print_source_info(answers)
 
 
+JOIN_ADD_ANOTHER_BACK = "back=0, quit=exit, folder=join all videos in folder"
+
+
+def join_video_files_in_folder(folder: Path) -> list[Path]:
+    """Return video files directly inside `folder`, sorted by name (case-insensitive)."""
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return []
+    return sorted(
+        (p for p in entries if p.is_file() and p.suffix.lower().lstrip(".") in FOLDER_VIDEO_EXTS),
+        key=lambda p: p.name.lower(),
+    )
+
+
+def ask_join_add_another(prompt: str) -> bool | str:
+    """Join-flow variant of the add-another question. Returns True (yes),
+    False (no / Enter), or the string 'folder'. Raises Back on 0/back tokens."""
+    while True:
+        value = ask_raw(prompt)
+        if is_back_value(value):
+            raise Back()
+        lowered = value.lower()
+        if not value or lowered in {"n", "no"}:
+            log_info(f"User choice: join_add_another=no; raw={value!r}")
+            return False
+        if lowered in {"y", "yes"}:
+            log_info("User choice: join_add_another=yes")
+            return True
+        if lowered == "folder":
+            log_info("User choice: join_add_another=folder")
+            return "folder"
+        error("Enter y, n, or 'folder' (join all videos in a folder).")
+
+
+def ask_join_folder_path(answers: dict[str, Any]) -> Path | None:
+    """Prompt for a folder whose videos will be joined in name order. Returns the
+    folder, or None if the user backs out (0/b/Enter)."""
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter folder path (all videos inside are joined in name order)",
+                "drag and drop a folder here or paste a path",
+            )
+        )
+        if is_back_value(value, allow_text=True) or not value:
+            return None
+        folder = terminal_path(value)
+        if not folder.exists() or not folder.is_dir():
+            error("Folder not found. Enter a valid folder path.")
+            continue
+        return folder
+
+
+def join_add_folder_items(
+    answers: dict[str, Any],
+    folder: Path,
+    items: list[dict[str, Any]],
+) -> int:
+    """Probe every video file in `folder` (sorted by name) and append the usable
+    ones to `items`, skipping the main input, already-added files, and generated
+    FFmWiz outputs. Returns the number of files actually added."""
+    input_path = answers.get("input_path")
+    candidates = join_video_files_in_folder(folder)
+    if not candidates:
+        error("No video files were found in that folder.")
+        return 0
+    added = 0
+    for path in candidates:
+        if input_path and paths_same(path, input_path):
+            continue
+        if any(paths_same(path, item["path"]) for item in items):
+            continue
+        if looks_like_generated_output_file(path):
+            note(f"Skipped generated output file: {path.name}")
+            continue
+        try:
+            items.append(join_load_media_item(answers, path))
+            added += 1
+            log_info(f"Join folder added: {path}")
+        except Exception as exc:  # noqa: BLE001
+            log_exception(f"Join folder probe skipped: {path}")
+            note(f"Skipped (not a usable video): {path.name} ({exc})")
+    if added:
+        note(f"Added {added} video(s) from folder: {folder}")
+    else:
+        error("No usable new videos were added from that folder.")
+    return added
+
+
 def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
     if not output_has_video(answers) or not answers.get("input_path"):
         answers.pop("join_input_items", None)
@@ -14009,60 +14100,98 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
     items: list[dict[str, Any]] = existing_items if resuming_existing_join else []
     if resuming_existing_join:
         resume_question = max(current_question, int(answers.get("_join_last_question") or current_question))
-        answers["_question_number"] = resume_question
-        if not ask_yes_no(
-            question_prompt(answers, "Add another video file?", "y/n", "n"),
-            False,
-        ):
-            answers["join_input_items"] = items
-            answers["_join_question_extra"] = existing_extra
-            return
-        sub_question = resume_question + 1
+        sub_question_base = resume_question
+        first_title = "Add another video file?"
     else:
         answers.pop("join_input_items", None)
         answers["_join_question_extra"] = 0
         answers["_join_base_question"] = base_question
-        if not ask_yes_no(
-            question_prompt(answers, "Add another video file to join with this input?", "y/n", "n"),
-            False,
-        ):
+        sub_question_base = base_question
+        first_title = "Add another video file to join with this input?"
+
+    # Initial add-another question (now also accepts 'folder').
+    answers["_question_number"] = sub_question_base
+    decision = ask_join_add_another(
+        question_prompt(answers, first_title, "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
+    )
+    if decision is False:
+        if resuming_existing_join:
+            answers["join_input_items"] = items
+            answers["_join_question_extra"] = existing_extra
+        else:
             answers.pop("_join_base_question", None)
             answers.pop("_join_last_question", None)
-            return
-        sub_question = base_question + 1
-    while True:
+        return
+    sub_question = sub_question_base + 1
+    need_file = decision is True
+    if decision == "folder":
         answers["_question_number"] = sub_question
-        value = ask_required(
-            question_prompt(
-                answers,
-                "Enter additional video file path",
-                "drag and drop a video file here or paste a path",
-            )
-        )
-        path = terminal_path(value)
-        if not path.exists() or not path.is_file():
-            error("File not found. Enter the full file path again.")
-            continue
-        if paths_same(path, answers["input_path"]) or any(paths_same(path, item["path"]) for item in items):
-            error("This video is already selected for joining. Enter a different file.")
-            continue
-        if looks_like_generated_output_file(path):
-            error("This looks like a previously generated FFmWiz output file. It was not added as a join input.")
-            continue
-        try:
-            items.append(join_load_media_item(answers, path))
-        except Exception as exc:
-            log_exception(f"Join input probe failed: {path}")
-            error(str(exc))
-            continue
+        folder = ask_join_folder_path(answers)
+        if folder is not None:
+            join_add_folder_items(answers, folder, items)
         sub_question += 1
+        need_file = False
+
+    while True:
+        if need_file:
+            answers["_question_number"] = sub_question
+            value = ask_raw(
+                question_prompt(
+                    answers,
+                    "Enter additional video file path",
+                    "drag and drop a video file here or paste a path; b=re-enter previous file",
+                    back="back=0, quit=exit",
+                )
+            )
+            if is_back_value(value):
+                # '0' goes back to the previous wizard step.
+                raise Back()
+            if value.lower() in {"b", "back"}:
+                # 'b' steps back to the PREVIOUS join file (re-enter it) rather
+                # than leaving the join question entirely. With no previous
+                # additional file, fall back to the previous wizard step.
+                if items:
+                    removed = items.pop()
+                    note(f"Removed previous join file: {Path(removed['path']).name}. Re-enter it.")
+                    continue
+                raise Back()
+            if not value:
+                error("This value cannot be empty. Enter a file path, or 'b' to go back.")
+                continue
+            path = terminal_path(value)
+            if not path.exists() or not path.is_file():
+                error("File not found. Enter the full file path again.")
+                continue
+            if paths_same(path, answers["input_path"]) or any(paths_same(path, item["path"]) for item in items):
+                error("This video is already selected for joining. Enter a different file.")
+                continue
+            if looks_like_generated_output_file(path):
+                error("This looks like a previously generated FFmWiz output file. It was not added as a join input.")
+                continue
+            try:
+                items.append(join_load_media_item(answers, path))
+            except Exception as exc:
+                log_exception(f"Join input probe failed: {path}")
+                error(str(exc))
+                continue
+            sub_question += 1
+
         answers["_question_number"] = sub_question
-        if not ask_yes_no(
-            question_prompt(answers, "Add another video file?", "y/n", "n"),
-            False,
-        ):
+        decision = ask_join_add_another(
+            question_prompt(answers, "Add another video file?", "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
+        )
+        if decision is False:
             break
         sub_question += 1
+        if decision == "folder":
+            answers["_question_number"] = sub_question
+            folder = ask_join_folder_path(answers)
+            if folder is not None:
+                join_add_folder_items(answers, folder, items)
+            sub_question += 1
+            need_file = False
+            continue
+        need_file = True
     answers["_join_last_question"] = sub_question
     answers["_join_question_extra"] = max(0, sub_question - base_question)
     answers["join_input_items"] = items
@@ -21895,35 +22024,59 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
     answers["_question_number"] = 1
     items: list[dict[str, Any]] = []
     try:
+        need_file = True
         while True:
-            label = "Enter first video file path" if not items else "Enter another video file path"
-            value = ask_required(
-                question_prompt(
-                    answers,
-                    label,
-                    "drag and drop a video file here or paste a path",
+            if need_file:
+                answers["_question_number"] = len(items) + 1
+                label = "Enter first video file path" if not items else "Enter another video file path"
+                hint = "drag and drop a video file here or paste a path"
+                if items:
+                    hint += "; b=re-enter previous file"
+                value = ask_raw(
+                    question_prompt(answers, label, hint, back="back=0, quit=exit")
                 )
-            )
-            path = terminal_path(value)
-            if not path.exists() or not path.is_file():
-                error("File not found. Enter the full file path again.")
-                continue
-            try:
-                item = join_load_media_item(answers, path)
-            except Exception as exc:
-                log_exception(f"Join Videos probe failed: {path}")
-                error(str(exc))
-                continue
-            items.append(item)
-            answers["_question_number"] = len(items) + 1
+                if is_back_value(value):
+                    raise Back()
+                if value.lower() in {"b", "back"}:
+                    if items:
+                        removed = items.pop()
+                        note(f"Removed previous file: {Path(removed['path']).name}. Re-enter it.")
+                        continue
+                    raise Back()
+                if not value:
+                    error("This value cannot be empty. Enter a file path.")
+                    continue
+                path = terminal_path(value)
+                if not path.exists() or not path.is_file():
+                    error("File not found. Enter the full file path again.")
+                    continue
+                if any(paths_same(path, it["path"]) for it in items):
+                    error("This video is already selected. Enter a different file.")
+                    continue
+                try:
+                    item = join_load_media_item(answers, path)
+                except Exception as exc:
+                    log_exception(f"Join Videos probe failed: {path}")
+                    error(str(exc))
+                    continue
+                items.append(item)
             if len(items) >= 2:
-                more = ask_yes_no(
-                    question_prompt(answers, "Add another video file?", "y/n", "n"),
-                    False,
+                answers["_question_number"] = len(items) + 1
+                more = ask_join_add_another(
+                    question_prompt(answers, "Add another video file?", "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
                 )
-                answers["_question_number"] += 1
-                if not more:
+                if more is False:
                     break
+                if more == "folder":
+                    answers["_question_number"] = len(items) + 1
+                    folder = ask_join_folder_path(answers)
+                    if folder is not None:
+                        join_add_folder_items(answers, folder, items)
+                    need_file = False
+                    continue
+                need_file = True
+                continue
+            need_file = True
 
         output_answers = dict(answers)
         output_answers["input_path"] = items[0]["path"]
