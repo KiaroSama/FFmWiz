@@ -665,6 +665,7 @@ class Color:
     SUGGESTION = "\033[38;5;190m"
     BACK_PROMPT = "\033[38;5;166m"
     EXIT_PROMPT = "\033[38;5;32m"
+    FOLDER_PROMPT = "\033[38;2;180;140;255m"  # light violet for the join-folder option
     NEAR_EMPTY = "\033[38;5;172m"
     ZERO_INLINE = "\033[38;5;177m"
     PROGRESS_PERCENT = "\033[38;5;46m"
@@ -886,6 +887,8 @@ def back_text(text: str = "back=0, quit=exit") -> str:
             parts.append(paint(part, Color.BACK_PROMPT))
         elif "exit" in lowered:
             parts.append(paint(part, Color.EXIT_PROMPT))
+        elif "folder" in lowered:
+            parts.append(paint(part, Color.FOLDER_PROMPT))
         else:
             parts.append(paint(part, Color.WHITE))
     return "{" + ", ".join(parts) + "}"
@@ -13937,16 +13940,68 @@ def _append_cut_suffix(path: Path) -> Path:
     return unique_numbered_path(path.with_name(f"{sanitize_output_stem(path.stem)}_cut{path.suffix}"))
 
 
+def _load_input_folder_join(answers: dict[str, Any], folder: Path) -> bool:
+    """Treat `folder` as the whole join set: the first video (by name) becomes the
+    main input and the rest become join inputs. Returns True on success."""
+    videos = [v for v in join_video_files_in_folder(folder) if not looks_like_generated_output_file(v)]
+    if not videos:
+        error("No video files were found in that folder.")
+        return False
+    first = videos[0]
+    try:
+        load_input_metadata(answers, first)
+    except FFprobeError as exc:
+        error(str(exc))
+        return False
+    except Exception:
+        log_exception(f"ffprobe metadata load failed for folder input: {first}")
+        error(f"ffprobe could not read the first folder video. See log file: {_log_file_text()}")
+        return False
+    items: list[dict[str, Any]] = []
+    for path in videos[1:]:
+        try:
+            items.append(join_load_media_item(answers, path))
+        except Exception as exc:  # noqa: BLE001
+            log_exception(f"Join folder probe skipped: {path}")
+            note(f"Skipped (not a usable video): {path.name} ({exc})")
+    answers["join_input_items"] = items
+    answers["_join_preloaded_from_folder"] = True
+    note(f"Loaded {len(items) + 1} video(s) from folder: {folder}")
+    print_join_order_list([answers["input_path"], *[it["path"] for it in items]])
+    return True
+
+
 def step_input_path(answers: dict[str, Any]) -> None:
     while True:
         input_example = example_text('"E:\\Input\\video.mkv"')
-        value = ask_required(
+        value = ask_raw(
             question_prompt(
                 answers,
                 "Enter input file path",
                 f"drag and drop a file here or paste a path; example: {input_example}",
+                back="back=0, quit=exit, f=join all videos in folder",
             )
         )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            error("This value cannot be empty. Enter a file path, or 'f' to join a folder.")
+            continue
+        # Folder join: the 'f' keyword prompts for a folder; a directory path is
+        # also accepted directly. Every video in it is joined in name order.
+        folder: Path | None = None
+        if value.lower() in {"f", "folder"}:
+            folder = ask_join_folder_path(answers)
+            if folder is None:
+                continue
+        else:
+            candidate = terminal_path(value)
+            if candidate.is_dir():
+                folder = candidate
+        if folder is not None:
+            if _load_input_folder_join(answers, folder):
+                return
+            continue
         input_path = terminal_path(value)
         if not input_path.exists() or not input_path.is_file():
             error("File not found. Enter the full file path again.")
@@ -14113,11 +14168,18 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
         sub_question_base = resume_question
         first_title = "Add another video file?"
     else:
-        answers.pop("join_input_items", None)
+        # Folder given at the input prompt pre-loads the join set; keep those
+        # items instead of discarding them.
+        preloaded_from_folder = bool(answers.pop("_join_preloaded_from_folder", False))
+        if preloaded_from_folder:
+            items = existing_items
+        else:
+            answers.pop("join_input_items", None)
+            items = []
         answers["_join_question_extra"] = 0
         answers["_join_base_question"] = base_question
         sub_question_base = base_question
-        first_title = "Add another video file to join with this input?"
+        first_title = "Add another video file?" if items else "Add another video file to join with this input?"
 
     # Initial add-another question (now also accepts 'folder').
     answers["_question_number"] = sub_question_base
@@ -14129,8 +14191,14 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
             answers["join_input_items"] = items
             answers["_join_question_extra"] = existing_extra
         else:
-            answers.pop("_join_base_question", None)
-            answers.pop("_join_last_question", None)
+            # Preserve folder-preloaded inputs (and bookkeeping for back-nav).
+            answers["join_input_items"] = items
+            if items:
+                answers["_join_question_extra"] = max(1, existing_extra)
+                answers["_join_last_question"] = sub_question_base
+            else:
+                answers.pop("_join_base_question", None)
+                answers.pop("_join_last_question", None)
         return
     sub_question = sub_question_base + 1
     need_file = decision is True
