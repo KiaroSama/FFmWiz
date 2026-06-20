@@ -82,7 +82,7 @@ def main() -> int:
             _log("ERROR", f"Could not write reply: {exc}")
 
     try:
-        request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+        request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
     except Exception as exc:
         write_reply({"status": "error", "message": f"Could not read request: {exc}"})
         return 3
