@@ -7872,23 +7872,6 @@ def build_unified_video_editor(request: dict[str, Any]):
             # PREVIEW: minimum wide enough for two 250px side columns plus the
             # 520px preview canvas (+ splitter handles/margins) so nothing clips.
             self.setMinimumSize(1120, 640)
-            # PERF / UX: show an empty window shell IMMEDIATELY so the editor
-            # appears within a fraction of a second instead of staying invisible
-            # during the cold-start cost of _build_ui (dominated by Windows font
-            # database initialization on the first text widget: ~2s warm, and up
-            # to ~18s on a fresh boot while Defender scans the font files). The
-            # real UI replaces this placeholder a moment later. Fully guarded so
-            # a failure here can never block the normal build path.
-            try:
-                _shell = QWidget()
-                self.setCentralWidget(_shell)
-                if self.request.get("start_maximized"):
-                    self.showMaximized()
-                else:
-                    self.show()
-                QtWidgets.QApplication.processEvents()
-            except Exception as exc:  # noqa: BLE001
-                _gui_log_debug(f"Early window shell show skipped: {exc}", force=True)
             # Kick off the waveform decode NOW (async ffmpeg) so it runs in PARALLEL
             # with building the UI. By the time the window is shown the PCM is usually
             # ready, instead of the waveform appearing seconds after the window.
@@ -10422,6 +10405,18 @@ def main() -> int:
         f"{mode} GUI window built in {time.perf_counter() - gui_start:.3f}s",
         force=True,
     )
+    # Apply the dark theme stylesheet BEFORE showing the window so it appears
+    # fully styled on the first paint. Previously this was deferred until after
+    # show(), which made the window flash white for a frame before restyling.
+    try:
+        _style_start = time.perf_counter()
+        app.setStyleSheet(QSS + PREVIEW_COMPACT_QSS)
+        _gui_log_debug(
+            f"Qt stylesheet applied in {time.perf_counter() - _style_start:.3f}s",
+            force=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _gui_log_debug(f"Stylesheet apply failed: {exc}", force=True)
     if request.get("start_maximized"):
         window.showMaximized()
     else:
@@ -10429,12 +10424,6 @@ def main() -> int:
     _apply_native_windows_icon(window)
 
     def apply_deferred_stylesheet():
-        style_start = time.perf_counter()
-        app.setStyleSheet(QSS + PREVIEW_COMPACT_QSS)
-        _gui_log_debug(
-            f"Qt stylesheet applied in {time.perf_counter() - style_start:.3f}s",
-            force=True,
-        )
         _apply_native_windows_icon(window)
         _gui_log_debug(
             f"{mode} GUI init completed in {time.perf_counter() - gui_start:.3f}s",
