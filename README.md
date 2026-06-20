@@ -63,6 +63,8 @@ README.md
 assets/
   runtime/
     ffmwiz_gui.py     # PySide6 GUI (Unified/Speed/Waveform editors; standalone Cut/Crop are archived)
+    ffmwiz_gui_qml.py # modern QtQuick unified editor (opt-in; classic stays default)
+    qml/              # QML UI files for the modern engine (UnifiedEditor.qml)
     MuxCls.py         # embedded Stream Cleanup Remux runtime
   icons/
   cursors/
@@ -72,6 +74,22 @@ assets/
 `FFmWiz.py` launches `assets/runtime/ffmwiz_gui.py` as a subprocess via small JSON request/reply files whenever an active GUI is needed. This keeps the Qt event loop fully isolated from the CLI process. The old standalone Cut/Crop GUI helpers remain archived in code but are no longer exposed by CLI prompts.
 
 Keep the `assets` folder next to `FFmWiz.py`. The local `assets/icons/ffmwiz_app.png`, `ffmwiz_app.ico`, and `ffmwiz_app.svg` files provide the application/window/taskbar icon for the Qt and Tk GUI windows.
+
+### GUI engine (classic vs modern QML)
+
+The unified video editor has two engines, selectable per machine:
+
+- `classic` (default): the stable PySide6-widgets editor with the full feature set.
+- `qml`: a new modern QtQuick editor. It appears faster (GPU scene graph, no QSS-polish stall), never flashes white on open, and previews video with the correct aspect ratio (no stretching for mixed-orientation joins). It is being built in phases; the classic engine remains the default and complete option.
+
+Select the engine with either:
+
+- config `settings.gui_engine` set to `"classic"` or `"qml"`, or
+- the environment variable `FFMWIZ_GUI_ENGINE=qml` (overrides config).
+
+The QML engine handles only the unified video editor; all other GUI modes always use the classic engine. If the QML files are missing, FFmWiz falls back to the classic editor automatically.
+
+
 
 ## Quick Start
 

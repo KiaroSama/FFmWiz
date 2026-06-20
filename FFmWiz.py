@@ -430,7 +430,8 @@ CONFIG_TEMPLATE = """{
         "keep_embedded_attachments": "y/n. y copies MKV attachment streams such as embedded subtitle fonts when keep_source_metadata is y and the output container supports attachments. Non-MKV outputs cannot keep attachment streams reliably here.",
         "detect_duplicate_audio": "y/n. When y, FFmWiz uses stream metadata plus exact packet sizes when needed to flag empty/near-empty tracks. Likely duplicate tracks are prechecked with short sampled hashes, then confirmed with a full audio hash. Used by the 'd' / 'e' / 'de' shortcuts.",
         "logging_enabled": "y/n. Logging is enabled by default and writes dated UTF-8 logs into the Logs folder next to FFmWiz.py. Set to n only when you intentionally want no log file for future runs.",
-        "log_retention_days": "Optional integer. 0 keeps logs forever. Any positive value deletes FFmWiz log files older than that many days when logging starts."
+        "log_retention_days": "Optional integer. 0 keeps logs forever. Any positive value deletes FFmWiz log files older than that many days when logging starts.",
+        "gui_engine": "classic or qml. 'classic' (default) uses the stable PySide6-widgets unified video editor. 'qml' uses the new modern QtQuick editor (faster to appear, no white flash, aspect-correct preview). Env FFMWIZ_GUI_ENGINE overrides this."
     },
     "settings": {
         "input_path": "",
@@ -455,7 +456,8 @@ CONFIG_TEMPLATE = """{
         "keep_embedded_attachments": "n",
         "detect_duplicate_audio": "y",
         "logging_enabled": "y",
-        "log_retention_days": 0
+        "log_retention_days": 0,
+        "gui_engine": "classic"
     },
     "_examples": {
         "fast_stream_copy_same_container": {
@@ -3159,6 +3161,17 @@ def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not _pyside6_available():
         return None
+    # Modern QML engine (opt-in) handles the UNIFIED video editor only; every
+    # other mode keeps using the classic engine. Falls back to classic if the
+    # QML files are missing.
+    if request.get("mode") == "video_unified" and _gui_engine_selected() == "qml":
+        qml_script = _qml_gui_path()
+        qml_file = script_dir() / "assets" / FFMWIZ_RUNTIME_DIR_NAME / "qml" / "UnifiedEditor.qml"
+        if qml_script.exists() and qml_file.exists():
+            gui_path = qml_script
+            log_info("Using modern QML GUI engine for the unified video editor.")
+        else:
+            log_warn("QML GUI engine selected but its files are missing; using the classic editor.")
 
     request_payload = dict(request)
     # Serialize Path objects to plain strings for JSON.
@@ -3338,6 +3351,20 @@ def _log_retention_days_from_config() -> int:
         return max(0, int(str(value).strip()))
     except Exception:
         return 0
+
+
+def _gui_engine_selected() -> str:
+    """Selected unified-editor GUI engine: 'classic' (default) or 'qml'.
+    The env var FFMWIZ_GUI_ENGINE overrides the config settings.gui_engine value."""
+    env = os.environ.get("FFMWIZ_GUI_ENGINE")
+    if env:
+        return env.strip().lower()
+    value = _config_setting_for_logging("gui_engine", "classic")
+    return str(value or "classic").strip().lower()
+
+
+def _qml_gui_path() -> Path:
+    return script_dir() / "assets" / FFMWIZ_RUNTIME_DIR_NAME / "ffmwiz_gui_qml.py"
 
 
 def _prune_old_logs(logs_dir: Path, retention_days: int) -> None:
