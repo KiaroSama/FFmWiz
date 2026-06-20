@@ -6529,7 +6529,25 @@ def build_unified_video_editor(request: dict[str, Any]):
             p.fillRect(self.rect(), QtGui.QColor(PALETTE["timeline_bg"]))
             img = self._image_rect()
             if self.image is not None and not self.image.isNull():
-                p.drawImage(img, self.image)
+                # Preserve the frame's own aspect ratio inside the canvas rect.
+                # Joined clips can have different aspect ratios (e.g. a vertical
+                # clip after a horizontal one); fit-with-black instead of
+                # stretching, matching the encode's scale+pad output.
+                iw = self.image.width()
+                ih = self.image.height()
+                if iw > 0 and ih > 0:
+                    fit = min(img.width() / iw, img.height() / ih)
+                    dw = iw * fit
+                    dh = ih * fit
+                    dst = QRectF(
+                        img.center().x() - dw / 2.0,
+                        img.center().y() - dh / 2.0,
+                        dw,
+                        dh,
+                    )
+                    p.drawImage(dst, self.image)
+                else:
+                    p.drawImage(img, self.image)
             else:
                 p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_mute"])))
                 p.setFont(QtGui.QFont("Segoe UI", 12))
@@ -7056,7 +7074,8 @@ def build_unified_video_editor(request: dict[str, Any]):
             return self.view_start + ratio * self.view_span
 
         def _snap_targets(self, exclude_separator=None, exclude_marker=None):
-            """Times the magnet can snap to: CTI, mark in/out, split points, clip ends."""
+            """Times the magnet can snap to: CTI, mark in/out, split points,
+            joined-video boundaries, clip ends."""
             targets = [self.playhead, 0.0, self.duration]
             if self.mark_in is not None and exclude_marker != "in":
                 targets.append(float(self.mark_in))
@@ -7065,6 +7084,12 @@ def build_unified_video_editor(request: dict[str, Any]):
             for i, sp in enumerate(self.separator_points):
                 if i != exclude_separator:
                     targets.append(float(sp))
+            # Joined-video boundaries: markers/CTI snap to where each new video
+            # starts (a little stickiness so cuts/marks land exactly on a join).
+            for segment in getattr(self, "join_segments", None) or []:
+                start_t = float(segment.get("start", 0.0))
+                if start_t > 1e-6:
+                    targets.append(start_t)
             return targets
 
         def _snap_time(self, seconds, exclude_separator=None, exclude_marker=None):
@@ -7311,18 +7336,21 @@ def build_unified_video_editor(request: dict[str, Any]):
                 # Subtle dotted boundary between joined videos: thin, faint and
                 # small (like the centre guide) instead of a thick coloured bar,
                 # so many joined clips stay readable and uncluttered.
-                backing = QtGui.QColor(6, 10, 16, 185)
-                line_color = QtGui.QColor(216, 163, 106, 140)  # faint amber
+                backing = QtGui.QColor(6, 10, 16, 200)
+                line_color = QtGui.QColor(232, 178, 120, 200)  # amber, a little stronger
                 top_y = ruler.bottom() + 2
                 bot_y = wave.bottom() + 4
                 p.setPen(QtGui.QPen(backing, 2))
                 p.drawLine(QPointF(x, top_y), QPointF(x, bot_y))
                 p.setPen(QtGui.QPen(line_color, 1, Qt.DotLine))
                 p.drawLine(QPointF(x, top_y), QPointF(x, bot_y))
-                p.setPen(QtGui.QPen(QtGui.QColor(216, 163, 106, 165), 1))
+                # Centre the label on the dotted line (like the Center guide),
+                # not left-aligned beside it.
+                p.setPen(QtGui.QPen(QtGui.QColor(240, 200, 150, 235), 1))
                 p.setFont(QtGui.QFont("Segoe UI", 7))
-                label = short_gui_label(str(segment.get("label") or "Video"), 12)
-                p.drawText(QRectF(x + 3, top_y, 70, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
+                label = short_gui_label(str(segment.get("label") or "Video"), 14)
+                _lbl_w = 84.0
+                p.drawText(QRectF(x - _lbl_w / 2.0, top_y, _lbl_w, 12), Qt.AlignCenter, label)
             for idx, value in enumerate(self.separator_points):
                 if value < start or value > end:
                     continue
@@ -10408,6 +10436,15 @@ def main() -> int:
         f"{mode} GUI window built in {time.perf_counter() - gui_start:.3f}s",
         force=True,
     )
+    # Paint the window dark on its very first frame (a tiny, instant stylesheet)
+    # so it never flashes white before the full QSS is applied a tick after show.
+    try:
+        window.setStyleSheet(
+            f"QMainWindow {{ background-color: {PALETTE['bg']}; }}"
+            f" QWidget#central {{ background-color: {PALETTE['bg']}; color: {PALETTE['text']}; }}"
+        )
+    except Exception:
+        pass
     if request.get("start_maximized"):
         window.showMaximized()
     else:
