@@ -21429,6 +21429,8 @@ def join_load_media_item(answers: dict[str, Any], path: Path) -> dict[str, Any]:
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
     subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+    attachment_streams = [stream for stream in streams if stream.get("codec_type") == "attachment"]
+    data_streams = [stream for stream in streams if stream.get("codec_type") == "data"]
     if not video_streams:
         raise ValueError("Join Videos requires video inputs.")
     return {
