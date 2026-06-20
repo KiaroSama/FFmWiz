@@ -10323,6 +10323,15 @@ def _write_reply(reply_path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     global _GUI_LOG_PATH, _PARENT_PID
+    # PERF: switch Qt's Windows font engine to FreeType. The default DirectWrite
+    # font database enumeration is the dominant editor cold-start cost (~2s warm,
+    # up to ~18s on a fresh boot while Defender scans font files). Measured, the
+    # FreeType engine cuts first-font-metrics from ~2s to ~0.6s. It still uses the
+    # native windows platform window, only the font engine changes. Guarded so it
+    # never overrides an explicit platform choice (e.g. offscreen test runs) and
+    # only applies on Windows. Must be set before QApplication is constructed.
+    if sys.platform == "win32" and not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "windows:fontengine=freetype"
     parser = argparse.ArgumentParser(description="FFmWiz GUI (PySide6)")
     parser.add_argument("--request", required=True, help="Path to request JSON.")
     parser.add_argument("--reply", required=True, help="Path to write reply JSON.")
