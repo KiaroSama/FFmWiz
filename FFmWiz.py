@@ -3801,7 +3801,8 @@ def _split_progress_seconds(
     previous_output_sizes: list[int] | None,
     active_part: int,
     previous_raw_s: float | None = None,
-) -> tuple[float, int]:
+    active_part_start_raw: float = 0.0,
+) -> tuple[float, int, float]:
     durations: list[float] = []
     for value in part_durations:
         try:
@@ -3811,8 +3812,9 @@ def _split_progress_seconds(
         if duration > 0:
             durations.append(duration)
     if not durations:
-        return max(0.0, max(raw_current_s, frame_seconds)), 0
+        return max(0.0, max(raw_current_s, frame_seconds)), 0, active_part_start_raw
     active = max(0, min(len(durations) - 1, int(active_part or 0)))
+    original_active = active
     sizes = list(output_sizes or [])
     previous_sizes = list(previous_output_sizes or [])
     growing_part: int | None = None
@@ -3854,15 +3856,30 @@ def _split_progress_seconds(
         active += 1
         offset = sum(durations[:active])
         part_duration = durations[active]
+    # When the active part advances, capture this part's out_time baseline.
+    # FFmpeg's multi-output -progress reports out_time in one of two ways
+    # depending on build/filters: it either RESETS to zero for each output, or
+    # reports the GLOBAL/continuous input position. Detect which: if raw already
+    # reached this part's start offset, out_time is global -> baseline = offset;
+    # otherwise it reset to part-local 0 -> baseline = 0. Subtracting the
+    # baseline collapses BOTH behaviors to true part-local progress and prevents
+    # the offset from being double-counted (which otherwise jumps e.g. 30% ->
+    # 59% at the boundary and hits 100% while the last part is only half done).
+    if active > original_active:
+        active_part_start_raw = offset if raw_current_s >= offset - 0.25 else 0.0
     if active == 0:
         local_s = max(raw_current_s, min(frame_seconds, part_duration))
     else:
-        local_s = raw_current_s
+        local_s = raw_current_s - active_part_start_raw
+        if local_s < -0.25:
+            # out_time reset to part-local AFTER the baseline was captured;
+            # the raw value is already this part's local time.
+            local_s = raw_current_s
         if local_s <= 0.0 and frame_seconds > offset:
             local_s = frame_seconds - offset
     local_s = max(0.0, min(part_duration, local_s))
     current_s = max(0.0, min(sum(durations), offset + local_s))
-    return current_s, active
+    return current_s, active, active_part_start_raw
 
 
 def preview_console_colors() -> None:
@@ -4195,6 +4212,7 @@ def run_ffmpeg_with_progress(
             split_part_durations.append(duration)
     split_previous_output_sizes = [0 for _ in output_paths]
     split_active_part = 0
+    split_active_part_start_raw = 0.0
     split_previous_raw_s: float | None = None
 
     try:
@@ -4326,7 +4344,7 @@ def run_ffmpeg_with_progress(
                         except OSError:
                             output_sizes.append(0)
                 if split_part_durations:
-                    current_s, split_active_part = _split_progress_seconds(
+                    current_s, split_active_part, split_active_part_start_raw = _split_progress_seconds(
                         raw_current_s,
                         frame_seconds,
                         split_part_durations,
@@ -4334,6 +4352,7 @@ def run_ffmpeg_with_progress(
                         split_previous_output_sizes,
                         split_active_part,
                         split_previous_raw_s,
+                        split_active_part_start_raw,
                     )
                     split_previous_output_sizes = output_sizes
                     split_previous_raw_s = raw_current_s

@@ -469,7 +469,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertNotIn("bitrate 419.5kbits/s", line)
 
     def test_split_progress_advances_after_first_output_part(self):
-        current_seconds, active_part = FFmWiz._split_progress_seconds(
+        current_seconds, active_part, _ = FFmWiz._split_progress_seconds(
             raw_current_s=6.16,
             frame_seconds=10.0,
             part_durations=[10.0, 10.0],
@@ -482,7 +482,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertAlmostEqual(current_seconds, 16.16, places=2)
 
     def test_split_progress_detects_part_handoff_before_file_size_flush(self):
-        current_seconds, active_part = FFmWiz._split_progress_seconds(
+        current_seconds, active_part, _ = FFmWiz._split_progress_seconds(
             raw_current_s=1.10,
             frame_seconds=10.0,
             part_durations=[10.0, 10.0],
@@ -495,7 +495,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertAlmostEqual(current_seconds, 11.10, places=2)
 
     def test_split_progress_keeps_first_part_when_it_is_still_growing(self):
-        current_seconds, active_part = FFmWiz._split_progress_seconds(
+        current_seconds, active_part, _ = FFmWiz._split_progress_seconds(
             raw_current_s=9.70,
             frame_seconds=10.0,
             part_durations=[10.0, 10.0],
@@ -508,7 +508,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertAlmostEqual(current_seconds, 10.0, places=2)
 
     def test_split_progress_does_not_move_active_part_backwards(self):
-        current_seconds, active_part = FFmWiz._split_progress_seconds(
+        current_seconds, active_part, _ = FFmWiz._split_progress_seconds(
             raw_current_s=7.0,
             frame_seconds=10.0,
             part_durations=[10.0, 10.0],
@@ -516,6 +516,7 @@ class CommandGenerationTests(unittest.TestCase):
             previous_output_sizes=[786480, 120000],
             active_part=1,
             previous_raw_s=6.0,
+            active_part_start_raw=0.0,
         )
         self.assertEqual(active_part, 1)
         self.assertAlmostEqual(current_seconds, 17.0, places=2)
@@ -524,7 +525,7 @@ class CommandGenerationTests(unittest.TestCase):
         # Part 2's file was just created (small container header flush) while
         # Part 1 is still being written. The active part must NOT jump forward,
         # otherwise the aggregate percent jumps (e.g. 30% -> 59%).
-        current_seconds, active_part = FFmWiz._split_progress_seconds(
+        current_seconds, active_part, _ = FFmWiz._split_progress_seconds(
             raw_current_s=3.0,
             frame_seconds=3.0,
             part_durations=[10.0, 10.0],
@@ -535,6 +536,45 @@ class CommandGenerationTests(unittest.TestCase):
         )
         self.assertEqual(active_part, 0)
         self.assertAlmostEqual(current_seconds, 3.0, places=2)
+
+    def test_split_progress_handles_global_continuous_out_time_without_double_count(self):
+        # Some ffmpeg builds/filter graphs report -progress out_time as the
+        # GLOBAL/continuous input position rather than resetting to zero for
+        # each output. Part 1 = 100s, part 2 = 200s (total 300s). When part 2
+        # becomes active, the global out_time is already ~100s (= part 1 end).
+        # The aggregate must NOT become offset(100) + raw(100) = 200s (66%); it
+        # must stay ~100s (33%). This is the root cause of the reported
+        # "30% -> 59%" jump and the wrong (too-low) bitrate during part 2.
+        durations = [100.0, 200.0]
+        # Tick at the part1->part2 handoff: global out_time = 100, part2 file
+        # just started growing past the 64KB threshold.
+        current_seconds, active_part, baseline = FFmWiz._split_progress_seconds(
+            raw_current_s=100.0,
+            frame_seconds=100.0,
+            part_durations=durations,
+            output_sizes=[6_600_000, 200_000],
+            previous_output_sizes=[6_600_000, 0],
+            active_part=0,
+            previous_raw_s=99.5,
+            active_part_start_raw=0.0,
+        )
+        self.assertEqual(active_part, 1)
+        # No double-count: ~100s (33%), NOT 200s (66%).
+        self.assertAlmostEqual(current_seconds, 100.0, places=1)
+        self.assertAlmostEqual(baseline, 100.0, places=1)
+        # A later tick deep into part 2: global out_time = 250s -> aggregate 250s.
+        current_seconds, active_part, baseline = FFmWiz._split_progress_seconds(
+            raw_current_s=250.0,
+            frame_seconds=100.0,
+            part_durations=durations,
+            output_sizes=[6_600_000, 10_000_000],
+            previous_output_sizes=[6_600_000, 9_900_000],
+            active_part=1,
+            previous_raw_s=249.0,
+            active_part_start_raw=baseline,
+        )
+        self.assertEqual(active_part, 1)
+        self.assertAlmostEqual(current_seconds, 250.0, places=1)
 
     def test_loudnorm_filter_uses_two_pass_values_when_available(self):
         # Use values where linear mode is feasible:
