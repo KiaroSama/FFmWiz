@@ -7308,24 +7308,21 @@ def build_unified_video_editor(request: dict[str, Any]):
                 if boundary <= 1e-6 or boundary < start or boundary > end:
                     continue
                 x = self._time_to_x(boundary)
-                boundary_color = QtGui.QColor("#f97316")
-                halo = QtGui.QColor("#60a5fa")
-                halo.setAlpha(180)
-                p.setPen(QtGui.QPen(halo, 9))
-                p.drawLine(QPointF(x, ruler.top() + 2), QPointF(x, wave.bottom() + 8))
-                p.setPen(QtGui.QPen(boundary_color, 5))
-                p.drawLine(QPointF(x, ruler.top() + 2), QPointF(x, wave.bottom() + 8))
-                p.setBrush(QtGui.QBrush(boundary_color))
-                p.setPen(QtGui.QPen(halo, 2))
-                p.drawPolygon(QtGui.QPolygonF([
-                    QPointF(x - 12, ruler.top() + 1),
-                    QPointF(x + 12, ruler.top() + 1),
-                    QPointF(x, ruler.top() + 19),
-                ]))
-                p.setPen(QtGui.QPen(QtGui.QColor("#ffd7a8"), 1))
-                p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
-                label = short_gui_label(str(segment.get("label") or "Video boundary"), 28)
-                p.drawText(QRectF(x + 6, ruler.top() + 20, 180, 16), Qt.AlignLeft | Qt.AlignVCenter, label)
+                # Subtle dotted boundary between joined videos: thin, faint and
+                # small (like the centre guide) instead of a thick coloured bar,
+                # so many joined clips stay readable and uncluttered.
+                backing = QtGui.QColor(6, 10, 16, 185)
+                line_color = QtGui.QColor(216, 163, 106, 140)  # faint amber
+                top_y = ruler.bottom() + 2
+                bot_y = wave.bottom() + 4
+                p.setPen(QtGui.QPen(backing, 2))
+                p.drawLine(QPointF(x, top_y), QPointF(x, bot_y))
+                p.setPen(QtGui.QPen(line_color, 1, Qt.DotLine))
+                p.drawLine(QPointF(x, top_y), QPointF(x, bot_y))
+                p.setPen(QtGui.QPen(QtGui.QColor(216, 163, 106, 165), 1))
+                p.setFont(QtGui.QFont("Segoe UI", 7))
+                label = short_gui_label(str(segment.get("label") or "Video"), 12)
+                p.drawText(QRectF(x + 3, top_y, 70, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
             for idx, value in enumerate(self.separator_points):
                 if value < start or value > end:
                     continue
@@ -10306,15 +10303,6 @@ def _write_reply(reply_path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     global _GUI_LOG_PATH, _PARENT_PID
-    # PERF: switch Qt's Windows font engine to FreeType. The default DirectWrite
-    # font database enumeration is the dominant editor cold-start cost (~2s warm,
-    # up to ~18s on a fresh boot while Defender scans font files). Measured, the
-    # FreeType engine cuts first-font-metrics from ~2s to ~0.6s. It still uses the
-    # native windows platform window, only the font engine changes. Guarded so it
-    # never overrides an explicit platform choice (e.g. offscreen test runs) and
-    # only applies on Windows. Must be set before QApplication is constructed.
-    if sys.platform == "win32" and not os.environ.get("QT_QPA_PLATFORM"):
-        os.environ["QT_QPA_PLATFORM"] = "windows:fontengine=freetype"
     parser = argparse.ArgumentParser(description="FFmWiz GUI (PySide6)")
     parser.add_argument("--request", required=True, help="Path to request JSON.")
     parser.add_argument("--reply", required=True, help="Path to write reply JSON.")
@@ -10359,6 +10347,21 @@ def main() -> int:
         app.setStyle("Fusion")
     except Exception:
         pass
+    # Dark base palette applied immediately so the window's very first frame is
+    # dark instead of flashing white during the brief gap before the full QSS
+    # stylesheet is applied (which is deferred until after show for fast startup).
+    try:
+        from PySide6.QtGui import QPalette, QColor  # type: ignore
+        _bg = QColor(PALETTE.get("bg", "#0d1117"))
+        _fg = QColor(PALETTE.get("text", "#e6edf3"))
+        _pal = app.palette()
+        for _role in (QPalette.Window, QPalette.Base, QPalette.Button, QPalette.AlternateBase, QPalette.ToolTipBase):
+            _pal.setColor(_role, _bg)
+        for _role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.ToolTipText):
+            _pal.setColor(_role, _fg)
+        app.setPalette(_pal)
+    except Exception as exc:  # noqa: BLE001
+        _gui_log_debug(f"Could not set dark base palette: {exc}", force=True)
     app.setApplicationName("FFmWiz")
     app.setApplicationDisplayName("FFmWiz")
     try:
@@ -10405,18 +10408,6 @@ def main() -> int:
         f"{mode} GUI window built in {time.perf_counter() - gui_start:.3f}s",
         force=True,
     )
-    # Apply the dark theme stylesheet BEFORE showing the window so it appears
-    # fully styled on the first paint. Previously this was deferred until after
-    # show(), which made the window flash white for a frame before restyling.
-    try:
-        _style_start = time.perf_counter()
-        app.setStyleSheet(QSS + PREVIEW_COMPACT_QSS)
-        _gui_log_debug(
-            f"Qt stylesheet applied in {time.perf_counter() - _style_start:.3f}s",
-            force=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _gui_log_debug(f"Stylesheet apply failed: {exc}", force=True)
     if request.get("start_maximized"):
         window.showMaximized()
     else:
@@ -10424,6 +10415,12 @@ def main() -> int:
     _apply_native_windows_icon(window)
 
     def apply_deferred_stylesheet():
+        style_start = time.perf_counter()
+        app.setStyleSheet(QSS + PREVIEW_COMPACT_QSS)
+        _gui_log_debug(
+            f"Qt stylesheet applied in {time.perf_counter() - style_start:.3f}s",
+            force=True,
+        )
         _apply_native_windows_icon(window)
         _gui_log_debug(
             f"{mode} GUI init completed in {time.perf_counter() - gui_start:.3f}s",
