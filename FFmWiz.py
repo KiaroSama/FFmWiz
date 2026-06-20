@@ -13994,7 +13994,7 @@ def step_output_location(answers: dict[str, Any]) -> None:
         print_source_info(answers)
 
 
-JOIN_ADD_ANOTHER_BACK = "back=0, quit=exit, folder=join all videos in folder"
+JOIN_ADD_ANOTHER_BACK = "back=0, quit=exit, f=join all videos in folder"
 
 
 def join_video_files_in_folder(folder: Path) -> list[Path]:
@@ -14023,10 +14023,10 @@ def ask_join_add_another(prompt: str) -> bool | str:
         if lowered in {"y", "yes"}:
             log_info("User choice: join_add_another=yes")
             return True
-        if lowered == "folder":
+        if lowered in {"f", "folder"}:
             log_info("User choice: join_add_another=folder")
             return "folder"
-        error("Enter y, n, or 'folder' (join all videos in a folder).")
+        error("Enter y, n, or 'f' (join all videos in a folder).")
 
 
 def ask_join_folder_path(answers: dict[str, Any]) -> Path | None:
@@ -14083,6 +14083,16 @@ def join_add_folder_items(
     else:
         error("No usable new videos were added from that folder.")
     return added
+
+
+def print_join_order_list(paths: list[Any]) -> None:
+    """Print the videos in the exact order they will be concatenated."""
+    ordered = [Path(p) for p in paths if p]
+    if len(ordered) < 2:
+        return
+    print(paint(f"Join order ({len(ordered)} videos, joined top to bottom):", Color.BOLD + Color.CYAN))
+    for idx, p in enumerate(ordered, start=1):
+        print("  " + paint(f"{idx}. {p.name}", Color.WHITE))
 
 
 def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
@@ -14196,6 +14206,8 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
     answers["_join_question_extra"] = max(0, sub_question - base_question)
     answers["join_input_items"] = items
     note(f"Added {len(items)} additional video input(s) for joining.")
+    if items:
+        print_join_order_list([answers["input_path"], *[it["path"] for it in items]])
 
 
 def step_output_format(answers: dict[str, Any]) -> None:
@@ -22078,6 +22090,7 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
                 continue
             need_file = True
 
+        print_join_order_list([it["path"] for it in items])
         output_answers = dict(answers)
         output_answers["input_path"] = items[0]["path"]
         output_answers["probe"] = items[0]["probe"]

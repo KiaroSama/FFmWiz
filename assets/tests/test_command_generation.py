@@ -2419,7 +2419,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(answers["join_input_items"], [item])
         self.assertEqual(answers["_join_question_extra"], 2)
         self.assertIn("5. Add another video file?", prompts[0])
-        self.assertIn("folder=join all videos in folder", prompts[0])
+        self.assertIn("f=join all videos in folder", prompts[0])
 
     def test_step_join_folder_option_and_b_undo(self):
         # Verify the join collection: 'b' at the file prompt undoes the previous
@@ -2452,7 +2452,7 @@ class CommandGenerationTests(unittest.TestCase):
                     "y", str(root / "a.mov"),
                     "y", str(root / "b.mov"),
                     "y", "b", str(root / "c.mov"),
-                    "folder", str(vids),
+                    "f", str(vids),
                     "n",
                 ])
                 answers = {
