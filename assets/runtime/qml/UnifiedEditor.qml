@@ -37,6 +37,7 @@ ApplicationWindow {
     property bool reverse: false
     property bool includeAudio: true
     property var separatorPoints: []
+    property var peaks: []
     property bool ready: false
 
     function col(key, fallback) { return (theme && theme[key]) ? theme[key] : fallback }
@@ -143,7 +144,17 @@ ApplicationWindow {
 
         ready = true
         loadSegment(0, 0, false)
+        bridge.startWaveform()
         if (win.visibility !== Window.Maximized) win.showMaximized()
+    }
+
+    // Waveform peaks arrive asynchronously from the audio decode.
+    Connections {
+        target: bridge
+        function onWaveformReady(peaksJson) {
+            try { win.peaks = JSON.parse(peaksJson) || [] } catch (e) { win.peaks = [] }
+            tl.requestPaint()
+        }
     }
 
     // ---------- Playback ----------
@@ -329,12 +340,27 @@ ApplicationWindow {
                         function x2t(x) { return Math.max(0, Math.min(totalDuration, (x - pad) / Math.max(1, (width - 2 * pad)) * totalDuration)) }
                         onPaint: {
                             var ctx = getContext("2d"); ctx.reset()
-                            var midY = height * 0.6
+                            var midY = height * 0.52
                             ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
                             ctx.beginPath(); ctx.moveTo(pad, midY); ctx.lineTo(width - pad, midY); ctx.stroke()
                             var xi = t2x(markIn), xo = t2x(markOut)
                             ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1f3a66")
                             ctx.fillRect(xi, 6, Math.max(0, xo - xi), height - 12); ctx.globalAlpha = 1.0
+                            // Audio waveform (amplitude envelope), centered on midY.
+                            var pk = win.peaks
+                            if (pk && pk.length > 1) {
+                                var halfMax = Math.min(midY - 4, height - 4 - midY)
+                                var np = pk.length
+                                ctx.strokeStyle = "rgba(47,129,247,0.85)"; ctx.lineWidth = 1
+                                for (var w = 0; w < np; ++w) {
+                                    var wx = pad + (w / (np - 1)) * (width - 2 * pad)
+                                    var hh = Math.max(0.4, pk[w] * halfMax)
+                                    ctx.beginPath(); ctx.moveTo(wx, midY - hh); ctx.lineTo(wx, midY + hh); ctx.stroke()
+                                }
+                            } else if (win.hasAudio) {
+                                ctx.fillStyle = win.col("text_subtle", "#484f58"); ctx.font = "10px 'Segoe UI'"; ctx.textAlign = "center"
+                                ctx.fillText("decoding waveform…", width / 2, midY - 2)
+                            }
                             ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "center"
                             for (var i = 1; i < segs.length; ++i) {
                                 var bx = t2x(segs[i].start)

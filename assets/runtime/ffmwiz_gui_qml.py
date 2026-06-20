@@ -27,9 +27,13 @@ waveform, multi-range cuts, split points, and frame-accurate scrubbing.
 from __future__ import annotations
 
 import argparse
+import array
 import json
 import os
+import subprocess
 import sys
+import tempfile
+import threading
 import traceback
 from pathlib import Path
 
@@ -98,7 +102,7 @@ def main() -> int:
 
     try:
         from PySide6.QtGui import QGuiApplication, QColor
-        from PySide6.QtCore import QObject, Slot, Property, QUrl, Qt
+        from PySide6.QtCore import QObject, Slot, Signal, Property, QUrl, Qt
         from PySide6.QtQml import QQmlApplicationEngine
         # Importing QtQuickControls2 / QtMultimedia ensures their QML plugins load.
         from PySide6 import QtQuick  # noqa: F401
@@ -112,6 +116,10 @@ def main() -> int:
     class Bridge(QObject):
         """Exposes the request to QML and collects the editor result."""
 
+        # Emitted (queued) from the decode thread with a JSON array of peak
+        # amplitudes (0..1) spanning the whole timeline, for the waveform.
+        waveformReady = Signal(str)
+
         def __init__(self, app: QGuiApplication, req: dict) -> None:
             super().__init__()
             self._app = app
@@ -119,6 +127,7 @@ def main() -> int:
             self._submitted = False
             self._request_json = json.dumps(req, ensure_ascii=False)
             self._palette_json = json.dumps(_PALETTE, ensure_ascii=False)
+            self._wave_thread: threading.Thread | None = None
 
         # --- Read-only data for QML ---
         def _get_request(self) -> str:
@@ -155,6 +164,82 @@ def main() -> int:
         @Slot(str)
         def logMessage(self, message: str) -> None:  # noqa: N802 (QML camelCase)
             _log("DEBUG", message)
+
+        @Slot()
+        def startWaveform(self) -> None:  # noqa: N802 (QML camelCase)
+            """Decode the (joined) audio to mono PCM in a background thread and
+            emit waveformReady with a downsampled peak array for the timeline."""
+            if os.environ.get("FFMWIZ_QML_SELFTEST") == "1":
+                self.waveformReady.emit("[]")
+                return
+            if not self._req.get("has_audio"):
+                self.waveformReady.emit("[]")
+                return
+            if self._wave_thread is not None:
+                return
+            self._wave_thread = threading.Thread(target=self._decode_waveform, daemon=True)
+            self._wave_thread.start()
+
+        def _decode_waveform(self) -> None:
+            try:
+                peaks = self._compute_peaks()
+                self.waveformReady.emit(json.dumps(peaks))
+            except Exception as exc:  # noqa: BLE001
+                _log("DEBUG", f"Waveform decode failed: {exc}")
+                self.waveformReady.emit("[]")
+
+        def _compute_peaks(self) -> list[float]:
+            ffmpeg = str(self._req.get("ffmpeg") or "ffmpeg")
+            rate = 2000  # mono samples/sec — enough for an amplitude envelope
+            segs = self._req.get("join_segments") or []
+            args = ["-hide_banner", "-loglevel", "error", "-y"]
+            if segs:
+                for seg in segs:
+                    args += ["-i", str(seg.get("path"))]
+                filt = [f"[{i}:a:0]aformat=channel_layouts=mono,aresample={rate},asetpts=PTS-STARTPTS[a{i}]"
+                        for i in range(len(segs))]
+                filt.append("".join(f"[a{i}]" for i in range(len(segs)))
+                            + f"concat=n={len(segs)}:v=0:a=1[mix]")
+                args += ["-filter_complex", ";".join(filt), "-map", "[mix]"]
+            else:
+                args += ["-i", str(self._req.get("input_path") or ""),
+                         "-filter_complex", f"[0:a:0]aformat=channel_layouts=mono,aresample={rate}[mix]",
+                         "-map", "[mix]"]
+            fd, pcm_path = tempfile.mkstemp(suffix=".pcm", prefix="ffmwiz_qmlwave_")
+            os.close(fd)
+            try:
+                args += ["-f", "s16le", "-acodec", "pcm_s16le", pcm_path]
+                subprocess.run([ffmpeg, *args], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                data = Path(pcm_path).read_bytes()
+            finally:
+                try:
+                    os.remove(pcm_path)
+                except OSError:
+                    pass
+            if len(data) < 2:
+                return []
+            samples = array.array("h")
+            samples.frombytes(data[: len(data) - (len(data) % 2)])
+            n = len(samples)
+            if n == 0:
+                return []
+            buckets = min(2400, n)
+            step = n / buckets
+            peaks: list[float] = []
+            for b in range(buckets):
+                s0 = int(b * step)
+                s1 = int((b + 1) * step)
+                if s1 <= s0:
+                    s1 = s0 + 1
+                chunk = samples[s0:s1]
+                if chunk:
+                    mx = max(max(chunk), -min(chunk))  # C-fast min/max on array
+                    peaks.append(min(1.0, mx / 32768.0))
+                else:
+                    peaks.append(0.0)
+            return peaks
 
         def finalize_if_unsubmitted(self) -> None:
             if not self._submitted:
