@@ -37,6 +37,7 @@ ApplicationWindow {
     property bool reverse: false
     property bool includeAudio: true
     property var separatorPoints: []
+    property var cuts: []          // ranges to REMOVE; keep = complement
     property var peaks: []
     property bool ready: false
 
@@ -141,6 +142,8 @@ ApplicationWindow {
         var keep = req.initial_keep_ranges || []
         if (keep.length > 0) { markIn = Number(keep[0][0]) || 0; markOut = Number(keep[keep.length - 1][1]) || totalDuration }
         else { markIn = 0; markOut = totalDuration }
+        // Reconstruct removed (cut) ranges from the kept ranges carried over.
+        cuts = invertRanges(keep.map(function (r) { return [Number(r[0]), Number(r[1])] }), totalDuration)
 
         ready = true
         loadSegment(0, 0, false)
@@ -195,11 +198,61 @@ ApplicationWindow {
         function p(n, w) { var x = String(n); while (x.length < w) x = "0" + x; return x }
         return p(h, 2) + ":" + p(m, 2) + ":" + p(s, 2) + "." + p(ms, 3)
     }
+
+    // ---- Cut/keep range maths ----
+    function normRanges(arr) {
+        var r = []
+        for (var i = 0; i < arr.length; ++i) {
+            var s = Math.max(0, Math.min(totalDuration, Number(arr[i][0])))
+            var e = Math.max(0, Math.min(totalDuration, Number(arr[i][1])))
+            if (e > s + 0.02) r.push([s, e])
+        }
+        r.sort(function (a, b) { return a[0] - b[0] })
+        var out = []
+        for (var k = 0; k < r.length; ++k) {
+            if (out.length && r[k][0] <= out[out.length - 1][1] + 0.001) out[out.length - 1][1] = Math.max(out[out.length - 1][1], r[k][1])
+            else out.push([r[k][0], r[k][1]])
+        }
+        return out
+    }
+    function invertRanges(arr, dur) {
+        var r = normRanges(arr), out = [], pos = 0
+        for (var i = 0; i < r.length; ++i) { if (r[i][0] > pos + 0.02) out.push([pos, r[i][0]]); pos = Math.max(pos, r[i][1]) }
+        if (pos < dur - 0.02) out.push([pos, dur])
+        return out
+    }
+    function keepFromCuts() {
+        var k = invertRanges(cuts, totalDuration)
+        return k.length ? k : [[0, totalDuration]]
+    }
+    function keepTotal() {
+        var k = keepFromCuts(), t = 0
+        for (var i = 0; i < k.length; ++i) t += (k[i][1] - k[i][0])
+        return t
+    }
+    function cutSelection() {
+        var lo = Math.min(markIn, markOut), hi = Math.max(markIn, markOut)
+        if (hi - lo < 0.05) return
+        var c = cuts.slice(); c.push([lo, hi]); cuts = normRanges(c); tl.requestPaint()
+    }
+    function deleteCutAtCti() {
+        var c = []
+        for (var i = 0; i < cuts.length; ++i) if (!(cti >= cuts[i][0] - 0.001 && cti <= cuts[i][1] + 0.001)) c.push(cuts[i])
+        cuts = c; tl.requestPaint()
+    }
+    function deleteSplitAtCti() {
+        var best = -1, bd = 1e9
+        for (var i = 0; i < separatorPoints.length; ++i) { var d = Math.abs(Number(separatorPoints[i]) - cti); if (d < bd) { bd = d; best = i } }
+        var px = tl.t2x(cti)
+        if (best >= 0 && bd / Math.max(0.001, totalDuration) * (tl.width - 12) < 14) {
+            var sp = separatorPoints.slice(); sp.splice(best, 1); separatorPoints = sp; tl.requestPaint()
+        }
+    }
+
     function buildResult() {
-        var lo = Math.max(0, Math.min(markIn, markOut)), hi = Math.min(totalDuration, Math.max(markIn, markOut))
-        if (hi - lo < 0.05) { lo = 0; hi = totalDuration }
         return JSON.stringify({ status: "ok", margins: [cropTop, cropLeft, cropRight, cropBottom],
-            keep_ranges: [[lo, hi]], separator_points: separatorPoints, speed: speed, reverse: reverse, include_audio: includeAudio })
+            keep_ranges: keepFromCuts(), separator_points: separatorPoints,
+            speed: speed, reverse: reverse, include_audio: includeAudio })
     }
 
     // ===================== LAYOUT =====================
@@ -271,17 +324,20 @@ ApplicationWindow {
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
-                        SectionLabel { text: "TRIM & SPLIT" }
+                        SectionLabel { text: "CUTS & SPLIT" }
                         GridLayout {
                             Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
                             PadButton { Layout.fillWidth: true; text: "Mark In (I)"; onClicked: markIn = cti }
                             PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; onClicked: markOut = cti }
+                            PadButton { Layout.fillWidth: true; text: "Cut Selection"; baseColor: win.col("danger_cut", "#7f123f"); textColor: "#ffffff"; onClicked: cutSelection() }
+                            PadButton { Layout.fillWidth: true; text: "Delete Cut"; onClicked: deleteCutAtCti() }
                             PadButton { Layout.fillWidth: true; text: "Add Split"; onClicked: { var sp = separatorPoints.slice(); sp.push(cti); separatorPoints = sp; tl.requestPaint() } }
-                            PadButton { Layout.fillWidth: true; text: "Clear Splits"; onClicked: { separatorPoints = []; tl.requestPaint() } }
+                            PadButton { Layout.fillWidth: true; text: "Del Split"; onClicked: deleteSplitAtCti() }
                         }
+                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; onClicked: { cuts = []; tl.requestPaint() } }
                         Label {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            text: "Keep: " + fmt(Math.min(markIn, markOut)) + " → " + fmt(Math.max(markIn, markOut))
+                            text: cuts.length + " cut(s) • " + separatorPoints.length + " split(s)\nKept: " + fmt(keepTotal()) + " of " + fmt(totalDuration)
                             color: win.col("marker_in", "#2ddc7f"); font.pixelSize: 11
                         }
 
@@ -361,6 +417,15 @@ ApplicationWindow {
                                 ctx.fillStyle = win.col("text_subtle", "#484f58"); ctx.font = "10px 'Segoe UI'"; ctx.textAlign = "center"
                                 ctx.fillText("decoding waveform…", width / 2, midY - 2)
                             }
+                            // Cut (removed) ranges: translucent red over the waveform.
+                            var cz = win.cuts
+                            for (var c1 = 0; c1 < cz.length; ++c1) {
+                                var cx0 = t2x(cz[c1][0]), cx1 = t2x(cz[c1][1])
+                                ctx.fillStyle = "rgba(248,81,73,0.32)"
+                                ctx.fillRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
+                                ctx.strokeStyle = "rgba(248,81,73,0.9)"; ctx.lineWidth = 1
+                                ctx.strokeRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
+                            }
                             ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "center"
                             for (var i = 1; i < segs.length; ++i) {
                                 var bx = t2x(segs[i].start)
@@ -386,6 +451,7 @@ ApplicationWindow {
                     Connections { target: win; function onCtiChanged() { tl.requestPaint() } }
                     Connections { target: win; function onMarkInChanged() { tl.requestPaint() } }
                     Connections { target: win; function onMarkOutChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onCutsChanged() { tl.requestPaint() } }
                     Connections { target: win; function onReadyChanged() { tl.requestPaint() } }
                 }
 
@@ -409,7 +475,7 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                 PadButton { text: "Reset all"; implicitWidth: 110
-                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; separatorPoints = []; speedBox.currentIndex = 3; tl.requestPaint() } }
+                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; tl.requestPaint() } }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
                 PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
