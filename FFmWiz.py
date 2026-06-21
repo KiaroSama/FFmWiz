@@ -15330,11 +15330,16 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
 
     measured: dict[str, float] | None = None
-    if two_pass:
-        # Two-pass: MEASURE FIRST (automatically), show the source loudness, and
-        # only THEN ask for the target. The measured source values are
-        # target-independent, so the analysis uses the default target. In Join
-        # mode the analysis covers the COMPLETE joined audio (all inputs).
+    # The current loudness is measured and shown BEFORE the target is asked.
+    # For two-pass it is required (and injected); for single-pass it is offered
+    # (informational, to help choose a target) and not injected.
+    measure_now = two_pass
+    if not two_pass:
+        measure_now = ask_yes_no(
+            yn_prompt("Measure current audio loudness first (to help choose a target)?", True),
+            True,
+        )
+    if measure_now:
         ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
         audio_index = selected[0]
         while True:
@@ -15360,8 +15365,13 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
             if measured is not None:
                 print_loudnorm_stats(measured)
                 break
-            # Parse/exec failure: never silently inject fake measured values.
             error("LoudNorm measurement failed or its JSON output could not be parsed.")
+            if not two_pass:
+                # Single-pass does not need the measurement; continue to target.
+                note("Could not measure the current loudness; continuing to the target prompt.")
+                measured = None
+                break
+            # Two-pass: never silently inject fake measured values.
             action = ask_raw(
                 question_prompt(
                     answers,
@@ -15407,7 +15417,7 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
 
     answers["loudnorm_enabled"] = True
     answers["loudnorm_target_i"] = target_i
-    if measured is not None:
+    if two_pass and measured is not None:
         answers["loudnorm_measured"] = measured
         answers["loudnorm_mode"] = "two_pass"
     else:

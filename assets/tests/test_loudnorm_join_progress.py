@@ -501,10 +501,27 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_loudnorm_menu_single_sets_mode(self):
         answers = {"audio_streams": [audio_stream()], "audio_tracks": [0], "audio_codec": "aac",
                    "output_ext": "mp4", "input_path": Path("x.mkv"), "format": {"duration": "5"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "-16"]):
+        # Single-pass now offers to measure first; decline -> straight to target.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "-16"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
             FFmWiz.step_loudnorm(answers)
         self.assertTrue(answers["loudnorm_enabled"])
         self.assertEqual(answers["loudnorm_mode"], "single")
+        self.assertNotIn("loudnorm_measured", answers)
+
+    def test_loudnorm_single_measures_first_then_target(self):
+        answers = {"audio_streams": [audio_stream()], "audio_tracks": [0], "audio_codec": "aac",
+                   "output_ext": "mp4", "input_path": Path("x.mkv"), "format": {"duration": "5"}}
+        measured = {"input_i": -22.0, "input_tp": -3.0, "input_lra": 5.0, "input_thresh": -32.0, "target_offset": -0.2}
+        # Choose single (2), accept "measure first" -> measurement shown -> then target.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "-16"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+             mock.patch.object(FFmWiz, "probe_loudnorm_measurement", return_value=measured), \
+             mock.patch.object(FFmWiz, "print_loudnorm_stats") as stats:
+            FFmWiz.step_loudnorm(answers)
+        self.assertTrue(stats.called)  # current loudness shown BEFORE the target
+        self.assertEqual(answers["loudnorm_mode"], "single")
+        # Single-pass shows the measurement but does not inject measured values.
         self.assertNotIn("loudnorm_measured", answers)
 
     def test_loudnorm_menu_two_pass_measures_and_no_vague_prompt(self):
