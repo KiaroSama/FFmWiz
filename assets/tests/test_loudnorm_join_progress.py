@@ -661,6 +661,48 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.25)
 
+    # ================= Lossless split =================
+    def test_parse_split_timestamp_formats(self):
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("10:00:000"), 600.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("10:00"), 600.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("20:00:000"), 1200.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("90"), 90.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("1:00:00:000"), 3600.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("0:30:500"), 30.5)
+
+    def test_parse_split_times_line_sorts_and_filters(self):
+        pts = FFmWiz.parse_split_times_line("20:00:000,10:00,25:00:000", 1800.0)
+        self.assertEqual(pts, [600.0, 1200.0, 1500.0])
+        # Out-of-range points are dropped.
+        self.assertEqual(FFmWiz.parse_split_times_line("10:00, 40:00", 1800.0), [600.0])
+        # Missing milliseconds treated as 0.
+        self.assertEqual(FFmWiz.parse_split_times_line("5:00", 600.0), [300.0])
+
+    def test_build_lossless_split_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = {"ffmpeg": "ffmpeg", "input_path": Path(tmp) / "clip.aac",
+                       "output_location": Path(tmp)}
+            cmd, pattern = FFmWiz.build_lossless_split_command(answers, [600.0, 1200.0, 1500.0])
+            self.assertIn("-c", cmd)
+            self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+            self.assertIn("-f", cmd)
+            self.assertEqual(cmd[cmd.index("-f") + 1], "segment")
+            self.assertEqual(cmd[cmd.index("-segment_times") + 1], "600.000000,1200.000000,1500.000000")
+            self.assertEqual(cmd[cmd.index("-map") + 1], "0")
+            self.assertIn("_part%03d.aac", str(pattern))
+
+    def test_manual_split_flow_sets_split_points(self):
+        answers = {"audio_index": 0, "format": {"duration": "1800"}}
+        # menu -> manual(2); "add cuts/split?" yes; layout 5; split line.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "5", "10:00,20:00,25:00"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertFalse(answers["_audio_transform_noop"])
+        self.assertEqual(answers["_audio_transform_split_points"], [600.0, 1200.0, 1500.0])
+        # Split is mutually exclusive with speed/reverse transforms.
+        self.assertFalse(answers["audio_speed_enabled"])
+        self.assertEqual(answers["audio_cut_keep_ranges"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
