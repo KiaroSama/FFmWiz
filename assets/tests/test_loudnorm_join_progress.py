@@ -621,12 +621,24 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertTrue(answers["_audio_transform_noop"])
 
     def test_audio_transform_manual_reverse_only(self):
-        answers = {"audio_index": 0}
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        # ask_yes_no order: "Add cuts?" -> False, "Reverse audio?" -> True.
         with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True):
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, True]):
             FFmWiz.step_audio_transform_editor(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertTrue(answers["reverse_audio"])
+
+    def test_audio_transform_manual_with_cuts(self):
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        # "Add cuts?" -> True, then collect_cut_ranges_terminal returns ranges;
+        # speed 100%, reverse -> False. Cuts alone make it active.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[True, False]), \
+             mock.patch.object(FFmWiz, "collect_cut_ranges_terminal", return_value=[(0.0, 4.0)]):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertFalse(answers["_audio_transform_noop"])
+        self.assertEqual(answers["audio_cut_keep_ranges"], [(0.0, 4.0)])
 
     def test_audio_transform_gui_success(self):
         answers = {"audio_index": 0}

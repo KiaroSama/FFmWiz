@@ -5941,14 +5941,21 @@ def question_prompt(
 
 
 def yn_prompt(title: str, default: bool) -> str:
-    """Build a colored yes/no sub-prompt consistent with the wizard style, for
-    standalone confirmations that do not go through question_prompt."""
+    """Build a colored yes/no sub-prompt that matches the standard wizard style
+    (bold title, HINT_YELLOW '(y/n)', green default), for standalone
+    confirmations that do not go through question_prompt."""
     default_text = "y" if default else "n"
     return (
-        f"{paint(title, Color.BOLD)} "
-        f"({paint('y', Color.OPT_KEY_CHARTREUSE)}/{paint('n', Color.OPT_KEY_CHARTREUSE)}) "
+        f"\n{paint(title, Color.BOLD)} "
+        f"({paint('y/n', Color.HINT_YELLOW)}) "
         f"{paint('[' + default_text + ']', Color.GREEN)}: "
     )
+
+
+def selection_menu_line(number: int, label: str) -> str:
+    """A numbered menu option line consistent with the wizard style: a colored
+    'N.' key followed by a bold label."""
+    return f"  {paint(str(number) + '.', Color.OPT_KEY_CORAL)} {paint(label, Color.BOLD)}"
 
 
 def strip_quotes(value: str) -> str:
@@ -15284,9 +15291,9 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
     while True:
         print()
         print(paint(title + ":", Color.BOLD + Color.LIGHT_BLUE))
-        print("  " + paint("1", Color.OPT_KEY_CORAL) + " Off")
-        print("  " + paint("2", Color.OPT_KEY_CORAL) + " " + opt2)
-        print("  " + paint("3", Color.OPT_KEY_CORAL) + " " + opt3)
+        print(selection_menu_line(1, "Off"))
+        print(selection_menu_line(2, opt2))
+        print(selection_menu_line(3, opt3))
         choice = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
         if is_back_value(choice):
             raise Back()
@@ -15322,31 +15329,12 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         answers["audio_codec"] = DEFAULT_AUDIO_CODEC
         answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
 
-    # Target Integrated Loudness prompt.
-    while True:
-        value = ask_raw(
-            question_prompt(
-                answers,
-                "Enter target Integrated Loudness I in LUFS",
-                "examples: -16 general video, -18 safer/lower, -14 louder",
-                loudnorm_number(LOUDNORM_DEFAULT_TARGET_I),
-            )
-        )
-        if is_back_value(value):
-            raise Back()
-        if not value:
-            value = loudnorm_number(LOUDNORM_DEFAULT_TARGET_I)
-        try:
-            target_i = parse_loudnorm_target(value)
-            break
-        except ValueError as exc:
-            error(str(exc))
-
     measured: dict[str, float] | None = None
     if two_pass:
-        # Two-pass: measurement runs AUTOMATICALLY (no separate prompt). In Join
-        # mode it analyzes the COMPLETE joined audio (all selected inputs), not
-        # just the first input.
+        # Two-pass: MEASURE FIRST (automatically), show the source loudness, and
+        # only THEN ask for the target. The measured source values are
+        # target-independent, so the analysis uses the default target. In Join
+        # mode the analysis covers the COMPLETE joined audio (all inputs).
         ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
         audio_index = selected[0]
         while True:
@@ -15358,7 +15346,8 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
                     f"({len(ordered_items)} inputs) on track {audio_index}..."
                 )
                 measured = probe_join_loudnorm_measurement(
-                    answers, ordered_items, audio_index, target_i=target_i,
+                    answers, ordered_items, audio_index,
+                    target_i=LOUDNORM_DEFAULT_TARGET_I,
                     total_duration=(total_duration if total_duration > 0 else None),
                 )
             else:
@@ -15366,7 +15355,7 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
                 total_duration = stream_duration_seconds({}, answers.get("format"))
                 measured = probe_loudnorm_measurement(
                     ffmpeg, Path(answers["input_path"]), audio_index,
-                    target_i=target_i, total_duration=total_duration,
+                    target_i=LOUDNORM_DEFAULT_TARGET_I, total_duration=total_duration,
                 )
             if measured is not None:
                 print_loudnorm_stats(measured)
@@ -15395,6 +15384,26 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
                 break
             if action != "r":
                 error("Enter r, c, or m.")
+
+    # Target Integrated Loudness prompt (asked AFTER measurement for two-pass).
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter target Integrated Loudness I in LUFS",
+                "examples: -16 general video, -18 safer/lower, -14 louder",
+                loudnorm_number(LOUDNORM_DEFAULT_TARGET_I),
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = loudnorm_number(LOUDNORM_DEFAULT_TARGET_I)
+        try:
+            target_i = parse_loudnorm_target(value)
+            break
+        except ValueError as exc:
+            error(str(exc))
 
     answers["loudnorm_enabled"] = True
     answers["loudnorm_target_i"] = target_i
@@ -17983,9 +17992,17 @@ def step_audio_cut_editor(answers: dict[str, Any]) -> None:
 
 
 def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
-    """Manual (non-GUI) audio transform: enter a speed value and choose reverse.
-    Cuts are GUI-only; manual mode covers speed/reverse, which is the common
-    case and always applies reliably."""
+    """Manual (non-GUI) audio transform: optional terminal cut ranges, plus a
+    speed value and reverse choice. All apply reliably without the GUI."""
+    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    keep_ranges: list[tuple[float, float]] = []
+    if ask_yes_no(yn_prompt("Add audio cuts (keep ranges)?", False), False):
+        try:
+            keep_ranges = collect_cut_ranges_terminal(answers, 25.0, duration)
+        except Back:
+            keep_ranges = []
+        if keep_ranges:
+            print(paint(format_audio_ranges_for_summary(keep_ranges, "Audio cuts (keep ranges)"), Color.LIME))
     while True:
         value = ask_raw(
             question_prompt(
@@ -18005,16 +18022,16 @@ def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
         except ValueError as exc:
             error(str(exc))
     reverse = ask_yes_no(yn_prompt("Reverse audio?", False), False)
-    if not (reverse or abs(speed - 1.0) > 1e-6):
-        note("No audio transform was selected (speed 100%, no reverse).")
+    if not (keep_ranges or reverse or abs(speed - 1.0) > 1e-6):
+        note("No audio transform was selected (no cuts, speed 100%, no reverse).")
         answers["_audio_transform_noop"] = True
         return
-    answers["audio_cut_keep_ranges"] = []
-    answers["audio_speed_enabled"] = True
+    answers["audio_cut_keep_ranges"] = keep_ranges
+    answers["audio_speed_enabled"] = bool(reverse or abs(speed - 1.0) > 1e-6)
     answers["audio_speed_factor"] = speed
     answers["reverse_audio"] = reverse
     answers["_audio_transform_noop"] = False
-    log_info(f"Manual audio transform: speed={speed}; reverse={reverse}")
+    log_info(f"Manual audio transform: cuts={keep_ranges}; speed={speed}; reverse={reverse}")
 
 
 def step_audio_transform_editor(answers: dict[str, Any]) -> None:
@@ -18023,8 +18040,8 @@ def step_audio_transform_editor(answers: dict[str, Any]) -> None:
     while True:
         print()
         print(paint("Audio transform:", Color.BOLD + Color.LIGHT_BLUE))
-        print("  " + paint("1", Color.OPT_KEY_CORAL) + " Graphical editor (waveform cuts + speed / reverse)")
-        print("  " + paint("2", Color.OPT_KEY_CORAL) + " Enter values manually (speed + reverse)")
+        print(selection_menu_line(1, "Graphical editor (waveform cuts + speed / reverse)"))
+        print(selection_menu_line(2, "Enter values manually (cuts + speed + reverse)"))
         choice = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
         if is_back_value(choice):
             raise Back()
