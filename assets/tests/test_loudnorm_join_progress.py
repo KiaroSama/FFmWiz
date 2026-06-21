@@ -604,45 +604,64 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
     # ================= Audio transform: GUI vs manual =================
     def test_audio_transform_menu_manual_sets_speed(self):
-        answers = {"audio_index": 0}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "150%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
-            FFmWiz.step_audio_transform_editor(answers)
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        # _apply_manual_audio_transform: cuts? -> False, speed -> 150%, reverse -> False.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["150%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False]):
+            FFmWiz._apply_manual_audio_transform(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
         self.assertFalse(answers["reverse_audio"])
         self.assertTrue(answers["audio_speed_enabled"])
 
     def test_audio_transform_manual_noop_when_unchanged(self):
-        answers = {"audio_index": 0}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
-            FFmWiz.step_audio_transform_editor(answers)
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["100%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False]):
+            FFmWiz._apply_manual_audio_transform(answers)
         self.assertTrue(answers["_audio_transform_noop"])
 
     def test_audio_transform_manual_reverse_only(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        # ask_yes_no order: "Add cuts?" -> False, "Reverse audio?" -> True.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
+        # cuts? -> False, speed -> 100%, reverse -> True.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["100%"]), \
              mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, True]):
-            FFmWiz.step_audio_transform_editor(answers)
+            FFmWiz._apply_manual_audio_transform(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertTrue(answers["reverse_audio"])
 
     def test_audio_transform_manual_with_cuts(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        # "Add cuts?" -> True, then collect_cut_ranges_terminal returns ranges;
-        # speed 100%, reverse -> False. Cuts alone make it active.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
+        # cuts? -> True (collect mocked), speed -> 100%, reverse -> False.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["100%"]), \
              mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[True, False]), \
              mock.patch.object(FFmWiz, "collect_cut_ranges_terminal", return_value=[(0.0, 4.0)]):
-            FFmWiz.step_audio_transform_editor(answers)
+            FFmWiz._apply_manual_audio_transform(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertEqual(answers["audio_cut_keep_ranges"], [(0.0, 4.0)])
 
+    def test_audio_transform_manual_back_at_speed_returns_to_cuts(self):
+        # Back ('0') at the speed prompt returns to the cuts question (not out).
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["0", "150%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False, False]):
+            FFmWiz._apply_manual_audio_transform(answers)
+        self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
+
+    def test_audio_transform_menu_manual_routes(self):
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "150%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False]), \
+             mock.patch.object(FFmWiz, "_confirm_audio_transform_start") as confirm:
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
+        self.assertTrue(confirm.called)
+        self.assertTrue(answers["_audio_transform_finalized"])
+
     def test_audio_transform_gui_success(self):
-        answers = {"audio_index": 0}
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
         with mock.patch.object(FFmWiz, "ask_raw", side_effect=["1"]), \
+             mock.patch.object(FFmWiz, "_confirm_audio_transform_start"), \
              mock.patch.object(FFmWiz, "open_audio_transform_gui",
                                return_value={"keep_ranges": [], "speed": 1.5, "reverse": True}):
             FFmWiz.step_audio_transform_editor(answers)
@@ -650,16 +669,18 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
         self.assertTrue(answers["reverse_audio"])
 
-    def test_audio_transform_gui_noop_falls_back_to_manual(self):
-        answers = {"audio_index": 0}
-        # Menu -> graphical; GUI returns no change; choose manual; enter 125%.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["1", "m", "125%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False), \
-             mock.patch.object(FFmWiz, "open_audio_transform_gui",
-                               return_value={"keep_ranges": [], "speed": 1.0, "reverse": False}):
+    def test_audio_transform_back_at_confirm_returns_to_configure(self):
+        # Confirm raises Back once -> editor re-runs the value prompts (configure),
+        # not the menu; the second confirm succeeds.
+        answers = {"audio_index": 0, "format": {"duration": "10"}}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "150%", "120%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False, False, False]), \
+             mock.patch.object(FFmWiz, "_confirm_audio_transform_start",
+                               side_effect=[FFmWiz.Back(), None]):
             FFmWiz.step_audio_transform_editor(answers)
-        self.assertFalse(answers["_audio_transform_noop"])
-        self.assertAlmostEqual(answers["audio_speed_factor"], 1.25)
+        # The first menu choice persists; only the value prompts were repeated.
+        self.assertAlmostEqual(answers["audio_speed_factor"], 1.2)
+        self.assertTrue(answers["_audio_transform_finalized"])
 
     # ================= Lossless split =================
     def test_parse_split_timestamp_formats(self):
@@ -669,6 +690,22 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertAlmostEqual(FFmWiz.parse_split_timestamp("90"), 90.0)
         self.assertAlmostEqual(FFmWiz.parse_split_timestamp("1:00:00:000"), 3600.0)
         self.assertAlmostEqual(FFmWiz.parse_split_timestamp("0:30:500"), 30.5)
+
+    def test_parse_split_timestamp_bare_unit(self):
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("16", "m"), 960.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("16", "h"), 57600.0)
+        self.assertAlmostEqual(FFmWiz.parse_split_timestamp("16", "s"), 16.0)
+
+    def test_largest_time_unit(self):
+        self.assertEqual(FFmWiz.largest_time_unit(45.0), "s")
+        self.assertEqual(FFmWiz.largest_time_unit(120.0), "m")
+        self.assertEqual(FFmWiz.largest_time_unit(7200.0), "h")
+
+    def test_parse_split_times_bare_number_uses_largest_unit(self):
+        # 31-minute file: a bare "16" means 16 minutes.
+        self.assertEqual(FFmWiz.parse_split_times_line("16", 1884.0), [960.0])
+        # Short file: a bare "16" means 16 seconds.
+        self.assertEqual(FFmWiz.parse_split_times_line("16", 30.0), [16.0])
 
     def test_parse_split_times_line_sorts_and_filters(self):
         pts = FFmWiz.parse_split_times_line("20:00:000,10:00,25:00:000", 1800.0)
@@ -695,7 +732,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         answers = {"audio_index": 0, "format": {"duration": "1800"}}
         # menu -> manual(2); "add cuts/split?" yes; layout 5; split line.
         with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "5", "10:00,20:00,25:00"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True):
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+             mock.patch.object(FFmWiz, "_confirm_audio_transform_start"):
             FFmWiz.step_audio_transform_editor(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertEqual(answers["_audio_transform_split_points"], [600.0, 1200.0, 1500.0])

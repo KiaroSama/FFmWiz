@@ -5953,9 +5953,9 @@ def yn_prompt(title: str, default: bool) -> str:
 
 
 def selection_menu_line(number: int, label: str) -> str:
-    """A numbered menu option line consistent with the wizard style: a colored
-    'N.' key followed by a bold label."""
-    return f"  {paint(str(number) + '.', Color.OPT_KEY_CORAL)} {paint(label, Color.BOLD)}"
+    """A numbered menu option line consistent with the rest of the app: a
+    sky-blue 'N.' key followed by a bold label."""
+    return f"  {paint(str(number) + '.', Color.LIGHT_BLUE)} {paint(label, Color.BOLD)}"
 
 
 def strip_quotes(value: str) -> str:
@@ -17992,47 +17992,72 @@ def step_audio_cut_editor(answers: dict[str, Any]) -> None:
 
 
 def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
-    """Manual (non-GUI) audio transform: optional terminal cut ranges or a
-    lossless split, plus a speed value and reverse choice."""
+    """Manual (non-GUI) audio transform with prompt-by-prompt Back navigation:
+    optional cuts/lossless-split, then speed, then reverse. Back at the first
+    prompt raises Back (to return to the editor menu); Back at a later prompt
+    returns to the immediately previous prompt."""
     answers.pop("_audio_transform_split_points", None)
     duration = stream_duration_seconds({}, answers.get("format")) or 0.0
     keep_ranges: list[tuple[float, float]] = []
-    if ask_yes_no(yn_prompt("Add audio cuts or split into separate files?", False), False):
-        try:
-            keep_ranges = collect_cut_ranges_terminal(answers, 25.0, duration, allow_split=True)
-        except Back:
-            keep_ranges = []
-        split_points = answers.pop("_manual_split_points", None)
-        if split_points:
-            # Lossless split: produce multiple files; speed/reverse do not apply.
-            answers["_audio_transform_split_points"] = split_points
-            answers["audio_cut_keep_ranges"] = []
-            answers["audio_speed_enabled"] = False
-            answers["reverse_audio"] = False
-            answers["_audio_transform_noop"] = False
-            log_info(f"Manual audio split points: {split_points}")
-            return
-        if keep_ranges:
-            print(paint(format_audio_ranges_for_summary(keep_ranges, "Audio cuts (keep ranges)"), Color.LIME))
+    speed = 1.0
+    reverse = False
+    stage = "cuts_q"
     while True:
-        value = ask_raw(
-            question_prompt(
-                answers,
-                "Enter audio speed",
-                "examples: 150% or 1.5x or 1.5 (100% = no change)",
-                "100%",
+        if stage == "cuts_q":
+            # Back here propagates to the editor menu.
+            want = ask_yes_no(yn_prompt("Add audio cuts or split into separate files?", False), False)
+            if want:
+                stage = "cut_detail"
+            else:
+                keep_ranges = []
+                stage = "speed"
+        elif stage == "cut_detail":
+            try:
+                kr = collect_cut_ranges_terminal(answers, 25.0, duration, allow_split=True)
+            except Back:
+                stage = "cuts_q"
+                continue
+            split_points = answers.pop("_manual_split_points", None)
+            if split_points:
+                # Lossless split: produce multiple files; speed/reverse do not apply.
+                answers["_audio_transform_split_points"] = split_points
+                answers["audio_cut_keep_ranges"] = []
+                answers["audio_speed_enabled"] = False
+                answers["reverse_audio"] = False
+                answers["_audio_transform_noop"] = False
+                log_info(f"Manual audio split points: {split_points}")
+                return
+            keep_ranges = kr
+            if keep_ranges:
+                print(paint(format_audio_ranges_for_summary(keep_ranges, "Audio cuts (keep ranges)"), Color.LIME))
+            stage = "speed"
+        elif stage == "speed":
+            value = ask_raw(
+                question_prompt(
+                    answers,
+                    "Enter audio speed",
+                    "examples: 150% or 1.5x or 1.5 (100% = no change)",
+                    "100%",
+                )
             )
-        )
-        if is_back_value(value):
-            raise Back()
-        if not value:
-            value = "100%"
-        try:
-            speed = parse_speed_factor(value)
+            if is_back_value(value):
+                stage = "cuts_q"  # Back -> previous prompt
+                continue
+            if not value:
+                value = "100%"
+            try:
+                speed = parse_speed_factor(value)
+            except ValueError as exc:
+                error(str(exc))
+                continue  # re-ask speed
+            stage = "reverse"
+        else:  # reverse
+            try:
+                reverse = ask_yes_no(yn_prompt("Reverse audio?", False), False)
+            except Back:
+                stage = "speed"  # Back -> previous prompt
+                continue
             break
-        except ValueError as exc:
-            error(str(exc))
-    reverse = ask_yes_no(yn_prompt("Reverse audio?", False), False)
     if not (keep_ranges or reverse or abs(speed - 1.0) > 1e-6):
         note("No audio transform was selected (no cuts, speed 100%, no reverse).")
         answers["_audio_transform_noop"] = True
@@ -18045,28 +18070,9 @@ def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
     log_info(f"Manual audio transform: cuts={keep_ranges}; speed={speed}; reverse={reverse}")
 
 
-def step_audio_transform_editor(answers: dict[str, Any]) -> None:
-    audio_index = int(answers.get("audio_index", 0))
-    answers.pop("_audio_transform_split_points", None)
-    # Let the user choose between the graphical editor and manual numeric entry.
-    while True:
-        print()
-        print(paint("Audio transform:", Color.BOLD + Color.LIGHT_BLUE))
-        print(selection_menu_line(1, "Graphical editor (waveform cuts + speed / reverse)"))
-        print(selection_menu_line(2, "Enter values manually (cuts + speed + reverse)"))
-        choice = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
-        if is_back_value(choice):
-            raise Back()
-        if not choice:
-            choice = "1"
-        if choice in {"1", "2"}:
-            break
-        error("Enter 1 or 2.")
-
-    if choice == "2":
-        _apply_manual_audio_transform(answers)
-        return
-
+def _run_gui_audio_transform(answers: dict[str, Any], audio_index: int) -> None:
+    """Graphical audio transform path. Sets the transform answers or marks
+    _audio_transform_noop. Raises Back to return to the editor menu."""
     while True:
         result = open_audio_transform_gui(answers, audio_index)
         if result is None:
@@ -18087,12 +18093,11 @@ def step_audio_transform_editor(answers: dict[str, Any]) -> None:
             if action in {"n", "no", "skip"}:
                 answers["_audio_transform_noop"] = True
                 return
-            continue  # 'g' or empty -> reopen the editor
+            continue  # 'g' or empty -> reopen
         keep_ranges = list(result.get("keep_ranges") or [])
         speed = clamp_speed_factor(result.get("speed", DEFAULT_SPEED_FACTOR))
         reverse = bool(result.get("reverse"))
-        changed = bool(keep_ranges) or reverse or abs(speed - 1.0) > 1e-6
-        if not changed:
+        if not (keep_ranges or reverse or abs(speed - 1.0) > 1e-6):
             note("No audio transform was selected in the editor.")
             action = ask_raw(
                 question_prompt(
@@ -18117,6 +18122,86 @@ def step_audio_transform_editor(answers: dict[str, Any]) -> None:
         answers["reverse_audio"] = reverse
         answers["_audio_transform_noop"] = False
         return
+
+
+def _confirm_audio_transform_start(answers: dict[str, Any]) -> None:
+    """Build the command, print the summary, and ask "Start FFmpeg now?".
+    Raises Back (on '0') so the editor can return to the value prompts."""
+    split_points = answers.get("_audio_transform_split_points")
+    if split_points:
+        cmd, pattern = build_lossless_split_command(answers, split_points)
+        answers["cmd"] = cmd
+        answers["output_path"] = pattern
+        print()
+        print(paint("Lossless split (stream copy):", Color.BOLD + Color.LIME))
+        print("  " + field_text("input", answers["input_path"], Color.WHITE))
+        print("  " + field_text("output parts", f"{len(split_points) + 1} files -> {pattern.name}", Color.LIME))
+        print(paint(format_split_points_for_summary(split_points, float(answers.get("fps") or 25.0)), Color.LIGHT_BLUE))
+        note("Stream-copy split: rejoining the parts reproduces the original file.")
+        print()
+        print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+        log_info("Final PowerShell command: " + command_to_powershell(cmd))
+        print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+    else:
+        cmd = build_audio_transform_command(answers)
+        answers["cmd"] = cmd
+        print_transform_summary(answers, cmd, "Audio Cut / Speed / Reverse")
+    answers["start_now"] = ask_yes_no(
+        question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
+        True,
+    )
+
+
+def step_audio_transform_editor(answers: dict[str, Any]) -> None:
+    audio_index = int(answers.get("audio_index", 0))
+    answers.pop("_audio_transform_split_points", None)
+    answers["_audio_transform_finalized"] = False
+    # Stage machine so Back goes one prompt back instead of jumping to the start:
+    #   menu  -> (Back) previous wizard step
+    #   configure (values) -> (Back) menu
+    #   confirm ("Start now?") -> (Back) configure / value prompts
+    stage = "menu"
+    choice = "1"
+    while True:
+        if stage == "menu":
+            print()
+            print(paint("Audio transform:", Color.BOLD + Color.LIGHT_BLUE))
+            print(selection_menu_line(1, "Graphical editor (waveform cuts + speed / reverse)"))
+            print(selection_menu_line(2, "Enter values manually (cuts + speed + reverse)"))
+            choice_value = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
+            if is_back_value(choice_value):
+                raise Back()
+            if not choice_value:
+                choice_value = "1"
+            if choice_value not in {"1", "2"}:
+                error("Enter 1 or 2.")
+                continue
+            choice = choice_value
+            stage = "configure"
+        elif stage == "configure":
+            answers["_audio_transform_noop"] = False
+            try:
+                if choice == "2":
+                    _apply_manual_audio_transform(answers)
+                else:
+                    _run_gui_audio_transform(answers, audio_index)
+            except Back:
+                stage = "menu"
+                continue
+            if answers.get("_audio_transform_noop"):
+                return  # nothing selected; no confirmation needed
+            stage = "confirm"
+        else:  # confirm
+            try:
+                _confirm_audio_transform_start(answers)
+            except Back:
+                stage = "configure"
+                continue
+            answers["_audio_transform_finalized"] = True
+            return
+
+
+
 
 
 def step_audio_cut_for_encode(answers: dict[str, Any]) -> None:
@@ -18309,33 +18394,12 @@ def step_audio_cut_start_now(answers: dict[str, Any]) -> None:
 def step_audio_transform_start_now(answers: dict[str, Any]) -> None:
     if answers.get("_audio_transform_noop"):
         return
-    split_points = answers.get("_audio_transform_split_points")
-    if split_points:
-        cmd, pattern = build_lossless_split_command(answers, split_points)
-        answers["cmd"] = cmd
-        answers["output_path"] = pattern
-        print()
-        print(paint("Lossless split (stream copy):", Color.BOLD + Color.LIME))
-        print("  " + field_text("input", answers["input_path"], Color.WHITE))
-        print("  " + field_text("output parts", f"{len(split_points) + 1} files -> {pattern.name}", Color.LIME))
-        print(paint(format_split_points_for_summary(split_points, float(answers.get("fps") or 25.0)), Color.LIGHT_BLUE))
-        note("Stream-copy split: rejoining the parts reproduces the original file.")
-        print()
-        print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
-        log_info("Final PowerShell command: " + command_to_powershell(cmd))
-        print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
-        answers["start_now"] = ask_yes_no(
-            question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
-            True,
-        )
+    # The editor step now builds the command and asks "Start FFmpeg now?" itself
+    # (so Back from the confirmation returns to the value prompts, not the menu).
+    if answers.get("_audio_transform_finalized"):
         return
-    cmd = build_audio_transform_command(answers)
-    answers["cmd"] = cmd
-    print_transform_summary(answers, cmd, "Audio Cut / Speed / Reverse")
-    answers["start_now"] = ask_yes_no(
-        question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
-        True,
-    )
+    # Fallback for any path that did not finalize in the editor.
+    _confirm_audio_transform_start(answers)
 
 
 METADATA_DISPOSITION_FLAGS = (
@@ -19447,15 +19511,24 @@ def ask_cut_method(answers: dict[str, Any]) -> int:
         error("Enter 1.")
 
 
-def parse_split_timestamp(token: str) -> float:
+def parse_split_timestamp(token: str, bare_unit: str = "s") -> float:
     """Parse one split timestamp. Accepts seconds (e.g. 90 or 90.5),
     MM:SS, MM:SS:mmm, or HH:MM:SS:mmm. The last colon field is milliseconds
-    (optional; missing => 0)."""
+    (optional; missing => 0).
+
+    A BARE number with no ':' is interpreted in `bare_unit` ('h', 'm', or 's'),
+    which the caller derives from the file's largest time unit (e.g. for a
+    31-minute file, "16" means 16 minutes)."""
     token = str(token or "").strip()
     if not token:
         raise ValueError("Empty timestamp.")
     if ":" not in token:
-        return max(0.0, float(token))
+        number = float(token)
+        if bare_unit == "h":
+            return max(0.0, number * 3600.0)
+        if bare_unit == "m":
+            return max(0.0, number * 60.0)
+        return max(0.0, number)
     parts = token.split(":")
     if any(part.strip() == "" for part in parts[:-1]):
         raise ValueError(f"Invalid timestamp: {token!r}")
@@ -19475,16 +19548,26 @@ def parse_split_timestamp(token: str) -> float:
     raise ValueError("Use seconds, MM:SS, MM:SS:mmm, or HH:MM:SS:mmm.")
 
 
+def largest_time_unit(duration: float) -> str:
+    """Largest natural time unit for a duration: 'h' (>=1h), 'm' (>=1min), 's'."""
+    if duration and duration >= 3600:
+        return "h"
+    if duration and duration >= 60:
+        return "m"
+    return "s"
+
+
 def parse_split_times_line(text: str, duration: float) -> list[float]:
     """Parse a comma-separated list of split timestamps into sorted, unique
-    points strictly inside (0, duration). Points at/after the duration or <=0
-    are dropped (they would create empty parts)."""
+    points strictly inside (0, duration). Bare numbers (no ':') use the file's
+    largest time unit. Points at/after the duration or <=0 are dropped."""
+    bare_unit = largest_time_unit(duration)
     points: list[float] = []
     for token in str(text or "").split(","):
         token = token.strip()
         if not token:
             continue
-        points.append(parse_split_timestamp(token))
+        points.append(parse_split_timestamp(token, bare_unit))
     cleaned = sorted({round(p, 6) for p in points if p > 0.0 and (not duration or p < duration - 1e-6)})
     return cleaned
 
@@ -19539,6 +19622,7 @@ def ask_split_points_terminal(answers: dict[str, Any], duration: float) -> list[
                 answers,
                 "Enter split times (comma-separated)",
                 "format MM:SS:mmm or HH:MM:SS:mmm or seconds; milliseconds optional; "
+                "a bare number uses the file's largest unit (e.g. 16 = 16 min for a minutes-long file); "
                 "example: 10:00,20:00:000,25:30",
                 None,
             )
