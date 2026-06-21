@@ -19415,6 +19415,7 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print(f"  {paint('12.', Color.LIGHT_BLUE)} Join Audios and Videos")
     print(f"  {paint('13.', Color.LIGHT_BLUE)} Metadata Editor")
     print(f"  {paint('14.', Color.LIGHT_BLUE)} FFmpeg capability cache (diagnostics)")
+    print(f"  {paint('15.', Color.LIGHT_BLUE)} Track Manager (remove / add / replace tracks)")
     print()
     # The main menu has no previous step, so '0=back' is intentionally not
     # advertised. Submenus continue to support 0=back where it makes sense.
@@ -19425,9 +19426,9 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
         )
         if not value:
             return 1
-        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"}:
+        if value in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"}:
             return int(value)
-        error("Enter a menu number from 1 to 14.")
+        error("Enter a menu number from 1 to 15.")
 
 
 # Kept as a thin wrapper for backwards compatibility with any external caller.
@@ -21108,6 +21109,286 @@ def _run_add_files_to_video_mode_impl(base_answers: dict[str, Any]) -> tuple[int
         total_duration=(duration if duration > 0 else None),
         label="Add files to video",
     )
+
+
+TRACK_MANAGER_MEDIA_EXTS = {
+    ".mkv", ".mp4", ".mov", ".m4v", ".webm", ".avi", ".ts", ".mpg", ".mpeg", ".wmv", ".flv",
+    ".m4a", ".mka", ".mp3", ".aac", ".flac", ".wav", ".opus", ".ogg", ".ac3", ".eac3", ".dts",
+}
+
+
+def parse_track_remove_specs(text: str, stream_count: int | None = None) -> list[str]:
+    """Parse comma-separated stream specifiers to REMOVE. Accepts an absolute
+    index (e.g. 2) or an ffmpeg type:index (e.g. a:1, s:0, v:0)."""
+    specs: list[str] = []
+    for token in str(text or "").split(","):
+        token = token.strip().lower()
+        if not token:
+            continue
+        if re.fullmatch(r"\d+", token):
+            index = int(token)
+            if stream_count is not None and index >= stream_count:
+                raise ValueError(f"Stream index {index} is out of range (file has {stream_count} streams).")
+            specs.append(token)
+        elif re.fullmatch(r"[vas]:\d+", token):
+            specs.append(token)
+        else:
+            raise ValueError(f"Invalid stream spec: {token!r}. Use an index like 2, or type:index like a:1.")
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for spec in specs:
+        if spec not in seen:
+            seen.add(spec)
+            unique.append(spec)
+    return unique
+
+
+def build_track_manager_command(
+    ffmpeg: str,
+    input_path: Path,
+    remove_specs: list[str],
+    extra_items: list[dict[str, Any]],
+    output_path: Path,
+) -> list[str]:
+    """Stream-copy command that maps all source streams except the removed ones
+    and appends audio/subtitle streams from external files. Replace = remove the
+    old track and add the new one in the same run."""
+    cmd: list[str] = [ffmpeg, "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n", "-i", str(input_path)]
+    for item in extra_items:
+        cmd.extend(["-i", str(item["path"])])
+    cmd.extend(["-map", "0"])
+    for spec in remove_specs:
+        cmd.extend(["-map", f"-0:{spec}"])
+    for input_number, item in enumerate(extra_items, start=1):
+        if item.get("audio_streams"):
+            cmd.extend(["-map", f"{input_number}:a?"])
+        if item.get("subtitle_streams"):
+            cmd.extend(["-map", f"{input_number}:s?"])
+    cmd.extend(["-map_metadata", "0", "-c", "copy", str(output_path)])
+    return cmd
+
+
+def track_manager_output_path(input_path: Path) -> Path:
+    suffix = input_path.suffix or ".mkv"
+    candidate = input_path.with_name(f"{sanitize_output_stem(input_path.stem)}_TrackEdit{suffix}")
+    return resolve_output_collision(candidate, input_path, "_TrackEdit")
+
+
+def print_track_list(answers: dict[str, Any]) -> None:
+    streams = (answers.get("probe") or {}).get("streams") or []
+    if not streams:
+        # Fallback: rebuild from the categorized lists (absolute index may be absent).
+        streams = (
+            list(answers.get("video_streams") or [])
+            + list(answers.get("audio_streams") or [])
+            + list(answers.get("subtitle_streams") or [])
+            + list(answers.get("data_streams") or [])
+        )
+    print()
+    print(paint("Streams in this file:", Color.BOLD + Color.BLUE))
+    for stream in streams:
+        index = stream.get("index", "?")
+        codec_type = stream.get("codec_type", "?")
+        codec = stream.get("codec_name", "?")
+        lang = (stream.get("tags") or {}).get("language", "")
+        title = (stream.get("tags") or {}).get("title", "")
+        extra = " | ".join(part for part in [f"lang={lang}" if lang else "", f"title={title}" if title else ""] if part)
+        type_color = {
+            "video": Color.CYAN, "audio": Color.GREEN, "subtitle": Color.MAGENTA,
+        }.get(codec_type, Color.WHITE)
+        print(
+            "  " + paint(f"#{index}", Color.LIGHT_BLUE) + " "
+            + paint(f"{codec_type}", type_color) + f" ({codec})"
+            + (f" | {extra}" if extra else "")
+        )
+    print("  " + paint("Remove by absolute index (e.g. 2) or type:index (e.g. a:1, s:0).", Color.HINT_YELLOW))
+
+
+def ask_track_manager_source(answers: dict[str, Any]) -> None:
+    while True:
+        value = ask_required(
+            question_prompt(
+                answers,
+                "Enter source media file path",
+                f"drag and drop a media file here or paste a path; example: {example_text('E:/Input/video.mkv')}",
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        input_path = terminal_path(value)
+        if not input_path.exists() or not input_path.is_file():
+            error("File not found. Enter the full file path again.")
+            continue
+        try:
+            load_input_metadata(answers, input_path)
+        except FFprobeError as exc:
+            error(str(exc))
+            continue
+        except Exception:
+            log_exception(f"ffprobe metadata load failed for Track Manager source: {input_path}")
+            error(f"ffprobe could not read the file. See log file: {_log_file_text()}")
+            continue
+        return
+
+
+def ask_track_remove_specs(answers: dict[str, Any], stream_count: int | None) -> list[str]:
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Stream(s) to REMOVE",
+                "comma-separated; index like 2 or type:index like a:1; Enter = remove nothing",
+                "",
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value.strip():
+            return []
+        try:
+            return parse_track_remove_specs(value, stream_count)
+        except ValueError as exc:
+            error(str(exc))
+
+
+def run_track_manager_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    try:
+        return _run_track_manager_mode_impl(base_answers)
+    except Back:
+        note("Returning to main menu.")
+        return None
+
+
+def _track_manager_collect_externals(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    if not ask_yes_no(yn_prompt("Add a track from an external file?", False), False):
+        return []
+    try:
+        return ask_additional_track_files(answers, [])
+    except Back:
+        return []
+
+
+def _run_track_manager_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
+    answers = dict(base_answers)
+    answers["_question_number"] = 1
+    print()
+    print(paint("Track Manager (remove a track and/or add a track from an external file):", Color.BOLD + Color.LIGHT_BLUE))
+    print(selection_menu_line(1, "Single file"))
+    print(selection_menu_line(2, "Folder (apply the same change to every media file)"))
+    while True:
+        scope = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
+        if is_back_value(scope):
+            raise Back()
+        if not scope:
+            scope = "1"
+        if scope in {"1", "2"}:
+            break
+        error("Enter 1 or 2.")
+
+    if scope == "2":
+        return _run_track_manager_folder(answers)
+    return _run_track_manager_single(answers)
+
+
+def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | None:
+    ask_track_manager_source(answers)
+    print_track_list(answers)
+    stream_count = len((answers.get("probe") or {}).get("streams") or [])
+    remove_specs = ask_track_remove_specs(answers, stream_count or None)
+    extra_items = _track_manager_collect_externals(answers)
+    if not remove_specs and not extra_items:
+        note("No track was removed or added; nothing to do.")
+        return None
+    input_path = Path(answers["input_path"])
+    output_path = track_manager_output_path(input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = build_track_manager_command(answers["ffmpeg"], input_path, remove_specs, extra_items, output_path)
+    print()
+    print(paint("Track Manager summary:", Color.BOLD + Color.LIME))
+    print("  " + field_text("input", input_path, Color.WHITE))
+    print("  " + field_text("remove", ", ".join(remove_specs) or "(none)", Color.ORANGE))
+    print("  " + field_text("add external", ", ".join(Path(it["path"]).name for it in extra_items) or "(none)", Color.GREEN))
+    print("  " + field_text("output", output_path, Color.LIME))
+    print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+    log_info("Final PowerShell command: " + command_to_powershell(cmd))
+    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+    if not ask_yes_no(question_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True):
+        note("FFmpeg was not started. The command above is ready to run manually.")
+        return None
+    print()
+    print(paint("Starting FFmpeg...", Color.GREEN))
+    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+    return run_ffmpeg_with_progress(cmd, total_duration=(duration if duration > 0 else None), label="Track Manager")
+
+
+def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | None:
+    while True:
+        value = ask_required(
+            question_prompt(
+                answers,
+                "Enter folder path (every media file inside is processed)",
+                "drag and drop a folder here or paste a path",
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        folder = terminal_path(value)
+        if not folder.exists() or not folder.is_dir():
+            error("Folder not found. Enter a valid folder path.")
+            continue
+        break
+    media_files = sorted(
+        (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in TRACK_MANAGER_MEDIA_EXTS
+         and not looks_like_generated_output_file(p)),
+        key=lambda p: p.name.lower(),
+    )
+    if not media_files:
+        error("No media files were found in that folder.")
+        return None
+    note(f"Found {len(media_files)} media file(s) in the folder.")
+    # For folder scope, removal uses type:index specs so it applies per file.
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Stream(s) to REMOVE from every file",
+                "comma-separated type:index (e.g. a:1, s:0); Enter = remove nothing",
+                "",
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value.strip():
+            remove_specs: list[str] = []
+            break
+        try:
+            remove_specs = parse_track_remove_specs(value)
+            if any(re.fullmatch(r"\d+", spec) for spec in remove_specs):
+                error("Folder mode needs type:index specs (e.g. a:1), not absolute indexes (they differ per file).")
+                continue
+            break
+        except ValueError as exc:
+            error(str(exc))
+    extra_items = _track_manager_collect_externals(answers)
+    if not remove_specs and not extra_items:
+        note("No track was removed or added; nothing to do.")
+        return None
+    last_result: tuple[int, float] | None = None
+    succeeded = 0
+    for media in media_files:
+        output_path = track_manager_output_path(media)
+        cmd = build_track_manager_command(answers["ffmpeg"], media, remove_specs, extra_items, output_path)
+        note(f"Processing: {media.name} -> {output_path.name}")
+        print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+        rc, elapsed = run_ffmpeg_with_progress(cmd, total_duration=None, label=f"Track Manager: {media.name}")
+        last_result = (rc, elapsed)
+        if rc == 0:
+            succeeded += 1
+        else:
+            error(f"FFmpeg failed on {media.name} (exit {rc}).")
+    note(f"Track Manager folder run finished: {succeeded}/{len(media_files)} succeeded.")
+    return last_result
 
 
 EXTRACT_AUDIO_EXTENSIONS = {
@@ -22899,7 +23180,20 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
     for idx, _item in enumerate(items):
         filters.append(f"[{idx}:a:0]{JOIN_AUDIO_PREP_FILTER}[a{idx}]")
         inputs.append(f"[a{idx}]")
-    filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=0:a=1[a]")
+    filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=0:a=1[acat]")
+    # Apply the same transforms the wizard collected to the JOINED audio:
+    # cut trims, then speed/reverse and loudnorm (no-ops for the menu-12 join,
+    # which sets none of these).
+    source_join_duration = sum(float(item.get("duration") or 0.0) for item in items)
+    keep_ranges = normalize_cut_ranges(
+        list(answers.get("cut_keep_ranges") or answers.get("audio_cut_keep_ranges") or []),
+        source_join_duration,
+    )
+    label = append_join_trim_concat_filter(filters, "acat", keep_ranges, "audio", "acut")
+    if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
+        filters.append(f"[{label}]{build_encode_audio_speed_filter(answers)}[a]")
+    else:
+        filters.append(f"[{label}]asetpts=PTS-STARTPTS[a]")
     cmd.extend([
         "-filter_complex", ";".join(filters),
         "-map", "[a]",
@@ -23104,6 +23398,8 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     answers = dict(base_answers)
     answers["_question_number"] = 1
     start_mode = ask_main_menu(answers, config_path)
+    if start_mode == 15:
+        return run_track_manager_mode(base_answers)
     if start_mode == 14:
         run_capability_cache_menu(base_answers)
         return None

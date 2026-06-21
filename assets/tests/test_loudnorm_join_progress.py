@@ -770,6 +770,45 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertTrue(FFmWiz.wizard_join_inputs_applicable(audio_answers))
         self.assertTrue(FFmWiz.wizard_join_inputs_applicable(video_answers))
 
+    # ================= Track Manager (menu 15) =================
+    def test_parse_track_remove_specs(self):
+        self.assertEqual(FFmWiz.parse_track_remove_specs("2, a:1 , s:0"), ["2", "a:1", "s:0"])
+        self.assertEqual(FFmWiz.parse_track_remove_specs("a:0,a:0"), ["a:0"])  # dedup
+        self.assertEqual(FFmWiz.parse_track_remove_specs(""), [])
+        with self.assertRaises(ValueError):
+            FFmWiz.parse_track_remove_specs("x:9")
+        with self.assertRaises(ValueError):
+            FFmWiz.parse_track_remove_specs("5", stream_count=3)
+
+    def test_build_track_manager_command_remove_and_add(self):
+        ext = {"path": Path("ext.aac"), "audio_streams": [{"codec_type": "audio"}], "subtitle_streams": []}
+        cmd = FFmWiz.build_track_manager_command("ffmpeg", Path("in.mkv"), ["a:1"], [ext], Path("out.mkv"))
+        # map all, drop a:1, add the external audio, copy.
+        self.assertEqual(cmd[cmd.index("-map") + 1], "0")
+        self.assertIn("-0:a:1", cmd)
+        self.assertIn("1:a?", cmd)
+        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+        self.assertTrue(str(cmd[-1]).endswith("out.mkv"))
+
+    def test_build_track_manager_command_remove_only(self):
+        cmd = FFmWiz.build_track_manager_command("ffmpeg", Path("in.mkv"), ["2"], [], Path("out.mkv"))
+        self.assertIn("-0:2", cmd)
+        self.assertNotIn("1:a?", cmd)
+        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+
+    def test_join_audio_encode_applies_loudnorm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            items = [make_item(Path(tmp) / "a.m4a"), make_item(Path(tmp) / "b.m4a")]
+            for it in items:
+                it["video_streams"] = []
+            answers = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "audio_bitrate_kbps": 160,
+                       "loudnorm_enabled": True, "loudnorm_target_i": -16.0, "loudnorm_mode": "single"}
+            cmd = FFmWiz.build_join_audio_encode_command(answers, items, Path(tmp) / "out.m4a")
+            fc = cmd[cmd.index("-filter_complex") + 1]
+            self.assertIn("concat=n=2:v=0:a=1", fc)
+            self.assertIn("loudnorm", fc)
+            self.assertLess(fc.index("concat=n=2"), fc.index("loudnorm"))
+
 
 if __name__ == "__main__":
     unittest.main()
