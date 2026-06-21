@@ -4638,7 +4638,11 @@ def build_speed_editor(request: dict[str, Any], media_kind: str):
             QtGui.QShortcut(QtGui.QKeySequence("Enter"), self, activated=self._confirm_if_not_editing_speed)
 
         def _setup_player(self):
-            if self.player is not None:
+            # Guard with getattr: the player attribute does not exist until this
+            # runs (other methods intentionally use hasattr(self, "player")), so a
+            # direct `self.player` read here raised AttributeError and the editor
+            # failed to initialize (notably for audio inputs).
+            if getattr(self, "player", None) is not None:
                 return
             self.player = QtMultimedia.QMediaPlayer(self)
             self.audio = QtMultimedia.QAudioOutput(self)
