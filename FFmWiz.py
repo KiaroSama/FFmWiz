@@ -17992,15 +17992,26 @@ def step_audio_cut_editor(answers: dict[str, Any]) -> None:
 
 
 def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
-    """Manual (non-GUI) audio transform: optional terminal cut ranges, plus a
-    speed value and reverse choice. All apply reliably without the GUI."""
+    """Manual (non-GUI) audio transform: optional terminal cut ranges or a
+    lossless split, plus a speed value and reverse choice."""
+    answers.pop("_audio_transform_split_points", None)
     duration = stream_duration_seconds({}, answers.get("format")) or 0.0
     keep_ranges: list[tuple[float, float]] = []
-    if ask_yes_no(yn_prompt("Add audio cuts (keep ranges)?", False), False):
+    if ask_yes_no(yn_prompt("Add audio cuts or split into separate files?", False), False):
         try:
-            keep_ranges = collect_cut_ranges_terminal(answers, 25.0, duration)
+            keep_ranges = collect_cut_ranges_terminal(answers, 25.0, duration, allow_split=True)
         except Back:
             keep_ranges = []
+        split_points = answers.pop("_manual_split_points", None)
+        if split_points:
+            # Lossless split: produce multiple files; speed/reverse do not apply.
+            answers["_audio_transform_split_points"] = split_points
+            answers["audio_cut_keep_ranges"] = []
+            answers["audio_speed_enabled"] = False
+            answers["reverse_audio"] = False
+            answers["_audio_transform_noop"] = False
+            log_info(f"Manual audio split points: {split_points}")
+            return
         if keep_ranges:
             print(paint(format_audio_ranges_for_summary(keep_ranges, "Audio cuts (keep ranges)"), Color.LIME))
     while True:
@@ -18036,6 +18047,7 @@ def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
 
 def step_audio_transform_editor(answers: dict[str, Any]) -> None:
     audio_index = int(answers.get("audio_index", 0))
+    answers.pop("_audio_transform_split_points", None)
     # Let the user choose between the graphical editor and manual numeric entry.
     while True:
         print()
@@ -18296,6 +18308,26 @@ def step_audio_cut_start_now(answers: dict[str, Any]) -> None:
 
 def step_audio_transform_start_now(answers: dict[str, Any]) -> None:
     if answers.get("_audio_transform_noop"):
+        return
+    split_points = answers.get("_audio_transform_split_points")
+    if split_points:
+        cmd, pattern = build_lossless_split_command(answers, split_points)
+        answers["cmd"] = cmd
+        answers["output_path"] = pattern
+        print()
+        print(paint("Lossless split (stream copy):", Color.BOLD + Color.LIME))
+        print("  " + field_text("input", answers["input_path"], Color.WHITE))
+        print("  " + field_text("output parts", f"{len(split_points) + 1} files -> {pattern.name}", Color.LIME))
+        print(paint(format_split_points_for_summary(split_points, float(answers.get("fps") or 25.0)), Color.LIGHT_BLUE))
+        note("Stream-copy split: rejoining the parts reproduces the original file.")
+        print()
+        print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+        log_info("Final PowerShell command: " + command_to_powershell(cmd))
+        print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+        answers["start_now"] = ask_yes_no(
+            question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
+            True,
+        )
         return
     cmd = build_audio_transform_command(answers)
     answers["cmd"] = cmd
@@ -19415,14 +19447,132 @@ def ask_cut_method(answers: dict[str, Any]) -> int:
         error("Enter 1.")
 
 
-def ask_manual_cut_layout(answers: dict[str, Any]) -> int:
-    """Ask which manual cut layout the user wants. Returns 1..4."""
+def parse_split_timestamp(token: str) -> float:
+    """Parse one split timestamp. Accepts seconds (e.g. 90 or 90.5),
+    MM:SS, MM:SS:mmm, or HH:MM:SS:mmm. The last colon field is milliseconds
+    (optional; missing => 0)."""
+    token = str(token or "").strip()
+    if not token:
+        raise ValueError("Empty timestamp.")
+    if ":" not in token:
+        return max(0.0, float(token))
+    parts = token.split(":")
+    if any(part.strip() == "" for part in parts[:-1]):
+        raise ValueError(f"Invalid timestamp: {token!r}")
+    try:
+        nums = [int(part) if part.strip() != "" else 0 for part in parts]
+    except ValueError:
+        raise ValueError(f"Invalid timestamp: {token!r}")
+    if len(nums) == 2:
+        minutes, seconds = nums
+        return minutes * 60 + seconds
+    if len(nums) == 3:
+        minutes, seconds, ms = nums
+        return minutes * 60 + seconds + ms / 1000.0
+    if len(nums) == 4:
+        hours, minutes, seconds, ms = nums
+        return hours * 3600 + minutes * 60 + seconds + ms / 1000.0
+    raise ValueError("Use seconds, MM:SS, MM:SS:mmm, or HH:MM:SS:mmm.")
+
+
+def parse_split_times_line(text: str, duration: float) -> list[float]:
+    """Parse a comma-separated list of split timestamps into sorted, unique
+    points strictly inside (0, duration). Points at/after the duration or <=0
+    are dropped (they would create empty parts)."""
+    points: list[float] = []
+    for token in str(text or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        points.append(parse_split_timestamp(token))
+    cleaned = sorted({round(p, 6) for p in points if p > 0.0 and (not duration or p < duration - 1e-6)})
+    return cleaned
+
+
+def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -> tuple[list[str], Path]:
+    """Build a stream-copy segment command that splits the input into contiguous
+    parts at the given times. Because it copies (no re-encode), concatenating
+    the parts reproduces the original file. Video split points snap to the
+    nearest preceding keyframe (inherent to lossless copy)."""
+    ffmpeg = answers["ffmpeg"]
+    input_path = Path(answers["input_path"])
+    ext = input_path.suffix or ".mkv"
+    location = Path(answers.get("output_location") or input_path.parent)
+    if location.suffix:
+        out_dir = location.parent
+        stem = sanitize_output_stem(location.stem)
+    else:
+        out_dir = location
+        stem = sanitize_output_stem(answers.get("output_name_stem") or input_path.stem)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pattern = out_dir / f"{stem}_part%03d{ext}"
+    segment_times = ",".join(f"{p:.6f}" for p in points)
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-y" if OVERWRITE_OUTPUT else "-n",
+        "-i",
+        str(input_path),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-f",
+        "segment",
+        "-segment_times",
+        segment_times,
+        "-reset_timestamps",
+        "1",
+        "-segment_start_number",
+        "1",
+        str(pattern),
+    ]
+    log_info(f"Lossless split: points={points}; parts={len(points) + 1}; pattern={pattern}")
+    return cmd, pattern
+
+
+def ask_split_points_terminal(answers: dict[str, Any], duration: float) -> list[float]:
+    """Prompt for comma-separated split times and return sorted split points."""
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter split times (comma-separated)",
+                "format MM:SS:mmm or HH:MM:SS:mmm or seconds; milliseconds optional; "
+                "example: 10:00,20:00:000,25:30",
+                None,
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            error("Enter at least one split time, or 0 to go back.")
+            continue
+        try:
+            points = parse_split_times_line(value, duration)
+        except ValueError as exc:
+            error(str(exc))
+            continue
+        if not points:
+            error("No valid split times inside the file duration. Try again.")
+            continue
+        print(paint(format_split_points_for_summary(points, float(answers.get("fps") or 25.0)), Color.LIME))
+        return points
+
+
+def ask_manual_cut_layout(answers: dict[str, Any], allow_split: bool = False) -> int:
+    """Ask which manual cut layout the user wants. Returns 1..4 (or 5 when
+    allow_split and the user chooses lossless split)."""
     print()
     print(paint("Manual cut mode:", Color.BOLD + Color.LIGHT_BLUE))
-    print(f"  {paint('1.', Color.LIGHT_BLUE)} Keep one range {paint('[1]', Color.GREEN)}")
-    print(f"  {paint('2.', Color.LIGHT_BLUE)} Remove one range")
-    print(f"  {paint('3.', Color.LIGHT_BLUE)} Remove multiple ranges")
-    print(f"  {paint('4.', Color.LIGHT_BLUE)} Keep multiple ranges")
+    print(selection_menu_line(1, "Keep one range") + " " + paint("[1]", Color.GREEN))
+    print(selection_menu_line(2, "Remove one range"))
+    print(selection_menu_line(3, "Remove multiple ranges"))
+    print(selection_menu_line(4, "Keep multiple ranges"))
+    valid = {"1", "2", "3", "4"}
+    if allow_split:
+        print(selection_menu_line(5, "Split into separate files at given times (lossless)"))
+        valid.add("5")
     print()
     while True:
         value = ask_raw(
@@ -19433,18 +19583,27 @@ def ask_manual_cut_layout(answers: dict[str, Any]) -> int:
             return 1
         if is_back_value(value):
             raise Back()
-        if value in {"1", "2", "3", "4"}:
+        if value in valid:
             return int(value)
-        error("Enter 1, 2, 3, or 4.")
+        error("Enter " + ", ".join(sorted(valid)) + ".")
 
 
 def collect_cut_ranges_terminal(
     answers: dict[str, Any],
     fps: float,
     duration: float,
+    allow_split: bool = False,
 ) -> list[tuple[float, float]]:
-    """Run the terminal manual-cut flow. Returns the final keep_ranges list."""
-    layout = ask_manual_cut_layout(answers)
+    """Run the terminal manual-cut flow. Returns the final keep_ranges list.
+    When allow_split and the user picks the split option, the split points are
+    stored in answers['_manual_split_points'] and an empty keep list is
+    returned (the caller routes to the lossless split path)."""
+    answers.pop("_manual_split_points", None)
+    layout = ask_manual_cut_layout(answers, allow_split=allow_split)
+
+    if layout == 5:
+        answers["_manual_split_points"] = ask_split_points_terminal(answers, duration)
+        return []
 
     if layout == 1:
         start = ask_hmsf_time(answers, "Keep start time", fps, duration)
@@ -19474,7 +19633,7 @@ def collect_cut_ranges_terminal(
                 error("End must be greater than start; this range was ignored.")
             else:
                 removes.append((start, end))
-            again = ask_yes_no("Add another remove range? [y/N]", False)
+            again = ask_yes_no(yn_prompt("Add another remove range?", False), False)
             if not again:
                 break
             idx += 1
@@ -19492,7 +19651,7 @@ def collect_cut_ranges_terminal(
             error("End must be greater than start; this range was ignored.")
         else:
             keeps.append((start, end))
-        again = ask_yes_no("Add another keep range? [y/N]", False)
+        again = ask_yes_no(yn_prompt("Add another keep range?", False), False)
         if not again:
             break
         idx += 1
