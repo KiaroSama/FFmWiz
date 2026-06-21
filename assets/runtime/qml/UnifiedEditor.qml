@@ -1,4 +1,4 @@
-// FFmWiz Unified Video Editor — QtQuick/QML (modern engine, Phase 1).
+// FFmWiz Unified Video Editor — QtQuick/QML (modern engine).
 // Colors come from the classic palette (bridge.paletteJson) so the look matches.
 import QtQuick
 import QtQuick.Controls.Basic
