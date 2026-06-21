@@ -17982,24 +17982,105 @@ def step_audio_cut_editor(answers: dict[str, Any]) -> None:
         return
 
 
+def _apply_manual_audio_transform(answers: dict[str, Any]) -> None:
+    """Manual (non-GUI) audio transform: enter a speed value and choose reverse.
+    Cuts are GUI-only; manual mode covers speed/reverse, which is the common
+    case and always applies reliably."""
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter audio speed",
+                "examples: 150% or 1.5x or 1.5 (100% = no change)",
+                "100%",
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = "100%"
+        try:
+            speed = parse_speed_factor(value)
+            break
+        except ValueError as exc:
+            error(str(exc))
+    reverse = ask_yes_no(yn_prompt("Reverse audio?", False), False)
+    if not (reverse or abs(speed - 1.0) > 1e-6):
+        note("No audio transform was selected (speed 100%, no reverse).")
+        answers["_audio_transform_noop"] = True
+        return
+    answers["audio_cut_keep_ranges"] = []
+    answers["audio_speed_enabled"] = True
+    answers["audio_speed_factor"] = speed
+    answers["reverse_audio"] = reverse
+    answers["_audio_transform_noop"] = False
+    log_info(f"Manual audio transform: speed={speed}; reverse={reverse}")
+
+
 def step_audio_transform_editor(answers: dict[str, Any]) -> None:
     audio_index = int(answers.get("audio_index", 0))
+    # Let the user choose between the graphical editor and manual numeric entry.
+    while True:
+        print()
+        print(paint("Audio transform:", Color.BOLD + Color.LIGHT_BLUE))
+        print("  " + paint("1", Color.OPT_KEY_CORAL) + " Graphical editor (waveform cuts + speed / reverse)")
+        print("  " + paint("2", Color.OPT_KEY_CORAL) + " Enter values manually (speed + reverse)")
+        choice = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
+        if is_back_value(choice):
+            raise Back()
+        if not choice:
+            choice = "1"
+        if choice in {"1", "2"}:
+            break
+        error("Enter 1 or 2.")
+
+    if choice == "2":
+        _apply_manual_audio_transform(answers)
+        return
+
     while True:
         result = open_audio_transform_gui(answers, audio_index)
         if result is None:
             note("Graphical audio transform editor was canceled.")
-            try_again = ask_yes_no(yn_prompt("Open it again?", True), True)
-            if not try_again:
+            action = ask_raw(
+                question_prompt(
+                    answers,
+                    "Reopen the editor, enter values manually, or skip?",
+                    "g=graphical editor, m=manual entry, n=skip",
+                    "g",
+                )
+            ).strip().lower()
+            if is_back_value(action):
+                raise Back()
+            if action in {"m", "manual"}:
+                _apply_manual_audio_transform(answers)
+                return
+            if action in {"n", "no", "skip"}:
                 answers["_audio_transform_noop"] = True
                 return
-            continue
+            continue  # 'g' or empty -> reopen the editor
         keep_ranges = list(result.get("keep_ranges") or [])
         speed = clamp_speed_factor(result.get("speed", DEFAULT_SPEED_FACTOR))
         reverse = bool(result.get("reverse"))
         changed = bool(keep_ranges) or reverse or abs(speed - 1.0) > 1e-6
         if not changed:
-            note("No audio transform was selected.")
-            answers["_audio_transform_noop"] = True
+            note("No audio transform was selected in the editor.")
+            action = ask_raw(
+                question_prompt(
+                    answers,
+                    "Nothing changed. Enter values manually, reopen editor, or skip?",
+                    "m=manual entry, g=graphical editor, n=skip",
+                    "m",
+                )
+            ).strip().lower()
+            if is_back_value(action):
+                raise Back()
+            if action in {"g", "graphical"}:
+                continue
+            if action in {"n", "no", "skip"}:
+                answers["_audio_transform_noop"] = True
+                return
+            _apply_manual_audio_transform(answers)
             return
         answers["audio_cut_keep_ranges"] = keep_ranges
         answers["audio_speed_enabled"] = bool(reverse or abs(speed - 1.0) > 1e-6)

@@ -602,6 +602,53 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             self.assertIn("audio-only", out)
             self.assertNotIn("Traceback", out)
 
+    # ================= Audio transform: GUI vs manual =================
+    def test_audio_transform_menu_manual_sets_speed(self):
+        answers = {"audio_index": 0}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "150%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertFalse(answers["_audio_transform_noop"])
+        self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
+        self.assertFalse(answers["reverse_audio"])
+        self.assertTrue(answers["audio_speed_enabled"])
+
+    def test_audio_transform_manual_noop_when_unchanged(self):
+        answers = {"audio_index": 0}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertTrue(answers["_audio_transform_noop"])
+
+    def test_audio_transform_manual_reverse_only(self):
+        answers = {"audio_index": 0}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "100%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertFalse(answers["_audio_transform_noop"])
+        self.assertTrue(answers["reverse_audio"])
+
+    def test_audio_transform_gui_success(self):
+        answers = {"audio_index": 0}
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["1"]), \
+             mock.patch.object(FFmWiz, "open_audio_transform_gui",
+                               return_value={"keep_ranges": [], "speed": 1.5, "reverse": True}):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertFalse(answers["_audio_transform_noop"])
+        self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
+        self.assertTrue(answers["reverse_audio"])
+
+    def test_audio_transform_gui_noop_falls_back_to_manual(self):
+        answers = {"audio_index": 0}
+        # Menu -> graphical; GUI returns no change; choose manual; enter 125%.
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["1", "m", "125%"]), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False), \
+             mock.patch.object(FFmWiz, "open_audio_transform_gui",
+                               return_value={"keep_ranges": [], "speed": 1.0, "reverse": False}):
+            FFmWiz.step_audio_transform_editor(answers)
+        self.assertFalse(answers["_audio_transform_noop"])
+        self.assertAlmostEqual(answers["audio_speed_factor"], 1.25)
+
 
 if __name__ == "__main__":
     unittest.main()
