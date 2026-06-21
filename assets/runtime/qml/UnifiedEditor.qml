@@ -160,24 +160,56 @@ ApplicationWindow {
         }
     }
 
-    // ---------- Playback ----------
+    // ---------- Playback (two players: preload next segment for near-seamless joins) ----------
+    property int activeAB: 0       // 0 -> playerA active, 1 -> playerB active
+    property bool wantPlaying: false
+
+    function actP() { return activeAB === 0 ? playerA : playerB }
+    function idleP() { return activeAB === 0 ? playerB : playerA }
+    function srcOf(i) { return "file:///" + String(segs[i].path).replace(/\\/g, "/") }
+    function showActive() { voA.visible = (activeAB === 0); voB.visible = (activeAB === 1) }
+
     MediaPlayer {
-        id: player
-        videoOutput: videoOut
-        audioOutput: AudioOutput { id: audioOut; volume: 0.85 }
-        onPositionChanged: { if (ready && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
-        onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.EndOfMedia && curSeg + 1 < segs.length) loadSegment(curSeg + 1, 0, true)
-        }
+        id: playerA
+        videoOutput: voA
+        audioOutput: AudioOutput { id: aoA; volume: 0.85 }
+        onPositionChanged: { if (ready && activeAB === 0 && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
+        onMediaStatusChanged: { if (activeAB === 0 && mediaStatus === MediaPlayer.EndOfMedia) advanceToNext() }
+    }
+    MediaPlayer {
+        id: playerB
+        videoOutput: voB
+        audioOutput: AudioOutput { id: aoB; volume: 0.85 }
+        onPositionChanged: { if (ready && activeAB === 1 && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
+        onMediaStatusChanged: { if (activeAB === 1 && mediaStatus === MediaPlayer.EndOfMedia) advanceToNext() }
     }
 
+    function preloadNext() {
+        if (curSeg + 1 < segs.length) { idleP().source = srcOf(curSeg + 1); idleP().position = 0; idleP().pause() }
+        else { idleP().source = "" }
+    }
+    // Hard switch the ACTIVE player to a segment (init + manual seeks across segments).
     function loadSegment(index, localSeconds, playAfter) {
         if (!segs.length) return
         index = Math.max(0, Math.min(segs.length - 1, index))
         curSeg = index
-        player.source = "file:///" + String(segs[index].path).replace(/\\/g, "/")
-        player.position = Math.max(0, Math.round(localSeconds * 1000))
-        if (playAfter) player.play(); else player.pause()
+        wantPlaying = playAfter
+        actP().source = srcOf(index)
+        actP().position = Math.max(0, Math.round(localSeconds * 1000))
+        if (playAfter) actP().play(); else actP().pause()
+        showActive()
+        preloadNext()
+    }
+    // Sequential boundary: hand over to the already-preloaded idle player (no reload gap).
+    function advanceToNext() {
+        if (curSeg + 1 >= segs.length) { actP().pause(); wantPlaying = false; return }
+        if (idleP().source === undefined || String(idleP().source) === "") preloadNext()
+        activeAB = (activeAB === 0) ? 1 : 0
+        curSeg = curSeg + 1
+        showActive()
+        actP().position = 0
+        if (wantPlaying) actP().play()
+        preloadNext()
     }
     function segmentForTime(t) {
         t = Math.max(0, Math.min(totalDuration, t))
@@ -188,10 +220,13 @@ ApplicationWindow {
     function seekTo(t) {
         var s = segmentForTime(t)
         cti = Math.max(0, Math.min(totalDuration, t))
-        if (s.index !== curSeg) loadSegment(s.index, s.local, player.playbackState === MediaPlayer.PlayingState)
-        else player.position = Math.round(s.local * 1000)
+        if (s.index === curSeg) actP().position = Math.round(s.local * 1000)
+        else loadSegment(s.index, s.local, actP().playbackState === MediaPlayer.PlayingState)
     }
-    function togglePlay() { if (player.playbackState === MediaPlayer.PlayingState) player.pause(); else player.play() }
+    function togglePlay() {
+        if (actP().playbackState === MediaPlayer.PlayingState) { actP().pause(); wantPlaying = false }
+        else { actP().play(); wantPlaying = true }
+    }
     function fmt(t) {
         t = Math.max(0, t)
         var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60), ms = Math.floor((t - Math.floor(t)) * 1000)
@@ -358,16 +393,27 @@ ApplicationWindow {
                     color: win.col("timeline_bg", "#0a0d12")
                     border.color: win.col("border_strong", "#3a4150")
                     clip: true
+                    // Two stacked outputs for double-buffered seamless joins.
+                    // PreserveAspectFit keeps each segment's native aspect ratio
+                    // (black bars instead of stretching when dimensions differ).
                     VideoOutput {
-                        id: videoOut
+                        id: voA
                         anchors.fill: parent
                         anchors.margins: 6
                         fillMode: VideoOutput.PreserveAspectFit
+                        visible: win.activeAB === 0
+                    }
+                    VideoOutput {
+                        id: voB
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        fillMode: VideoOutput.PreserveAspectFit
+                        visible: win.activeAB === 1
                     }
                     Item {
                         anchors.fill: parent
                         visible: ready && (cropTop + cropLeft + cropRight + cropBottom) > 0
-                        property rect cr: videoOut.contentRect
+                        property rect cr: (win.activeAB === 0 ? voA.contentRect : voB.contentRect)
                         Rectangle {
                             color: "transparent"; border.color: win.col("warn", "#d29922"); border.width: 2
                             x: parent.cr.x + parent.cr.width * (cropLeft / Math.max(1, sourceW))
@@ -378,7 +424,7 @@ ApplicationWindow {
                     }
                     Label {
                         anchors.centerIn: parent
-                        visible: player.mediaStatus === MediaPlayer.NoMedia || player.mediaStatus === MediaPlayer.LoadingMedia
+                        visible: actP().mediaStatus === MediaPlayer.NoMedia || actP().mediaStatus === MediaPlayer.LoadingMedia
                         text: "Loading preview…"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 14
                     }
                 }
@@ -459,7 +505,7 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    PadButton { Layout.preferredWidth: 110; text: player.playbackState === MediaPlayer.PlayingState ? "❚❚  Pause" : "▶  Play"; onClicked: togglePlay() }
+                    PadButton { Layout.preferredWidth: 110; text: actP().playbackState === MediaPlayer.PlayingState ? "❚❚  Pause" : "▶  Play"; onClicked: togglePlay() }
                     PadButton { Layout.preferredWidth: 70; text: "−1s"; onClicked: seekTo(cti - 1) }
                     PadButton { Layout.preferredWidth: 70; text: "+1s"; onClicked: seekTo(cti + 1) }
                     Label { text: fmt(cti) + "  /  " + fmt(totalDuration); color: win.col("text", "#e6edf3"); font.pixelSize: 13; font.family: "Consolas" }
