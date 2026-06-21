@@ -546,6 +546,62 @@ class LoudnormJoinProgressTests(unittest.TestCase):
                 FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4")
             self.assertIn("B.mov", str(ctx.exception))
 
+    # ================= Audio+Video Join (auto-detect) =================
+    def test_join_load_media_item_rejects_audio_only_by_default(self):
+        with mock.patch.object(FFmWiz, "ffprobe_json", return_value={
+            "format": {"duration": "5"},
+            "streams": [{"codec_type": "audio", "codec_name": "aac"}],
+        }):
+            with self.assertRaises(ValueError):
+                FFmWiz.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"))
+
+    def test_join_load_media_item_accepts_audio_only_when_allowed(self):
+        with mock.patch.object(FFmWiz, "ffprobe_json", return_value={
+            "format": {"duration": "5"},
+            "streams": [{"codec_type": "audio", "codec_name": "aac"}],
+        }):
+            item = FFmWiz.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"), allow_audio_only=True)
+        self.assertEqual(item["video_streams"], [])
+        self.assertEqual(len(item["audio_streams"]), 1)
+
+    def test_join_load_media_item_rejects_empty_when_allowed(self):
+        with mock.patch.object(FFmWiz, "ffprobe_json", return_value={"format": {}, "streams": []}):
+            with self.assertRaises(ValueError):
+                FFmWiz.join_load_media_item({"ffprobe": "ffprobe"}, Path("x.bin"), allow_audio_only=True)
+
+    def test_build_join_audio_encode_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            items = [
+                make_item(Path(tmp) / "a.m4a", duration=4.0, audio_bitrate="128000"),
+                make_item(Path(tmp) / "b.m4a", duration=6.0, audio_bitrate="96000"),
+            ]
+            for it in items:
+                it["video_streams"] = []  # audio-only
+            answers = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "audio_bitrate_kbps": 160,
+                       "output_collision_suffix": "_Encode"}
+            cmd = FFmWiz.build_join_audio_encode_command(answers, items, Path(tmp) / "out.m4a")
+            fc = cmd[cmd.index("-filter_complex") + 1]
+            self.assertIn("concat=n=2:v=0:a=1", fc)
+            self.assertIn("[0:a:0]", fc)
+            self.assertIn("[1:a:0]", fc)
+            self.assertEqual(cmd[cmd.index("-map") + 1], "[a]")
+            self.assertIn("-vn", cmd)
+            self.assertNotIn("-c:v", cmd)
+            self.assertIn("aac", cmd)
+            self.assertIn("160k", cmd)
+
+    def test_print_join_summary_handles_audio_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            items = [make_item(Path(tmp) / "a.m4a"), make_item(Path(tmp) / "b.m4a")]
+            for it in items:
+                it["video_streams"] = []
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                FFmWiz.print_join_summary(items, False, ["audio re-encode"])
+            out = buf.getvalue()
+            self.assertIn("audio-only", out)
+            self.assertNotIn("Traceback", out)
+
 
 if __name__ == "__main__":
     unittest.main()

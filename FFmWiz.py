@@ -5940,6 +5940,17 @@ def question_prompt(
     return "\n" + prompt + ": "
 
 
+def yn_prompt(title: str, default: bool) -> str:
+    """Build a colored yes/no sub-prompt consistent with the wizard style, for
+    standalone confirmations that do not go through question_prompt."""
+    default_text = "y" if default else "n"
+    return (
+        f"{paint(title, Color.BOLD)} "
+        f"({paint('y', Color.OPT_KEY_CHARTREUSE)}/{paint('n', Color.OPT_KEY_CHARTREUSE)}) "
+        f"{paint('[' + default_text + ']', Color.GREEN)}: "
+    )
+
+
 def strip_quotes(value: str) -> str:
     value = value.strip()
     while len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -17726,9 +17737,9 @@ def step_video_speed_reverse_options(answers: dict[str, Any]) -> None:
                     error(str(exc))
             if "speed_factor" not in answers:
                 continue
-            answers["reverse_video"] = ask_yes_no("Reverse video too? (y/n) [n]: ", False)
+            answers["reverse_video"] = ask_yes_no(yn_prompt("Reverse video too?", False), False)
             include_default = bool(answers.get("audio_streams"))
-            answers["include_audio"] = ask_yes_no("Sync all audio tracks with the video speed/reverse change? (y/n) [y]: ", include_default)
+            answers["include_audio"] = ask_yes_no(yn_prompt("Sync all audio tracks with the video speed/reverse change?", include_default), include_default)
             answers["_speed_reverse_noop"] = False
             return
         error("Enter y, n, or g.")
@@ -17793,9 +17804,9 @@ def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
                     error(str(exc))
             if "video_speed_factor" not in answers:
                 continue
-            answers["reverse_video"] = ask_yes_no("Reverse video too? (y/n) [n]: ", False)
+            answers["reverse_video"] = ask_yes_no(yn_prompt("Reverse video too?", False), False)
             if answers.get("audio_streams"):
-                answers["audio_speed_from_video"] = ask_yes_no("Apply the same speed/reverse to selected audio too? (y/n) [y]: ", True)
+                answers["audio_speed_from_video"] = ask_yes_no(yn_prompt("Apply the same speed/reverse to selected audio too?", True), True)
             answers["video_speed_enabled"] = True
             return
         error("Enter y, n, or g." if allow_gui else "Enter y or n.")
@@ -17846,7 +17857,7 @@ def step_audio_speed_reverse_options(answers: dict[str, Any]) -> None:
                     error(str(exc))
             if "speed_factor" not in answers:
                 continue
-            answers["reverse_audio"] = ask_yes_no("Reverse audio too? (y/n) [n]: ", False)
+            answers["reverse_audio"] = ask_yes_no(yn_prompt("Reverse audio too?", False), False)
             answers["_speed_reverse_noop"] = False
             return
         error("Enter y, n, or g.")
@@ -17903,7 +17914,7 @@ def step_audio_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
                     error(str(exc))
             if "audio_speed_factor" not in answers:
                 continue
-            answers["reverse_audio"] = ask_yes_no("Reverse audio too? (y/n) [n]: ", False)
+            answers["reverse_audio"] = ask_yes_no(yn_prompt("Reverse audio too?", False), False)
             answers["audio_speed_enabled"] = True
             answers["audio_speed_from_video"] = False
             return
@@ -17958,7 +17969,7 @@ def step_audio_cut_editor(answers: dict[str, Any]) -> None:
         ranges = open_audio_cut_gui(answers, audio_index)
         if ranges is None:
             note("Graphical audio cut editor was canceled.")
-            try_again = ask_yes_no("Open it again? (y/n) [y]: ", True)
+            try_again = ask_yes_no(yn_prompt("Open it again?", True), True)
             if not try_again:
                 answers["_audio_cut_noop"] = True
                 return
@@ -17977,7 +17988,7 @@ def step_audio_transform_editor(answers: dict[str, Any]) -> None:
         result = open_audio_transform_gui(answers, audio_index)
         if result is None:
             note("Graphical audio transform editor was canceled.")
-            try_again = ask_yes_no("Open it again? (y/n) [y]: ", True)
+            try_again = ask_yes_no(yn_prompt("Open it again?", True), True)
             if not try_again:
                 answers["_audio_transform_noop"] = True
                 return
@@ -19128,7 +19139,7 @@ def _capability_cache_clear() -> None:
     if not any(p.exists() for p in owned_files):
         note("Capability cache is already empty.")
         return
-    if not ask_yes_no("Clear the FFmpeg capability cache? (y/n) [n]: ", False):
+    if not ask_yes_no(yn_prompt("Clear the FFmpeg capability cache?", False), False):
         note("Capability cache not cleared.")
         return
     removed: list[str] = []
@@ -19166,7 +19177,7 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print(f"  {paint('9.', Color.LIGHT_BLUE)} Hard Sub Encode")
     print(f"  {paint('10.', Color.LIGHT_BLUE)} Video Speed / Reverse")
     print(f"  {paint('11.', Color.LIGHT_BLUE)} Audio Cut / Speed / Reverse")
-    print(f"  {paint('12.', Color.LIGHT_BLUE)} Join Videos")
+    print(f"  {paint('12.', Color.LIGHT_BLUE)} Join Audios and Videos")
     print(f"  {paint('13.', Color.LIGHT_BLUE)} Metadata Editor")
     print(f"  {paint('14.', Color.LIGHT_BLUE)} FFmpeg capability cache (diagnostics)")
     print()
@@ -22024,7 +22035,7 @@ def ffconcat_quote_path(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace("'", r"'\''")
 
 
-def join_load_media_item(answers: dict[str, Any], path: Path) -> dict[str, Any]:
+def join_load_media_item(answers: dict[str, Any], path: Path, allow_audio_only: bool = False) -> dict[str, Any]:
     probe = ffprobe_json(answers["ffprobe"], path)
     streams = probe.get("streams", [])
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
@@ -22033,7 +22044,14 @@ def join_load_media_item(answers: dict[str, Any], path: Path) -> dict[str, Any]:
     attachment_streams = [stream for stream in streams if stream.get("codec_type") == "attachment"]
     data_streams = [stream for stream in streams if stream.get("codec_type") == "data"]
     if not video_streams:
-        raise ValueError("Join Videos requires video inputs.")
+        # Audio-only inputs are accepted only when the caller explicitly allows
+        # an audio join (the standalone "Join Audios and Videos" mode); the
+        # video-encode join paths still require video inputs.
+        if not (allow_audio_only and audio_streams):
+            if allow_audio_only:
+                raise ValueError("This file has no audio or video streams to join.")
+            raise ValueError("Join Videos requires video inputs.")
+    primary_stream = (video_streams or audio_streams or [{}])[0]
     return {
         "path": path,
         "probe": probe,
@@ -22044,7 +22062,7 @@ def join_load_media_item(answers: dict[str, Any], path: Path) -> dict[str, Any]:
         "subtitle_streams": subtitle_streams,
         "attachment_streams": attachment_streams,
         "data_streams": data_streams,
-        "duration": stream_duration_seconds({}, probe.get("format")) or stream_duration_seconds(video_streams[0], probe.get("format")) or 0.0,
+        "duration": stream_duration_seconds({}, probe.get("format")) or stream_duration_seconds(primary_stream, probe.get("format")) or 0.0,
     }
 
 
@@ -22480,22 +22498,60 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     return cmd
 
 
+def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
+    """Audio-only Join re-encode: prepare each input's first audio track with
+    the shared join audio preparation, concat them, and encode to AAC. Used when
+    every joined input is audio-only and stream copy is not possible."""
+    output_path = resolve_output_collision_against_inputs(
+        output_path,
+        [Path(item["path"]) for item in items if item.get("path")],
+        answers.get("output_collision_suffix", "_Encode"),
+    )
+    answers["output_path"] = output_path
+    bitrate = int(answers.get("audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
+    cmd: list[str] = [answers["ffmpeg"], "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n"]
+    for item in items:
+        cmd.extend(["-i", str(item["path"])])
+    filters: list[str] = []
+    inputs: list[str] = []
+    for idx, _item in enumerate(items):
+        filters.append(f"[{idx}:a:0]{JOIN_AUDIO_PREP_FILTER}[a{idx}]")
+        inputs.append(f"[a{idx}]")
+    filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=0:a=1[a]")
+    cmd.extend([
+        "-filter_complex", ";".join(filters),
+        "-map", "[a]",
+        "-vn", "-sn", "-dn",
+        "-map_metadata", "-1", "-map_chapters", "-1",
+        "-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2",
+    ])
+    if output_path.suffix.lower() in {".mp4", ".m4a", ".mov"}:
+        cmd.extend(["-movflags", "+faststart"])
+    cmd.append(str(output_path))
+    return cmd
+
+
 def print_join_summary(items: list[dict[str, Any]], copy_compatible: bool, reasons: list[str]) -> None:
     print()
-    print(paint("Join Videos summary:", Color.BOLD + Color.LIGHT_BLUE))
+    print(paint("Join summary:", Color.BOLD + Color.LIGHT_BLUE))
     for idx, item in enumerate(items, start=1):
-        video = item["video_streams"][0]
-        fps = rational_to_float(video.get("avg_frame_rate")) or rational_to_float(video.get("r_frame_rate")) or 0.0
-        print(
-            "  "
-            + field_text(
-                f"input {idx}",
+        video_streams = item.get("video_streams") or []
+        if video_streams:
+            video = video_streams[0]
+            fps = rational_to_float(video.get("avg_frame_rate")) or rational_to_float(video.get("r_frame_rate")) or 0.0
+            detail = (
                 f"{item['path'].name} | duration: {format_duration(item.get('duration'))} | "
                 f"video: {video.get('codec_name', 'unknown')} {video.get('width', '?')}x{video.get('height', '?')} {fps:g} fps | "
-                f"audio tracks: {len(item.get('audio_streams') or [])}",
-                Color.WHITE,
+                f"audio tracks: {len(item.get('audio_streams') or [])}"
             )
-        )
+        else:
+            audio_streams = item.get("audio_streams") or []
+            codec = audio_streams[0].get("codec_name", "unknown") if audio_streams else "none"
+            detail = (
+                f"{item['path'].name} | duration: {format_duration(item.get('duration'))} | "
+                f"audio-only: {codec} | audio tracks: {len(audio_streams)}"
+            )
+        print("  " + field_text(f"input {idx}", detail, Color.WHITE))
     if copy_compatible:
         print("  " + field_text("join mode", "stream copy, no re-encode", Color.GREEN))
     else:
@@ -22513,8 +22569,8 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
         while True:
             if need_file:
                 answers["_question_number"] = len(items) + 1
-                label = "Enter first video file path" if not items else "Enter another video file path"
-                hint = "drag and drop a video file here or paste a path"
+                label = "Enter first media file path (audio or video)" if not items else "Enter another media file path"
+                hint = "drag and drop an audio or video file here or paste a path"
                 if items:
                     hint += "; b=re-enter previous file"
                 value = ask_raw(
@@ -22536,19 +22592,19 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
                     error("File not found. Enter the full file path again.")
                     continue
                 if any(paths_same(path, it["path"]) for it in items):
-                    error("This video is already selected. Enter a different file.")
+                    error("This file is already selected. Enter a different file.")
                     continue
                 try:
-                    item = join_load_media_item(answers, path)
+                    item = join_load_media_item(answers, path, allow_audio_only=True)
                 except Exception as exc:
-                    log_exception(f"Join Videos probe failed: {path}")
+                    log_exception(f"Join media probe failed: {path}")
                     error(str(exc))
                     continue
                 items.append(item)
             if len(items) >= 2:
                 answers["_question_number"] = len(items) + 1
                 more = ask_join_add_another(
-                    question_prompt(answers, "Add another video file?", "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
+                    question_prompt(answers, "Add another media file?", "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
                 )
                 if more is False:
                     break
@@ -22582,10 +22638,37 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
 
     output_path = join_default_output_path(answers, items[0]["path"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect whether this is an audio-only join or a video join.
+    has_video_items = [it for it in items if it.get("video_streams")]
+    audio_only_items = [it for it in items if not it.get("video_streams")]
+    if has_video_items and audio_only_items:
+        error(
+            "Cannot mix audio-only and video inputs in one join. "
+            f"Audio-only: {', '.join(Path(it['path']).name for it in audio_only_items)}. "
+            "Select all video files, or all audio files."
+        )
+        return None
+    audio_only_join = not has_video_items
+    if audio_only_join:
+        note("Detected audio-only inputs: performing an audio join.")
+
     copy_compatible, reasons = join_copy_compatibility(items)
     print_join_summary(items, copy_compatible, reasons)
     if copy_compatible:
         cmd = build_join_copy_command(answers, items, output_path)
+    elif audio_only_join:
+        note("These audio files cannot be joined with stream copy. Re-encoding to AAC is required.")
+        # Default the audio bitrate to the highest known source among inputs.
+        candidates: list[int] = []
+        for item in items:
+            astreams = item.get("audio_streams") or []
+            if astreams:
+                value = stream_bitrate_kbps(astreams[0], item.get("format"), get_packet_sizes(join_item_answers(answers, item)))
+                if value:
+                    candidates.append(int(value))
+        answers["audio_bitrate_kbps"] = max(candidates) if candidates else DEFAULT_AUDIO_BITRATE_KBPS
+        cmd = build_join_audio_encode_command(answers, items, output_path)
     else:
         note("These files cannot be safely joined with stream copy. Re-encoding is required.")
         use_near = ask_yes_no(
@@ -22598,7 +22681,7 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
             True,
         )
         if not use_near:
-            note("Join Videos was canceled before encoding.")
+            note("Join was canceled before encoding.")
             return None
         first_video = items[0]["video_streams"][0]
         format_answers = dict(answers)
@@ -22617,7 +22700,7 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
         cmd = build_join_near_quality_command(answers, items, output_path)
     output_path = Path(answers.get("output_path") or output_path)
     answers["output_path"] = output_path
-    log_info(f"Join Videos command: {command_to_powershell(cmd)}")
+    log_info(f"Join command: {command_to_powershell(cmd)}")
     print()
     print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
     print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
@@ -22630,7 +22713,7 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
     try:
-        return run_ffmpeg_with_progress(cmd, total_duration=(total_duration if total_duration > 0 else None), label="Join Videos")
+        return run_ffmpeg_with_progress(cmd, total_duration=(total_duration if total_duration > 0 else None), label="Join")
     finally:
         cleanup_join_concat_list(answers)
 
