@@ -3602,8 +3602,10 @@ class CommandGenerationTests(unittest.TestCase):
         filt = FFmWiz.build_loudnorm_filter(answers)
         self.assertIn("linear=true", filt)
 
-    def test_loudnorm_linear_not_feasible(self):
-        """Linear mode not feasible: predicted TP exceeds target TP."""
+    def test_loudnorm_two_pass_always_linear_true(self):
+        """Two-pass (measured) always emits linear=true per the loudnorm spec;
+        FFmpeg internally falls back to dynamic if the linear gain would exceed
+        the true-peak ceiling, so FFmWiz no longer hard-codes linear=false."""
         answers = {
             "loudnorm_enabled": True,
             "loudnorm_target_i": -14.0,
@@ -3615,10 +3617,12 @@ class CommandGenerationTests(unittest.TestCase):
                 "target_offset": -0.51,
             },
         }
-        # gain = +5.64 dB, predicted_TP = -2.96 + 5.64 = +2.68 > -1.5 → dynamic
+        # gain = +5.64 dB, predicted_TP = +2.68 > -1.5: still linear=true here.
         filt = FFmWiz.build_loudnorm_filter(answers)
-        self.assertIn("linear=false", filt)
-        self.assertNotIn("linear=true", filt)
+        self.assertIn("linear=true", filt)
+        self.assertNotIn("linear=false", filt)
+        self.assertIn("measured_I=-19.64", filt)
+        self.assertIn("offset=-0.51", filt)
 
     def test_loudnorm_aresample_after_filter(self):
         """LoudNorm processing chain includes aresample=48000 after loudnorm."""

@@ -703,6 +703,8 @@ class Color:
     MUX_PURPLE = "\033[38;5;141m"
     MUX_LAVENDER = "\033[38;5;183m"
     MUX_ROSE = "\033[38;5;204m"
+    # Compact Join input summary (min/max bitrate, fps, file count).
+    JOIN_SUMMARY = "\033[38;5;111m"
     MUX_CORAL = "\033[38;5;209m"
     MUX_SALMON = "\033[38;5;210m"
     MUX_STEEL = "\033[38;5;110m"
@@ -2257,32 +2259,22 @@ def build_loudnorm_filter(answers: dict[str, Any]) -> str:
     measured = answers.get("loudnorm_measured") if isinstance(answers.get("loudnorm_measured"), dict) else {}
     required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
     if measured and all(measured.get(key) not in {None, ""} for key in required):
-        # Determine whether linear normalization is feasible.
+        # Two-pass: inject the Pass-1 measured values and request linear
+        # normalization. FFmpeg's loudnorm applies a single fixed gain in
+        # linear mode and AUTOMATICALLY falls back to dynamic internally if that
+        # gain would exceed the true-peak ceiling, so linear=true is safe.
         measured_i = float(measured["input_i"])
         measured_tp = float(measured["input_tp"])
         required_gain = target_i - measured_i
         predicted_tp = measured_tp + required_gain
         target_tp = float(LOUDNORM_TARGET_TP)
-        use_linear = predicted_tp <= target_tp
-
-        if use_linear:
-            linear_text = "true"
-            log_info(
-                "LoudNorm mode: Linear (measured two-pass); "
-                f"target_i={target_i:g}; measured_I={measured_i:g}; measured_TP={measured_tp:g}; "
-                f"gain={required_gain:+.2f} dB; predicted_TP={predicted_tp:.2f} dBTP; "
-                f"target_TP={target_tp:g} dBTP; linear=true"
-            )
-        else:
-            linear_text = "false"
-            log_info(
-                "LoudNorm mode: Dynamic; "
-                f"Reason: Linear gain would raise predicted true peak to {predicted_tp:+.2f} dBTP, "
-                f"above the selected {target_tp:g} dBTP limit. "
-                f"target_i={target_i:g}; measured_I={measured_i:g}; measured_TP={measured_tp:g}; "
-                f"gain={required_gain:+.2f} dB; linear=false"
-            )
-
+        log_info(
+            "LoudNorm mode: Two-pass (measured); linear=true; "
+            f"target_i={target_i:g}; measured_I={measured_i:g}; measured_TP={measured_tp:g}; "
+            f"gain={required_gain:+.2f} dB; predicted_TP={predicted_tp:.2f} dBTP; "
+            f"target_TP={target_tp:g} dBTP "
+            f"(FFmpeg falls back to dynamic internally if the linear gain would exceed the TP ceiling)."
+        )
         return (
             "loudnorm="
             f"I={loudnorm_number(target_i)}:"
@@ -2293,7 +2285,7 @@ def build_loudnorm_filter(answers: dict[str, Any]) -> str:
             f"measured_LRA={loudnorm_number(measured['input_lra'])}:"
             f"measured_thresh={loudnorm_number(measured['input_thresh'])}:"
             f"offset={loudnorm_number(measured['target_offset'])}:"
-            f"linear={linear_text}:print_format=summary"
+            f"linear=true:print_format=summary"
         )
     log_info(f"Using single-pass loudnorm filter because measured values are unavailable: target_i={target_i:g}")
     return (
@@ -2305,18 +2297,56 @@ def build_loudnorm_filter(answers: dict[str, Any]) -> str:
     )
 
 
+def loudnorm_analysis_filter(target_i: float) -> str:
+    """Pass-1 measurement filter: same target, JSON output, no media encode."""
+    return (
+        "loudnorm="
+        f"I={loudnorm_number(target_i)}:"
+        f"TP={loudnorm_number(LOUDNORM_TARGET_TP)}:"
+        f"LRA={loudnorm_number(LOUDNORM_TARGET_LRA)}:"
+        "print_format=json"
+    )
+
+
+def loudnorm_mode(answers: dict[str, Any]) -> str:
+    """Resolved loudnorm mode: 'off', 'single', or 'two_pass'.
+
+    Prefers the explicit answers['loudnorm_mode'] set by the wizard, and falls
+    back to deriving it from the enabled flag plus presence of measured values
+    (so older answer dicts still report correctly)."""
+    explicit = str(answers.get("loudnorm_mode") or "").strip().lower()
+    if explicit in {"off", "single", "two_pass"}:
+        return explicit
+    if not loudnorm_transform_enabled(answers):
+        return "off"
+    return "two_pass" if (isinstance(answers.get("loudnorm_measured"), dict) and answers.get("loudnorm_measured")) else "single"
+
+
+# Shared per-input audio preparation for Join graphs. Used identically by the
+# final Join encode AND the two-pass loudnorm measurement so the analyzed audio
+# topology matches the encoded audio exactly.
+JOIN_AUDIO_PREP_FILTER = "aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS"
+
+
 def _loudnorm_output_sample_rate() -> int:
     """Return the sample rate to apply after LoudNorm to stabilize the output."""
     return int(AUDIO_SAMPLE_RATE) if AUDIO_SAMPLE_RATE else 48000
 
 
-def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
-    filters: list[str] = []
+def audio_speed_reverse_filter_parts(answers: dict[str, Any]) -> list[str]:
+    """Reverse/atempo filter parts shared by the final encode and the two-pass
+    loudnorm measurement graph (everything before the loudnorm insertion)."""
+    parts: list[str] = []
     if encode_audio_reverse_enabled(answers):
-        filters.append("areverse")
+        parts.append("areverse")
     speed = encode_audio_speed_factor(answers)
     if abs(speed - 1.0) > 1e-6:
-        filters.append(atempo_filter_chain(speed))
+        parts.append(atempo_filter_chain(speed))
+    return parts
+
+
+def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
+    filters: list[str] = list(audio_speed_reverse_filter_parts(answers))
     if loudnorm_transform_enabled(answers):
         filters.append(build_loudnorm_filter(answers))
         # Explicitly resample after LoudNorm to guarantee a stable output rate.
@@ -3956,6 +3986,11 @@ def preview_console_colors() -> None:
 _VT_MODE_ATTEMPTED = False
 _PROGRESS_LAST_LEN = 0
 _PROGRESS_LAST_ROWS = 0
+# Once a run commits its final progress line (via _finish_progress_line), late
+# repaints from the run loop (e.g. queue-drain ticks after FFmpeg's
+# progress=end) must be suppressed so the completed 100% line is printed
+# exactly once. _begin_progress_render() resets this at the start of each run.
+_PROGRESS_FINALIZED = False
 _WINDOWS_CONSOLE_CHECKED = False
 _WINDOWS_CONSOLE_OK = False
 
@@ -4000,8 +4035,21 @@ def _stdout_supports_in_place_progress() -> bool:
     return _WINDOWS_CONSOLE_OK
 
 
+def _begin_progress_render() -> None:
+    """Reset the per-run progress finalize guard. Call once before a run's first
+    progress line so a fresh final line can be committed for this run."""
+    global _PROGRESS_FINALIZED, _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS
+    _PROGRESS_FINALIZED = False
+    _PROGRESS_LAST_LEN = 0
+    _PROGRESS_LAST_ROWS = 0
+
+
 def _write_progress_line(rendered: str) -> None:
     global _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS
+    # The run's final line was already committed; ignore late repaints so the
+    # completed 100% line is not duplicated by post-end queue-drain ticks.
+    if _PROGRESS_FINALIZED:
+        return
     if not _stdout_supports_in_place_progress():
         return
     _enable_windows_vt_mode()
@@ -4018,7 +4066,12 @@ def _write_progress_line(rendered: str) -> None:
 
 
 def _finish_progress_line(rendered: str | None) -> None:
-    global _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS
+    global _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS, _PROGRESS_FINALIZED
+    # Only the first finalize for a run commits the final line; subsequent
+    # finalize calls (post-loop fallback, late ticks) are ignored.
+    if _PROGRESS_FINALIZED:
+        return
+    _PROGRESS_FINALIZED = True
     if rendered:
         if not _stdout_supports_in_place_progress():
             sys.stdout.write(rendered + "\n")
@@ -4217,6 +4270,7 @@ def run_ffmpeg_with_progress(
     log_info(f"{label} executed command with progress: {command_to_text(progress_cmd)}")
     log_info(f"{label} executed argv with progress: {json.dumps([str(part) for part in progress_cmd], ensure_ascii=False)}")
 
+    _begin_progress_render()
     started_at = time.perf_counter()
     state: dict[str, str] = {}
     target_mux_bitrate_kbps = _progress_target_mux_bitrate_kbps_from_command(cmd)
@@ -4467,6 +4521,9 @@ def run_ffmpeg_with_progress(
             if value.strip() == "end":
                 _finish_progress_line(rendered)
                 final_emitted = True
+                # FFmpeg's progress=end is terminal; stop the render loop so
+                # post-end queue-drain ticks cannot repaint a second 100% line.
+                break
     except Exception:
         log_exception(f"{label} progress reader crashed")
 
@@ -6327,42 +6384,20 @@ def parse_loudnorm_measurement_output(text: str) -> dict[str, float] | None:
     return None
 
 
-def probe_loudnorm_measurement(
-    ffmpeg: str,
-    input_path: Path,
-    audio_index: int,
-    target_i: float = LOUDNORM_DEFAULT_TARGET_I,
-    total_duration: float | None = None,
+def _run_loudnorm_analysis(
+    args: list[str],
+    total_duration: float | None,
+    context: str,
 ) -> dict[str, float] | None:
-    loudnorm = (
-        f"loudnorm=I={loudnorm_number(target_i)}:"
-        f"TP={loudnorm_number(LOUDNORM_TARGET_TP)}:"
-        f"LRA={loudnorm_number(LOUDNORM_TARGET_LRA)}:"
-        "print_format=json"
-    )
-    args = [
-        ffmpeg,
-        "-hide_banner",
-        "-nostats",
-        "-stats_period",
-        "0.5",
-        "-progress",
-        "pipe:1",
-        "-i",
-        str(input_path),
-        "-map",
-        f"0:a:{int(audio_index)}",
-        "-vn",
-        "-sn",
-        "-dn",
-        "-af",
-        loudnorm,
-        "-f",
-        "null",
-        os.devnull,
-    ]
+    """Run a prepared loudnorm analysis FFmpeg command (already containing
+    -progress pipe:1 and -f null output) and parse the final JSON object.
+
+    Shared by single-input and Join (multi-input) measurement so both parse
+    identically and report progress identically. Returns the measured-stats
+    dict, or None on failure / parse error."""
     log_info("LoudNorm measurement command: " + command_to_powershell(args))
     log_command("LoudNorm measurement", args)
+    _begin_progress_render()
     started_at = time.perf_counter()
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -6382,6 +6417,7 @@ def probe_loudnorm_measurement(
             encoding="utf-8",
             errors="replace",
         )
+
         def _capture_stderr() -> None:
             try:
                 for line in process.stderr:  # type: ignore[union-attr]
@@ -6428,7 +6464,7 @@ def probe_loudnorm_measurement(
         stats = parse_loudnorm_measurement_output(combined)
         log_info(
             "LoudNorm measurement finished: "
-            f"input={input_path}; audio_index={audio_index}; returncode={process.returncode}; "
+            f"{context}; returncode={process.returncode}; "
             f"elapsed={time.perf_counter() - started_at:.3f}s; "
             f"progress_events={progress_events}; stats={stats or '{}'}"
         )
@@ -6436,8 +6472,214 @@ def probe_loudnorm_measurement(
             log_error("LoudNorm measurement output:\n" + _text_preview(combined, 4000))
         return stats
     except Exception:
-        log_exception(f"LoudNorm measurement failed: input={input_path}; audio_index={audio_index}")
+        log_exception(f"LoudNorm measurement failed: {context}")
         return None
+
+
+def probe_loudnorm_measurement(
+    ffmpeg: str,
+    input_path: Path,
+    audio_index: int,
+    target_i: float = LOUDNORM_DEFAULT_TARGET_I,
+    total_duration: float | None = None,
+) -> dict[str, float] | None:
+    """Single-input two-pass measurement: analyze one input audio track."""
+    args = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostats",
+        "-stats_period",
+        "0.5",
+        "-progress",
+        "pipe:1",
+        "-i",
+        str(input_path),
+        "-map",
+        f"0:a:{int(audio_index)}",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        loudnorm_analysis_filter(target_i),
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    return _run_loudnorm_analysis(args, total_duration, f"input={input_path}; audio_index={audio_index}")
+
+
+def build_join_loudnorm_analysis_args(
+    answers: dict[str, Any],
+    items: list[dict[str, Any]],
+    audio_index: int,
+    target_i: float = LOUDNORM_DEFAULT_TARGET_I,
+) -> list[str]:
+    """Build the Pass-1 measurement command for the FINAL joined audio.
+
+    This reconstructs the exact audio assembly the final Join encode produces
+    (same per-input preparation, same cut trims, same concat order, same
+    speed/reverse), then applies loudnorm=...:print_format=json and maps ONLY
+    the analysis audio to a null output (no video encode, no media file). The
+    measurement therefore reflects every selected input's audio, not just the
+    first input."""
+    ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
+    args: list[str] = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostats",
+        "-stats_period",
+        "0.5",
+        "-progress",
+        "pipe:1",
+    ]
+    for item in items:
+        args.extend(["-i", str(item["path"])])
+    filters: list[str] = []
+    concat_inputs: list[str] = []
+    for input_idx, _item in enumerate(items):
+        filters.append(f"[{input_idx}:a:{int(audio_index)}]{JOIN_AUDIO_PREP_FILTER}[mja{input_idx}]")
+        concat_inputs.append(f"[mja{input_idx}]")
+    filters.append(f"{''.join(concat_inputs)}concat=n={len(items)}:v=0:a=1[mjcat]")
+    # Same cut trims as the final encode (across the joined timeline).
+    source_join_duration = sum(float(item.get("duration") or 0.0) for item in items)
+    keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), source_join_duration)
+    label = append_join_trim_concat_filter(filters, "mjcat", keep_ranges, "audio", "mjcut")
+    # Same speed/reverse preparation as the final encode (before loudnorm).
+    speed_parts = audio_speed_reverse_filter_parts(answers)
+    if speed_parts:
+        filters.append(f"[{label}]{','.join(speed_parts)},asetpts=PTS-STARTPTS[mjspeed]")
+        label = "mjspeed"
+    filters.append(f"[{label}]{loudnorm_analysis_filter(target_i)}[mjanalysis]")
+    args.extend([
+        "-filter_complex",
+        ";".join(filters),
+        "-map",
+        "[mjanalysis]",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-f",
+        "null",
+        os.devnull,
+    ])
+    return args
+
+
+def probe_join_loudnorm_measurement(
+    answers: dict[str, Any],
+    items: list[dict[str, Any]],
+    audio_index: int,
+    target_i: float = LOUDNORM_DEFAULT_TARGET_I,
+    total_duration: float | None = None,
+) -> dict[str, float] | None:
+    """Two-pass measurement over the complete joined audio (all inputs)."""
+    args = build_join_loudnorm_analysis_args(answers, items, audio_index, target_i)
+    return _run_loudnorm_analysis(
+        args,
+        total_duration,
+        f"join_inputs={len(items)}; audio_index={audio_index}",
+    )
+
+
+def join_ordered_items_for_answers(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the ordered Join input set [primary, *join_input_items].
+
+    This mirrors exactly the items list the final Join encode builds (the
+    primary input is index 0), so the two-pass measurement analyzes the same
+    inputs in the same order as the encoded output."""
+    join_extra = list(answers.get("join_input_items") or [])
+    if not join_extra:
+        return []
+    primary = {
+        "path": answers["input_path"],
+        "probe": answers.get("probe") or {},
+        "format": answers.get("format") or {},
+        "streams": (
+            list(answers.get("video_streams") or [])
+            + list(answers.get("audio_streams") or [])
+            + list(answers.get("subtitle_streams") or [])
+            + list(answers.get("attachment_streams") or [])
+            + list(answers.get("data_streams") or [])
+        ),
+        "video_streams": answers.get("video_streams") or [],
+        "audio_streams": answers.get("audio_streams") or [],
+        "data_streams": answers.get("data_streams") or [],
+        "duration": stream_duration_seconds({}, answers.get("format")) or 0.0,
+    }
+    return [primary, *join_extra]
+
+
+def join_input_media_stats(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per-file (name, video_kbps, audio_kbps, fps) for the ordered Join set,
+    using the already-probed source data. Unknown values are stored as None."""
+    rows: list[dict[str, Any]] = []
+    for item in join_ordered_items_for_answers(answers):
+        item_answers = join_item_answers(answers, item)
+        fmt = item.get("format") or {}
+        packet_sizes = get_packet_sizes(item_answers)
+        video_streams = item.get("video_streams") or []
+        audio_streams = item.get("audio_streams") or []
+        video_kbps = stream_bitrate_kbps(video_streams[0], fmt, packet_sizes) if video_streams else None
+        audio_kbps = stream_bitrate_kbps(audio_streams[0], fmt, packet_sizes) if audio_streams else None
+        fps = None
+        if video_streams:
+            fps = rational_to_float(video_streams[0].get("avg_frame_rate")) or rational_to_float(video_streams[0].get("r_frame_rate"))
+        rows.append({
+            "name": Path(item.get("path")).name,
+            "video_kbps": int(video_kbps) if video_kbps else None,
+            "audio_kbps": int(audio_kbps) if audio_kbps else None,
+            "fps": float(fps) if fps else None,
+        })
+    return rows
+
+
+def _join_summary_minmax(rows: list[dict[str, Any]], key: str):
+    """Return ((hi_value, hi_name), (lo_value, lo_name), unknown_count) for a
+    metric across rows, or None when no row has a known value."""
+    known = [(row[key], row["name"]) for row in rows if row.get(key)]
+    if not known:
+        return None
+    hi = max(known, key=lambda pair: pair[0])
+    lo = min(known, key=lambda pair: pair[0])
+    return hi, lo, len(rows) - len(known)
+
+
+def format_join_input_summary_lines(answers: dict[str, Any]) -> list[str]:
+    """Plain-text lines for the Join input summary (no color), for tests/logs."""
+    rows = join_input_media_stats(answers)
+    if len(rows) < 2:
+        return []
+    lines = ["Join input summary", f"Files selected: {len(rows)}"]
+
+    def metric_line(label: str, key: str, unit: str, render) -> str:
+        result = _join_summary_minmax(rows, key)
+        if result is None:
+            return f"{label}: unavailable"
+        (hi_value, hi_name), (lo_value, lo_name), unknown = result
+        text = f"{label}: highest {render(hi_value)}{unit} ({hi_name}), lowest {render(lo_value)}{unit} ({lo_name})"
+        if unknown:
+            text += f"; {unknown} unknown"
+        return text
+
+    lines.append(metric_line("Video bitrate", "video_kbps", " kbps", lambda v: f"{int(v):,}"))
+    lines.append(metric_line("Audio bitrate", "audio_kbps", " kbps", lambda v: f"{int(v):,}"))
+    lines.append(metric_line("FPS", "fps", "", lambda v: f"{v:.3f}"))
+    return lines
+
+
+def print_join_input_summary(answers: dict[str, Any]) -> None:
+    """Compact Join input summary printed before the output-format step. Shows
+    min/max video bitrate, audio bitrate, FPS (with file names) and the total
+    selected file count, using actual FFprobe-derived values."""
+    lines = format_join_input_summary_lines(answers)
+    if not lines:
+        return
+    print()
+    print(paint(lines[0], Color.BOLD + Color.JOIN_SUMMARY))
+    for line in lines[1:]:
+        label, _, value = line.partition(": ")
+        print("  " + field_text(label, value, Color.JOIN_SUMMARY))
+    log_info("Join input summary: " + " | ".join(lines[1:]))
 
 
 def print_loudnorm_stats(stats: dict[str, float]) -> None:
@@ -13772,6 +14014,35 @@ def detected_resolution_limit(answers: dict[str, Any]) -> tuple[tuple[int, int] 
         return None, "detected source resolution"
 
 
+def join_audio_bitrate_candidates(answers: dict[str, Any], audio_index: int) -> list[tuple[int, str]]:
+    """(kbps, file_name) for the given audio track across the ordered Join input
+    set (primary + join items). Unknown/missing bitrates are skipped."""
+    candidates: list[tuple[int, str]] = []
+    primary_streams = answers.get("audio_streams") or []
+    if 0 <= audio_index < len(primary_streams):
+        value = stream_bitrate_kbps(primary_streams[audio_index], answers.get("format"), get_packet_sizes(answers))
+        if value:
+            candidates.append((int(value), Path(answers["input_path"]).name))
+    for item in answers.get("join_input_items") or []:
+        item_streams = item.get("audio_streams") or []
+        if 0 <= audio_index < len(item_streams):
+            item_answers = join_item_answers(answers, item)
+            value = stream_bitrate_kbps(item_streams[audio_index], item.get("format"), get_packet_sizes(item_answers))
+            if value:
+                candidates.append((int(value), Path(item.get("path")).name))
+    return candidates
+
+
+def join_max_source_audio_bitrate(answers: dict[str, Any], audio_index: int) -> tuple[int | None, str | None]:
+    """Highest known source audio bitrate (and its file name) for the given
+    track across all joined inputs. Returns (None, None) when all are unknown."""
+    candidates = join_audio_bitrate_candidates(answers, audio_index)
+    if not candidates:
+        return None, None
+    best_kbps, best_name = max(candidates, key=lambda pair: pair[0])
+    return best_kbps, best_name
+
+
 def detected_audio_bitrate_limit(answers: dict[str, Any]) -> tuple[int | None, str]:
     values: list[int] = []
     items = _folder_validation_items(answers)
@@ -14306,6 +14577,10 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
 
 
 def step_output_format(answers: dict[str, Any]) -> None:
+    # Join mode: show the compact source summary (min/max video bitrate, audio
+    # bitrate, fps, file count) right before the format prompt.
+    if answers.get("join_input_items"):
+        print_join_input_summary(answers)
     input_ext = answers["input_path"].suffix.lstrip(".") or "mp4"
     default_ext = "mp4" if answers.get("video_streams") else "mp3"
     common_formats = COMMON_VIDEO_FORMATS + COMMON_AUDIO_FORMATS
@@ -14776,59 +15051,86 @@ def step_fps(answers: dict[str, Any]) -> None:
         return
 
 
+def _audio_report_signature(answers: dict[str, Any]) -> str:
+    """Signature of the report-affecting inputs: primary file + audio count and
+    every joined input file + audio count. Changing the selected files/tracks
+    changes this signature and forces a fresh report."""
+    parts = [str(answers.get("input_path")), str(len(answers.get("audio_streams") or []))]
+    for item in answers.get("join_input_items") or []:
+        parts.append(str(item.get("path")))
+        parts.append(str(len(item.get("audio_streams") or [])))
+    return "|".join(parts)
+
+
 def step_audio_tracks(answers: dict[str, Any]) -> None:
     streams = answers["audio_streams"]
-    packet_sizes = get_packet_sizes(answers)
-    report = detect_duplicate_audio(answers) if answers.get("detect_duplicate_audio", True) else None
-    fmt = answers.get("format", {})
-    volume_stats = get_audio_volume_stats(answers)
-    print()
-    print(paint("Detected audio tracks:", Color.BOLD + Color.BLUE))
-    for idx, stream in enumerate(streams):
-        size, _ = stream_size_bytes(stream, fmt, packet_sizes)
-        labels = duplicate_labels(idx, report) if report else []
-        label_text = f" | {' | '.join(labels)}" if labels else ""
-        print(
-            f"  {paint(stream_title(stream, idx), Color.WHITE)} | "
-            f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)} | "
-            f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
-        )
-    join_items = list(answers.get("join_input_items") or [])
-    if join_items:
+    signature = _audio_report_signature(answers)
+
+    def print_audio_report() -> None:
+        packet_sizes = get_packet_sizes(answers)
+        report = detect_duplicate_audio(answers) if answers.get("detect_duplicate_audio", True) else None
+        fmt = answers.get("format", {})
+        volume_stats = get_audio_volume_stats(answers)
         print()
-        print(paint("Joined input audio tracks", Color.BOLD + Color.BLUE))
-        print("  " + paint("The selected track numbers below will be applied to every joined input.", Color.YELLOW))
-        for input_pos, item in enumerate(join_items, start=2):
-            joined = join_item_answers(answers, item)
-            joined_streams = joined.get("audio_streams") or []
-            joined_fmt = joined.get("format", {})
-            joined_packet_sizes = get_packet_sizes(joined)
-            joined_report = detect_duplicate_audio(joined) if joined.get("detect_duplicate_audio", True) and joined_streams else None
-            joined_volume = get_audio_volume_stats(joined) if joined_streams else {}
-            print("  " + field_text(f"input {input_pos}", Path(item.get("path")).name, Color.WHITE))
-            for idx, stream in enumerate(joined_streams):
-                size, _ = stream_size_bytes(stream, joined_fmt, joined_packet_sizes)
-                labels = duplicate_labels(idx, joined_report) if joined_report else []
-                label_text = f" | {' | '.join(labels)}" if labels else ""
-                print(
-                    f"    {paint(stream_title(stream, idx), Color.WHITE)} | "
-                    f"{field_text('mean / max volume', audio_mean_max_volume_field(joined_volume, idx), Color.MEAN_VOLUME)} | "
-                    f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
-                )
-            if len(joined_streams) != len(streams):
-                warning = f"input {input_pos} has {len(joined_streams)} audio track(s), primary input has {len(streams)}."
-                print("    " + paint(warning, Color.YELLOW))
+        print(paint("Detected audio tracks:", Color.BOLD + Color.BLUE))
+        for idx, stream in enumerate(streams):
+            size, _ = stream_size_bytes(stream, fmt, packet_sizes)
+            labels = duplicate_labels(idx, report) if report else []
+            label_text = f" | {' | '.join(labels)}" if labels else ""
+            print(
+                f"  {paint(stream_title(stream, idx), Color.WHITE)} | "
+                f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)} | "
+                f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
+            )
+        join_items = list(answers.get("join_input_items") or [])
+        if join_items:
+            print()
+            print(paint("Joined input audio tracks", Color.BOLD + Color.BLUE))
+            print("  " + paint("The selected track numbers below will be applied to every joined input.", Color.YELLOW))
+            for input_pos, item in enumerate(join_items, start=2):
+                joined = join_item_answers(answers, item)
+                joined_streams = joined.get("audio_streams") or []
+                joined_fmt = joined.get("format", {})
+                joined_packet_sizes = get_packet_sizes(joined)
+                joined_report = detect_duplicate_audio(joined) if joined.get("detect_duplicate_audio", True) and joined_streams else None
+                joined_volume = get_audio_volume_stats(joined) if joined_streams else {}
+                print("  " + field_text(f"input {input_pos}", Path(item.get("path")).name, Color.WHITE))
+                for idx, stream in enumerate(joined_streams):
+                    size, _ = stream_size_bytes(stream, joined_fmt, joined_packet_sizes)
+                    labels = duplicate_labels(idx, joined_report) if joined_report else []
+                    label_text = f" | {' | '.join(labels)}" if labels else ""
+                    print(
+                        f"    {paint(stream_title(stream, idx), Color.WHITE)} | "
+                        f"{field_text('mean / max volume', audio_mean_max_volume_field(joined_volume, idx), Color.MEAN_VOLUME)} | "
+                        f"{field_text('size', format_bytes(size), Color.LIME)}{label_text}"
+                    )
+                if len(joined_streams) != len(streams):
+                    warning = f"input {input_pos} has {len(joined_streams)} audio track(s), primary input has {len(streams)}."
+                    print("    " + paint(warning, Color.YELLOW))
+        answers["_audio_report_shown_signature"] = signature
+
+    # Suppress re-printing the (potentially long) audio report on Back
+    # navigation when nothing relevant changed; the user can type 'r' to
+    # reprint it. A changed file/track set invalidates the cached signature.
+    if answers.get("_audio_report_shown_signature") == signature:
+        print()
+        note("Audio report already displayed in this session; skipping repeat to avoid clutter. Enter 'r' at the prompt to reprint it.")
+    else:
+        print_audio_report()
 
     prompt = question_prompt(
         answers,
         "Which audio tracks should be kept?",
-        f"example: {example_text('0,1,2')}; {colored_audio_track_hint()}",
+        f"example: {example_text('0,1,2')}; {colored_audio_track_hint()}; r=reprint report",
         "de",
         back="back=b, quit=exit",
     )
     while True:
         value = ask_raw(prompt)
         lowered = value.lower()
+        if lowered == "r":
+            print_audio_report()
+            continue
         if not value:
             answers["audio_tracks_mode"] = "de"
             answers["audio_tracks"] = auto_select_audio_tracks(answers, "de")
@@ -14891,6 +15193,21 @@ def step_audio_bitrate(answers: dict[str, Any]) -> None:
     packet_sizes = get_packet_sizes(answers)
     source = stream_bitrate_kbps(answers["audio_streams"][first_selected], answers.get("format"), packet_sizes)
     source_limit, source_limit_label = detected_audio_bitrate_limit(answers)
+    # Join mode: the default keep-value should reflect the HIGHEST source audio
+    # bitrate among all joined inputs (not just the first input), so the joined
+    # program is not down-rated to the first clip's bitrate.
+    answers.pop("_join_audio_bitrate_source_name", None)
+    if answers.get("join_input_items"):
+        join_max, join_source_name = join_max_source_audio_bitrate(answers, first_selected)
+        if join_max:
+            source = join_max
+            answers["_join_audio_bitrate_source_name"] = join_source_name
+            log_info(
+                f"Join audio bitrate default uses highest source audio bitrate among joined inputs: "
+                f"{join_max} kbps from {join_source_name}"
+            )
+        else:
+            log_info("Join audio bitrate default: all joined source audio bitrates unknown; using safe default.")
     default_audio_bitrate = DEFAULT_AUDIO_BITRATE_KBPS
     if source and source < DEFAULT_AUDIO_BITRATE_KBPS:
         default_audio_bitrate = source
@@ -14937,24 +15254,44 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
     answers.pop("loudnorm_enabled", None)
     answers.pop("loudnorm_target_i", None)
     answers.pop("loudnorm_measured", None)
+    answers.pop("loudnorm_mode", None)
     selected = selected_audio_streams(answers) if answers.get("audio_streams") else []
     if not selected:
         return
-    enabled = ask_yes_no(
-        question_prompt(
-            answers,
-            "Increase / normalize audio loudness with loudnorm?",
-            "y/n",
-            "n",
-        ),
-        False,
-    )
-    if not enabled:
-        answers["loudnorm_enabled"] = False
-        log_info("User choice: loudnorm_enabled=False")
-        return
-    log_info("User choice: loudnorm_enabled=True")
+    join_items = list(answers.get("join_input_items") or [])
+    is_join = bool(join_items)
 
+    # Explicit mode menu replaces the old yes/no + vague "measure?" prompt.
+    if is_join:
+        title = "Audio loudness normalization for joined output"
+        opt2 = "Single-pass loudnorm after joining all audio"
+        opt3 = "Two-pass loudnorm after joining all audio"
+    else:
+        title = "Audio loudness normalization"
+        opt2 = "Single-pass loudnorm on final output audio"
+        opt3 = "Two-pass loudnorm on final output audio"
+    while True:
+        print()
+        print(paint(title + ":", Color.BOLD + Color.LIGHT_BLUE))
+        print("  " + paint("1", Color.OPT_KEY_CORAL) + " Off")
+        print("  " + paint("2", Color.OPT_KEY_CORAL) + " " + opt2)
+        print("  " + paint("3", Color.OPT_KEY_CORAL) + " " + opt3)
+        choice = ask_raw(question_prompt(answers, "Select an option", None, "1")).strip()
+        if is_back_value(choice):
+            raise Back()
+        if not choice:
+            choice = "1"
+        if choice in {"1", "2", "3"}:
+            break
+        error("Enter 1, 2, or 3.")
+    if choice == "1":
+        answers["loudnorm_enabled"] = False
+        answers["loudnorm_mode"] = "off"
+        log_info("User choice: loudnorm mode=off")
+        return
+    two_pass = choice == "3"
+
+    # LoudNorm requires re-encoding audio; it cannot run on a stream copy.
     audio_codec = normalize_audio_codec(
         answers.get("audio_codec"),
         default_audio_codec_for_ext(answers.get("output_ext", "")),
@@ -14962,66 +15299,19 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
     answers["audio_codec"] = audio_codec
     if audio_codec == "copy":
         use_aac = ask_yes_no(
-            question_prompt(
-                answers,
-                "LoudNorm requires audio re-encoding. Use AAC?",
-                "y/n",
-                "y",
-            ),
+            question_prompt(answers, "LoudNorm requires audio re-encoding. Use AAC?", "y/n", "y"),
             True,
         )
         if not use_aac:
             note("LoudNorm disabled because audio remains stream-copy.")
             answers["loudnorm_enabled"] = False
-            log_info("LoudNorm measured/applied decision: disabled because user kept audio stream-copy.")
+            answers["loudnorm_mode"] = "off"
+            log_info("LoudNorm disabled: user kept audio stream-copy.")
             return
         answers["audio_codec"] = DEFAULT_AUDIO_CODEC
         answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
 
-    # Ask whether to measure current loudness (two-pass) or skip to manual target.
-    measure = ask_yes_no(
-        question_prompt(
-            answers,
-            "Measure current audio loudness for two-pass normalization?",
-            f"{paint('y', Color.OPT_KEY_CHARTREUSE)}{paint('=measure (more accurate)', Color.HINT_YELLOW)}; "
-            f"{paint('n', Color.OPT_KEY_CHARTREUSE)}{paint('=skip to manual target (faster)', Color.HINT_YELLOW)}",
-            "y",
-        ),
-        True,
-    )
-
-    measured: dict[str, float] | None = None
-    if measure:
-        audio_index = selected[0]
-        ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
-        input_path = Path(answers["input_path"])
-        while True:
-            note(f"Measuring current loudness on audio track {audio_index}...")
-            total_duration = stream_duration_seconds({}, answers.get("format"))
-            measured = probe_loudnorm_measurement(ffmpeg, input_path, audio_index, total_duration=total_duration)
-            if measured is not None:
-                print_loudnorm_stats(measured)
-                break
-            error("LoudNorm measurement failed.")
-            action = ask_raw(
-                question_prompt(
-                    answers,
-                    "LoudNorm measurement failed. Choose action",
-                    "r=retry; c=continue without loudnorm; m=manual single-pass loudnorm",
-                    "c",
-                )
-            ).strip().lower()
-            if is_back_value(action):
-                raise Back()
-            if not action or action == "c":
-                answers["loudnorm_enabled"] = False
-                return
-            if action == "m":
-                measured = None
-                break
-            if action != "r":
-                error("Enter r, c, or m.")
-
+    # Target Integrated Loudness prompt.
     while True:
         value = ask_raw(
             question_prompt(
@@ -15037,20 +15327,76 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
             value = loudnorm_number(LOUDNORM_DEFAULT_TARGET_I)
         try:
             target_i = parse_loudnorm_target(value)
+            break
         except ValueError as exc:
             error(str(exc))
-            continue
-        answers["loudnorm_enabled"] = True
-        answers["loudnorm_target_i"] = target_i
-        if measured is not None:
-            answers["loudnorm_measured"] = measured
-        else:
-            answers.pop("loudnorm_measured", None)
-        log_info(
-            f"User choice: loudnorm_target_i={target_i}; confirmed=yes; "
-            f"two_pass={'yes' if measured is not None else 'no'}"
-        )
-        return
+
+    measured: dict[str, float] | None = None
+    if two_pass:
+        # Two-pass: measurement runs AUTOMATICALLY (no separate prompt). In Join
+        # mode it analyzes the COMPLETE joined audio (all selected inputs), not
+        # just the first input.
+        ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
+        audio_index = selected[0]
+        while True:
+            if is_join:
+                ordered_items = join_ordered_items_for_answers(answers)
+                total_duration = sum(float(it.get("duration") or 0.0) for it in ordered_items)
+                note(
+                    f"Measuring loudness of the complete joined audio "
+                    f"({len(ordered_items)} inputs) on track {audio_index}..."
+                )
+                measured = probe_join_loudnorm_measurement(
+                    answers, ordered_items, audio_index, target_i=target_i,
+                    total_duration=(total_duration if total_duration > 0 else None),
+                )
+            else:
+                note(f"Measuring current loudness on audio track {audio_index}...")
+                total_duration = stream_duration_seconds({}, answers.get("format"))
+                measured = probe_loudnorm_measurement(
+                    ffmpeg, Path(answers["input_path"]), audio_index,
+                    target_i=target_i, total_duration=total_duration,
+                )
+            if measured is not None:
+                print_loudnorm_stats(measured)
+                break
+            # Parse/exec failure: never silently inject fake measured values.
+            error("LoudNorm measurement failed or its JSON output could not be parsed.")
+            action = ask_raw(
+                question_prompt(
+                    answers,
+                    "LoudNorm measurement failed. Choose action",
+                    "r=retry; c=continue with single-pass; m=cancel loudnorm",
+                    "r",
+                )
+            ).strip().lower()
+            if is_back_value(action):
+                raise Back()
+            if action == "m":
+                answers["loudnorm_enabled"] = False
+                answers["loudnorm_mode"] = "off"
+                log_info("LoudNorm canceled after measurement failure.")
+                return
+            if action == "c":
+                measured = None
+                two_pass = False
+                note("Continuing with single-pass loudnorm (no measured values).")
+                break
+            if action != "r":
+                error("Enter r, c, or m.")
+
+    answers["loudnorm_enabled"] = True
+    answers["loudnorm_target_i"] = target_i
+    if measured is not None:
+        answers["loudnorm_measured"] = measured
+        answers["loudnorm_mode"] = "two_pass"
+    else:
+        answers.pop("loudnorm_measured", None)
+        answers["loudnorm_mode"] = "single"
+    log_info(
+        f"User choice: loudnorm mode={answers['loudnorm_mode']}; target_i={target_i}; "
+        f"join={'yes' if is_join else 'no'}"
+    )
 
 
 def step_subtitle_tracks(answers: dict[str, Any]) -> None:
@@ -15086,14 +15432,21 @@ def step_source_extra_policy(answers: dict[str, Any]) -> None:
     print(paint("Detected source metadata / extra streams:", Color.BOLD + Color.LIGHT_BLUE))
     for feature in features:
         print("  " + paint(feature, Color.WHITE))
+    # Join mode defaults to NOT keeping source extras: copying metadata,
+    # chapters, data streams, and attachments from one selected input is
+    # misleading for a joined program and risks MP4 muxing issues. Non-Join
+    # workflows keep the existing default of 'y'.
+    join_mode = bool(answers.get("join_input_items"))
+    default_keep = not join_mode
+    default_text = "y" if default_keep else "n"
     keep = ask_yes_no(
         question_prompt(
             answers,
             "Keep source metadata, chapters, extra video/subtitle/data streams, and embedded fonts/attachments?",
             "y/n; n removes metadata, chapters, extra source video streams, source subtitles, data streams, and embedded font/attachment streams",
-            "y",
+            default_text,
         ),
-        True,
+        default_keep,
     )
     answers["keep_source_metadata"] = keep
     answers["keep_source_chapters"] = keep
@@ -17118,8 +17471,20 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             print("  " + field_text("audio speed", f"{encode_audio_speed_factor(answers) * 100:.0f}%", Color.MAGENTA))
             print("  " + field_text("reverse audio", "yes" if encode_audio_reverse_enabled(answers) else "no", Color.ORANGE))
         if loudnorm_transform_enabled(answers):
-            mode = "two-pass" if answers.get("loudnorm_measured") else "single-pass"
-            print("  " + field_text("LoudNorm", f"I={answers.get('loudnorm_target_i', LOUDNORM_DEFAULT_TARGET_I):g} LUFS ({mode})", Color.MEAN_VOLUME))
+            mode = loudnorm_mode(answers)
+            mode_text = {"single": "Single-pass", "two_pass": "Two-pass"}.get(mode, mode)
+            target_i = answers.get("loudnorm_target_i", LOUDNORM_DEFAULT_TARGET_I)
+            print("  " + field_text(
+                "LoudNorm",
+                f"{mode_text} on final output audio  (I={target_i:g}, TP={LOUDNORM_TARGET_TP:g}, LRA={LOUDNORM_TARGET_LRA:g})",
+                Color.MEAN_VOLUME,
+            ))
+            if mode == "two_pass":
+                source_text = (
+                    "final joined audio from all selected input clips"
+                    if answers.get("join_input_items") else "final output audio"
+                )
+                print("    " + field_text("measurement source", source_text, Color.MEAN_VOLUME))
     if output_has_video(answers) and answers.get("subtitle_streams"):
         if source_subtitles_keep_enabled(answers):
             print("  " + field_text("subtitle tracks", answers.get("subtitle_tracks"), Color.WHITE))
@@ -21859,7 +22224,7 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
         )
         inputs.append(f"[v{idx}]")
         if any_audio and item.get("audio_streams"):
-            filters.append(f"[{idx}:a:0]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{idx}]")
+            filters.append(f"[{idx}:a:0]{JOIN_AUDIO_PREP_FILTER}[a{idx}]")
             inputs.append(f"[a{idx}]")
         elif any_audio:
             duration = max(0.001, float(item.get("duration") or 0.001))
@@ -21966,12 +22331,25 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         cmd.extend(["-i", str(item["path"])])
 
     selected_audio = selected_audio_streams(join_answers) if join_answers.get("audio_streams") else []
-    for item_pos, item in enumerate(items, start=1):
-        audio_count = len(item.get("audio_streams") or [])
-        missing = [idx for idx in selected_audio if idx >= audio_count]
-        if missing:
+    if selected_audio:
+        # Reject the join with a clear message listing EVERY input that lacks a
+        # selected audio track, instead of letting an unmapped [n:a:idx] label
+        # fail deep inside FFmpeg. (Missing-audio behavior is explicit + tested.)
+        missing_files: list[str] = []
+        for item_pos, item in enumerate(items, start=1):
+            audio_count = len(item.get("audio_streams") or [])
+            missing = [idx for idx in selected_audio if idx >= audio_count]
+            if missing:
+                missing_files.append(
+                    f"input {item_pos} ({Path(item.get('path')).name}): has {audio_count} audio track(s), "
+                    f"missing selected track(s) {missing}"
+                )
+        if missing_files:
             raise RuntimeError(
-                f"Joined input {item_pos} has {audio_count} audio track(s), so selected track(s) {missing} cannot be mapped."
+                "Join cannot map the selected audio track(s) because some inputs lack them:\n  "
+                + "\n  ".join(missing_files)
+                + "\nRe-run and select only audio tracks present in every joined input, "
+                "or remove the inputs without that audio."
             )
 
     filters: list[str] = []
@@ -22006,7 +22384,7 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         for audio_pos, audio_index in enumerate(selected_audio):
             filters.append(
                 f"[{input_idx}:a:{audio_index}]"
-                f"aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[ja{input_idx}_{audio_pos}]"
+                f"{JOIN_AUDIO_PREP_FILTER}[ja{input_idx}_{audio_pos}]"
             )
             concat_inputs.append(f"[ja{input_idx}_{audio_pos}]")
 
