@@ -45,6 +45,12 @@ ApplicationWindow {
     property real zoom: 1.0        // 1 = whole clip visible; higher = zoomed in
     property real viewStart: 0     // left edge of the visible window, in seconds
     property bool cropEdit: false  // show draggable crop handles on the preview
+    property bool snapEnabled: true   // magnetic snapping of marks/splits/CTI to targets
+    // Undo/redo: JSON snapshots of the editable state (mirrors classic HistoryStack).
+    property var histUndo: []
+    property var histRedo: []
+    property bool restoring: false
+    property string histCurrent: ""
 
     function viewSpan() { return totalDuration / Math.max(1, zoom) }
     function clampView() {
@@ -68,6 +74,68 @@ ApplicationWindow {
     function frameStep(dir) {
         var f = Math.round(cti * fps) + dir
         seekTo(Math.max(0, Math.min(totalDuration, f / Math.max(0.001, fps))))
+    }
+
+    // ---- Magnetic snapping (pixel-based pull, tightens as you zoom) ----
+    function snapTargets(excludeSplitIdx, excludeMarker) {
+        var t = [cti, 0, totalDuration]
+        if (excludeMarker !== "in") t.push(markIn)
+        if (excludeMarker !== "out") t.push(markOut)
+        for (var i = 0; i < separatorPoints.length; ++i)
+            if (i !== excludeSplitIdx) t.push(Number(separatorPoints[i]))
+        for (var s = 1; s < segs.length; ++s) t.push(segs[s].start)   // join boundaries
+        return t
+    }
+    function snapTime(t, excludeSplitIdx, excludeMarker) {
+        t = Math.max(0, Math.min(totalDuration, t))
+        if (!snapEnabled) return t
+        var spanPx = Math.max(1, tl.width - 2 * tl.pad)
+        var tol = (viewSpan() / spanPx) * 8.0          // ~8 px magnet
+        var tg = snapTargets(excludeSplitIdx, excludeMarker)
+        var best = t, bd = tol
+        for (var k = 0; k < tg.length; ++k) { var d = Math.abs(t - tg[k]); if (d <= bd) { best = tg[k]; bd = d } }
+        return best
+    }
+
+    // ---- Undo/redo: snapshot the full editable state as JSON ----
+    function snapshot() {
+        return JSON.stringify({ ct: cropTop, cl: cropLeft, cr: cropRight, cb: cropBottom,
+            sp: speed, rv: reverse, ia: includeAudio, mi: markIn, mo: markOut,
+            cuts: cuts, splits: separatorPoints })
+    }
+    function applySnapshot(s) {
+        var o = JSON.parse(s)
+        restoring = true
+        cropTop = o.ct; cropLeft = o.cl; cropRight = o.cr; cropBottom = o.cb
+        speed = o.sp; reverse = o.rv; includeAudio = o.ia
+        markIn = o.mi; markOut = o.mo
+        cuts = o.cuts; separatorPoints = o.splits
+        var idx = speedBox.model.indexOf(Math.round(speed * 100) + "%"); if (idx >= 0) speedBox.currentIndex = idx
+        restoring = false
+        tl.requestPaint()
+    }
+    // Record a new state after an edit-affecting action (skips no-op duplicates).
+    function commit() {
+        if (restoring) return
+        var snap = snapshot()
+        if (snap === histCurrent) return
+        if (histCurrent !== "") { var u = histUndo.slice(); u.push(histCurrent); if (u.length > 100) u.shift(); histUndo = u }
+        histCurrent = snap
+        histRedo = []
+    }
+    function doUndo() {
+        if (!histUndo.length) return
+        var u = histUndo.slice(); var prev = u.pop()
+        var r = histRedo.slice(); r.push(histCurrent); histRedo = r
+        histCurrent = prev; histUndo = u
+        applySnapshot(prev)
+    }
+    function doRedo() {
+        if (!histRedo.length) return
+        var r = histRedo.slice(); var nxt = r.pop()
+        var u = histUndo.slice(); u.push(histCurrent); histUndo = u
+        histCurrent = nxt; histRedo = r
+        applySnapshot(nxt)
     }
 
     function col(key, fallback) { return (theme && theme[key]) ? theme[key] : fallback }
@@ -175,6 +243,7 @@ ApplicationWindow {
         cuts = invertRanges(keep.map(function (r) { return [Number(r[0]), Number(r[1])] }), totalDuration)
 
         ready = true
+        histCurrent = snapshot()   // baseline state for undo/redo
         loadSegment(0, 0, false)
         bridge.startWaveform()
         if (win.visibility !== Window.Maximized) win.showMaximized()
@@ -297,21 +366,26 @@ ApplicationWindow {
     function cutSelection() {
         var lo = Math.min(markIn, markOut), hi = Math.max(markIn, markOut)
         if (hi - lo < 0.05) return
-        var c = cuts.slice(); c.push([lo, hi]); cuts = normRanges(c); tl.requestPaint()
+        var c = cuts.slice(); c.push([lo, hi]); cuts = normRanges(c); tl.requestPaint(); commit()
     }
     function deleteCutAtCti() {
         var c = []
         for (var i = 0; i < cuts.length; ++i) if (!(cti >= cuts[i][0] - 0.001 && cti <= cuts[i][1] + 0.001)) c.push(cuts[i])
-        cuts = c; tl.requestPaint()
+        cuts = c; tl.requestPaint(); commit()
     }
     function deleteSplitAtCti() {
         var best = -1, bd = 1e9
         for (var i = 0; i < separatorPoints.length; ++i) { var d = Math.abs(Number(separatorPoints[i]) - cti); if (d < bd) { bd = d; best = i } }
         var px = tl.t2x(cti)
         if (best >= 0 && bd / Math.max(0.001, totalDuration) * (tl.width - 12) < 14) {
-            var sp = separatorPoints.slice(); sp.splice(best, 1); separatorPoints = sp; tl.requestPaint()
+            var sp = separatorPoints.slice(); sp.splice(best, 1); separatorPoints = sp; tl.requestPaint(); commit()
         }
     }
+    function addSplit() {
+        var sp = separatorPoints.slice(); sp.push(snapTime(cti, -1, null)); separatorPoints = sp; tl.requestPaint(); commit()
+    }
+    function setMarkIn() { markIn = snapTime(cti, -1, "in"); commit() }
+    function setMarkOut() { markOut = snapTime(cti, -1, "out"); commit() }
 
     function buildResult() {
         return JSON.stringify({ status: "ok", margins: [cropTop, cropLeft, cropRight, cropBottom],
@@ -334,6 +408,8 @@ ApplicationWindow {
                 Label { text: "FFmWiz  •  Unified Video Editor"; color: win.col("accent_text", "#79b4ff"); font.pixelSize: 15; font.bold: true }
                 Label { text: segs.length > 1 ? (segs.length + " joined videos") : "1 video"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 12 }
                 Item { Layout.fillWidth: true }
+                PadButton { text: "↶ Undo"; implicitWidth: 92; enabled: histUndo.length > 0; onClicked: doUndo() }
+                PadButton { text: "↷ Redo"; implicitWidth: 92; enabled: histRedo.length > 0; onClicked: doRedo() }
                 Label { text: "MODERN (QML)"; color: win.col("chapter_text", "#d9bdff"); font.pixelSize: 11; font.bold: true }
             }
         }
@@ -362,10 +438,10 @@ ApplicationWindow {
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 2; rowSpacing: 8; columnSpacing: 10
-                            CropField { Layout.fillWidth: true; label: "T"; maxv: sourceH; v: cropTop; onEdited: (value) => cropTop = value }
-                            CropField { Layout.fillWidth: true; label: "B"; maxv: sourceH; v: cropBottom; onEdited: (value) => cropBottom = value }
-                            CropField { Layout.fillWidth: true; label: "L"; maxv: sourceW; v: cropLeft; onEdited: (value) => cropLeft = value }
-                            CropField { Layout.fillWidth: true; label: "R"; maxv: sourceW; v: cropRight; onEdited: (value) => cropRight = value }
+                            CropField { Layout.fillWidth: true; label: "T"; maxv: sourceH; v: cropTop; onEdited: (value) => { cropTop = value; commit() } }
+                            CropField { Layout.fillWidth: true; label: "B"; maxv: sourceH; v: cropBottom; onEdited: (value) => { cropBottom = value; commit() } }
+                            CropField { Layout.fillWidth: true; label: "L"; maxv: sourceW; v: cropLeft; onEdited: (value) => { cropLeft = value; commit() } }
+                            CropField { Layout.fillWidth: true; label: "R"; maxv: sourceW; v: cropRight; onEdited: (value) => { cropRight = value; commit() } }
                         }
                         Switch { text: "Edit crop on preview"; checked: cropEdit; onToggled: cropEdit = checked }
 
@@ -380,26 +456,27 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 model: ["25%", "50%", "75%", "100%", "125%", "150%", "200%"]
                                 currentIndex: 3
-                                onActivated: speed = parseFloat(currentText) / 100.0
+                                onActivated: { speed = parseFloat(currentText) / 100.0; commit() }
                                 Component.onCompleted: { var idx = model.indexOf(Math.round(speed * 100) + "%"); if (idx >= 0) currentIndex = idx }
                             }
                         }
-                        Switch { text: "Reverse video"; checked: reverse; onToggled: reverse = checked }
-                        Switch { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: includeAudio = checked }
+                        Switch { text: "Reverse video"; checked: reverse; onToggled: { reverse = checked; commit() } }
+                        Switch { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: { includeAudio = checked; commit() } }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
                         SectionLabel { text: "CUTS & SPLIT" }
+                        Switch { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
                         GridLayout {
                             Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Mark In (I)"; onClicked: markIn = cti }
-                            PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; onClicked: markOut = cti }
+                            PadButton { Layout.fillWidth: true; text: "Mark In (I)"; onClicked: setMarkIn() }
+                            PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; onClicked: setMarkOut() }
                             PadButton { Layout.fillWidth: true; text: "Cut Selection"; baseColor: win.col("danger_cut", "#7f123f"); textColor: "#ffffff"; onClicked: cutSelection() }
                             PadButton { Layout.fillWidth: true; text: "Delete Cut"; onClicked: deleteCutAtCti() }
-                            PadButton { Layout.fillWidth: true; text: "Add Split"; onClicked: { var sp = separatorPoints.slice(); sp.push(cti); separatorPoints = sp; tl.requestPaint() } }
+                            PadButton { Layout.fillWidth: true; text: "Add Split"; onClicked: addSplit() }
                             PadButton { Layout.fillWidth: true; text: "Del Split"; onClicked: deleteSplitAtCti() }
                         }
-                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; onClicked: { cuts = []; tl.requestPaint() } }
+                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; onClicked: { cuts = []; tl.requestPaint(); commit() } }
                         Label {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
                             text: cuts.length + " cut(s) • " + separatorPoints.length + " split(s)\nKept: " + fmt(keepTotal()) + " of " + fmt(totalDuration)
@@ -471,6 +548,7 @@ ApplicationWindow {
                                         var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
                                         cropTop = Math.max(0, Math.min(sourceH - cropBottom - 10, v))
                                     }
+                                    onReleased: commit()
                                 }
                             }
                             // Bottom edge handle
@@ -484,6 +562,7 @@ ApplicationWindow {
                                         var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
                                         cropBottom = Math.max(0, Math.min(sourceH - cropTop - 10, sourceH - v))
                                     }
+                                    onReleased: commit()
                                 }
                             }
                             // Left edge handle
@@ -497,6 +576,7 @@ ApplicationWindow {
                                         var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
                                         cropLeft = Math.max(0, Math.min(sourceW - cropRight - 10, v))
                                     }
+                                    onReleased: commit()
                                 }
                             }
                             // Right edge handle
@@ -510,6 +590,7 @@ ApplicationWindow {
                                         var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
                                         cropRight = Math.max(0, Math.min(sourceW - cropLeft - 10, sourceW - v))
                                     }
+                                    onReleased: commit()
                                 }
                             }
                         }
@@ -585,8 +666,8 @@ ApplicationWindow {
                         }
                         MouseArea {
                             anchors.fill: parent
-                            onPressed: (m) => seekTo(tl.x2t(m.x))
-                            onPositionChanged: (m) => { if (pressed) seekTo(tl.x2t(m.x)) }
+                            onPressed: (m) => seekTo(snapTime(tl.x2t(m.x), -1, null))
+                            onPositionChanged: (m) => { if (pressed) seekTo(snapTime(tl.x2t(m.x), -1, null)) }
                             // Wheel zooms the timeline around the cursor time.
                             onWheel: (wheel) => {
                                 var tUnder = tl.x2t(wheel.x)
@@ -647,7 +728,7 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                 PadButton { text: "Reset all"; implicitWidth: 110
-                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; tl.requestPaint() } }
+                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; tl.requestPaint(); commit() } }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
                 PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
@@ -659,8 +740,11 @@ ApplicationWindow {
     Shortcut { sequence: "Esc"; onActivated: bridge.cancel() }
     Shortcut { sequence: "Return"; onActivated: bridge.submit(buildResult()) }
     Shortcut { sequence: "Enter"; onActivated: bridge.submit(buildResult()) }
-    Shortcut { sequence: "I"; onActivated: markIn = cti }
-    Shortcut { sequence: "O"; onActivated: markOut = cti }
+    Shortcut { sequence: "I"; onActivated: setMarkIn() }
+    Shortcut { sequence: "O"; onActivated: setMarkOut() }
+    Shortcut { sequence: "Ctrl+Z"; onActivated: doUndo() }
+    Shortcut { sequence: "Ctrl+Y"; onActivated: doRedo() }
+    Shortcut { sequence: "Ctrl+Shift+Z"; onActivated: doRedo() }
     Shortcut { sequence: "Left"; onActivated: frameStep(-1) }
     Shortcut { sequence: "Right"; onActivated: frameStep(1) }
     Shortcut { sequence: "Shift+Left"; onActivated: seekTo(cti - 1) }
