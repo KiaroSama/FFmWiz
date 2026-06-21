@@ -273,6 +273,17 @@ DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS = 400
 # and answers["audio_encoders"]. Only the common lists below are shown on screen.
 COMMON_VIDEO_FORMATS = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "ts"]
 COMMON_AUDIO_FORMATS = ["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"]
+
+# Recognized output container/format extensions. A value outside this set is
+# very likely a typo (e.g. "acc" for "aac") that would make FFmpeg fail with
+# "Unable to find a suitable output format"; the wizard warns and suggests the
+# closest match before accepting it.
+KNOWN_OUTPUT_FORMATS = {
+    "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "mpg", "mpeg", "wmv", "flv",
+    "ogv", "3gp", "mts", "m2ts", "vob", "mxf",
+    "mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "ac3", "eac3",
+    "wma", "alac", "aiff", "aif", "amr", "mka", "caf", "spx",
+}
 COMMON_VIDEO_CODECS = ["H265", "H264", "AV1", "VP9", "MPEG4", "copy"]
 COMMON_AUDIO_CODECS = ["aac", "libopus", "opus", "libmp3lame", "flac", "pcm_s16le", "copy"]
 CONFIG_FILE_NAME = "config.json"
@@ -14639,7 +14650,15 @@ def step_output_format(answers: dict[str, Any]) -> None:
             value = default_ext
         try:
             answers["output_format_keep_input"] = value.lower().strip() == "n"
-            answers["output_ext"] = normalize_format(value, input_ext)
+            ext = normalize_format(value, input_ext)
+            # Guard against typos (e.g. "acc" for "aac") that FFmpeg cannot mux.
+            if not answers["output_format_keep_input"] and ext not in KNOWN_OUTPUT_FORMATS:
+                import difflib
+                close = difflib.get_close_matches(ext, sorted(KNOWN_OUTPUT_FORMATS), n=1)
+                hint = f" Did you mean '{close[0]}'?" if close else ""
+                if not ask_yes_no(yn_prompt(f"'{ext}' is not a recognized output format.{hint} Use it anyway?", False), False):
+                    continue
+            answers["output_ext"] = ext
             return
         except ValueError as exc:
             error(str(exc))
@@ -15352,15 +15371,15 @@ def step_loudnorm(answers: dict[str, Any]) -> None:
         answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
 
     measured: dict[str, float] | None = None
-    # The current loudness is measured and shown BEFORE the target is asked.
-    # For two-pass it is required (and injected); for single-pass it is offered
-    # (informational, to help choose a target) and not injected.
-    measure_now = two_pass
-    if not two_pass:
-        measure_now = ask_yes_no(
-            yn_prompt("Measure current audio loudness first (to help choose a target)?", True),
-            True,
-        )
+    # ALWAYS ask before measuring (default yes), for both single and two-pass.
+    # Declining a two-pass measurement falls back to single-pass.
+    measure_now = ask_yes_no(
+        yn_prompt("Measure current audio loudness first (to help choose a target)?", True),
+        True,
+    )
+    if two_pass and not measure_now:
+        note("Two-pass loudnorm needs a measurement; using single-pass instead.")
+        two_pass = False
     if measure_now:
         ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
         audio_index = selected[0]

@@ -528,26 +528,29 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
             measured = {"input_i": -18.0, "input_tp": -2.0, "input_lra": 5.0, "input_thresh": -28.0, "target_offset": -0.1}
-            captured_prompts = []
-
-            def fake_ask_raw(prompt):
-                captured_prompts.append(prompt)
-                return ["3", "-16"][len(captured_prompts) - 1] if len(captured_prompts) <= 2 else ""
-
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask_raw), \
+            with mock.patch.object(FFmWiz, "ask_raw", side_effect=["3", "-16"]), \
+                 mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
                  mock.patch.object(FFmWiz, "probe_join_loudnorm_measurement", return_value=measured), \
                  mock.patch.object(FFmWiz, "print_loudnorm_stats"):
                 FFmWiz.step_loudnorm(answers)
             self.assertEqual(answers["loudnorm_mode"], "two_pass")
             self.assertEqual(answers["loudnorm_measured"], measured)
-            joined_prompts = " ".join(captured_prompts)
-            self.assertNotIn("Measure current audio loudness", joined_prompts)
-            self.assertNotIn("Increase / normalize audio loudness", joined_prompts)
+
+    def test_loudnorm_two_pass_decline_measure_falls_back_to_single(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, _ = self.join_answers(tmp)
+            # Choose two-pass (3) but decline the measure question -> single-pass.
+            with mock.patch.object(FFmWiz, "ask_raw", side_effect=["3", "-16"]), \
+                 mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
+                FFmWiz.step_loudnorm(answers)
+            self.assertEqual(answers["loudnorm_mode"], "single")
+            self.assertNotIn("loudnorm_measured", answers)
 
     def test_loudnorm_two_pass_parse_failure_can_cancel(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
             with mock.patch.object(FFmWiz, "ask_raw", side_effect=["3", "-16", "m"]), \
+                 mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
                  mock.patch.object(FFmWiz, "probe_join_loudnorm_measurement", return_value=None):
                 FFmWiz.step_loudnorm(answers)
             self.assertFalse(answers["loudnorm_enabled"])
