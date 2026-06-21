@@ -13894,6 +13894,22 @@ def output_has_video(answers: dict[str, Any]) -> bool:
     return bool(answers.get("video_streams")) and not output_is_audio_only(answers)
 
 
+def wizard_audio_join_applicable(answers: dict[str, Any]) -> bool:
+    """True for a pure audio input in the interactive wizard, so the user can
+    join more audio files (the video join path requires video inputs)."""
+    return (
+        bool(answers.get("input_path"))
+        and bool(answers.get("audio_streams"))
+        and not answers.get("video_streams")
+    )
+
+
+def wizard_join_inputs_applicable(answers: dict[str, Any]) -> bool:
+    """The wizard offers join-another for video inputs (existing) and for
+    audio-only inputs (join more audio)."""
+    return output_has_video(answers) or wizard_audio_join_applicable(answers)
+
+
 def default_audio_codec_for_ext(ext: str) -> str:
     return AUDIO_CODEC_DEFAULTS_BY_FORMAT.get(ext.lower(), DEFAULT_AUDIO_CODEC)
 
@@ -14366,6 +14382,7 @@ def step_output_location(answers: dict[str, Any]) -> None:
 
 
 JOIN_ADD_ANOTHER_BACK = "back=0, quit=exit, f=join all videos in folder"
+JOIN_ADD_ANOTHER_BACK_AUDIO = "back=0, quit=exit"
 
 
 def join_video_files_in_folder(folder: Path) -> list[Path]:
@@ -14380,7 +14397,7 @@ def join_video_files_in_folder(folder: Path) -> list[Path]:
     )
 
 
-def ask_join_add_another(prompt: str) -> bool | str:
+def ask_join_add_another(prompt: str, allow_folder: bool = True) -> bool | str:
     """Join-flow variant of the add-another question. Returns True (yes),
     False (no / Enter), or the string 'folder'. Raises Back on 0/back tokens."""
     while True:
@@ -14394,10 +14411,10 @@ def ask_join_add_another(prompt: str) -> bool | str:
         if lowered in {"y", "yes"}:
             log_info("User choice: join_add_another=yes")
             return True
-        if lowered in {"f", "folder"}:
+        if allow_folder and lowered in {"f", "folder"}:
             log_info("User choice: join_add_another=folder")
             return "folder"
-        error("Enter y, n, or 'f' (join all videos in a folder).")
+        error("Enter y, n, or 'f' (join all videos in a folder)." if allow_folder else "Enter y or n.")
 
 
 def ask_join_folder_path(answers: dict[str, Any]) -> Path | None:
@@ -14467,13 +14484,18 @@ def print_join_order_list(paths: list[Any]) -> None:
 
 
 def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
-    if not output_has_video(answers) or not answers.get("input_path"):
+    audio_join = wizard_audio_join_applicable(answers) and not output_has_video(answers)
+    if (not output_has_video(answers) and not audio_join) or not answers.get("input_path"):
         answers.pop("join_input_items", None)
         answers["_join_question_extra"] = 0
         answers.pop("_join_base_question", None)
         answers.pop("_join_last_question", None)
         return
     existing_items = list(answers.get("join_input_items") or [])
+    # Media-aware wording + options (audio joins do not offer folder scanning).
+    media_word = "audio" if audio_join else "video"
+    join_back = JOIN_ADD_ANOTHER_BACK_AUDIO if audio_join else JOIN_ADD_ANOTHER_BACK
+    allow_folder = not audio_join
     existing_extra = int(answers.get("_join_question_extra", 0) or 0)
     current_question = int(answers.get("_question_number", 0) or 0)
     resuming_existing_join = bool(existing_items and existing_extra and current_question > existing_extra)
@@ -14482,7 +14504,7 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
     if resuming_existing_join:
         resume_question = max(current_question, int(answers.get("_join_last_question") or current_question))
         sub_question_base = resume_question
-        first_title = "Add another video file?"
+        first_title = f"Add another {media_word} file?"
     else:
         # Folder given at the input prompt pre-loads the join set; keep those
         # items instead of discarding them.
@@ -14495,12 +14517,12 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
         answers["_join_question_extra"] = 0
         answers["_join_base_question"] = base_question
         sub_question_base = base_question
-        first_title = "Add another video file?" if items else "Add another video file to join with this input?"
+        first_title = f"Add another {media_word} file?" if items else f"Add another {media_word} file to join with this input?"
 
     # Initial add-another question (now also accepts 'folder').
     answers["_question_number"] = sub_question_base
     decision = ask_join_add_another(
-        question_prompt(answers, first_title, "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
+        question_prompt(answers, first_title, "y/n", "n", back=join_back), allow_folder=allow_folder
     )
     if decision is False:
         if resuming_existing_join:
@@ -14532,8 +14554,8 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
             value = ask_raw(
                 question_prompt(
                     answers,
-                    "Enter additional video file path",
-                    "drag and drop a video file here or paste a path; b=re-enter previous file",
+                    f"Enter additional {media_word} file path",
+                    f"drag and drop a {media_word} file here or paste a path; b=re-enter previous file",
                     back="back=0, quit=exit",
                 )
             )
@@ -14557,13 +14579,13 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
                 error("File not found. Enter the full file path again.")
                 continue
             if paths_same(path, answers["input_path"]) or any(paths_same(path, item["path"]) for item in items):
-                error("This video is already selected for joining. Enter a different file.")
+                error("This file is already selected for joining. Enter a different file.")
                 continue
             if looks_like_generated_output_file(path):
                 error("This looks like a previously generated FFmWiz output file. It was not added as a join input.")
                 continue
             try:
-                items.append(join_load_media_item(answers, path))
+                items.append(join_load_media_item(answers, path, allow_audio_only=audio_join))
             except Exception as exc:
                 log_exception(f"Join input probe failed: {path}")
                 error(str(exc))
@@ -14572,7 +14594,7 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
 
         answers["_question_number"] = sub_question
         decision = ask_join_add_another(
-            question_prompt(answers, "Add another video file?", "y/n", "n", back=JOIN_ADD_ANOTHER_BACK)
+            question_prompt(answers, f"Add another {media_word} file?", "y/n", "n", back=join_back), allow_folder=allow_folder
         )
         if decision is False:
             break
@@ -14589,7 +14611,7 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
     answers["_join_last_question"] = sub_question
     answers["_join_question_extra"] = max(0, sub_question - base_question)
     answers["join_input_items"] = items
-    note(f"Added {len(items)} additional video input(s) for joining.")
+    note(f"Added {len(items)} additional {media_word} input(s) for joining.")
     if items:
         print_join_order_list([answers["input_path"], *[it["path"] for it in items]])
 
@@ -16944,7 +16966,16 @@ def step_start_now(answers: dict[str, Any]) -> None:
                 and not loudnorm_transform_enabled(answers)
             )
             print_join_summary(join_items, copy_compatible, reasons)
-            if can_copy:
+            audio_only_join = all(not item.get("video_streams") for item in join_items)
+            if audio_only_join:
+                # Interactive-wizard audio join: stream-copy when compatible,
+                # otherwise concatenate and re-encode the joined audio.
+                if copy_compatible and str(answers.get("audio_codec", "")).lower() == "copy":
+                    cmd = build_join_copy_command(answers, join_items, output_path)
+                else:
+                    note("Joining audio inputs (concatenate and re-encode).")
+                    cmd = build_join_audio_encode_command(answers, join_items, output_path)
+            elif can_copy:
                 cmd = build_join_copy_command(answers, join_items, output_path)
             else:
                 if copy_compatible:
@@ -17167,7 +17198,7 @@ def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: boo
 def run_wizard(answers: dict[str, Any]) -> None:
     steps = [
         Step("input_path", lambda a: True, step_input_path),
-        Step("join_inputs", output_has_video, step_join_additional_inputs_for_encode),
+        Step("join_inputs", wizard_join_inputs_applicable, step_join_additional_inputs_for_encode),
         Step("output_location", lambda a: True, step_output_location),
         Step("output_format", lambda a: True, step_output_format),
         Step("video_codec", output_has_video, step_video_codec),
