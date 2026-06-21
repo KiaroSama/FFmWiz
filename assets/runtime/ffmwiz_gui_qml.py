@@ -1,4 +1,4 @@
-"""FFmWiz unified video editor — QtQuick/QML implementation (Phase 1).
+"""FFmWiz unified video editor — QtQuick/QML implementation (modern engine).
 
 This is the NEW, modern GUI engine. It is a SEPARATE module from the classic
 PySide6-widgets editor (assets/runtime/ffmwiz_gui.py), which is kept intact and
@@ -18,11 +18,17 @@ QSS-polish cost that made the classic editor slow to appear; the window is
 painted from its first frame (no white flash); and VideoOutput preserves the
 source aspect ratio natively (no stretching for mixed-orientation joins).
 
-Phase 1 scope (fully working): modern dark theme using the EXACT current colors,
-fast load, no white flash, aspect-correct video preview across joined segments,
-play/pause/seek, crop margins, speed, reverse, include-audio, trim via mark
-in/out, and confirm/cancel returning the correct reply. Pending phases: vector
-waveform, multi-range cuts, split points, and frame-accurate scrubbing.
+Implemented scope (all phases): modern dark theme using the EXACT current
+colors, fast load with no white flash, aspect-correct video preview across
+joined segments (PreserveAspectFit, no stretching for mixed orientations),
+double-buffered two-player seamless join playback, vector audio waveform,
+multi-range cuts, split points, frame-accurate scrubbing, timeline zoom/pan,
+interactive draggable crop handles on the preview, speed, reverse,
+include-audio, mark in/out, and confirm/cancel returning the correct reply.
+
+Note: a headless self-test (FFMWIZ_QML_SELFTEST=1 + QT_QPA_PLATFORM=offscreen)
+verifies the QML compiles and the root window is created; it does not exercise
+interactive playback or painting, which must be verified on a real display.
 """
 from __future__ import annotations
 
