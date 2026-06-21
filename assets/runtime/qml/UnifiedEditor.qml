@@ -41,6 +41,35 @@ ApplicationWindow {
     property var peaks: []
     property bool ready: false
 
+    // ---- Phase 5: timeline zoom/pan + interactive crop ----
+    property real zoom: 1.0        // 1 = whole clip visible; higher = zoomed in
+    property real viewStart: 0     // left edge of the visible window, in seconds
+    property bool cropEdit: false  // show draggable crop handles on the preview
+
+    function viewSpan() { return totalDuration / Math.max(1, zoom) }
+    function clampView() {
+        var sp = viewSpan()
+        viewStart = Math.max(0, Math.min(Math.max(0, totalDuration - sp), viewStart))
+    }
+    // Zoom around an anchor time, keeping it at the same fractional x position.
+    function zoomAt(factor, anchorT, frac) {
+        var z = Math.max(1, Math.min(400, zoom * factor))
+        if (z === zoom) return
+        zoom = z
+        var sp = viewSpan()
+        viewStart = anchorT - frac * sp
+        clampView()
+    }
+    function fitZoom() { zoom = 1.0; viewStart = 0 }
+
+    // ---- Frame-accurate scrubbing ----
+    function curFrame() { return Math.round(cti * fps) }
+    function totalFrames() { return Math.round(totalDuration * fps) }
+    function frameStep(dir) {
+        var f = Math.round(cti * fps) + dir
+        seekTo(Math.max(0, Math.min(totalDuration, f / Math.max(0.001, fps))))
+    }
+
     function col(key, fallback) { return (theme && theme[key]) ? theme[key] : fallback }
     color: col("bg", "#0d1117")
 
@@ -338,6 +367,7 @@ ApplicationWindow {
                             CropField { Layout.fillWidth: true; label: "L"; maxv: sourceW; v: cropLeft; onEdited: (value) => cropLeft = value }
                             CropField { Layout.fillWidth: true; label: "R"; maxv: sourceW; v: cropRight; onEdited: (value) => cropRight = value }
                         }
+                        Switch { text: "Edit crop on preview"; checked: cropEdit; onToggled: cropEdit = checked }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
@@ -393,39 +423,101 @@ ApplicationWindow {
                     color: win.col("timeline_bg", "#0a0d12")
                     border.color: win.col("border_strong", "#3a4150")
                     clip: true
-                    // Two stacked outputs for double-buffered seamless joins.
-                    // PreserveAspectFit keeps each segment's native aspect ratio
-                    // (black bars instead of stretching when dimensions differ).
-                    VideoOutput {
-                        id: voA
-                        anchors.fill: parent
-                        anchors.margins: 6
-                        fillMode: VideoOutput.PreserveAspectFit
-                        visible: win.activeAB === 0
-                    }
-                    VideoOutput {
-                        id: voB
-                        anchors.fill: parent
-                        anchors.margins: 6
-                        fillMode: VideoOutput.PreserveAspectFit
-                        visible: win.activeAB === 1
-                    }
+                    // previewArea hosts both video outputs and the crop overlay in
+                    // ONE coordinate space, so contentRect maps 1:1 to overlay pixels.
                     Item {
+                        id: previewArea
                         anchors.fill: parent
-                        visible: ready && (cropTop + cropLeft + cropRight + cropBottom) > 0
-                        property rect cr: (win.activeAB === 0 ? voA.contentRect : voB.contentRect)
-                        Rectangle {
-                            color: "transparent"; border.color: win.col("warn", "#d29922"); border.width: 2
-                            x: parent.cr.x + parent.cr.width * (cropLeft / Math.max(1, sourceW))
-                            y: parent.cr.y + parent.cr.height * (cropTop / Math.max(1, sourceH))
-                            width: parent.cr.width * Math.max(0, (sourceW - cropLeft - cropRight)) / Math.max(1, sourceW)
-                            height: parent.cr.height * Math.max(0, (sourceH - cropTop - cropBottom)) / Math.max(1, sourceH)
+                        anchors.margins: 6
+                        // Two stacked outputs for double-buffered seamless joins.
+                        // PreserveAspectFit keeps each segment's native aspect ratio
+                        // (black bars instead of stretching when dimensions differ).
+                        VideoOutput {
+                            id: voA
+                            anchors.fill: parent
+                            fillMode: VideoOutput.PreserveAspectFit
+                            visible: win.activeAB === 0
                         }
-                    }
-                    Label {
-                        anchors.centerIn: parent
-                        visible: actP().mediaStatus === MediaPlayer.NoMedia || actP().mediaStatus === MediaPlayer.LoadingMedia
-                        text: "Loading preview…"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 14
+                        VideoOutput {
+                            id: voB
+                            anchors.fill: parent
+                            fillMode: VideoOutput.PreserveAspectFit
+                            visible: win.activeAB === 1
+                        }
+                        // Interactive crop overlay: outline + draggable edge handles.
+                        Item {
+                            id: cropOverlay
+                            anchors.fill: parent
+                            visible: ready && (cropEdit || (cropTop + cropLeft + cropRight + cropBottom) > 0)
+                            property rect cr: (win.activeAB === 0 ? voA.contentRect : voB.contentRect)
+                            property real rx: cr.x + cr.width * (cropLeft / Math.max(1, sourceW))
+                            property real ry: cr.y + cr.height * (cropTop / Math.max(1, sourceH))
+                            property real rw: cr.width * Math.max(0, (sourceW - cropLeft - cropRight)) / Math.max(1, sourceW)
+                            property real rh: cr.height * Math.max(0, (sourceH - cropTop - cropBottom)) / Math.max(1, sourceH)
+                            property color handleCol: win.col("accent", "#1f6feb")
+
+                            Rectangle {
+                                color: "transparent"; border.color: win.col("warn", "#d29922"); border.width: 2
+                                x: cropOverlay.rx; y: cropOverlay.ry; width: cropOverlay.rw; height: cropOverlay.rh
+                            }
+                            // Top edge handle
+                            Rectangle {
+                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
+                                height: 10; x: cropOverlay.rx; width: cropOverlay.rw; y: cropOverlay.ry - 5
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeVerCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                        cropTop = Math.max(0, Math.min(sourceH - cropBottom - 10, v))
+                                    }
+                                }
+                            }
+                            // Bottom edge handle
+                            Rectangle {
+                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
+                                height: 10; x: cropOverlay.rx; width: cropOverlay.rw; y: cropOverlay.ry + cropOverlay.rh - 5
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeVerCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                        cropBottom = Math.max(0, Math.min(sourceH - cropTop - 10, sourceH - v))
+                                    }
+                                }
+                            }
+                            // Left edge handle
+                            Rectangle {
+                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
+                                width: 10; y: cropOverlay.ry; height: cropOverlay.rh; x: cropOverlay.rx - 5
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeHorCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                        cropLeft = Math.max(0, Math.min(sourceW - cropRight - 10, v))
+                                    }
+                                }
+                            }
+                            // Right edge handle
+                            Rectangle {
+                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
+                                width: 10; y: cropOverlay.ry; height: cropOverlay.rh; x: cropOverlay.rx + cropOverlay.rw - 5
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeHorCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                        cropRight = Math.max(0, Math.min(sourceW - cropLeft - 10, sourceW - v))
+                                    }
+                                }
+                            }
+                        }
+                        Label {
+                            anchors.centerIn: parent
+                            visible: actP().mediaStatus === MediaPlayer.NoMedia || actP().mediaStatus === MediaPlayer.LoadingMedia
+                            text: "Loading preview…"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 14
+                        }
                     }
                 }
 
@@ -438,8 +530,9 @@ ApplicationWindow {
                         id: tl
                         anchors.fill: parent; anchors.margins: 8
                         property real pad: 6
-                        function t2x(t) { return pad + (t / Math.max(0.001, totalDuration)) * (width - 2 * pad) }
-                        function x2t(x) { return Math.max(0, Math.min(totalDuration, (x - pad) / Math.max(1, (width - 2 * pad)) * totalDuration)) }
+                        // Zoom/pan-aware mapping: the visible window is [viewStart, viewStart+span].
+                        function t2x(t) { var sp = win.viewSpan(); return pad + ((t - win.viewStart) / Math.max(0.001, sp)) * (width - 2 * pad) }
+                        function x2t(x) { var sp = win.viewSpan(); return Math.max(0, Math.min(totalDuration, win.viewStart + (x - pad) / Math.max(1, (width - 2 * pad)) * sp)) }
                         onPaint: {
                             var ctx = getContext("2d"); ctx.reset()
                             var midY = height * 0.52
@@ -455,7 +548,9 @@ ApplicationWindow {
                                 var np = pk.length
                                 ctx.strokeStyle = "rgba(47,129,247,0.85)"; ctx.lineWidth = 1
                                 for (var w = 0; w < np; ++w) {
-                                    var wx = pad + (w / (np - 1)) * (width - 2 * pad)
+                                    var wt = (w / (np - 1)) * totalDuration
+                                    var wx = t2x(wt)
+                                    if (wx < pad - 1 || wx > width - pad + 1) continue   // outside zoom window
                                     var hh = Math.max(0.4, pk[w] * halfMax)
                                     ctx.beginPath(); ctx.moveTo(wx, midY - hh); ctx.lineTo(wx, midY + hh); ctx.stroke()
                                 }
@@ -492,6 +587,13 @@ ApplicationWindow {
                             anchors.fill: parent
                             onPressed: (m) => seekTo(tl.x2t(m.x))
                             onPositionChanged: (m) => { if (pressed) seekTo(tl.x2t(m.x)) }
+                            // Wheel zooms the timeline around the cursor time.
+                            onWheel: (wheel) => {
+                                var tUnder = tl.x2t(wheel.x)
+                                var frac = (wheel.x - tl.pad) / Math.max(1, (tl.width - 2 * tl.pad))
+                                win.zoomAt(wheel.angleDelta.y > 0 ? 1.25 : 0.8, tUnder, frac)
+                                tl.requestPaint()
+                            }
                         }
                     }
                     Connections { target: win; function onCtiChanged() { tl.requestPaint() } }
@@ -499,17 +601,41 @@ ApplicationWindow {
                     Connections { target: win; function onMarkOutChanged() { tl.requestPaint() } }
                     Connections { target: win; function onCutsChanged() { tl.requestPaint() } }
                     Connections { target: win; function onReadyChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onZoomChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onViewStartChanged() { tl.requestPaint() } }
+                    // Pan bar (only when zoomed in).
+                    ScrollBar {
+                        id: tlScroll
+                        orientation: Qt.Horizontal
+                        anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                        anchors.margins: 4
+                        height: 10
+                        visible: win.zoom > 1.0001
+                        policy: ScrollBar.AlwaysOn
+                        size: 1.0 / Math.max(1, win.zoom)
+                        position: win.viewStart / Math.max(0.001, totalDuration)
+                        onPositionChanged: {
+                            if (pressed) { win.viewStart = position * totalDuration; win.clampView() }
+                        }
+                    }
                 }
 
                 // Transport
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 8
-                    PadButton { Layout.preferredWidth: 110; text: actP().playbackState === MediaPlayer.PlayingState ? "❚❚  Pause" : "▶  Play"; onClicked: togglePlay() }
-                    PadButton { Layout.preferredWidth: 70; text: "−1s"; onClicked: seekTo(cti - 1) }
-                    PadButton { Layout.preferredWidth: 70; text: "+1s"; onClicked: seekTo(cti + 1) }
+                    spacing: 6
+                    PadButton { Layout.preferredWidth: 104; text: actP().playbackState === MediaPlayer.PlayingState ? "❚❚  Pause" : "▶  Play"; onClicked: togglePlay() }
+                    PadButton { Layout.preferredWidth: 50; text: "◀◀"; onClicked: seekTo(cti - 1) }    // -1 s
+                    PadButton { Layout.preferredWidth: 44; text: "◀|"; onClicked: frameStep(-1) }       // -1 frame
+                    PadButton { Layout.preferredWidth: 44; text: "|▶"; onClicked: frameStep(1) }        // +1 frame
+                    PadButton { Layout.preferredWidth: 50; text: "▶▶"; onClicked: seekTo(cti + 1) }     // +1 s
                     Label { text: fmt(cti) + "  /  " + fmt(totalDuration); color: win.col("text", "#e6edf3"); font.pixelSize: 13; font.family: "Consolas" }
+                    Label { text: "f " + curFrame() + " / " + totalFrames(); color: win.col("text_mute", "#7d8590"); font.pixelSize: 11; font.family: "Consolas" }
                     Item { Layout.fillWidth: true }
+                    PadButton { Layout.preferredWidth: 40; text: "−"; onClicked: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
+                    Label { text: (Math.round(win.zoom * 100) / 100) + "×"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
+                    PadButton { Layout.preferredWidth: 40; text: "+"; onClicked: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
+                    PadButton { Layout.preferredWidth: 54; text: "Fit"; onClicked: { win.fitZoom(); tl.requestPaint() } }
                 }
             }
         }
@@ -521,7 +647,7 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                 PadButton { text: "Reset all"; implicitWidth: 110
-                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; tl.requestPaint() } }
+                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; tl.requestPaint() } }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
                 PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
@@ -535,4 +661,8 @@ ApplicationWindow {
     Shortcut { sequence: "Enter"; onActivated: bridge.submit(buildResult()) }
     Shortcut { sequence: "I"; onActivated: markIn = cti }
     Shortcut { sequence: "O"; onActivated: markOut = cti }
+    Shortcut { sequence: "Left"; onActivated: frameStep(-1) }
+    Shortcut { sequence: "Right"; onActivated: frameStep(1) }
+    Shortcut { sequence: "Shift+Left"; onActivated: seekTo(cti - 1) }
+    Shortcut { sequence: "Shift+Right"; onActivated: seekTo(cti + 1) }
 }
