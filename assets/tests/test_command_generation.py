@@ -2397,7 +2397,7 @@ class CommandGenerationTests(unittest.TestCase):
         }
         prompts: list[str] = []
 
-        def fake_add_another(prompt):
+        def fake_add_another(prompt, allow_folder=True):
             prompts.append(prompt)
             return False
 
@@ -2438,7 +2438,7 @@ class CommandGenerationTests(unittest.TestCase):
                 (vids / name).write_bytes(b"x")
 
             original = FFmWiz.join_load_media_item
-            FFmWiz.join_load_media_item = lambda answers, path: {
+            FFmWiz.join_load_media_item = lambda answers, path, allow_audio_only=False: {
                 "path": Path(path), "probe": {}, "format": {}, "streams": [],
                 "video_streams": [{"codec_type": "video"}], "audio_streams": [],
                 "subtitle_streams": [], "attachment_streams": [], "data_streams": [],

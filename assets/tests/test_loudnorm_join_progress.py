@@ -758,6 +758,18 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertFalse(answers["audio_speed_enabled"])
         self.assertEqual(answers["audio_cut_keep_ranges"], [])
 
+    # ================= Audio join in the interactive wizard =================
+    def test_wizard_join_applicable_for_audio_input(self):
+        audio_answers = {"input_path": Path("a.wav"), "audio_streams": [audio_stream()], "video_streams": []}
+        video_answers = {"input_path": Path("v.mkv"), "audio_streams": [audio_stream()],
+                         "video_streams": [video_stream()], "output_ext": "mkv"}
+        no_input = {"audio_streams": [audio_stream()], "video_streams": []}
+        self.assertTrue(FFmWiz.wizard_audio_join_applicable(audio_answers))
+        self.assertFalse(FFmWiz.wizard_audio_join_applicable(video_answers))
+        self.assertFalse(FFmWiz.wizard_audio_join_applicable(no_input))
+        self.assertTrue(FFmWiz.wizard_join_inputs_applicable(audio_answers))
+        self.assertTrue(FFmWiz.wizard_join_inputs_applicable(video_answers))
+
 
 if __name__ == "__main__":
     unittest.main()
