@@ -82,7 +82,7 @@ The unified video editor has two engines, selectable per machine:
 - `classic` (default): the stable PySide6-widgets editor with the full feature set.
 - `qml`: a modern QtQuick editor. It appears faster (GPU scene graph, no QSS-polish stall), never flashes white on open, and previews video with the correct aspect ratio (no stretching for mixed-orientation joins). The classic engine remains the default.
 
-  The QML editor supports: aspect-correct preview across joined segments, double-buffered two-player seamless join playback, a vector audio waveform, multi-range cuts, split points, frame-accurate scrubbing (◀|/|▶ buttons and Left/Right arrows; Shift+Left/Right step one second), timeline zoom/pan (mouse wheel to zoom around the cursor, a pan bar when zoomed, and −/+/Fit controls), interactive draggable crop handles on the preview (toggle "Edit crop on preview"), plus speed, reverse, include-audio, mark in/out, and confirm/cancel. Colors and states match the classic editor exactly.
+  The QML editor supports: aspect-correct preview across joined segments, double-buffered two-player seamless join playback, a vector audio waveform, multi-range cuts, split points, undo/redo (Ctrl+Z / Ctrl+Y, up to 100 steps), magnetic snapping of marks/splits/playhead to join boundaries and other targets (toggle "Magnetic snapping"), frame-accurate scrubbing (◀|/|▶ buttons and Left/Right arrows; Shift+Left/Right step one second), timeline zoom/pan (mouse wheel to zoom around the cursor, a pan bar when zoomed, and −/+/Fit controls), interactive draggable crop handles on the preview (toggle "Edit crop on preview"), plus speed, reverse, include-audio, mark in/out, and confirm/cancel. Colors and states match the classic editor exactly.
 
 Select the engine with either:
 
