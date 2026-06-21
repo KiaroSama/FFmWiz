@@ -5931,8 +5931,11 @@ def build_audio_cut_editor(request: dict[str, Any]):
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+Z"), self, activated=self._redo)
             QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+I"), self, activated=self.invert_cuts)
             QtGui.QShortcut(QtGui.QKeySequence("Esc"), self, activated=self.cancel)
-            QtGui.QShortcut(QtGui.QKeySequence("Return"), self, activated=self._confirm_or_apply_text_editor)
-            QtGui.QShortcut(QtGui.QKeySequence("Enter"), self, activated=self._confirm_or_apply_text_editor)
+            # AudioCutWindow has no inline preview-zoom/crop/speed text editors,
+            # so Return/Enter simply confirm. (Binding to the video editor's
+            # _confirm_or_apply_text_editor here previously crashed init.)
+            QtGui.QShortcut(QtGui.QKeySequence("Return"), self, activated=self.confirm)
+            QtGui.QShortcut(QtGui.QKeySequence("Enter"), self, activated=self.confirm)
             self._sync_view_controls()
             self._refresh()
 
