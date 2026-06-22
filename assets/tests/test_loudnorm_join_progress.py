@@ -800,9 +800,10 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         # map all, drop a:1, add the external audio, copy.
         self.assertEqual(cmd[cmd.index("-map") + 1], "0")
         self.assertIn("-0:a:1", cmd)
-        # External audio map must be REQUIRED (no trailing '?') so FFmpeg fails
-        # loudly if the replacement audio stream is missing.
-        self.assertIn("1:a", cmd)
+        # External audio map must be REQUIRED (no trailing '?') and target only
+        # the first audio stream of the external file (:a:0).
+        self.assertIn("1:a:0", cmd)
+        self.assertNotIn("1:a", cmd)
         self.assertNotIn("1:a?", cmd)
         self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
         self.assertTrue(str(cmd[-1]).endswith("out.mkv"))
@@ -810,7 +811,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_build_track_manager_command_remove_only(self):
         cmd = FFmWiz.build_track_manager_command("ffmpeg", Path("in.mkv"), ["2"], [], Path("out.mkv"))
         self.assertIn("-0:2", cmd)
-        self.assertNotIn("1:a", cmd)
+        self.assertNotIn("1:a:0", cmd)
         self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
 
     def test_build_track_manager_command_loudnorm_reencodes_audio(self):

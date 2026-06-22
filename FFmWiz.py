@@ -21664,11 +21664,14 @@ def build_track_manager_command(
     for input_number, item in enumerate(extra_items, start=1):
         # Required maps (no trailing '?'): if the external file's audio/subtitle
         # stream is missing or undetectable, FFmpeg must fail loudly instead of
-        # silently producing output without the replacement track.
+        # silently producing output without the replacement track. Map only the
+        # FIRST stream of each kind (:a:0 / :s:0) so a multi-track external file
+        # adds exactly one audio/subtitle track, matching the metadata prompt
+        # which only configures stream 0.
         if item.get("audio_streams"):
-            cmd.extend(["-map", f"{input_number}:a"])
+            cmd.extend(["-map", f"{input_number}:a:0"])
         if item.get("subtitle_streams"):
-            cmd.extend(["-map", f"{input_number}:s"])
+            cmd.extend(["-map", f"{input_number}:s:0"])
     cmd.extend(["-map_metadata", "0"])
     if answers is not None and loudnorm_transform_enabled(answers):
         # Copy everything, then override audio so loudnorm can re-encode it.
