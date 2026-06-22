@@ -5953,13 +5953,14 @@ def question_prompt(
 
 def yn_prompt(title: str, default: bool) -> str:
     """Build a colored yes/no sub-prompt that matches the standard wizard style
-    (bold title, HINT_YELLOW '(y/n)', green default), for standalone
-    confirmations that do not go through question_prompt."""
+    (bold title, HINT_YELLOW '(y/n)', green default, back/quit hint), for
+    standalone confirmations that do not go through question_prompt."""
     default_text = "y" if default else "n"
     return (
         f"\n{paint(title, Color.BOLD)} "
         f"({paint('y/n', Color.HINT_YELLOW)}) "
-        f"{paint('[' + default_text + ']', Color.GREEN)}: "
+        f"{paint('[' + default_text + ']', Color.GREEN)} "
+        f"{back_text('back=0, quit=exit')}: "
     )
 
 
@@ -14633,7 +14634,11 @@ def step_output_format(answers: dict[str, Any]) -> None:
     if answers.get("join_input_items"):
         print_join_input_summary(answers)
     input_ext = answers["input_path"].suffix.lstrip(".") or "mp4"
-    default_ext = "mp4" if answers.get("video_streams") else "mp3"
+    if answers.get("video_streams"):
+        # Default to mp4 for video, except keep mkv when the input is mkv.
+        default_ext = "mkv" if input_ext.lower() == "mkv" else "mp4"
+    else:
+        default_ext = "mp3"
     common_formats = COMMON_VIDEO_FORMATS + COMMON_AUDIO_FORMATS
     while True:
         value = ask_raw(
@@ -14651,17 +14656,19 @@ def step_output_format(answers: dict[str, Any]) -> None:
         try:
             answers["output_format_keep_input"] = value.lower().strip() == "n"
             ext = normalize_format(value, input_ext)
-            # Guard against typos (e.g. "acc" for "aac") that FFmpeg cannot mux.
-            if not answers["output_format_keep_input"] and ext not in KNOWN_OUTPUT_FORMATS:
-                import difflib
-                close = difflib.get_close_matches(ext, sorted(KNOWN_OUTPUT_FORMATS), n=1)
-                hint = f" Did you mean '{close[0]}'?" if close else ""
-                if not ask_yes_no(yn_prompt(f"'{ext}' is not a recognized output format.{hint} Use it anyway?", False), False):
-                    continue
-            answers["output_ext"] = ext
-            return
         except ValueError as exc:
             error(str(exc))
+            continue
+        # Reject unknown output formats (likely typos) with a suggestion, and
+        # ask for a different format instead of building a command FFmpeg fails.
+        if not answers["output_format_keep_input"] and ext not in KNOWN_OUTPUT_FORMATS:
+            import difflib
+            close = difflib.get_close_matches(ext, sorted(KNOWN_OUTPUT_FORMATS), n=1)
+            hint = f" Did you mean '{close[0]}'?" if close else ""
+            error(f"'{ext}' is not a supported output format.{hint} Enter a different format.")
+            continue
+        answers["output_ext"] = ext
+        return
 
 
 def step_video_codec(answers: dict[str, Any]) -> None:
@@ -21258,7 +21265,7 @@ def ask_track_remove_specs(answers: dict[str, Any], stream_count: int | None) ->
                 answers,
                 "Stream(s) to REMOVE",
                 "comma-separated; index like 2 or type:index like a:1; Enter = remove nothing",
-                "",
+                None,
             )
         )
         if is_back_value(value):
@@ -21280,12 +21287,31 @@ def run_track_manager_mode(base_answers: dict[str, Any]) -> tuple[int, float] | 
 
 
 def _track_manager_collect_externals(answers: dict[str, Any]) -> list[dict[str, Any]]:
-    if not ask_yes_no(yn_prompt("Add a track from an external file?", False), False):
+    if not ask_yes_no(yn_prompt("Add a track from an external file?", True), True):
         return []
     try:
         return ask_additional_track_files(answers, [])
     except Back:
         return []
+
+
+def normalize_track_remove_specs(specs: list[str], streams: list[dict[str, Any]]) -> list[str]:
+    """Convert absolute-index removal specs to clearer type:index specs using the
+    probe streams (e.g. '1' -> 'a:0' = the first audio track), which is more
+    explicit and robust than a bare stream index."""
+    if not streams:
+        return list(specs)
+    abs_to_typed: dict[str, str] = {}
+    type_counts: dict[str, int] = {}
+    for stream in streams:
+        index = stream.get("index")
+        letter = {"video": "v", "audio": "a", "subtitle": "s"}.get(stream.get("codec_type"))
+        if letter is None or index is None:
+            continue
+        rel = type_counts.get(letter, 0)
+        abs_to_typed[str(index)] = f"{letter}:{rel}"
+        type_counts[letter] = rel + 1
+    return [abs_to_typed.get(spec, spec) for spec in specs]
 
 
 def _run_track_manager_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
@@ -21312,9 +21338,13 @@ def _run_track_manager_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
 
 def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | None:
     ask_track_manager_source(answers)
+    print_source_info(answers)
     print_track_list(answers)
-    stream_count = len((answers.get("probe") or {}).get("streams") or [])
+    streams = (answers.get("probe") or {}).get("streams") or []
+    stream_count = len(streams)
     remove_specs = ask_track_remove_specs(answers, stream_count or None)
+    # Prefer explicit type:index over a bare absolute index (e.g. -0:a:0).
+    remove_specs = normalize_track_remove_specs(remove_specs, streams)
     extra_items = _track_manager_collect_externals(answers)
     if not remove_specs and not extra_items:
         note("No track was removed or added; nothing to do.")
@@ -21373,7 +21403,7 @@ def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | No
                 answers,
                 "Stream(s) to REMOVE from every file",
                 "comma-separated type:index (e.g. a:1, s:0); Enter = remove nothing",
-                "",
+                None,
             )
         )
         if is_back_value(value):
