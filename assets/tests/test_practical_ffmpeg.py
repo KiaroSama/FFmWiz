@@ -236,6 +236,31 @@ class PracticalFFmpegTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0.0)
         self.assertTrue(out.exists() and out.stat().st_size > 0)
 
+    # ================= Audio Cut lossless split (audio-only) =================
+    def test_lossless_audio_split_from_video_excludes_video(self):
+        # Mode 11 (Audio Cut) on a VIDEO input must split ONLY the selected
+        # audio track losslessly and produce audio-only parts (no video).
+        src = self._make_av("vid.mp4", audio_tracks=1, depth=8, duration=4.0)
+        answers = {
+            "ffmpeg": FFMPEG, "input_path": src, "output_location": self._tmp,
+            "audio_index": 0, "audio_streams": self._audio_streams(src),
+        }
+        cmd, pattern = FFmWiz.build_lossless_split_command(answers, [2.0])
+        text = " ".join(str(c) for c in cmd)
+        self.assertIn("-map 0:a:0", text)
+        self.assertIn("-vn", text)
+        self.assertIn("_part%03d.m4a", str(pattern))
+        rc = self._run(cmd).returncode
+        self.assertEqual(rc, 0)
+        part1 = self._tmp / "vid_part001.m4a"
+        part2 = self._tmp / "vid_part002.m4a"
+        self.assertTrue(part1.exists() and part2.exists())
+        # Parts must contain audio and NO video stream.
+        for part in (part1, part2):
+            streams = self._probe(part).get("streams", [])
+            self.assertTrue(any(s.get("codec_type") == "audio" for s in streams), part)
+            self.assertFalse(any(s.get("codec_type") == "video" for s in streams), part)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
