@@ -1192,17 +1192,20 @@ class LoudnormHighlightTests(unittest.TestCase):
     STATS = {"input_i": -21.4, "input_tp": -0.7, "input_lra": 8.0,
              "input_thresh": -32.0, "target_offset": -0.4}
 
-    def test_integrated_loudness_line_is_green_bold(self):
+    def test_integrated_loudness_label_emerald_bold_value_original(self):
         FFmWiz.USE_COLOR = True
         try:
             line = FFmWiz.format_integrated_loudness_line(self.STATS)
         finally:
             FFmWiz.USE_COLOR = False
-        self.assertIn(FFmWiz.Color.GREEN, line)
+        # Label: bold + a distinct (emerald) green.
+        self.assertIn(FFmWiz.Color.MUX_EMERALD, line)
         self.assertIn(FFmWiz.Color.BOLD, line)
+        # Value keeps its original MEAN_VOLUME color (not recolored green).
+        self.assertIn(FFmWiz.Color.MEAN_VOLUME, line)
         self.assertIn("-21.4 LUFS", line)
 
-    def test_other_lines_not_green_bold(self):
+    def test_other_lines_not_emerald_bold(self):
         FFmWiz.USE_COLOR = True
         try:
             buf = io.StringIO()
@@ -1211,10 +1214,93 @@ class LoudnormHighlightTests(unittest.TestCase):
             out = buf.getvalue()
         finally:
             FFmWiz.USE_COLOR = False
-        # The integrated-loudness line is highlighted; true-peak is not green.
-        green_bold = FFmWiz.Color.BOLD + FFmWiz.Color.GREEN
+        # Only the integrated-loudness label is emerald; true-peak is not.
         true_peak_line = [ln for ln in out.splitlines() if "True peak" in ln][0]
-        self.assertNotIn(green_bold, true_peak_line)
+        self.assertNotIn(FFmWiz.Color.MUX_EMERALD, true_peak_line)
+
+
+class JoinVolumeScanTests(unittest.TestCase):
+    """ensure_join_volume_stats populates volume extremes via a (mocked) scan."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def _answers(self, tmp):
+        v = _vstream()
+        a = audio_stream()
+        def item(name):
+            return {"path": Path(tmp) / name, "streams": [v, a], "video_streams": [v],
+                    "audio_streams": [a], "format": {"duration": "5"}, "duration": 5.0}
+        return {
+            "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "input_path": Path(tmp) / "A.mov",
+            "format": {"duration": "5"}, "video_streams": [v], "audio_streams": [a],
+            "data_streams": [], "subtitle_streams": [], "attachment_streams": [], "duration": 5.0,
+            "fps": 30, "join_input_items": [item("B.mov"), item("C.mov")],
+        }
+
+    def test_scan_populates_volume_then_summary_shows_extremes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._answers(tmp)
+            fake = {
+                Path(tmp) / "A.mov": {"mean_volume": "-19.8 dB", "max_volume": "-0.6 dB"},
+                Path(tmp) / "B.mov": {"mean_volume": "-24.1 dB", "max_volume": "-2.0 dB"},
+                Path(tmp) / "C.mov": {"mean_volume": "-20.0 dB", "max_volume": "-0.3 dB"},
+            }
+            def fake_probe(ffmpeg, path, idx):
+                return fake[Path(path)]
+            with mock.patch.object(FFmWiz, "probe_audio_volume_stats", side_effect=fake_probe), \
+                 mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+                FFmWiz.ensure_join_volume_stats(answers)
+                # Primary cached on answers; extras cached on their item dicts.
+                self.assertEqual(answers["audio_volume_stats"][0]["mean_volume"], "-19.8 dB")
+                self.assertIn("audio_volume_stats", answers["join_input_items"][0])
+                lines = FFmWiz.format_join_input_summary_lines(answers)
+        joined = "\n".join(lines)
+        self.assertIn("Mean volume: lowest -24.1 dB (B.mov)", joined)
+        self.assertIn("Max volume: highest -0.3 dB (C.mov)", joined)
+
+    def test_scan_skips_when_already_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self._answers(tmp)
+            answers["audio_volume_stats"] = {0: {"mean_volume": "-10 dB", "max_volume": "-1 dB"}}
+            for it in answers["join_input_items"]:
+                it["audio_volume_stats"] = {0: {"mean_volume": "-10 dB", "max_volume": "-1 dB"}}
+            with mock.patch.object(FFmWiz, "probe_audio_volume_stats",
+                                   side_effect=AssertionError("should not probe")) as probe:
+                FFmWiz.ensure_join_volume_stats(answers)
+                probe.assert_not_called()
+
+
+class SmoothedEtaTests(unittest.TestCase):
+    """ETA rate smoothing: stable against FFmpeg's jumpy per-tick speed."""
+
+    def test_first_sample_seeds_overall_average(self):
+        state = {}
+        rate = FFmWiz._smoothed_eta_rate(state, current_s=100.0, elapsed=10.0)
+        self.assertAlmostEqual(rate, 10.0, places=3)  # 100/10
+
+    def test_jumpy_samples_are_smoothed(self):
+        # Feed a steady ~10x rate, then a single huge spike; smoothed rate must
+        # not jump to the spike (EMA + overall-average blend dampens it).
+        state = {}
+        FFmWiz._smoothed_eta_rate(state, 100.0, 10.0)   # seed: 10/s
+        FFmWiz._smoothed_eta_rate(state, 200.0, 20.0)   # +100 in 10s -> 10/s
+        # Spike: +500 media-seconds in 10s wall (50/s) for one sample.
+        smoothed = FFmWiz._smoothed_eta_rate(state, 700.0, 30.0)
+        instantaneous = 500.0 / 10.0  # 50/s
+        self.assertLess(smoothed, instantaneous)
+        # And it stays in a sensible band (well below the raw spike).
+        self.assertLess(smoothed, 30.0)
+
+    def test_idle_rerender_does_not_corrupt_rate(self):
+        state = {}
+        FFmWiz._smoothed_eta_rate(state, 100.0, 10.0)
+        FFmWiz._smoothed_eta_rate(state, 200.0, 20.0)
+        before = float(state["_ffmwiz_eta_rate_ema"])
+        # Idle re-render: no media progress, tiny elapsed delta -> no EMA update.
+        FFmWiz._smoothed_eta_rate(state, 200.0, 20.2)
+        after = float(state["_ffmwiz_eta_rate_ema"])
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

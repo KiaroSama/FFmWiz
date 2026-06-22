@@ -223,6 +223,19 @@ class PracticalFFmpegTests(unittest.TestCase):
         self.assertEqual(self._run(cmd).returncode, 0)
         self.assertEqual(self._video_stream(out).get("codec_name"), "hevc")
 
+    # ================= progress / ETA rendering =================
+    def test_run_with_progress_renders_and_completes(self):
+        # Exercise run_ffmpeg_with_progress (and the smoothed-ETA renderer) on a
+        # real short encode; it must complete cleanly without raising.
+        src = self._make_av("psrc.mkv", audio_tracks=1, duration=2.0)
+        out = self._tmp / "pout.mp4"
+        cmd = [FFMPEG, "-hide_banner", "-y", "-i", str(src),
+               "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(out)]
+        rc, elapsed = FFmWiz.run_ffmpeg_with_progress(cmd, total_duration=2.0, label="PracticalProgress")
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(elapsed, 0.0)
+        self.assertTrue(out.exists() and out.stat().st_size > 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
