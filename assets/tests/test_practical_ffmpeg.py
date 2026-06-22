@@ -141,8 +141,9 @@ class PracticalFFmpegTests(unittest.TestCase):
                     "subtitle_streams": []}
         out = self._tmp / "replaced.mkv"
         cmd = FFmWiz.build_track_manager_command(FFMPEG, src, ["a:0"], [ext_item], out)
-        # External map must be required (no optional '?').
-        self.assertIn("1:a", cmd)
+        # External map must be required (no optional '?') and target only :a:0.
+        self.assertIn("1:a:0", cmd)
+        self.assertNotIn("1:a", cmd)
         self.assertNotIn("1:a?", cmd)
         self.assertEqual(self._run(cmd).returncode, 0)
         self.assertEqual(len(self._audio_streams(out)), 1)
