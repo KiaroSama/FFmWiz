@@ -21870,40 +21870,75 @@ def _run_track_manager_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
 
 
 def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | None:
-    ask_track_manager_source(answers)
-    print_source_info(answers)
-    print_track_list(answers)
-    streams = (answers.get("probe") or {}).get("streams") or []
-    stream_count = len(streams)
-    remove_specs = ask_track_remove_specs(answers, stream_count or None)
-    # Prefer explicit type:index over a bare absolute index (e.g. -0:a:0).
-    remove_specs = normalize_track_remove_specs(remove_specs, streams)
-    extra_items = _track_manager_collect_externals(answers)
-    _track_manager_ask_loudnorm(answers)
-    if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
-        note("No track was removed or added; nothing to do.")
-        return None
-    input_path = Path(answers["input_path"])
-    output_path = track_manager_output_path(input_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_track_manager_command(answers["ffmpeg"], input_path, remove_specs, extra_items, output_path, answers)
-    print()
-    print(paint("Track Manager summary:", Color.BOLD + Color.LIME))
-    print("  " + field_text("input", input_path, Color.WHITE))
-    print("  " + field_text("remove", ", ".join(remove_specs) or "(none)", Color.ORANGE))
-    print("  " + field_text("add external", ", ".join(Path(it["path"]).name for it in extra_items) or "(none)", Color.GREEN))
-    print("  " + field_text("loudnorm", _track_manager_loudnorm_summary(answers), Color.GREEN))
-    print("  " + field_text("output", output_path, Color.LIME))
-    print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
-    log_info("Final PowerShell command: " + command_to_powershell(cmd))
-    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
-    if not ask_yes_no(question_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True):
-        note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    duration = stream_duration_seconds({}, answers.get("format")) or 0.0
-    return run_ffmpeg_with_progress(cmd, total_duration=(duration if duration > 0 else None), label="Track Manager")
+    # Stage machine so Back ('0') goes ONE step back instead of cancelling the
+    # whole mode: source -> remove -> externals -> loudnorm -> confirm.
+    stage = "source"
+    streams: list[dict[str, Any]] = []
+    stream_count = 0
+    remove_specs: list[str] = []
+    extra_items: list[dict[str, Any]] = []
+    while True:
+        if stage == "source":
+            # Back from the first prompt exits the mode (to the scope menu).
+            ask_track_manager_source(answers)
+            print_source_info(answers)
+            print_track_list(answers)
+            streams = (answers.get("probe") or {}).get("streams") or []
+            stream_count = len(streams)
+            stage = "remove"
+        elif stage == "remove":
+            try:
+                specs = ask_track_remove_specs(answers, stream_count or None)
+            except Back:
+                stage = "source"
+                continue
+            # Prefer explicit type:index over a bare absolute index (e.g. -0:a:0).
+            remove_specs = normalize_track_remove_specs(specs, streams)
+            stage = "externals"
+        elif stage == "externals":
+            try:
+                extra_items = _track_manager_collect_externals(answers)
+            except Back:
+                stage = "remove"
+                continue
+            stage = "loudnorm"
+        elif stage == "loudnorm":
+            try:
+                _track_manager_ask_loudnorm(answers)
+            except Back:
+                stage = "externals"
+                continue
+            stage = "confirm"
+        else:  # confirm
+            if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
+                note("No track was removed or added; nothing to do.")
+                return None
+            input_path = Path(answers["input_path"])
+            output_path = track_manager_output_path(input_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            cmd = build_track_manager_command(answers["ffmpeg"], input_path, remove_specs, extra_items, output_path, answers)
+            print()
+            print(paint("Track Manager summary:", Color.BOLD + Color.LIME))
+            print("  " + field_text("input", input_path, Color.WHITE))
+            print("  " + field_text("remove", ", ".join(remove_specs) or "(none)", Color.ORANGE))
+            print("  " + field_text("add external", ", ".join(Path(it["path"]).name for it in extra_items) or "(none)", Color.GREEN))
+            print("  " + field_text("loudnorm", _track_manager_loudnorm_summary(answers), Color.GREEN))
+            print("  " + field_text("output", output_path, Color.LIME))
+            print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
+            log_info("Final PowerShell command: " + command_to_powershell(cmd))
+            print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
+            try:
+                start_now = ask_yes_no(question_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True)
+            except Back:
+                stage = "loudnorm"  # Back -> previous step
+                continue
+            if not start_now:
+                note("FFmpeg was not started. The command above is ready to run manually.")
+                return None
+            print()
+            print(paint("Starting FFmpeg...", Color.GREEN))
+            duration = stream_duration_seconds({}, answers.get("format")) or 0.0
+            return run_ffmpeg_with_progress(cmd, total_duration=(duration if duration > 0 else None), label="Track Manager")
 
 
 def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | None:

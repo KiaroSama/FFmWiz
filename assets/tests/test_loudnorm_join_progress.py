@@ -1385,5 +1385,74 @@ class LosslessSplitExtTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-map") + 1], "0:a:0")
 
 
+class TrackManagerBackTests(unittest.TestCase):
+    """Back ('0') in the single-file Track Manager goes ONE step back instead
+    of cancelling the whole mode."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def _answers(self):
+        return {
+            "ffmpeg": "ffmpeg", "input_path": Path("x.mkv"),
+            "probe": {"streams": [{"index": 0, "codec_type": "video"},
+                                  {"index": 1, "codec_type": "audio"}]},
+            "format": {"duration": "10"},
+        }
+
+    def test_back_at_loudnorm_returns_to_externals_not_cancel(self):
+        loud_calls, ext_calls = [], []
+
+        def fake_loud(a):
+            loud_calls.append(1)
+            if len(loud_calls) == 1:
+                raise FFmWiz.Back()  # user pressed 0 at the loudnorm menu
+
+        def fake_ext(a):
+            ext_calls.append(1)
+            return []
+
+        answers = self._answers()
+        with mock.patch.object(FFmWiz, "ask_track_manager_source", lambda a: None), \
+             mock.patch.object(FFmWiz, "print_source_info", lambda a: None), \
+             mock.patch.object(FFmWiz, "print_track_list", lambda a: None), \
+             mock.patch.object(FFmWiz, "ask_track_remove_specs", lambda a, c: []), \
+             mock.patch.object(FFmWiz, "_track_manager_collect_externals", side_effect=fake_ext), \
+             mock.patch.object(FFmWiz, "_track_manager_ask_loudnorm", side_effect=fake_loud):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = FFmWiz._run_track_manager_single(answers)
+        # Did NOT cancel the mode (no Back propagated out); instead re-ran the
+        # previous (externals) step and then loudnorm again.
+        self.assertIsNone(result)
+        self.assertEqual(len(loud_calls), 2)
+        self.assertEqual(len(ext_calls), 2)
+
+    def test_back_at_externals_returns_to_remove(self):
+        remove_calls, ext_calls = [], []
+
+        def fake_remove(a, c):
+            remove_calls.append(1)
+            return []
+
+        def fake_ext(a):
+            ext_calls.append(1)
+            if len(ext_calls) == 1:
+                raise FFmWiz.Back()  # 0 at "Add a track?"
+            return []
+
+        answers = self._answers()
+        with mock.patch.object(FFmWiz, "ask_track_manager_source", lambda a: None), \
+             mock.patch.object(FFmWiz, "print_source_info", lambda a: None), \
+             mock.patch.object(FFmWiz, "print_track_list", lambda a: None), \
+             mock.patch.object(FFmWiz, "ask_track_remove_specs", side_effect=fake_remove), \
+             mock.patch.object(FFmWiz, "_track_manager_collect_externals", side_effect=fake_ext), \
+             mock.patch.object(FFmWiz, "_track_manager_ask_loudnorm", lambda a: None):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = FFmWiz._run_track_manager_single(answers)
+        self.assertIsNone(result)
+        self.assertEqual(len(remove_calls), 2)  # went back to remove
+        self.assertEqual(len(ext_calls), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
