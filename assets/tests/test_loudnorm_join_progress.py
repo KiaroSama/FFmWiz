@@ -1314,5 +1314,32 @@ class SmoothedEtaTests(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class AudioTrackSelectionTests(unittest.TestCase):
+    """Audio tools always let the user pick the audio track, even with one
+    track (it is shown and Enter selects it)."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def test_single_track_still_prompts(self):
+        answers = {"audio_streams": [audio_stream()], "format": {"duration": "10"}}
+        with mock.patch.object(FFmWiz, "ask_raw", return_value="") as ask, \
+             mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}), \
+             mock.patch.object(FFmWiz, "get_audio_volume_stats", return_value={}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_audio_track_for_tool(answers)
+        ask.assert_called()  # prompted even with a single track
+        self.assertEqual(answers["audio_index"], 0)
+
+    def test_multi_track_selects_chosen_one_based(self):
+        answers = {"audio_streams": [audio_stream(), audio_stream()], "format": {"duration": "10"}}
+        with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+             mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}), \
+             mock.patch.object(FFmWiz, "get_audio_volume_stats", return_value={}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                FFmWiz.step_audio_track_for_tool(answers)
+        self.assertEqual(answers["audio_index"], 1)  # "2" -> index 1
+
+
 if __name__ == "__main__":
     unittest.main()
