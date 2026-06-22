@@ -1315,21 +1315,21 @@ class SmoothedEtaTests(unittest.TestCase):
 
 
 class AudioTrackSelectionTests(unittest.TestCase):
-    """Audio tools always let the user pick the audio track, even with one
-    track (it is shown and Enter selects it)."""
+    """Single audio track is auto-selected (with a note); multiple tracks are
+    listed and chosen by the user."""
 
     def setUp(self):
         FFmWiz.USE_COLOR = False
 
-    def test_single_track_still_prompts(self):
+    def test_single_track_auto_selects_with_note(self):
         answers = {"audio_streams": [audio_stream()], "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="") as ask, \
-             mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}), \
-             mock.patch.object(FFmWiz, "get_audio_volume_stats", return_value={}):
-            with contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=AssertionError("must not prompt")) as ask:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
                 FFmWiz.step_audio_track_for_tool(answers)
-        ask.assert_called()  # prompted even with a single track
+            ask.assert_not_called()
         self.assertEqual(answers["audio_index"], 0)
+        self.assertIn("Only one audio track", buf.getvalue())
 
     def test_multi_track_selects_chosen_one_based(self):
         answers = {"audio_streams": [audio_stream(), audio_stream()], "format": {"duration": "10"}}
@@ -1339,6 +1339,50 @@ class AudioTrackSelectionTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_audio_track_for_tool(answers)
         self.assertEqual(answers["audio_index"], 1)  # "2" -> index 1
+
+
+class LosslessSplitExtTests(unittest.TestCase):
+    """Lossless audio split lets the user choose a copy-compatible extension."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def test_copy_ext_choices_per_codec(self):
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext_choices("aac")[0], "m4a")
+        self.assertIn("aac", FFmWiz.lossless_audio_copy_ext_choices("aac"))
+        self.assertIn("mka", FFmWiz.lossless_audio_copy_ext_choices("aac"))
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext_choices("flac")[0], "flac")
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext_choices("opus")[0], "opus")
+        # Unknown codec -> universal containers.
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext_choices("weird"), ["mka", "mov"])
+
+    def test_ask_uses_chosen_ext_and_lists_copy_options(self):
+        answers = {"input_path": Path("clip.mp4"),
+                   "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}], "audio_index": 0}
+        buf = io.StringIO()
+        with mock.patch.object(FFmWiz, "ask_raw", return_value="aac"):
+            with contextlib.redirect_stdout(buf):
+                ext = FFmWiz.ask_lossless_split_ext(answers, "aac")
+        self.assertEqual(ext, "aac")
+        self.assertEqual(answers["lossless_split_ext"], "aac")
+
+    def test_ask_default_is_preferred_container(self):
+        answers = {"input_path": Path("clip.mp4"),
+                   "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}], "audio_index": 0}
+        with mock.patch.object(FFmWiz, "ask_raw", return_value=""):
+            with contextlib.redirect_stdout(io.StringIO()):
+                ext = FFmWiz.ask_lossless_split_ext(answers, "aac")
+        self.assertEqual(ext, "m4a")  # Enter -> preferred default
+
+    def test_chosen_ext_used_in_split_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = {"ffmpeg": "ffmpeg", "input_path": Path(tmp) / "clip.mp4",
+                       "output_location": Path(tmp), "audio_index": 0,
+                       "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}],
+                       "lossless_split_ext": "aac"}
+            cmd, pattern = FFmWiz.build_lossless_split_command(answers, [600.0])
+        self.assertIn("_part%03d.aac", str(pattern))
+        self.assertEqual(cmd[cmd.index("-map") + 1], "0:a:0")
 
 
 if __name__ == "__main__":
