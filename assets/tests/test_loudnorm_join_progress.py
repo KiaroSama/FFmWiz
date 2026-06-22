@@ -813,5 +813,89 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             self.assertLess(fc.index("concat=n=2"), fc.index("loudnorm"))
 
 
+class TrackManagerAndOutputFormatTests(unittest.TestCase):
+    """Covers the Track Manager removal-spec normalization and the stricter
+    output-format handling (mkv default for mkv input, reject typos)."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    # ---- normalize_track_remove_specs ----
+    def test_normalize_absolute_index_to_typed(self):
+        # streams: #0 video, #1 audio -> absolute "1" should become "a:0".
+        streams = [
+            {"index": 0, "codec_type": "video"},
+            {"index": 1, "codec_type": "audio"},
+        ]
+        self.assertEqual(FFmWiz.normalize_track_remove_specs(["1"], streams), ["a:0"])
+
+    def test_normalize_multiple_streams(self):
+        # #0 video, #1 audio, #2 audio, #3 subtitle.
+        streams = [
+            {"index": 0, "codec_type": "video"},
+            {"index": 1, "codec_type": "audio"},
+            {"index": 2, "codec_type": "audio"},
+            {"index": 3, "codec_type": "subtitle"},
+        ]
+        self.assertEqual(
+            FFmWiz.normalize_track_remove_specs(["2", "3"], streams),
+            ["a:1", "s:0"],
+        )
+
+    def test_normalize_keeps_typed_specs_unchanged(self):
+        streams = [
+            {"index": 0, "codec_type": "video"},
+            {"index": 1, "codec_type": "audio"},
+        ]
+        self.assertEqual(
+            FFmWiz.normalize_track_remove_specs(["a:0", "s:1"], streams),
+            ["a:0", "s:1"],
+        )
+
+    def test_normalize_no_streams_returns_input(self):
+        self.assertEqual(FFmWiz.normalize_track_remove_specs(["1", "a:0"], []), ["1", "a:0"])
+
+    # ---- step_output_format default ----
+    def _run_output_format(self, input_name, has_video, typed):
+        answers = {
+            "input_path": Path(input_name),
+            "video_streams": [video_stream()] if has_video else [],
+            "_question_number": 1,
+        }
+        with mock.patch.object(FFmWiz, "ask_raw", side_effect=list(typed)):
+            FFmWiz.step_output_format(answers)
+        return answers
+
+    def test_output_default_mp4_for_non_mkv_input(self):
+        # Pressing Enter (empty) on an mp4 input keeps mp4.
+        answers = self._run_output_format("video.mp4", True, [""])
+        self.assertEqual(answers["output_ext"], "mp4")
+
+    def test_output_default_mkv_for_mkv_input(self):
+        # Pressing Enter (empty) on an mkv input defaults to mkv.
+        answers = self._run_output_format("video.mkv", True, [""])
+        self.assertEqual(answers["output_ext"], "mkv")
+
+    def test_output_default_mp3_for_audio_input(self):
+        answers = self._run_output_format("audio.wav", False, [""])
+        self.assertEqual(answers["output_ext"], "mp3")
+
+    def test_output_rejects_unknown_format_then_accepts(self):
+        # "acc" is a typo for ac3 -> rejected and re-asked; then "mp4" accepted.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            answers = self._run_output_format("video.mp4", True, ["acc", "mp4"])
+        self.assertEqual(answers["output_ext"], "mp4")
+        out = buf.getvalue().lower()
+        self.assertIn("not a supported output format", out)
+        self.assertIn("ac3", out)  # close-match suggestion
+
+    def test_output_keep_input_n_allows_unknown(self):
+        # "n" = keep input format, even an unusual container extension.
+        answers = self._run_output_format("clip.xyz", True, ["n"])
+        self.assertTrue(answers["output_format_keep_input"])
+        self.assertEqual(answers["output_ext"], "xyz")
+
+
 if __name__ == "__main__":
     unittest.main()
