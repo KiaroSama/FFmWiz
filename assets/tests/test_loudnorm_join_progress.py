@@ -914,5 +914,308 @@ class TrackManagerAndOutputFormatTests(unittest.TestCase):
         self.assertEqual(answers["output_ext"], "xyz")
 
 
+def _vstream(pix_fmt="yuv420p", depth=8):
+    return {
+        "codec_type": "video", "codec_name": "hevc",
+        "width": 1920, "height": 1080,
+        "avg_frame_rate": "30/1", "r_frame_rate": "30/1",
+        "pix_fmt": pix_fmt, "bits_per_raw_sample": str(depth),
+        "color_range": "tv",
+    }
+
+
+class PixelFormatResolverTests(unittest.TestCase):
+    """Architecture-aware 10-bit/12-bit+ pixel-format selection (CPU vs NVENC)."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def _ans(self, pix_fmt, depth, use_gpu, codec="H265"):
+        return {"video_streams": [_vstream(pix_fmt, depth)], "video_codec": codec, "use_gpu": use_gpu}
+
+    # ---- resolver: encoder x bit depth ----
+    def test_libx265_main_8bit_yuv420p(self):
+        a = self._ans("yuv420p", 8, False)
+        self.assertEqual(FFmWiz.cpu_graph_pixel_format_for_encoder(a), "yuv420p")
+        self.assertEqual(FFmWiz.hevc_profile_for_output(a, "main"), "main")
+
+    def test_libx265_main10_10bit_yuv420p10le(self):
+        a = self._ans("yuv420p10le", 10, False)
+        self.assertEqual(FFmWiz.cpu_graph_pixel_format_for_encoder(a), "yuv420p10le")
+        self.assertEqual(FFmWiz.hevc_profile_for_output(a, "main"), "main10")
+
+    def test_nvenc_main_8bit_format(self):
+        a = self._ans("yuv420p", 8, True)
+        # CPU filter graph feeding NVENC keeps yuv420p (8-bit, unchanged).
+        self.assertEqual(FFmWiz.cpu_graph_pixel_format_for_encoder(a), "yuv420p")
+        # CUDA hardware path uses nv12.
+        self.assertEqual(FFmWiz.cuda_pixel_format_for_output(a), "nv12")
+        self.assertEqual(FFmWiz.target_pixel_format_for_answers(a), "nv12")
+
+    def test_nvenc_main10_10bit_p010le(self):
+        a = self._ans("yuv420p10le", 10, True)
+        self.assertEqual(FFmWiz.cpu_graph_pixel_format_for_encoder(a), "p010le")
+        self.assertEqual(FFmWiz.cuda_pixel_format_for_output(a), "p010le")
+        self.assertEqual(FFmWiz.hevc_profile_for_output(a), "main10")
+
+    # ---- source/output preservation + notes ----
+    def test_source_10bit_output_10bit_preserved_no_note(self):
+        a = self._ans("yuv420p10le", 10, False)
+        self.assertEqual(FFmWiz.output_video_bit_depth(a), 10)
+        self.assertIsNone(FFmWiz.bit_depth_precision_note(a))
+
+    def test_source_8bit_output_10bit_upconvert_note(self):
+        a = self._ans("yuv420p", 8, False)
+        a["force_output_bit_depth"] = 10
+        note = FFmWiz.bit_depth_precision_note(a)
+        self.assertIsNotNone(note)
+        self.assertIn("source precision remains 8-bit", note)
+        # Up-conversion is not a reduction.
+        self.assertNotIn("reduced", note)
+
+    def test_unsupported_high_depth_caps_at_10(self):
+        # 12-bit+ never silently kept; output capped at 10-bit Main10.
+        for depth, pix in ((12, "yuv420p12le"), (14, "yuv420p14le"), (16, "yuv420p16le")):
+            a = self._ans(pix, depth, False)
+            self.assertEqual(FFmWiz.output_video_bit_depth(a), 10)
+            self.assertEqual(FFmWiz.cpu_pixel_format_for_output(a), "yuv420p10le")
+            self.assertEqual(FFmWiz.hevc_profile_for_output(a, "main"), "main10")
+
+    # ---- 12-bit+ reduction notes ----
+    def test_12bit_reduction_note(self):
+        a = self._ans("yuv420p12le", 12, False)
+        self.assertIn("reduced from 12-bit to 10-bit", FFmWiz.bit_depth_precision_note(a))
+
+    def test_14bit_reduction_note(self):
+        a = self._ans("yuv420p14le", 14, False)
+        self.assertIn("reduced from 14-bit to 10-bit", FFmWiz.bit_depth_precision_note(a))
+
+    def test_12bit_forced_8bit_reduction_note(self):
+        a = self._ans("yuv420p12le", 12, False)
+        a["force_output_bit_depth"] = 8
+        self.assertIn("reduced from 12-bit to 8-bit", FFmWiz.bit_depth_precision_note(a))
+
+    # ---- terminal format of the software filter graph ----
+    def test_cpu_filter_nvenc_10bit_ends_p010le(self):
+        f = FFmWiz.build_cpu_video_filter(self._ans("yuv420p10le", 10, True))
+        self.assertTrue(f.endswith("format=p010le"), f)
+
+    def test_cpu_filter_libx265_10bit_ends_yuv420p10le(self):
+        f = FFmWiz.build_cpu_video_filter(self._ans("yuv420p10le", 10, False))
+        self.assertTrue(f.endswith("format=yuv420p10le"), f)
+
+    def test_cpu_filter_nvenc_8bit_ends_yuv420p(self):
+        f = FFmWiz.build_cpu_video_filter(self._ans("yuv420p", 8, True))
+        self.assertTrue(f.endswith("format=yuv420p"), f)
+
+    def test_cuda_filter_10bit_uses_scale_cuda_p010le(self):
+        f = FFmWiz.build_cuda_video_filter(self._ans("yuv420p10le", 10, True))
+        self.assertIn("format=p010le", f)
+        self.assertNotIn("yuv420p10le", f)
+
+    def test_cuda_filter_8bit_uses_nv12(self):
+        f = FFmWiz.build_cuda_video_filter(self._ans("yuv420p", 8, True))
+        self.assertIn("format=nv12", f)
+
+
+class JoinMain10CommandTests(unittest.TestCase):
+    """Join command generation: GPU Main10 must use p010le, CPU Main10
+    yuv420p10le, and 8-bit NVENC must stay unchanged."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def _join(self, tmp, use_gpu, depth=10, codec="H265", loudnorm=False):
+        pix = "yuv420p10le" if depth >= 10 else "yuv420p"
+        v = _vstream(pix, depth)
+        a = audio_stream()
+        def item(name):
+            return {"path": Path(tmp) / name, "streams": [v, a], "video_streams": [v],
+                    "audio_streams": [a], "format": {"duration": "5"}, "duration": 5.0}
+        answers = {
+            "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "input_path": Path(tmp) / "A.mov",
+            "output_ext": "mp4", "video_codec": codec, "use_gpu": use_gpu,
+            "video_streams": [v], "audio_streams": [a], "subtitle_streams": [],
+            "data_streams": [], "attachment_streams": [], "audio_tracks": [0],
+            "subtitle_tracks": [], "audio_codec": "aac", "audio_bitrate_kbps": 128,
+            "resolution": "n", "fps": 30, "video_bitrate_kbps": 4000,
+            "format": {"duration": "5"}, "color_range_choice": "tv",
+            "join_input_items": [item("B.mov")],
+        }
+        if loudnorm:
+            answers.update({"loudnorm_enabled": True, "loudnorm_mode": "single", "loudnorm_target_i": -16.0})
+        items = [item("A.mov"), item("B.mov")]
+        return answers, items
+
+    def test_join_gpu_main10_uses_p010le_not_yuv420p10le(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, items = self._join(tmp, use_gpu=True, depth=10)
+            text = " ".join(FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4"))
+        self.assertIn("format=p010le", text)
+        self.assertNotIn("format=yuv420p10le", text)
+        self.assertIn("hevc_nvenc", text)
+        self.assertIn("-profile:v main10", text)
+        self.assertNotIn("-profile:v main ", text)
+
+    def test_join_cpu_main10_uses_yuv420p10le(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, items = self._join(tmp, use_gpu=False, depth=10)
+            text = " ".join(FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4"))
+        self.assertIn("format=yuv420p10le", text)
+        self.assertIn("-c:v libx265", text)
+        self.assertIn("-profile:v main10", text)
+        self.assertNotIn("format=p010le", text)
+
+    def test_join_8bit_nvenc_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, items = self._join(tmp, use_gpu=True, depth=8)
+            text = " ".join(FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4"))
+        self.assertIn("format=yuv420p", text)
+        self.assertNotIn("format=p010le", text)
+        self.assertNotIn("main10", text)
+
+    def test_join_gpu_main10_with_loudnorm_keeps_p010le(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, items = self._join(tmp, use_gpu=True, depth=10, loudnorm=True)
+            text = " ".join(FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4"))
+        self.assertIn("format=p010le", text)
+        self.assertIn("loudnorm", text)
+        self.assertIn("-profile:v main10", text)
+
+
+class JoinSummaryEnhancementTests(unittest.TestCase):
+    """Join input summary: distinct colors, total raw duration + frame count,
+    and audio volume extremes."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def _rows_answers(self, with_volume=True, with_duration=True):
+        def item(name, vk, ak, fps, dur, mean, mx):
+            v = {**_vstream(), "bit_rate": str(vk * 1000)}
+            a = {**audio_stream(bit_rate=str(ak * 1000))}
+            it = {"path": Path(name), "streams": [v, a], "video_streams": [v],
+                  "audio_streams": [a], "format": {"duration": str(dur)} if with_duration else {},
+                  "duration": float(dur) if with_duration else None}
+            v["avg_frame_rate"] = f"{fps}/1"
+            if with_volume:
+                it["audio_volume_stats"] = {0: {"mean_volume": f"{mean} dB", "max_volume": f"{mx} dB"}}
+            return it
+        primary = item("A.mov", 8900, 175, 30, 600.0, "-19.8", "-0.6")
+        extra1 = item("B.mov", 8499, 164, 30, 700.0, "-24.1", "-2.0")
+        extra2 = item("C.mov", 8948, 170, 29, 0.0, "-20.0", "-0.3")
+        answers = {
+            "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "input_path": primary["path"],
+            "format": primary["format"], "video_streams": primary["video_streams"],
+            "audio_streams": primary["audio_streams"], "data_streams": [],
+            "subtitle_streams": [], "attachment_streams": [], "duration": primary["duration"],
+            "fps": 30, "audio_volume_stats": primary.get("audio_volume_stats"),
+            "join_input_items": [extra1, extra2],
+        }
+        return answers
+
+    def _capture_summary(self, answers):
+        buf = io.StringIO()
+        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            with contextlib.redirect_stdout(buf):
+                FFmWiz.print_join_input_summary(answers)
+        return buf.getvalue()
+
+    def test_plain_lines_include_duration_and_volume(self):
+        answers = self._rows_answers()
+        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            lines = FFmWiz.format_join_input_summary_lines(answers)
+        joined = "\n".join(lines)
+        self.assertIn("Files selected: 3", joined)
+        self.assertIn("Total raw duration:", joined)
+        self.assertIn("Mean volume: lowest -24.1 dB (B.mov)", joined)
+        self.assertIn("Max volume: highest -0.3 dB (C.mov)", joined)
+
+    def test_total_raw_duration_and_frame_count(self):
+        answers = self._rows_answers()
+        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            rows = FFmWiz.join_input_media_stats(answers)
+            info = FFmWiz.join_summary_total_duration(answers, rows)
+        # One file (C.mov) has unknown duration -> 600 + 700 known.
+        self.assertEqual(info["unknown_count"], 1)
+        self.assertAlmostEqual(info["total_seconds"], 1300.0)
+        # Output fps is set -> frames at selected output fps.
+        self.assertIsNotNone(info["frames"])
+        self.assertIn("selected output", info["frame_basis"])
+
+    def test_duration_handles_all_unknown(self):
+        answers = self._rows_answers(with_duration=False)
+        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            rows = FFmWiz.join_input_media_stats(answers)
+            info = FFmWiz.join_summary_total_duration(answers, rows)
+        self.assertEqual(info["known_count"], 0)
+        self.assertEqual(FFmWiz.join_summary_duration_text(info), "unavailable")
+
+    def test_volume_extremes_unavailable_clean(self):
+        answers = self._rows_answers(with_volume=False)
+        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            rows = FFmWiz.join_input_media_stats(answers)
+            self.assertIsNone(FFmWiz.join_summary_volume_extremes(rows))
+
+    def test_summary_colors_highest_differs_from_lowest(self):
+        answers = self._rows_answers()
+        FFmWiz.USE_COLOR = True
+        try:
+            out = self._capture_summary(answers)
+        finally:
+            FFmWiz.USE_COLOR = False
+        # highest and lowest must use different color categories.
+        self.assertIn(FFmWiz.Color.JOIN_HIGH, out)
+        self.assertIn(FFmWiz.Color.JOIN_LOW, out)
+        self.assertNotEqual(FFmWiz.Color.JOIN_HIGH, FFmWiz.Color.JOIN_LOW)
+        # file names use a distinct color.
+        self.assertIn(FFmWiz.Color.JOIN_FILE, out)
+        # volume extremes use distinct colors.
+        self.assertIn(FFmWiz.Color.JOIN_VOL_LOW, out)
+        self.assertIn(FFmWiz.Color.JOIN_VOL_HIGH, out)
+
+    def test_summary_does_not_print_full_paths(self):
+        answers = self._rows_answers()
+        out = self._capture_summary(answers)
+        # Only base names, never directory separators from the item paths.
+        self.assertIn("A.mov", out)
+        self.assertNotIn("/A.mov", out)
+        self.assertNotIn("\\A.mov", out)
+
+
+class LoudnormHighlightTests(unittest.TestCase):
+    """Integrated loudness must be emphasized (bold + green)."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    STATS = {"input_i": -21.4, "input_tp": -0.7, "input_lra": 8.0,
+             "input_thresh": -32.0, "target_offset": -0.4}
+
+    def test_integrated_loudness_line_is_green_bold(self):
+        FFmWiz.USE_COLOR = True
+        try:
+            line = FFmWiz.format_integrated_loudness_line(self.STATS)
+        finally:
+            FFmWiz.USE_COLOR = False
+        self.assertIn(FFmWiz.Color.GREEN, line)
+        self.assertIn(FFmWiz.Color.BOLD, line)
+        self.assertIn("-21.4 LUFS", line)
+
+    def test_other_lines_not_green_bold(self):
+        FFmWiz.USE_COLOR = True
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                FFmWiz.print_loudnorm_stats(self.STATS)
+            out = buf.getvalue()
+        finally:
+            FFmWiz.USE_COLOR = False
+        # The integrated-loudness line is highlighted; true-peak is not green.
+        green_bold = FFmWiz.Color.BOLD + FFmWiz.Color.GREEN
+        true_peak_line = [ln for ln in out.splitlines() if "True peak" in ln][0]
+        self.assertNotIn(green_bold, true_peak_line)
+
+
 if __name__ == "__main__":
     unittest.main()
