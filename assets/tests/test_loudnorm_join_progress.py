@@ -789,15 +789,32 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         # map all, drop a:1, add the external audio, copy.
         self.assertEqual(cmd[cmd.index("-map") + 1], "0")
         self.assertIn("-0:a:1", cmd)
-        self.assertIn("1:a?", cmd)
+        # External audio map must be REQUIRED (no trailing '?') so FFmpeg fails
+        # loudly if the replacement audio stream is missing.
+        self.assertIn("1:a", cmd)
+        self.assertNotIn("1:a?", cmd)
         self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
         self.assertTrue(str(cmd[-1]).endswith("out.mkv"))
 
     def test_build_track_manager_command_remove_only(self):
         cmd = FFmWiz.build_track_manager_command("ffmpeg", Path("in.mkv"), ["2"], [], Path("out.mkv"))
         self.assertIn("-0:2", cmd)
-        self.assertNotIn("1:a?", cmd)
+        self.assertNotIn("1:a", cmd)
         self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+
+    def test_build_track_manager_command_loudnorm_reencodes_audio(self):
+        # With loudnorm enabled, audio is re-encoded (-c:a) with a loudnorm
+        # -filter:a, while the rest stays stream-copied.
+        answers = {"loudnorm_enabled": True, "loudnorm_mode": "single",
+                   "loudnorm_target_i": -16.0, "audio_codec": "aac", "audio_bitrate_kbps": 160}
+        cmd = FFmWiz.build_track_manager_command(
+            "ffmpeg", Path("in.mkv"), [], [], Path("out.mkv"), answers)
+        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
+        self.assertIn("-c:a", cmd)
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertIn("-filter:a", cmd)
+        self.assertIn("loudnorm", cmd[cmd.index("-filter:a") + 1])
+        self.assertEqual(cmd[cmd.index("-b:a") + 1], "160k")
 
     def test_join_audio_encode_applies_loudnorm(self):
         with tempfile.TemporaryDirectory() as tmp:

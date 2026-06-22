@@ -19441,7 +19441,7 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print(f"  {paint('12.', Color.LIGHT_BLUE)} Join Audios and Videos")
     print(f"  {paint('13.', Color.LIGHT_BLUE)} Metadata Editor")
     print(f"  {paint('14.', Color.LIGHT_BLUE)} FFmpeg capability cache (diagnostics)")
-    print(f"  {paint('15.', Color.LIGHT_BLUE)} Track Manager (remove / add / replace tracks)")
+    print(f"  {paint('15.', Color.LIGHT_BLUE)} Track Manager (remove / add / replace tracks, normalize loudness)")
     print()
     # The main menu has no previous step, so '0=back' is intentionally not
     # advertised. Submenus continue to support 0=back where it makes sense.
@@ -21176,10 +21176,15 @@ def build_track_manager_command(
     remove_specs: list[str],
     extra_items: list[dict[str, Any]],
     output_path: Path,
+    answers: dict[str, Any] | None = None,
 ) -> list[str]:
     """Stream-copy command that maps all source streams except the removed ones
     and appends audio/subtitle streams from external files. Replace = remove the
-    old track and add the new one in the same run."""
+    old track and add the new one in the same run.
+
+    When loudnorm is enabled (answers['loudnorm_enabled']) the audio streams are
+    re-encoded with the loudnorm filter while video/subtitles stay stream-copied.
+    """
     cmd: list[str] = [ffmpeg, "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n", "-i", str(input_path)]
     for item in extra_items:
         cmd.extend(["-i", str(item["path"])])
@@ -21187,11 +21192,32 @@ def build_track_manager_command(
     for spec in remove_specs:
         cmd.extend(["-map", f"-0:{spec}"])
     for input_number, item in enumerate(extra_items, start=1):
+        # Required maps (no trailing '?'): if the external file's audio/subtitle
+        # stream is missing or undetectable, FFmpeg must fail loudly instead of
+        # silently producing output without the replacement track.
         if item.get("audio_streams"):
-            cmd.extend(["-map", f"{input_number}:a?"])
+            cmd.extend(["-map", f"{input_number}:a"])
         if item.get("subtitle_streams"):
-            cmd.extend(["-map", f"{input_number}:s?"])
-    cmd.extend(["-map_metadata", "0", "-c", "copy", str(output_path)])
+            cmd.extend(["-map", f"{input_number}:s"])
+    cmd.extend(["-map_metadata", "0"])
+    if answers is not None and loudnorm_transform_enabled(answers):
+        # Copy everything, then override audio so loudnorm can re-encode it.
+        # The later -c:a wins over the earlier -c copy for audio streams only.
+        audio_codec = normalize_audio_codec(
+            answers.get("audio_codec"),
+            default_audio_codec_for_ext(output_path.suffix.lstrip(".")),
+        )
+        if audio_codec == "copy":
+            audio_codec = DEFAULT_AUDIO_CODEC
+        cmd.extend(["-c", "copy", "-c:a", audio_codec])
+        bitrate = answers.get("audio_bitrate_kbps")
+        if bitrate:
+            cmd.extend(["-b:a", f"{int(bitrate)}k"])
+        # -filter:a applies the loudnorm chain to every mapped audio stream.
+        cmd.extend(["-filter:a", build_loudnorm_filter(answers)])
+    else:
+        cmd.extend(["-c", "copy"])
+    cmd.append(str(output_path))
     return cmd
 
 
@@ -21286,6 +21312,43 @@ def run_track_manager_mode(base_answers: dict[str, Any]) -> tuple[int, float] | 
         return None
 
 
+def _track_manager_loudnorm_summary(answers: dict[str, Any]) -> str:
+    mode = loudnorm_mode(answers)
+    if mode == "off" or not loudnorm_transform_enabled(answers):
+        return "(off)"
+    target = loudnorm_number(float(answers.get("loudnorm_target_i", LOUDNORM_DEFAULT_TARGET_I)))
+    label = "two-pass" if mode == "two_pass" else "single-pass"
+    return f"{label}, target I={target} LUFS"
+
+
+def _track_manager_ask_loudnorm(answers: dict[str, Any], *, sample_path: Path | None = None) -> None:
+    """Offer the same loudness-normalization options as the interactive wizard
+    (Off / Single-pass / Two-pass) for the Track Manager. Reuses step_loudnorm
+    so the prompts, measurement, and target handling stay identical.
+
+    For folder mode a representative sample file is used for the optional
+    two-pass measurement; the resulting values are reused for every file, so
+    single-pass is the safer choice when the folder mixes loudness levels.
+    """
+    if sample_path is not None:
+        note("Two-pass measurement (if chosen) uses the first folder file as reference; "
+             "single-pass is recommended when files differ in loudness.")
+        probe = ffprobe_json(answers["ffprobe"], sample_path)
+        answers["input_path"] = sample_path
+        answers["format"] = probe.get("format", {})
+        answers["audio_streams"] = [s for s in probe.get("streams", []) if s.get("codec_type") == "audio"]
+    if not answers.get("audio_streams"):
+        # Nothing to normalize (e.g. the source had no audio); skip silently.
+        answers["loudnorm_enabled"] = False
+        answers["loudnorm_mode"] = "off"
+        return
+    # step_loudnorm needs a selected-audio set and an output extension; apply
+    # loudnorm to every audio stream of the Track Manager output.
+    answers["audio_tracks"] = "all"
+    answers["output_ext"] = (sample_path or Path(answers.get("input_path") or "x.mkv")).suffix.lstrip(".") or "mkv"
+    step_loudnorm(answers)
+
+
 def _track_manager_collect_externals(answers: dict[str, Any]) -> list[dict[str, Any]]:
     if not ask_yes_no(yn_prompt("Add a track from an external file?", True), True):
         return []
@@ -21318,7 +21381,7 @@ def _run_track_manager_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
     answers = dict(base_answers)
     answers["_question_number"] = 1
     print()
-    print(paint("Track Manager (remove a track and/or add a track from an external file):", Color.BOLD + Color.LIGHT_BLUE))
+    print(paint("Track Manager (remove / add / replace tracks, and normalize audio loudness):", Color.BOLD + Color.LIGHT_BLUE))
     print(selection_menu_line(1, "Single file"))
     print(selection_menu_line(2, "Folder (apply the same change to every media file)"))
     while True:
@@ -21346,18 +21409,20 @@ def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | No
     # Prefer explicit type:index over a bare absolute index (e.g. -0:a:0).
     remove_specs = normalize_track_remove_specs(remove_specs, streams)
     extra_items = _track_manager_collect_externals(answers)
-    if not remove_specs and not extra_items:
+    _track_manager_ask_loudnorm(answers)
+    if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
         note("No track was removed or added; nothing to do.")
         return None
     input_path = Path(answers["input_path"])
     output_path = track_manager_output_path(input_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_track_manager_command(answers["ffmpeg"], input_path, remove_specs, extra_items, output_path)
+    cmd = build_track_manager_command(answers["ffmpeg"], input_path, remove_specs, extra_items, output_path, answers)
     print()
     print(paint("Track Manager summary:", Color.BOLD + Color.LIME))
     print("  " + field_text("input", input_path, Color.WHITE))
     print("  " + field_text("remove", ", ".join(remove_specs) or "(none)", Color.ORANGE))
     print("  " + field_text("add external", ", ".join(Path(it["path"]).name for it in extra_items) or "(none)", Color.GREEN))
+    print("  " + field_text("loudnorm", _track_manager_loudnorm_summary(answers), Color.GREEN))
     print("  " + field_text("output", output_path, Color.LIME))
     print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
     log_info("Final PowerShell command: " + command_to_powershell(cmd))
@@ -21420,14 +21485,15 @@ def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | No
         except ValueError as exc:
             error(str(exc))
     extra_items = _track_manager_collect_externals(answers)
-    if not remove_specs and not extra_items:
+    _track_manager_ask_loudnorm(answers, sample_path=media_files[0])
+    if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
         note("No track was removed or added; nothing to do.")
         return None
     last_result: tuple[int, float] | None = None
     succeeded = 0
     for media in media_files:
         output_path = track_manager_output_path(media)
-        cmd = build_track_manager_command(answers["ffmpeg"], media, remove_specs, extra_items, output_path)
+        cmd = build_track_manager_command(answers["ffmpeg"], media, remove_specs, extra_items, output_path, answers)
         note(f"Processing: {media.name} -> {output_path.name}")
         print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
         rc, elapsed = run_ffmpeg_with_progress(cmd, total_duration=None, label=f"Track Manager: {media.name}")
