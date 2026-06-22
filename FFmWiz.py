@@ -3781,22 +3781,57 @@ def _join_progress_segments(
     return sep.join(text if not color else _progress_colorize(text, color, colorize) for text, color in segments)
 
 
+def _smoothed_eta_rate(state: dict[str, str], current_s: float, elapsed: float) -> float | None:
+    """Return a smoothed processing rate (media-seconds per wall-second) for ETA.
+
+    FFmpeg's per-tick 'speed=' value is noisy and makes a naive ETA jump around.
+    This keeps an exponential moving average (EMA) of the rate sampled only on
+    real progress, blended toward the overall average rate (current/elapsed) for
+    stability, so the ETA is steady and trustworthy instead of bouncing."""
+    if elapsed <= 0 or current_s <= 0:
+        return None
+    overall = current_s / elapsed
+    try:
+        prev_e = float(state.get("_ffmwiz_eta_prev_elapsed", ""))
+        prev_c = float(state.get("_ffmwiz_eta_prev_current", ""))
+    except (TypeError, ValueError):
+        prev_e = prev_c = None
+    ema_raw = state.get("_ffmwiz_eta_rate_ema")
+    try:
+        ema = float(ema_raw) if ema_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        ema = None
+
+    if prev_e is not None and prev_c is not None:
+        delta_e = elapsed - prev_e
+        delta_c = current_s - prev_c
+        # Update only on a meaningful, forward progress sample (>= 0.5s apart),
+        # so idle re-renders never inject a zero/noisy rate.
+        if delta_e >= 0.5 and delta_c > 1e-6:
+            instant = delta_c / delta_e
+            ema = instant if ema is None else (0.2 * instant + 0.8 * ema)
+            state["_ffmwiz_eta_rate_ema"] = repr(ema)
+            state["_ffmwiz_eta_prev_elapsed"] = repr(elapsed)
+            state["_ffmwiz_eta_prev_current"] = repr(current_s)
+    else:
+        # First sample: seed from the overall average.
+        ema = overall if ema is None else ema
+        state["_ffmwiz_eta_rate_ema"] = repr(ema)
+        state["_ffmwiz_eta_prev_elapsed"] = repr(elapsed)
+        state["_ffmwiz_eta_prev_current"] = repr(current_s)
+
+    if ema is None or ema <= 0:
+        return overall
+    # Blend the EMA with the overall average for extra stability.
+    return 0.5 * ema + 0.5 * overall
+
+
 def _render_progress_line(state: dict[str, str], total_duration: float | None,
                           started_at: float, max_width: int | None = None) -> str:
     """Format a single FFmpeg progress status line."""
     current_s = _progress_seconds_from_state(state)
     if state.get("progress") == "end" and total_duration and total_duration > 0:
         current_s = max(current_s, float(total_duration))
-
-    def parsed_speed_ratio() -> float | None:
-        raw = str(state.get("speed", "") or "").strip().lower()
-        if raw.endswith("x"):
-            raw = raw[:-1].strip()
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return value if value > 0.01 and math.isfinite(value) else None
 
     def q_value() -> str:
         for key in ("stream_0_0_q", "q"):
@@ -3854,11 +3889,10 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
     if total_duration and total_duration > 0 and current_s >= total_duration * 0.995:
         eta_s = 0.0
     elif total_duration and current_s > 0.5 and elapsed > 0.5:
-        if state.get("_ffmwiz_prefer_elapsed_speed"):
-            speed_ratio = current_s / elapsed
-        else:
-            speed_ratio = parsed_speed_ratio() or (current_s / elapsed)
-        eta_s = max(0.0, (total_duration - current_s) / speed_ratio) if speed_ratio > 0.01 else None
+        # Use a smoothed rate (EMA blended with the overall average) instead of
+        # FFmpeg's jumpy per-tick speed, so the ETA is steady and reliable.
+        speed_ratio = _smoothed_eta_rate(state, current_s, elapsed) or (current_s / elapsed)
+        eta_s = max(0.0, (total_duration - current_s) / speed_ratio) if speed_ratio and speed_ratio > 0.01 else None
     else:
         eta_s = None
 
@@ -6734,6 +6768,7 @@ def join_ordered_items_for_answers(answers: dict[str, Any]) -> list[dict[str, An
         "audio_streams": answers.get("audio_streams") or [],
         "data_streams": answers.get("data_streams") or [],
         "duration": stream_duration_seconds({}, answers.get("format")) or 0.0,
+        "audio_volume_stats": answers.get("audio_volume_stats"),
     }
     return [primary, *join_extra]
 
@@ -6742,6 +6777,49 @@ def _parse_db_value(text: Any) -> float | None:
     """Parse a dB string such as '-19.8 dB' to a float, or None when unknown."""
     match = re.search(r"-?\d+(?:\.\d+)?", str(text or ""))
     return float(match.group(0)) if match else None
+
+
+def ensure_join_volume_stats(answers: dict[str, Any]) -> None:
+    """Populate audio volume (mean/max) for the Join input set so the summary
+    can show loudness extremes. Runs volumedetect on audio track 0 of each
+    input that has audio but no cached value, in parallel, and caches the
+    result on the primary answers and on each join item so it is computed at
+    most once per session. Failures are tolerated (left as unknown)."""
+    items = list(answers.get("join_input_items") or [])
+    if not items:
+        return
+    ffmpeg = str(answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg")
+
+    # Build the list of (target_dict, input_path) needing a scan. The primary
+    # input is stored on answers; extra inputs on their own item dicts.
+    pending: list[tuple[dict[str, Any], Path]] = []
+    if answers.get("audio_streams") and not answers.get("audio_volume_stats") and answers.get("input_path"):
+        pending.append((answers, Path(answers["input_path"])))
+    for item in items:
+        if item.get("audio_streams") and not item.get("audio_volume_stats") and item.get("path"):
+            pending.append((item, Path(item["path"])))
+    if not pending:
+        return
+
+    note(f"Scanning audio loudness of {len(pending)} input file(s) for the summary...")
+
+    def _scan(target_and_path: tuple[dict[str, Any], Path]) -> tuple[dict[str, Any], dict[str, str]]:
+        target, path = target_and_path
+        try:
+            stats = probe_audio_volume_stats(ffmpeg, path, 0)
+        except Exception:
+            log_exception(f"Join summary volume scan failed for {path}")
+            stats = {}
+        return target, stats
+
+    workers = max(1, min(4, len(pending)))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for target, stats in executor.map(_scan, pending):
+                if stats:
+                    target["audio_volume_stats"] = {0: stats}
+    except Exception:
+        log_exception("Join summary parallel volume scan failed; volume extremes may be unavailable.")
 
 
 def join_input_media_stats(answers: dict[str, Any]) -> list[dict[str, Any]]:
@@ -6908,6 +6986,10 @@ def print_join_input_summary(answers: dict[str, Any]) -> None:
     rows = join_input_media_stats(answers)
     if len(rows) < 2:
         return
+    # Populate audio loudness (mean/max) so the summary can show volume
+    # extremes, then rebuild rows so the freshly scanned values are included.
+    ensure_join_volume_stats(answers)
+    rows = join_input_media_stats(answers)
     # Keep the plain-text version for the log (and tests).
     plain = format_join_input_summary_lines(answers)
 
@@ -6966,18 +7048,20 @@ def print_join_input_summary(answers: dict[str, Any]) -> None:
 
 
 def format_integrated_loudness_line(stats: dict[str, float]) -> str:
-    """Build the emphasized 'Integrated loudness' summary line (bold + green).
-    Extracted so tests can verify the highlighted style is applied without
-    asserting raw ANSI elsewhere."""
-    style = Color.BOLD + Color.GREEN
-    return "  " + paint("Integrated loudness:", style) + " " + paint(f"{stats['input_i']:.1f} LUFS", style)
+    """Build the 'Integrated loudness' summary line. The label is emphasized
+    (bold + a distinct emerald green) while the measured value keeps its
+    original MEAN_VOLUME color, so the actionable value stands out without
+    recoloring the number itself."""
+    label = paint("Integrated loudness:", Color.BOLD + Color.MUX_EMERALD)
+    value = paint(f"{stats['input_i']:.1f} LUFS", Color.MEAN_VOLUME)
+    return "  " + label + " " + value
 
 
 def print_loudnorm_stats(stats: dict[str, float]) -> None:
     print()
     print(paint("Current audio loudnorm measurement:", Color.BOLD + Color.LIGHT_BLUE))
-    # Integrated loudness is the main actionable value: emphasize it (bold +
-    # green). The remaining measurement lines keep the normal palette.
+    # Integrated loudness is the main actionable value: its label is emphasized
+    # (bold + emerald green) while the number keeps its original color.
     print(format_integrated_loudness_line(stats))
     print("  " + field_text("True peak", f"{stats['input_tp']:.1f} dBTP", Color.CYAN))
     print("  " + field_text("Loudness range", f"{stats['input_lra']:.1f} LU", Color.MAGENTA))
