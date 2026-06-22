@@ -716,6 +716,16 @@ class Color:
     MUX_ROSE = "\033[38;5;204m"
     # Compact Join input summary (min/max bitrate, fps, file count).
     JOIN_SUMMARY = "\033[38;5;111m"
+    # Join summary value styling: highest vs lowest must use distinct colors.
+    JOIN_LABEL = "\033[38;5;81m"        # cyan-ish labels (Video bitrate, FPS, ...)
+    JOIN_HIGH = "\033[38;5;82m"         # bright green for "highest" values
+    JOIN_LOW = "\033[38;5;214m"         # amber-orange for "lowest" values
+    JOIN_FILE = "\033[38;5;147m"        # soft violet for file names
+    JOIN_COUNT = "\033[38;5;123m"       # cyan for the file count
+    JOIN_DURATION = "\033[38;5;120m"    # mint for total raw duration
+    JOIN_FRAMES = "\033[38;5;180m"      # tan for approximate frame count
+    JOIN_VOL_LOW = "\033[38;5;39m"      # blue for lowest mean volume
+    JOIN_VOL_HIGH = "\033[38;5;203m"    # coral-red for highest max volume
     MUX_CORAL = "\033[38;5;209m"
     MUX_SALMON = "\033[38;5;210m"
     MUX_STEEL = "\033[38;5;110m"
@@ -1946,41 +1956,108 @@ def source_video_bit_depth(answers: dict[str, Any]) -> int | None:
 
 
 def output_video_bit_depth(answers: dict[str, Any]) -> int:
+    """Resolved DELIVERY bit depth for the encoded output: 8 or 10.
+
+    FFmWiz delivers 8-bit or 10-bit HEVC. Sources above 10-bit (12/14/16-bit)
+    are reduced to a 10-bit Main10 encode (with a precision-reduction warning),
+    because the encoders/profiles FFmWiz drives (libx265 main/main10 and
+    hevc_nvenc main/main10) target 8-bit and 10-bit delivery. An explicit
+    answers['force_output_bit_depth'] (8 or 10) overrides source detection, so
+    an 8-bit source can be intentionally up-converted to a 10-bit encode."""
+    override = answers.get("force_output_bit_depth")
+    if override in (8, 10):
+        return int(override)
     depth = source_video_bit_depth(answers)
     if not depth or depth <= 8:
         return 8
-    return min(depth, 16)
+    # 10/12/14/16-bit sources all deliver as 10-bit Main10.
+    return 10
 
 
 def cpu_pixel_format_for_output(answers: dict[str, Any]) -> str:
-    depth = output_video_bit_depth(answers)
-    if depth <= 8:
-        return CPU_FORMAT
-    if depth <= 10:
-        return "yuv420p10le"
-    if depth <= 12:
-        return "yuv420p12le"
-    if depth <= 14:
-        return "yuv420p14le"
-    return "yuv420p16le"
+    """Planar software pixel format for CPU/libx26x encoding."""
+    return "yuv420p10le" if output_video_bit_depth(answers) > 8 else CPU_FORMAT
 
 
 def cuda_pixel_format_for_output(answers: dict[str, Any]) -> str:
+    """Hardware-surface pixel format for CUDA filter graphs feeding NVENC."""
     return "p010le" if output_video_bit_depth(answers) > 8 else CUDA_FORMAT
 
 
+def nvenc_software_pixel_format_for_output(answers: dict[str, Any]) -> str:
+    """Software-frame pixel format for a CPU filter graph feeding hevc_nvenc.
+
+    NVENC accepts software yuv420p (8-bit) and p010le (10-bit) input frames.
+    yuv420p10le is NOT a native NVENC input format, so a CPU filter graph that
+    feeds NVENC for 10-bit output must terminate in p010le, not yuv420p10le."""
+    return "p010le" if output_video_bit_depth(answers) > 8 else "yuv420p"
+
+
+def cpu_graph_pixel_format_for_encoder(answers: dict[str, Any], video_encoder: str | None = None) -> str:
+    """Terminal 'format=' for a CPU/software filter graph, chosen for the
+    resolved encoder. This is the single decision point for the final pixel
+    format produced by software filter graphs:
+
+      - hevc/h264_nvenc : p010le (10-bit) / yuv420p (8-bit)  [software frames]
+      - libx265/libx264 : yuv420p10le (10-bit) / yuv420p (8-bit)
+
+    CUDA hardware filter graphs use cuda_pixel_format_for_output instead
+    (scale_cuda=format=p010le / nv12)."""
+    if video_encoder is None:
+        video_encoder, _tag, _profile = resolve_video_encoder(answers)
+    if str(video_encoder).endswith("_nvenc"):
+        return nvenc_software_pixel_format_for_output(answers)
+    return cpu_pixel_format_for_output(answers)
+
+
 def hevc_profile_for_output(answers: dict[str, Any], default_profile: str | None = None) -> str:
-    depth = output_video_bit_depth(answers)
-    if depth <= 8:
-        return default_profile or NVENC_HEVC_PROFILE
-    if depth <= 10:
+    """HEVC profile for the resolved output bit depth: main10 for 10-bit,
+    otherwise the requested/default profile (main)."""
+    if output_video_bit_depth(answers) > 8:
         return "main10"
-    if depth <= 12:
-        return "main12"
-    return "rext"
+    return default_profile or NVENC_HEVC_PROFILE
+
+
+def bit_depth_precision_note(answers: dict[str, Any]) -> str | None:
+    """A human-readable note when source and output bit depths differ.
+
+    - source > output: precision is reduced (e.g. 12-bit source to 10-bit out).
+    - source < output: output is encoded at a higher bit depth, but no new real
+      precision is created (8-bit source to 10-bit encode).
+    Returns None when source depth is unknown or equals the output depth."""
+    src = source_video_bit_depth(answers)
+    out = output_video_bit_depth(answers)
+    if not src:
+        return None
+    if src > out:
+        return (
+            f"source is {src}-bit; output is limited to {out}-bit. "
+            f"Precision will be reduced from {src}-bit to {out}-bit."
+        )
+    if src < out:
+        return (
+            f"source is {src}-bit; output will be encoded as {out}-bit, "
+            f"but source precision remains {src}-bit."
+        )
+    return None
+
+
+def filter_graph_path_label(answers: dict[str, Any], video_encoder: str | None = None) -> str:
+    """Describe the filter-graph/frame path for the command summary."""
+    if video_encoder is None:
+        video_encoder, _tag, _profile = resolve_video_encoder(answers)
+    if str(video_encoder).lower() == "copy":
+        return "stream copy (no filter graph)"
+    if str(video_encoder).endswith("_nvenc"):
+        if can_use_cuda_fast_path(answers, video_encoder):
+            return "CUDA/GPU filter graph feeding NVENC"
+        return "CPU filter graph feeding NVENC"
+    return "CPU/libx26x software filter graph"
 
 
 def high_bit_depth_requires_cpu_encoder(answers: dict[str, Any], video_encoder: str) -> bool:
+    # With delivery capped at 10-bit, NVENC (Main10) handles all high-bit-depth
+    # sources, so no forced CPU fallback is needed. Kept for safety/compat.
     return output_video_bit_depth(answers) > 10 and str(video_encoder).endswith("_nvenc")
 
 
@@ -5298,6 +5375,21 @@ def log_and_warn_pixel_format(answers: dict[str, Any], announce: bool = True) ->
         log_warn("Pixel format: " + warning)
         if announce:
             note("Warning: " + warning)
+    # Surface a precision-reduction note for high-bit-depth (12-bit+) sources
+    # whose delivery is capped at a lower bit depth, so the reduction is never
+    # silent. Up-conversion (8-bit source to 10-bit output) is informational.
+    precision_note = bit_depth_precision_note(answers)
+    if precision_note:
+        src_depth = source_video_bit_depth(answers) or 0
+        out_depth = output_video_bit_depth(answers)
+        if src_depth > out_depth:
+            log_warn("Bit depth: " + precision_note)
+            if announce:
+                note("Warning: " + precision_note)
+        else:
+            log_info("Bit depth: " + precision_note)
+            if announce:
+                note(precision_note)
     return info
 
 
@@ -6646,9 +6738,18 @@ def join_ordered_items_for_answers(answers: dict[str, Any]) -> list[dict[str, An
     return [primary, *join_extra]
 
 
+def _parse_db_value(text: Any) -> float | None:
+    """Parse a dB string such as '-19.8 dB' to a float, or None when unknown."""
+    match = re.search(r"-?\d+(?:\.\d+)?", str(text or ""))
+    return float(match.group(0)) if match else None
+
+
 def join_input_media_stats(answers: dict[str, Any]) -> list[dict[str, Any]]:
-    """Per-file (name, video_kbps, audio_kbps, fps) for the ordered Join set,
-    using the already-probed source data. Unknown values are stored as None."""
+    """Per-file (name, video_kbps, audio_kbps, fps, duration, volume) for the
+    ordered Join set, using the already-probed source data. Unknown values are
+    stored as None. Volume extremes use only pre-computed analysis (cached in
+    each item's 'audio_volume_stats'); the summary never triggers a new
+    expensive volumedetect scan."""
     rows: list[dict[str, Any]] = []
     for item in join_ordered_items_for_answers(answers):
         item_answers = join_item_answers(answers, item)
@@ -6661,11 +6762,25 @@ def join_input_media_stats(answers: dict[str, Any]) -> list[dict[str, Any]]:
         fps = None
         if video_streams:
             fps = rational_to_float(video_streams[0].get("avg_frame_rate")) or rational_to_float(video_streams[0].get("r_frame_rate"))
+        duration = item.get("duration")
+        if not duration:
+            duration = stream_duration_seconds({}, fmt)
+        # Volume extremes: only from already-computed analysis, never re-probed.
+        mean_db = max_db = None
+        cached_volume = item.get("audio_volume_stats") or item_answers.get("audio_volume_stats")
+        if isinstance(cached_volume, dict) and cached_volume:
+            first = cached_volume.get(0) or next(iter(cached_volume.values()), None)
+            if isinstance(first, dict):
+                mean_db = _parse_db_value(first.get("mean_volume"))
+                max_db = _parse_db_value(first.get("max_volume"))
         rows.append({
             "name": Path(item.get("path")).name,
             "video_kbps": int(video_kbps) if video_kbps else None,
             "audio_kbps": int(audio_kbps) if audio_kbps else None,
             "fps": float(fps) if fps else None,
+            "duration": float(duration) if duration else None,
+            "mean_volume_db": mean_db,
+            "max_volume_db": max_db,
         })
     return rows
 
@@ -6679,6 +6794,72 @@ def _join_summary_minmax(rows: list[dict[str, Any]], key: str):
     hi = max(known, key=lambda pair: pair[0])
     lo = min(known, key=lambda pair: pair[0])
     return hi, lo, len(rows) - len(known)
+
+
+def _format_hms_ms(seconds: float) -> str:
+    """Format seconds as HH:MM:SS.mmm."""
+    total_ms = int(round(max(0.0, seconds) * 1000))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, ms = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
+
+
+def join_summary_total_duration(answers: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Total raw (pre-cut) duration of the selected Join inputs plus an
+    approximate frame count. Returns a structured dict so both the colored and
+    the plain-text renderers stay consistent."""
+    durations = [row["duration"] for row in rows if row.get("duration")]
+    unknown = len(rows) - len(durations)
+    total = sum(durations) if durations else 0.0
+    output_fps = answers.get("fps")
+    frames = None
+    frame_basis = None
+    if durations:
+        try:
+            out_fps = float(output_fps) if output_fps is not None else None
+        except (TypeError, ValueError):
+            out_fps = None
+        if out_fps and out_fps > 0:
+            frames = int(round(total * out_fps))
+            frame_basis = f"at selected output {out_fps:g} fps"
+        elif all(row.get("fps") for row in rows if row.get("duration")):
+            frames = int(round(sum((row["duration"] * row["fps"]) for row in rows if row.get("duration") and row.get("fps"))))
+            frame_basis = "source-frame estimate"
+    return {
+        "total_seconds": total,
+        "known_count": len(durations),
+        "unknown_count": unknown,
+        "frames": frames,
+        "frame_basis": frame_basis,
+    }
+
+
+def join_summary_duration_text(info: dict[str, Any]) -> str:
+    """Plain-text 'Total raw duration' value built from join_summary_total_duration."""
+    if info["known_count"] == 0:
+        return "unavailable"
+    text = _format_hms_ms(info["total_seconds"])
+    if info["frames"] is not None:
+        text += f" (~{info['frames']:,} frames {info['frame_basis']})"
+    if info["unknown_count"]:
+        text += f"; {info['unknown_count']} files unknown"
+    return text
+
+
+def join_summary_volume_extremes(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Lowest mean volume and highest max volume (with file names) from
+    pre-computed analysis, or None when no volume values are available.
+
+    'lowest mean volume' = most negative mean (quietest average).
+    'highest max volume' = closest to / above 0 dB (loudest peak)."""
+    means = [(row["mean_volume_db"], row["name"]) for row in rows if row.get("mean_volume_db") is not None]
+    maxes = [(row["max_volume_db"], row["name"]) for row in rows if row.get("max_volume_db") is not None]
+    if not means and not maxes:
+        return None
+    lowest_mean = min(means, key=lambda pair: pair[0]) if means else None
+    highest_max = max(maxes, key=lambda pair: pair[0]) if maxes else None
+    return {"lowest_mean": lowest_mean, "highest_max": highest_max}
 
 
 def format_join_input_summary_lines(answers: dict[str, Any]) -> list[str]:
@@ -6701,28 +6882,103 @@ def format_join_input_summary_lines(answers: dict[str, Any]) -> list[str]:
     lines.append(metric_line("Video bitrate", "video_kbps", " kbps", lambda v: f"{int(v):,}"))
     lines.append(metric_line("Audio bitrate", "audio_kbps", " kbps", lambda v: f"{int(v):,}"))
     lines.append(metric_line("FPS", "fps", "", lambda v: f"{v:.3f}"))
+    duration_info = join_summary_total_duration(answers, rows)
+    lines.append(f"Total raw duration: {join_summary_duration_text(duration_info)}")
+    volume = join_summary_volume_extremes(rows)
+    if volume is None:
+        lines.append("Mean volume: unavailable")
+        lines.append("Max volume: unavailable")
+    else:
+        if volume["lowest_mean"]:
+            lines.append(f"Mean volume: lowest {volume['lowest_mean'][0]:.1f} dB ({volume['lowest_mean'][1]})")
+        else:
+            lines.append("Mean volume: unavailable")
+        if volume["highest_max"]:
+            lines.append(f"Max volume: highest {volume['highest_max'][0]:.1f} dB ({volume['highest_max'][1]})")
+        else:
+            lines.append("Max volume: unavailable")
     return lines
 
 
 def print_join_input_summary(answers: dict[str, Any]) -> None:
-    """Compact Join input summary printed before the output-format step. Shows
-    min/max video bitrate, audio bitrate, FPS (with file names) and the total
-    selected file count, using actual FFprobe-derived values."""
-    lines = format_join_input_summary_lines(answers)
-    if not lines:
+    """Compact, color-coded Join input summary printed before the output-format
+    step. 'highest' and 'lowest' use distinct colors, file names use a distinct
+    color, and each label is visually separated. Also shows the total raw
+    (pre-cut) duration, approximate frame count, and audio volume extremes."""
+    rows = join_input_media_stats(answers)
+    if len(rows) < 2:
         return
+    # Keep the plain-text version for the log (and tests).
+    plain = format_join_input_summary_lines(answers)
+
     print()
-    print(paint(lines[0], Color.BOLD + Color.JOIN_SUMMARY))
-    for line in lines[1:]:
-        label, _, value = line.partition(": ")
-        print("  " + field_text(label, value, Color.JOIN_SUMMARY))
-    log_info("Join input summary: " + " | ".join(lines[1:]))
+    print(paint("Join input summary", Color.BOLD + Color.JOIN_SUMMARY))
+    print("  " + paint("Files selected:", Color.JOIN_LABEL) + " " + paint(str(len(rows)), Color.JOIN_COUNT))
+
+    def print_metric(label: str, key: str, unit: str, render) -> None:
+        result = _join_summary_minmax(rows, key)
+        if result is None:
+            print("  " + paint(f"{label}:", Color.JOIN_LABEL) + " " + paint("unavailable", Color.DIM))
+            return
+        (hi_value, hi_name), (lo_value, lo_name), unknown = result
+        line = (
+            "  " + paint(f"{label}:", Color.JOIN_LABEL) + " "
+            + paint("highest", Color.JOIN_HIGH) + " "
+            + paint(f"{render(hi_value)}{unit}", Color.JOIN_HIGH)
+            + " " + paint(f"({hi_name})", Color.JOIN_FILE) + ", "
+            + paint("lowest", Color.JOIN_LOW) + " "
+            + paint(f"{render(lo_value)}{unit}", Color.JOIN_LOW)
+            + " " + paint(f"({lo_name})", Color.JOIN_FILE)
+        )
+        if unknown:
+            line += "; " + paint(f"{unknown} unknown", Color.DIM)
+        print(line)
+
+    print_metric("Video bitrate", "video_kbps", " kbps", lambda v: f"{int(v):,}")
+    print_metric("Audio bitrate", "audio_kbps", " kbps", lambda v: f"{int(v):,}")
+    print_metric("FPS", "fps", "", lambda v: f"{v:.3f}")
+
+    duration_info = join_summary_total_duration(answers, rows)
+    print("  " + paint("Total raw duration:", Color.JOIN_LABEL) + " "
+          + paint(join_summary_duration_text(duration_info), Color.JOIN_DURATION))
+
+    volume = join_summary_volume_extremes(rows)
+    if volume is None:
+        print("  " + paint("Mean volume:", Color.JOIN_LABEL) + " " + paint("unavailable", Color.DIM))
+        print("  " + paint("Max volume:", Color.JOIN_LABEL) + " " + paint("unavailable", Color.DIM))
+    else:
+        if volume["lowest_mean"]:
+            value, name = volume["lowest_mean"]
+            print("  " + paint("Mean volume:", Color.JOIN_LABEL) + " "
+                  + paint("lowest", Color.JOIN_VOL_LOW) + " " + paint(f"{value:.1f} dB", Color.JOIN_VOL_LOW)
+                  + " " + paint(f"({name})", Color.JOIN_FILE))
+        else:
+            print("  " + paint("Mean volume:", Color.JOIN_LABEL) + " " + paint("unavailable", Color.DIM))
+        if volume["highest_max"]:
+            value, name = volume["highest_max"]
+            print("  " + paint("Max volume:", Color.JOIN_LABEL) + " "
+                  + paint("highest", Color.JOIN_VOL_HIGH) + " " + paint(f"{value:.1f} dB", Color.JOIN_VOL_HIGH)
+                  + " " + paint(f"({name})", Color.JOIN_FILE))
+        else:
+            print("  " + paint("Max volume:", Color.JOIN_LABEL) + " " + paint("unavailable", Color.DIM))
+
+    log_info("Join input summary: " + " | ".join(plain[1:]))
+
+
+def format_integrated_loudness_line(stats: dict[str, float]) -> str:
+    """Build the emphasized 'Integrated loudness' summary line (bold + green).
+    Extracted so tests can verify the highlighted style is applied without
+    asserting raw ANSI elsewhere."""
+    style = Color.BOLD + Color.GREEN
+    return "  " + paint("Integrated loudness:", style) + " " + paint(f"{stats['input_i']:.1f} LUFS", style)
 
 
 def print_loudnorm_stats(stats: dict[str, float]) -> None:
     print()
     print(paint("Current audio loudnorm measurement:", Color.BOLD + Color.LIGHT_BLUE))
-    print("  " + field_text("Integrated loudness", f"{stats['input_i']:.1f} LUFS", Color.MEAN_VOLUME))
+    # Integrated loudness is the main actionable value: emphasize it (bold +
+    # green). The remaining measurement lines keep the normal palette.
+    print(format_integrated_loudness_line(stats))
     print("  " + field_text("True peak", f"{stats['input_tp']:.1f} dBTP", Color.CYAN))
     print("  " + field_text("Loudness range", f"{stats['input_lra']:.1f} LU", Color.MAGENTA))
     print("  " + field_text("Threshold", f"{stats['input_thresh']:.1f} LUFS", Color.YELLOW))
@@ -15899,7 +16155,7 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
                     f"setsar omitted as redundant."
                 )
 
-    filters.append(f"format={cpu_pixel_format_for_output(answers)}")
+    filters.append(f"format={cpu_graph_pixel_format_for_encoder(answers)}")
     return ",".join(filters) if filters else None
 
 
@@ -17414,8 +17670,24 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
     print("  " + field_text("output", answers["output_path"], Color.LIME))
     if output_has_video(answers):
         print("  " + field_text("video codec", answers.get("video_codec", DEFAULT_VIDEO_CODEC), Color.CYAN))
+        _resolved_encoder = resolve_video_encoder(answers)[0]
         print("  " + field_text("source bit depth", describe_video_bit_depth(source_video_stream(answers) or {}), Color.PINK))
         print("  " + field_text("output bit depth", f"{output_video_bit_depth(answers)}-bit", Color.PINK))
+        if str(_resolved_encoder).lower() != "copy":
+            print("  " + field_text("encoder", _resolved_encoder, Color.CYAN))
+            if "hevc" in str(_resolved_encoder) or str(_resolved_encoder) in {"libx265"}:
+                _default_profile = "main" if str(_resolved_encoder) in {"libx265"} else None
+                print("  " + field_text("profile", hevc_profile_for_output(answers, _default_profile), Color.CYAN))
+            print("  " + field_text(
+                "pixel format",
+                cuda_pixel_format_for_output(answers) if (str(_resolved_encoder).endswith("_nvenc") and can_use_cuda_fast_path(answers, _resolved_encoder))
+                else cpu_graph_pixel_format_for_encoder(answers, _resolved_encoder),
+                Color.ORANGE,
+            ))
+            print("  " + field_text("path", filter_graph_path_label(answers, _resolved_encoder), Color.AQUA))
+            _precision_note = bit_depth_precision_note(answers)
+            if _precision_note:
+                print("  " + field_text("precision note", _precision_note, Color.NOTE_YELLOW))
         print("  " + field_text("GPU", "yes" if answers.get("use_gpu") else "no", Color.GREEN if answers.get("use_gpu") else Color.YELLOW))
         if "_nvenc" in command_to_text(cmd):
             print("  " + field_text("NVENC multipass", normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")), Color.YELLOW))
@@ -23168,7 +23440,10 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         crop_filter = f"crop=iw-{n_left}-{n_right}:ih-{n_top}-{n_bottom}:{n_left}:{n_top}:exact=1"
     else:
         crop_filter = ""
-    output_pix_fmt = cpu_pixel_format_for_output(join_answers)
+    # Final 'format=' for the CPU concat filter graph, chosen for the resolved
+    # encoder: p010le (10-bit) / yuv420p (8-bit) for NVENC, yuv420p10le /
+    # yuv420p for libx26x. This avoids feeding yuv420p10le to hevc_nvenc.
+    output_pix_fmt = cpu_graph_pixel_format_for_encoder(join_answers, video_encoder)
 
     for input_idx, _item in enumerate(items):
         chain = []

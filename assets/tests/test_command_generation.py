@@ -2942,38 +2942,58 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertIn("-profile:v main10", text)
         self.assertNotIn("format=nv12", text)
 
-    def test_cuda_request_for_12bit_source_uses_cpu_high_bit_depth_encoder(self):
+    def test_gpu_request_for_12bit_source_reduces_to_10bit_nvenc_main10(self):
+        # New policy: 12-bit+ sources are delivered as 10-bit Main10. For GPU,
+        # NVENC stays (no forced CPU fallback) and uses p010le + main10.
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
             answers["video_streams"][0]["pix_fmt"] = "yuv420p12le"
             answers["video_streams"][0]["bits_per_raw_sample"] = "12"
             text = self.command_text(answers)
-        self.assertIn("format=yuv420p12le", text)
-        self.assertIn("-c:v libx265", text)
-        self.assertIn("-profile:v main12", text)
-        self.assertNotIn("hevc_nvenc", text)
-        self.assertNotIn("format=p010le", text)
+        self.assertIn("format=p010le", text)
+        self.assertIn("hevc_nvenc", text)
+        self.assertIn("-profile:v main10", text)
+        self.assertNotIn("format=yuv420p12le", text)
+        self.assertNotIn("main12", text)
+        self.assertEqual(FFmWiz.output_video_bit_depth(answers), 10)
 
-    def test_cpu_main_encode_preserves_14bit_source_pixel_format(self):
+    def test_cpu_12bit_source_reduces_to_10bit_main10(self):
+        # 12-bit source + CPU/libx265 falls back to 10-bit Main10 (yuv420p10le).
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["use_gpu"] = False
+            answers["video_streams"][0]["pix_fmt"] = "yuv420p12le"
+            answers["video_streams"][0]["bits_per_raw_sample"] = "12"
+            text = self.command_text(answers)
+        self.assertIn("format=yuv420p10le", text)
+        self.assertIn("-c:v libx265", text)
+        self.assertIn("-profile:v main10", text)
+        self.assertNotIn("yuv420p12le", text)
+        self.assertNotIn("main12", text)
+
+    def test_cpu_main_encode_reduces_14bit_source_to_10bit(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
             answers["use_gpu"] = False
             answers["video_streams"][0]["pix_fmt"] = "yuv420p14le"
             answers["video_streams"][0]["bits_per_raw_sample"] = "14"
             text = self.command_text(answers)
-        self.assertIn("format=yuv420p14le", text)
-        self.assertIn("-profile:v rext", text)
+        self.assertIn("format=yuv420p10le", text)
+        self.assertIn("-profile:v main10", text)
+        self.assertNotIn("yuv420p14le", text)
+        self.assertNotIn("rext", text)
 
-    def test_cpu_main_encode_caps_above_16bit_source_to_16bit_pixel_format(self):
+    def test_cpu_main_encode_reduces_above_16bit_source_to_10bit(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
             answers["use_gpu"] = False
             answers["video_streams"][0]["pix_fmt"] = "yuv420p16le"
             answers["video_streams"][0]["bits_per_raw_sample"] = "24"
             text = self.command_text(answers)
-        self.assertIn("format=yuv420p16le", text)
-        self.assertIn("-profile:v rext", text)
-        self.assertEqual(FFmWiz.output_video_bit_depth(answers), 16)
+        self.assertIn("format=yuv420p10le", text)
+        self.assertIn("-profile:v main10", text)
+        self.assertNotIn("yuv420p16le", text)
+        self.assertEqual(FFmWiz.output_video_bit_depth(answers), 10)
 
     def test_audio_track_selection_n_means_all_tracks(self):
         self.assertEqual(FFmWiz.parse_selection_config("n", 3, [0]), "all")
