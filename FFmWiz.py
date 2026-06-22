@@ -18364,6 +18364,13 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
     streams = answers.get("audio_streams") or []
     if not streams:
         raise ValueError("This mode needs an audio stream.")
+    if len(streams) == 1:
+        # Only one audio track: select it automatically (no prompt) but say so.
+        answers["audio_index"] = 0
+        codec = str(streams[0].get("codec_name", "unknown"))
+        note(f"Only one audio track (codec: {codec}); selecting it automatically.")
+        log_info("Audio tool auto-selected the only audio track: index=0")
+        return
     print()
     print(paint("Audio streams", Color.BOLD + Color.BLUE))
     fmt = answers.get("format", {})
@@ -18378,14 +18385,12 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
             f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)} | "
             f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)}"
         )
-    only_one = len(streams) == 1
     while True:
         value = ask_raw(
             question_prompt(
                 answers,
                 "Choose audio track to process",
-                ("only one audio track is present; press Enter to use it"
-                 if only_one else "track number 1 is the first audio track"),
+                "track number 1 is the first audio track",
                 "1",
             )
         )
@@ -18559,19 +18564,22 @@ def _confirm_audio_transform_start(answers: dict[str, Any]) -> None:
     Raises Back (on '0') so the editor can return to the value prompts."""
     split_points = answers.get("_audio_transform_split_points")
     if split_points:
+        # Ask which lossless container extension to use (copy-compatible list).
+        _ai = int(answers.get("audio_index", 0))
+        _astreams = answers.get("audio_streams") or []
+        _acodec = str(_astreams[_ai].get("codec_name", "")) if 0 <= _ai < len(_astreams) else ""
+        ask_lossless_split_ext(answers, _acodec)
         cmd, pattern = build_lossless_split_command(answers, split_points)
         answers["cmd"] = cmd
         answers["output_path"] = pattern
         print()
         print(paint("Lossless audio split (stream copy, selected audio track only):", Color.BOLD + Color.LIME))
         print("  " + field_text("input", answers["input_path"], Color.WHITE))
-        _ai = int(answers.get("audio_index", 0))
-        _astreams = answers.get("audio_streams") or []
-        _acodec = str(_astreams[_ai].get("codec_name", "unknown")) if 0 <= _ai < len(_astreams) else "unknown"
-        print("  " + field_text("audio track", f"{_ai + 1} (codec: {_acodec})", Color.AQUA))
+        _acodec_disp = _acodec or "unknown"
+        print("  " + field_text("audio track", f"{_ai + 1} (codec: {_acodec_disp})", Color.AQUA))
         print("  " + field_text(
             "output container",
-            f"{pattern.suffix.lstrip('.')} (chosen to hold {_acodec} losslessly; tracks have a codec, not an extension)",
+            f"{pattern.suffix.lstrip('.')} (holds {_acodec_disp} losslessly; tracks have a codec, not an extension)",
             Color.LIME,
         ))
         print("  " + field_text("output parts", f"{len(split_points) + 1} files -> {pattern.name}", Color.LIME))
@@ -18594,6 +18602,7 @@ def _confirm_audio_transform_start(answers: dict[str, Any]) -> None:
 def step_audio_transform_editor(answers: dict[str, Any]) -> None:
     audio_index = int(answers.get("audio_index", 0))
     answers.pop("_audio_transform_split_points", None)
+    answers.pop("lossless_split_ext", None)
     answers["_audio_transform_finalized"] = False
     # Stage machine so Back goes one prompt back instead of jumping to the start:
     #   menu  -> (Back) previous wizard step
@@ -20019,26 +20028,80 @@ LOSSLESS_AUDIO_COPY_EXT_BY_CODEC = {
     "pcm_f32le": "wav", "pcm_s16be": "wav",
 }
 
+# Container extensions that can hold each audio codec via stream copy (no
+# re-encode). The first entry is the preferred default. Used for the Audio Cut
+# lossless-split output-extension prompt.
+LOSSLESS_AUDIO_COPY_EXT_CHOICES = {
+    "aac": ["m4a", "aac", "mka", "mp4", "mov", "ts"],
+    "alac": ["m4a", "mka", "mov"],
+    "mp3": ["mp3", "mka", "mp4"],
+    "ac3": ["ac3", "mka", "mp4", "ts"],
+    "eac3": ["eac3", "mka", "mp4", "ts"],
+    "opus": ["opus", "ogg", "mka", "webm"],
+    "vorbis": ["ogg", "mka", "webm"],
+    "flac": ["flac", "mka", "ogg"],
+    "pcm_s16le": ["wav", "mka", "mov"],
+    "pcm_s24le": ["wav", "mka", "mov"],
+    "pcm_s32le": ["wav", "mka", "mov"],
+    "pcm_f32le": ["wav", "mka", "mov"],
+    "pcm_u8": ["wav", "mka"],
+    "pcm_s16be": ["wav", "mka", "mov"],
+}
 
-def lossless_audio_copy_ext(codec_name: str, input_suffix: str) -> str:
-    """Return an audio container extension that can hold the given audio codec
-    via stream copy (for lossless segmenting). Falls back to Matroska audio
-    (.mka), which accepts virtually any audio codec, for unknown codecs."""
-    ext = LOSSLESS_AUDIO_COPY_EXT_BY_CODEC.get(str(codec_name or "").lower())
-    if ext:
-        return ext
-    fallback = str(input_suffix or "").lstrip(".").lower()
-    if fallback in {"m4a", "aac", "mp3", "opus", "ogg", "wav", "flac", "mka", "ac3", "eac3"}:
-        return fallback
-    return "mka"
+
+def lossless_audio_copy_ext_choices(codec_name: str, input_suffix: str = "") -> list[str]:
+    """Container extensions that can hold the given audio codec via stream copy
+    (no re-encode). The first entry is the preferred default. Unknown codecs
+    fall back to universal containers."""
+    choices = LOSSLESS_AUDIO_COPY_EXT_CHOICES.get(str(codec_name or "").lower())
+    if choices:
+        return list(choices)
+    return ["mka", "mov"]
+
+
+def lossless_audio_copy_ext(codec_name: str, input_suffix: str = "") -> str:
+    """Preferred audio container extension for a lossless (stream-copy) split of
+    the given codec."""
+    return lossless_audio_copy_ext_choices(codec_name, input_suffix)[0]
+
+
+def ask_lossless_split_ext(answers: dict[str, Any], codec_name: str) -> str:
+    """Ask which output container extension to use for the lossless audio split,
+    listing only extensions that can hold the source codec WITHOUT re-encoding.
+    Caches the answer; raises Back on '0'."""
+    choices = lossless_audio_copy_ext_choices(codec_name, Path(answers["input_path"]).suffix)
+    default = str(answers.get("lossless_split_ext") or choices[0]).lower().lstrip(".")
+    if default not in choices:
+        choices = [default] + [c for c in choices if c != default]
+    valid = {c.lower() for c in choices}
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Choose output extension for the split audio",
+                f"lossless containers for {codec_name or 'this codec'} (no re-encode): {option_list(choices)}",
+                default,
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = default
+        ext = value.strip().lower().lstrip(".")
+        if ext in valid:
+            answers["lossless_split_ext"] = ext
+            return ext
+        error(f"Enter one of: {', '.join(choices)} (these hold {codec_name or 'the source codec'} without re-encoding).")
 
 
 def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -> tuple[list[str], Path]:
     """Build a stream-copy segment command that splits ONLY the selected audio
     track into contiguous parts at the given times. This is the Audio Cut tool,
     so video/other streams are intentionally excluded and the output is an audio
-    container that matches the source audio codec. Because it copies (no
-    re-encode), concatenating the parts reproduces the original audio stream."""
+    container that can hold the source audio codec without re-encoding (the user
+    may pick the extension; otherwise the codec's preferred container is used).
+    Because it copies (no re-encode), concatenating the parts reproduces the
+    original audio stream."""
     ffmpeg = answers["ffmpeg"]
     input_path = Path(answers["input_path"])
     audio_index = int(answers.get("audio_index", 0))
@@ -20046,7 +20109,8 @@ def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -
     codec = ""
     if 0 <= audio_index < len(audio_streams):
         codec = str(audio_streams[audio_index].get("codec_name", "") or "")
-    ext = "." + lossless_audio_copy_ext(codec, input_path.suffix)
+    chosen_ext = str(answers.get("lossless_split_ext") or lossless_audio_copy_ext(codec, input_path.suffix))
+    ext = "." + chosen_ext.lower().lstrip(".")
     location = Path(answers.get("output_location") or input_path.parent)
     if location.suffix:
         out_dir = location.parent

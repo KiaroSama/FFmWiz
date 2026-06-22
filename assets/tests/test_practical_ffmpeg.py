@@ -261,6 +261,23 @@ class PracticalFFmpegTests(unittest.TestCase):
             self.assertTrue(any(s.get("codec_type") == "audio" for s in streams), part)
             self.assertFalse(any(s.get("codec_type") == "video" for s in streams), part)
 
+    def test_lossless_audio_split_user_chosen_extension(self):
+        # User picks a copy-compatible extension (.aac/ADTS) for an aac source.
+        src = self._make_av("vid2.mp4", audio_tracks=1, depth=8, duration=4.0)
+        answers = {
+            "ffmpeg": FFMPEG, "input_path": src, "output_location": self._tmp,
+            "audio_index": 0, "audio_streams": self._audio_streams(src),
+            "lossless_split_ext": "aac",
+        }
+        cmd, pattern = FFmWiz.build_lossless_split_command(answers, [2.0])
+        self.assertIn("_part%03d.aac", str(pattern))
+        self.assertEqual(self._run(cmd).returncode, 0)
+        part1 = self._tmp / "vid2_part001.aac"
+        self.assertTrue(part1.exists() and part1.stat().st_size > 0)
+        streams = self._probe(part1).get("streams", [])
+        self.assertTrue(any(s.get("codec_type") == "audio" for s in streams))
+        self.assertFalse(any(s.get("codec_type") == "video" for s in streams))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
