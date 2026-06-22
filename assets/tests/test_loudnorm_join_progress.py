@@ -737,16 +737,27 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
     def test_build_lossless_split_command(self):
         with tempfile.TemporaryDirectory() as tmp:
-            answers = {"ffmpeg": "ffmpeg", "input_path": Path(tmp) / "clip.aac",
-                       "output_location": Path(tmp)}
+            answers = {"ffmpeg": "ffmpeg", "input_path": Path(tmp) / "clip.mp4",
+                       "output_location": Path(tmp), "audio_index": 0,
+                       "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}]}
             cmd, pattern = FFmWiz.build_lossless_split_command(answers, [600.0, 1200.0, 1500.0])
-            self.assertIn("-c", cmd)
             self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
-            self.assertIn("-f", cmd)
             self.assertEqual(cmd[cmd.index("-f") + 1], "segment")
             self.assertEqual(cmd[cmd.index("-segment_times") + 1], "600.000000,1200.000000,1500.000000")
-            self.assertEqual(cmd[cmd.index("-map") + 1], "0")
-            self.assertIn("_part%03d.aac", str(pattern))
+            # Audio Cut tool: only the selected audio track is mapped (not -map 0).
+            self.assertEqual(cmd[cmd.index("-map") + 1], "0:a:0")
+            self.assertIn("-vn", cmd)
+            self.assertNotIn("0", [cmd[i + 1] for i, t in enumerate(cmd) if t == "-map"])
+            # aac source -> .m4a audio container.
+            self.assertIn("_part%03d.m4a", str(pattern))
+
+    def test_lossless_audio_copy_ext_mapping(self):
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext("aac", ".mp4"), "m4a")
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext("mp3", ".mp4"), "mp3")
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext("flac", ".mkv"), "flac")
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext("opus", ".webm"), "opus")
+        # Unknown codec falls back to a universal audio container.
+        self.assertEqual(FFmWiz.lossless_audio_copy_ext("weird", ".xyz"), "mka")
 
     def test_manual_split_flow_sets_split_points(self):
         answers = {"audio_index": 0, "format": {"duration": "1800"}}

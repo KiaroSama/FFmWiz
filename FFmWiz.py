@@ -18563,11 +18563,12 @@ def _confirm_audio_transform_start(answers: dict[str, Any]) -> None:
         answers["cmd"] = cmd
         answers["output_path"] = pattern
         print()
-        print(paint("Lossless split (stream copy):", Color.BOLD + Color.LIME))
+        print(paint("Lossless audio split (stream copy, selected audio track only):", Color.BOLD + Color.LIME))
         print("  " + field_text("input", answers["input_path"], Color.WHITE))
+        print("  " + field_text("audio track", int(answers.get("audio_index", 0)) + 1, Color.AQUA))
         print("  " + field_text("output parts", f"{len(split_points) + 1} files -> {pattern.name}", Color.LIME))
         print(paint(format_split_points_for_summary(split_points, float(answers.get("fps") or 25.0)), Color.LIGHT_BLUE))
-        note("Stream-copy split: rejoining the parts reproduces the original file.")
+        note("Stream-copy split: rejoining the audio parts reproduces the original audio stream.")
         print()
         print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
         log_info("Final PowerShell command: " + command_to_powershell(cmd))
@@ -20003,14 +20004,41 @@ def parse_split_times_line(text: str, duration: float) -> list[float]:
     return cleaned
 
 
+LOSSLESS_AUDIO_COPY_EXT_BY_CODEC = {
+    "aac": "m4a", "alac": "m4a", "mp3": "mp3", "ac3": "ac3", "eac3": "eac3",
+    "opus": "opus", "vorbis": "ogg", "flac": "flac",
+    "pcm_s16le": "wav", "pcm_s24le": "wav", "pcm_s32le": "wav", "pcm_u8": "wav",
+    "pcm_f32le": "wav", "pcm_s16be": "wav",
+}
+
+
+def lossless_audio_copy_ext(codec_name: str, input_suffix: str) -> str:
+    """Return an audio container extension that can hold the given audio codec
+    via stream copy (for lossless segmenting). Falls back to Matroska audio
+    (.mka), which accepts virtually any audio codec, for unknown codecs."""
+    ext = LOSSLESS_AUDIO_COPY_EXT_BY_CODEC.get(str(codec_name or "").lower())
+    if ext:
+        return ext
+    fallback = str(input_suffix or "").lstrip(".").lower()
+    if fallback in {"m4a", "aac", "mp3", "opus", "ogg", "wav", "flac", "mka", "ac3", "eac3"}:
+        return fallback
+    return "mka"
+
+
 def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -> tuple[list[str], Path]:
-    """Build a stream-copy segment command that splits the input into contiguous
-    parts at the given times. Because it copies (no re-encode), concatenating
-    the parts reproduces the original file. Video split points snap to the
-    nearest preceding keyframe (inherent to lossless copy)."""
+    """Build a stream-copy segment command that splits ONLY the selected audio
+    track into contiguous parts at the given times. This is the Audio Cut tool,
+    so video/other streams are intentionally excluded and the output is an audio
+    container that matches the source audio codec. Because it copies (no
+    re-encode), concatenating the parts reproduces the original audio stream."""
     ffmpeg = answers["ffmpeg"]
     input_path = Path(answers["input_path"])
-    ext = input_path.suffix or ".mkv"
+    audio_index = int(answers.get("audio_index", 0))
+    audio_streams = answers.get("audio_streams") or []
+    codec = ""
+    if 0 <= audio_index < len(audio_streams):
+        codec = str(audio_streams[audio_index].get("codec_name", "") or "")
+    ext = "." + lossless_audio_copy_ext(codec, input_path.suffix)
     location = Path(answers.get("output_location") or input_path.parent)
     if location.suffix:
         out_dir = location.parent
@@ -20027,10 +20055,14 @@ def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -
         "-y" if OVERWRITE_OUTPUT else "-n",
         "-i",
         str(input_path),
+        # Audio Cut tool: map ONLY the selected audio track (lossless copy).
         "-map",
-        "0",
+        f"0:a:{audio_index}",
         "-c",
         "copy",
+        "-vn",
+        "-sn",
+        "-dn",
         "-f",
         "segment",
         "-segment_times",
@@ -20041,7 +20073,10 @@ def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -
         "1",
         str(pattern),
     ]
-    log_info(f"Lossless split: points={points}; parts={len(points) + 1}; pattern={pattern}")
+    log_info(
+        f"Lossless audio split: audio_index={audio_index}; codec={codec or 'unknown'}; "
+        f"points={points}; parts={len(points) + 1}; pattern={pattern}"
+    )
     return cmd, pattern
 
 
