@@ -18364,9 +18364,6 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
     streams = answers.get("audio_streams") or []
     if not streams:
         raise ValueError("This mode needs an audio stream.")
-    if len(streams) == 1:
-        answers["audio_index"] = 0
-        return
     print()
     print(paint("Audio streams", Color.BOLD + Color.BLUE))
     fmt = answers.get("format", {})
@@ -18374,19 +18371,21 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
     volume_stats = get_audio_volume_stats(answers)
     for idx, stream in enumerate(streams):
         print(
-            f"  {paint(str(idx), Color.LIGHT_BLUE)}: "
+            f"  {paint(str(idx + 1), Color.LIGHT_BLUE)}: "
             f"{field_text('codec', stream.get('codec_name', 'unknown'), Color.CYAN)} | "
             f"{field_text('channels', stream.get('channels', 'unknown'), Color.GREEN)} | "
             f"{field_text('sample_rate', stream.get('sample_rate', 'unknown'), Color.MAGENTA)} | "
             f"{field_text('bitrate', describe_bitrate(stream_bitrate_kbps(stream, fmt, packet_sizes)), Color.YELLOW)} | "
             f"{field_text('mean / max volume', audio_mean_max_volume_field(volume_stats, idx), Color.MEAN_VOLUME)}"
         )
+    only_one = len(streams) == 1
     while True:
         value = ask_raw(
             question_prompt(
                 answers,
-                "Choose audio track",
-                "track number 1 is the first audio track",
+                "Choose audio track to process",
+                ("only one audio track is present; press Enter to use it"
+                 if only_one else "track number 1 is the first audio track"),
                 "1",
             )
         )
@@ -18398,6 +18397,7 @@ def step_audio_track_for_tool(answers: dict[str, Any]) -> None:
             index = int(value) - 1
             if 0 <= index < len(streams):
                 answers["audio_index"] = index
+                log_info(f"Audio tool selected audio track: index={index} (1-based {index + 1})")
                 return
         error(f"Enter an audio track number from 1 to {len(streams)}.")
 
@@ -18565,7 +18565,15 @@ def _confirm_audio_transform_start(answers: dict[str, Any]) -> None:
         print()
         print(paint("Lossless audio split (stream copy, selected audio track only):", Color.BOLD + Color.LIME))
         print("  " + field_text("input", answers["input_path"], Color.WHITE))
-        print("  " + field_text("audio track", int(answers.get("audio_index", 0)) + 1, Color.AQUA))
+        _ai = int(answers.get("audio_index", 0))
+        _astreams = answers.get("audio_streams") or []
+        _acodec = str(_astreams[_ai].get("codec_name", "unknown")) if 0 <= _ai < len(_astreams) else "unknown"
+        print("  " + field_text("audio track", f"{_ai + 1} (codec: {_acodec})", Color.AQUA))
+        print("  " + field_text(
+            "output container",
+            f"{pattern.suffix.lstrip('.')} (chosen to hold {_acodec} losslessly; tracks have a codec, not an extension)",
+            Color.LIME,
+        ))
         print("  " + field_text("output parts", f"{len(split_points) + 1} files -> {pattern.name}", Color.LIME))
         print(paint(format_split_points_for_summary(split_points, float(answers.get("fps") or 25.0)), Color.LIGHT_BLUE))
         note("Stream-copy split: rejoining the audio parts reproduces the original audio stream.")
