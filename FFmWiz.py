@@ -6362,14 +6362,21 @@ def probe_packet_sizes(ffprobe: str, input_path: Path) -> dict[int, int]:
         str(input_path),
     ]
     sizes: dict[int, int] = {}
-    process = subprocess.Popen(
-        args,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        process = subprocess.Popen(
+            args,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        # ffprobe is unavailable on this machine; degrade gracefully to "no
+        # packet sizes" instead of crashing. Callers treat {} as unknown size.
+        note(f"Could not run ffprobe for exact stream sizes ({exc}); treating sizes as unknown.")
+        log_warn(f"probe_packet_sizes: ffprobe unavailable: {exc}")
+        return {}
     assert process.stdout is not None
     for line in process.stdout:
         numbers = re.findall(r"\d+", line)
