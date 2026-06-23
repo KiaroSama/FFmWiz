@@ -3949,15 +3949,28 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
         return state.get("speed", "N/A") or "N/A"
 
     elapsed = max(0.0, time.perf_counter() - started_at)
-    if total_duration and total_duration > 0 and current_s >= total_duration * 0.995:
-        eta_s = 0.0
-    elif total_duration and current_s > 0.5 and elapsed > 0.5:
-        # Use a smoothed rate (EMA blended with the overall average) instead of
-        # FFmpeg's jumpy per-tick speed, so the ETA is steady and reliable.
-        speed_ratio = _smoothed_eta_rate(state, current_s, elapsed) or (current_s / elapsed)
-        eta_s = max(0.0, (total_duration - current_s) / speed_ratio) if speed_ratio and speed_ratio > 0.01 else None
+    # Refresh the ETA only when the media position actually advances (a real
+    # FFmpeg progress tick). Between ticks the loop re-renders every ~0.25s to
+    # keep the line live; recomputing the ETA from the ever-growing wall-clock
+    # 'elapsed' on those heartbeats made it drift/refresh faster than the
+    # percent/time/size fields. Caching it against current_s keeps every field
+    # updating in lock-step.
+    eta_anchor = f"{current_s:.3f}"
+    if state.get("_ffmwiz_eta_anchor") == eta_anchor and "_ffmwiz_eta_seconds" in state:
+        cached_eta = state.get("_ffmwiz_eta_seconds")
+        eta_s = None if cached_eta in (None, "", "none") else float(cached_eta)
     else:
-        eta_s = None
+        if total_duration and total_duration > 0 and current_s >= total_duration * 0.995:
+            eta_s = 0.0
+        elif total_duration and current_s > 0.5 and elapsed > 0.5:
+            # Use a smoothed rate (the overall average) instead of FFmpeg's jumpy
+            # per-tick speed, so the ETA is steady and reliable.
+            speed_ratio = _smoothed_eta_rate(state, current_s, elapsed) or (current_s / elapsed)
+            eta_s = max(0.0, (total_duration - current_s) / speed_ratio) if speed_ratio and speed_ratio > 0.01 else None
+        else:
+            eta_s = None
+        state["_ffmwiz_eta_anchor"] = eta_anchor
+        state["_ffmwiz_eta_seconds"] = "none" if eta_s is None else f"{eta_s:.3f}"
 
     colorize = USE_COLOR
     if total_duration and total_duration > 0:
