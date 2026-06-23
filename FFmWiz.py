@@ -4429,7 +4429,12 @@ def _apply_output_file_size_progress(
     changed = size_text != previous_size_text
     state["_ffmwiz_size_text"] = size_text
     state["_ffmwiz_size_source"] = size_source
-    if current_s > 0.001:
+    # For a Split (multiple output parts) the displayed bitrate is owned by the
+    # split branch, which derives it from the REAL reconstructed media time so
+    # it reflects the true average output bitrate. Recomputing it here against
+    # the byte-derived current_s would re-pin it to the target and make it jump
+    # between flushes, so only the (real, on-disk) size is refreshed for splits.
+    if current_s > 0.001 and not multi_output_split:
         bitrate_kbps = display_size_bytes * 8.0 / 1000.0 / current_s
         bitrate_text = f"{bitrate_kbps:.1f}kbits/s"
         changed = changed or bitrate_text != state.get("_ffmwiz_bitrate_text")
@@ -4620,6 +4625,13 @@ def run_ffmpeg_with_progress(
                             output_sizes.append(output_path.stat().st_size)
                         except OSError:
                             output_sizes.append(0)
+                # recon_s is the media position from FFmpeg's real out_time/frame
+                # reconstruction, BEFORE the byte-based override below. It is the
+                # only clock that is independent of how many bytes have flushed to
+                # disk, so it is used as the bitrate denominator (a true average
+                # bitrate) instead of the byte-derived current_s (which would pin
+                # the bitrate to the target).
+                recon_s = current_s
                 if split_part_durations:
                     current_s, split_active_part, split_active_part_start_raw = _split_progress_seconds(
                         raw_current_s,
@@ -4633,6 +4645,7 @@ def run_ffmpeg_with_progress(
                     )
                     split_previous_output_sizes = output_sizes
                     split_previous_raw_s = raw_current_s
+                    recon_s = current_s
                     # ROBUST AGGREGATE PROGRESS: FFmpeg's multi-output -progress
                     # counters are unreliable for Split (frozen `frame`, frozen
                     # `total_size`, and `out_time` that only covers one output),
@@ -4680,6 +4693,7 @@ def run_ffmpeg_with_progress(
                     # Fallback for callers that only provide FPS. This avoids
                     # double-counting but cannot infer later Split parts.
                     current_s = max(raw_current_s, frame_seconds)
+                    recon_s = current_s
                 if current_s > 0.0:
                     if total_duration and total_duration > 0:
                         current_s = min(current_s, float(total_duration))
@@ -4698,8 +4712,29 @@ def run_ffmpeg_with_progress(
                                 .replace("GiB", "GB")
                                 .replace("TiB", "TB")
                             )
-                            bitrate_kbps = total_size_bytes * 8.0 / 1000.0 / current_s
-                            state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
+                            # Bitrate from the REAL reconstructed media time, not
+                            # the byte-derived current_s (which would be pinned to
+                            # the target and look frozen). While recon_s advances
+                            # (the active part), this is a true running average.
+                            # When recon_s stalls (later parts, where FFmpeg's
+                            # out_time/frame freeze), hold the last real value
+                            # rather than recomputing against a frozen clock. At
+                            # the very end the full program duration is known, so
+                            # show the exact overall average bitrate.
+                            try:
+                                prev_recon = float(state.get("_ffmwiz_split_recon_s", "0") or 0.0)
+                            except (TypeError, ValueError):
+                                prev_recon = 0.0
+                            if state.get("progress") == "end" and total_duration and total_duration > 0:
+                                bitrate_kbps = total_size_bytes * 8.0 / 1000.0 / float(total_duration)
+                                state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
+                            elif recon_s > 0.05 and recon_s > prev_recon + 0.05:
+                                bitrate_kbps = total_size_bytes * 8.0 / 1000.0 / recon_s
+                                state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
+                                state["_ffmwiz_split_recon_s"] = f"{recon_s:.6f}"
+                            elif not state.get("_ffmwiz_bitrate_text"):
+                                bitrate_kbps = total_size_bytes * 8.0 / 1000.0 / current_s
+                                state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
                         elif total_size_text.isdigit():
                             bitrate_kbps = int(total_size_text) * 8.0 / 1000.0 / current_s
                             state["_ffmwiz_bitrate_text"] = f"{bitrate_kbps:.1f}kbits/s"
