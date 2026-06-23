@@ -447,6 +447,37 @@ class CommandGenerationTests(unittest.TestCase):
             FFmWiz._apply_output_file_size_progress(state, [output], 12.0)
             self.assertIn("kbits/s", state.get("_ffmwiz_bitrate_text", ""))
 
+    def test_progress_eta_frozen_between_heartbeats(self):
+        # The render loop re-renders every ~0.25s to keep the line live, but the
+        # ETA must only change when the media position (current_s) advances, so
+        # it refreshes in lock-step with the percent/time/size fields instead of
+        # drifting on every heartbeat. Same position across renders => same ETA.
+        import re as _re
+        import time as _time
+        ansi = _re.compile(r"\x1b\[[0-9;]*m")
+
+        def eta_of(line):
+            m = _re.search(r"ETA\s+([0-9:]+|calculating)", ansi.sub("", line))
+            return m.group(1) if m else None
+
+        total = 600.0
+        started = _time.perf_counter() - 60.0
+        state = {"_ffmwiz_current_s": "60.0"}
+        first = eta_of(FFmWiz._render_progress_line(state, total, started))
+        # Heartbeat re-renders at the SAME position but a later wall clock.
+        _time.sleep(0.2)
+        second = eta_of(FFmWiz._render_progress_line(state, total, started))
+        _time.sleep(0.2)
+        third = eta_of(FFmWiz._render_progress_line(state, total, started))
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+        self.assertEqual(first, third)
+        # When the position advances, the ETA is recomputed (anchor changes).
+        state["_ffmwiz_current_s"] = "120.0"
+        fourth = eta_of(FFmWiz._render_progress_line(state, total, started))
+        self.assertNotEqual(state.get("_ffmwiz_eta_anchor"), "60.000")
+
+
     def test_progress_target_mux_bitrate_uses_first_video_and_audio_bitrates(self):
         cmd = [
             "ffmpeg",
