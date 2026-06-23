@@ -398,6 +398,26 @@ class CommandGenerationTests(unittest.TestCase):
             line = FFmWiz._strip_ansi(FFmWiz._render_progress_line(state, 60.0, FFmWiz.time.perf_counter() - 4))
             self.assertIn("size 1.3 MB", line)
 
+    def test_progress_split_shows_real_size_not_target_extrapolation(self):
+        # For a multi-output Split, the per-tick progress is byte-derived, so
+        # extrapolating size at the target bitrate would fake a frozen
+        # size/bitrate. With >1 output path the displayed size must be the REAL
+        # summed on-disk bytes (no "estimated-file").
+        with tempfile.TemporaryDirectory() as tmp:
+            part1 = Path(tmp) / "out_Part01.mp4"
+            part2 = Path(tmp) / "out_Part02.mp4"
+            part1.write_bytes(b"x" * 3_000_000)
+            part2.write_bytes(b"x" * 1_000_000)  # real aggregate = 4 MB
+            state = {
+                "progress": "continue",
+                "_ffmwiz_target_bitrate_kbps": "1600",
+                "_ffmwiz_last_file_size_bytes": "4000000",
+                "_ffmwiz_last_file_size_seconds": "10.000000",
+            }
+            FFmWiz._apply_output_file_size_progress(state, [part1, part2], 12.0)
+            self.assertEqual(state["_ffmwiz_size_source"], "file")  # not estimated
+            self.assertIn("3.8 MB", state["_ffmwiz_size_text"])     # 4,000,000 bytes ~= 3.8 MB
+
     def test_progress_target_mux_bitrate_uses_first_video_and_audio_bitrates(self):
         cmd = [
             "ffmpeg",
