@@ -418,6 +418,35 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertEqual(state["_ffmwiz_size_source"], "file")  # not estimated
             self.assertIn("3.8 MB", state["_ffmwiz_size_text"])     # 4,000,000 bytes ~= 3.8 MB
 
+    def test_progress_split_size_refresh_does_not_overwrite_bitrate(self):
+        # The split branch owns the bitrate (it derives it from the REAL
+        # reconstructed media time). The on-disk size refresh must only update
+        # the size for a multi-output Split, never the bitrate, otherwise the
+        # bitrate jumps between the real value and a stale-current_s spike.
+        with tempfile.TemporaryDirectory() as tmp:
+            part1 = Path(tmp) / "out_Part01.mp4"
+            part2 = Path(tmp) / "out_Part02.mp4"
+            part1.write_bytes(b"x" * 3_000_000)
+            part2.write_bytes(b"x" * 1_000_000)
+            state = {
+                "progress": "continue",
+                "_ffmwiz_bitrate_text": "1492.3kbits/s",  # set by the split branch
+            }
+            FFmWiz._apply_output_file_size_progress(state, [part1, part2], 12.0)
+            # Size updated, bitrate left untouched.
+            self.assertIn("3.8 MB", state["_ffmwiz_size_text"])
+            self.assertEqual(state["_ffmwiz_bitrate_text"], "1492.3kbits/s")
+
+    def test_progress_single_output_size_refresh_still_sets_bitrate(self):
+        # The bitrate suppression above is ONLY for multi-output splits; a
+        # single output must still get a refreshed bitrate from the on-disk size.
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "encoded.mp4"
+            output.write_bytes(b"x" * 1_500_000)
+            state = {"progress": "continue"}
+            FFmWiz._apply_output_file_size_progress(state, [output], 12.0)
+            self.assertIn("kbits/s", state.get("_ffmwiz_bitrate_text", ""))
+
     def test_progress_target_mux_bitrate_uses_first_video_and_audio_bitrates(self):
         cmd = [
             "ffmpeg",
