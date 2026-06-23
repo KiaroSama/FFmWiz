@@ -125,6 +125,9 @@ def main() -> int:
         # Emitted (queued) from the decode thread with a JSON array of peak
         # amplitudes (0..1) spanning the whole timeline, for the waveform.
         waveformReady = Signal(str)
+        # Emitted when a reversed preview proxy has finished rendering:
+        # (generation, output_path). output_path is "" on failure.
+        reverseReady = Signal(int, str)
 
         def __init__(self, app: QGuiApplication, req: dict) -> None:
             super().__init__()
@@ -134,6 +137,7 @@ def main() -> int:
             self._request_json = json.dumps(req, ensure_ascii=False)
             self._palette_json = json.dumps(_PALETTE, ensure_ascii=False)
             self._wave_thread: threading.Thread | None = None
+            self._rev_files: list[str] = []
 
         # --- Read-only data for QML ---
         def _get_request(self) -> str:
@@ -251,6 +255,60 @@ def main() -> int:
             if not self._submitted:
                 write_reply({"status": "canceled"})
 
+        # --- Live reverse preview: render a reversed proxy chunk on demand ---
+        @Slot(str)
+        def renderReverse(self, spec_json: str) -> None:  # noqa: N802 (QML camelCase)
+            try:
+                spec = json.loads(spec_json)
+            except Exception as exc:
+                _log("DEBUG", f"renderReverse bad spec: {exc}")
+                return
+            threading.Thread(target=self._do_reverse, args=(spec,), daemon=True).start()
+
+        def _do_reverse(self, spec: dict) -> None:
+            gen = int(spec.get("gen", 0))
+            try:
+                ffmpeg = str(self._req.get("ffmpeg") or "ffmpeg")
+                src = str(spec.get("src") or self._req.get("input_path") or "")
+                ss = max(0.0, float(spec.get("ss", 0.0)))
+                dur = max(0.05, float(spec.get("dur", 1.0)))
+                width = int(spec.get("width", 854))
+                fd, out = tempfile.mkstemp(suffix=".mp4", prefix=f"ffmwiz_qmlrev_{gen}_")
+                os.close(fd)
+                # The reverse filter buffers the whole window, so keep chunks short
+                # and the frame modest. scale=-2 keeps even dimensions for yuv420p.
+                vf = f"reverse,scale={width}:-2:flags=fast_bilinear"
+                args = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                        "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}", "-i", src, "-vf", vf]
+                if self._req.get("has_audio"):
+                    args += ["-af", "areverse"]
+                else:
+                    args += ["-an"]
+                args += ["-preset", "ultrafast", "-pix_fmt", "yuv420p", out]
+                subprocess.run(args, check=False, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                self._rev_files.append(out)
+                # Keep only the few most recent proxies on disk.
+                while len(self._rev_files) > 4:
+                    old = self._rev_files.pop(0)
+                    try:
+                        os.remove(old)
+                    except OSError:
+                        pass
+                self.reverseReady.emit(gen, out)
+            except Exception as exc:  # noqa: BLE001
+                _log("DEBUG", f"reverse proxy failed: {exc}")
+                self.reverseReady.emit(gen, "")
+
+        def cleanup_reverse(self) -> None:
+            for path in self._rev_files:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            self._rev_files = []
+
     app = QGuiApplication(sys.argv)
     app.setApplicationName("FFmWiz")
     app.setApplicationDisplayName("FFmWiz Unified Video Editor")
@@ -292,6 +350,7 @@ def main() -> int:
 
     rc = app.exec()
     bridge.finalize_if_unsubmitted()
+    bridge.cleanup_reverse()
     return int(rc or 0)
 
 
