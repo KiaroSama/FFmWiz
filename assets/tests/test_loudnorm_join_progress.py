@@ -1297,35 +1297,28 @@ class JoinVolumeScanTests(unittest.TestCase):
 
 
 class SmoothedEtaTests(unittest.TestCase):
-    """ETA rate smoothing: stable against FFmpeg's jumpy per-tick speed."""
+    """ETA rate uses the overall average: stable and accurate (no early
+    overshoot, no jumps)."""
 
-    def test_first_sample_seeds_overall_average(self):
-        state = {}
-        rate = FFmWiz._smoothed_eta_rate(state, current_s=100.0, elapsed=10.0)
+    def test_first_sample_is_overall_average(self):
+        rate = FFmWiz._smoothed_eta_rate({}, current_s=100.0, elapsed=10.0)
         self.assertAlmostEqual(rate, 10.0, places=3)  # 100/10
 
-    def test_jumpy_samples_are_smoothed(self):
-        # Feed a steady ~10x rate, then a single huge spike; smoothed rate must
-        # not jump to the spike (EMA + overall-average blend dampens it).
-        state = {}
-        FFmWiz._smoothed_eta_rate(state, 100.0, 10.0)   # seed: 10/s
-        FFmWiz._smoothed_eta_rate(state, 200.0, 20.0)   # +100 in 10s -> 10/s
-        # Spike: +500 media-seconds in 10s wall (50/s) for one sample.
-        smoothed = FFmWiz._smoothed_eta_rate(state, 700.0, 30.0)
-        instantaneous = 500.0 / 10.0  # 50/s
-        self.assertLess(smoothed, instantaneous)
-        # And it stays in a sensible band (well below the raw spike).
-        self.assertLess(smoothed, 30.0)
-
-    def test_idle_rerender_does_not_corrupt_rate(self):
+    def test_overall_average_does_not_overshoot_a_fast_burst(self):
+        # A recent fast burst must not make the rate spike: the overall average
+        # (700 media-s / 30 wall-s) stays near the true average, far below the
+        # 50x of the last 10s window, so the ETA never becomes wildly optimistic.
         state = {}
         FFmWiz._smoothed_eta_rate(state, 100.0, 10.0)
         FFmWiz._smoothed_eta_rate(state, 200.0, 20.0)
-        before = float(state["_ffmwiz_eta_rate_ema"])
-        # Idle re-render: no media progress, tiny elapsed delta -> no EMA update.
-        FFmWiz._smoothed_eta_rate(state, 200.0, 20.2)
-        after = float(state["_ffmwiz_eta_rate_ema"])
-        self.assertEqual(before, after)
+        rate = FFmWiz._smoothed_eta_rate(state, 700.0, 30.0)
+        self.assertAlmostEqual(rate, 700.0 / 30.0, places=3)
+        self.assertLess(rate, 50.0)
+
+    def test_pure_function_of_progress_and_elapsed(self):
+        self.assertAlmostEqual(FFmWiz._smoothed_eta_rate({}, 200.0, 20.0), 10.0, places=3)
+        self.assertAlmostEqual(FFmWiz._smoothed_eta_rate({}, 200.0, 20.2), 200.0 / 20.2, places=3)
+        self.assertIsNone(FFmWiz._smoothed_eta_rate({}, 0.0, 10.0))
 
 
 class AudioTrackSelectionTests(unittest.TestCase):

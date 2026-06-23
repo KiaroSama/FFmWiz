@@ -265,7 +265,11 @@ ApplicationWindow {
     function actP() { return activeAB === 0 ? playerA : playerB }
     function idleP() { return activeAB === 0 ? playerB : playerA }
     function srcOf(i) { return "file:///" + String(segs[i].path).replace(/\\/g, "/") }
-    function showActive() { voA.visible = (activeAB === 0); voB.visible = (activeAB === 1) }
+    // Visibility is driven by the declarative bindings `visible: win.activeAB === N`
+    // on each VideoOutput. This is a no-op kept for call-site compatibility:
+    // assigning voA.visible/voB.visible imperatively here would BREAK those
+    // bindings (and could leave a stale/letterbox-mismatched surface shown).
+    function showActive() {}
 
     MediaPlayer {
         id: playerA

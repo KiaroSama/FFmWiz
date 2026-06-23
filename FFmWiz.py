@@ -3876,48 +3876,17 @@ def _join_progress_segments(
 
 
 def _smoothed_eta_rate(state: dict[str, str], current_s: float, elapsed: float) -> float | None:
-    """Return a smoothed processing rate (media-seconds per wall-second) for ETA.
+    """Return a stable processing rate (media-seconds per wall-second) for ETA.
 
-    FFmpeg's per-tick 'speed=' value is noisy and makes a naive ETA jump around.
-    This keeps an exponential moving average (EMA) of the rate sampled only on
-    real progress, blended toward the overall average rate (current/elapsed) for
-    stability, so the ETA is steady and trustworthy instead of bouncing."""
+    Uses the OVERALL average (current_s / elapsed). FFmpeg's per-tick 'speed='
+    is noisy and a short-window rate overshoots early (the first frames decode
+    fast during priming), which made the ETA optimistic and unreliable. The
+    overall average is inherently smooth (both numerator and denominator grow
+    monotonically) and converges to the true rate, so the ETA is steady and
+    trustworthy. 'state' is unused now but kept for signature compatibility."""
     if elapsed <= 0 or current_s <= 0:
         return None
-    overall = current_s / elapsed
-    try:
-        prev_e = float(state.get("_ffmwiz_eta_prev_elapsed", ""))
-        prev_c = float(state.get("_ffmwiz_eta_prev_current", ""))
-    except (TypeError, ValueError):
-        prev_e = prev_c = None
-    ema_raw = state.get("_ffmwiz_eta_rate_ema")
-    try:
-        ema = float(ema_raw) if ema_raw not in (None, "") else None
-    except (TypeError, ValueError):
-        ema = None
-
-    if prev_e is not None and prev_c is not None:
-        delta_e = elapsed - prev_e
-        delta_c = current_s - prev_c
-        # Update only on a meaningful, forward progress sample (>= 0.5s apart),
-        # so idle re-renders never inject a zero/noisy rate.
-        if delta_e >= 0.5 and delta_c > 1e-6:
-            instant = delta_c / delta_e
-            ema = instant if ema is None else (0.2 * instant + 0.8 * ema)
-            state["_ffmwiz_eta_rate_ema"] = repr(ema)
-            state["_ffmwiz_eta_prev_elapsed"] = repr(elapsed)
-            state["_ffmwiz_eta_prev_current"] = repr(current_s)
-    else:
-        # First sample: seed from the overall average.
-        ema = overall if ema is None else ema
-        state["_ffmwiz_eta_rate_ema"] = repr(ema)
-        state["_ffmwiz_eta_prev_elapsed"] = repr(elapsed)
-        state["_ffmwiz_eta_prev_current"] = repr(current_s)
-
-    if ema is None or ema <= 0:
-        return overall
-    # Blend the EMA with the overall average for extra stability.
-    return 0.5 * ema + 0.5 * overall
+    return current_s / elapsed
 
 
 def _render_progress_line(state: dict[str, str], total_duration: float | None,
