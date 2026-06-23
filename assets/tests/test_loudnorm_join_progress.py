@@ -828,6 +828,19 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertIn("loudnorm", cmd[cmd.index("-filter:a") + 1])
         self.assertEqual(cmd[cmd.index("-b:a") + 1], "160k")
 
+    def test_build_track_manager_command_drops_metadata_when_requested(self):
+        answers = {"track_manager_keep_metadata": False}
+        cmd = FFmWiz.build_track_manager_command("ffmpeg", Path("in.mkv"), [], [], Path("out.mkv"), answers)
+        self.assertEqual(cmd[cmd.index("-map_metadata") + 1], "-1")
+        self.assertIn("-map_chapters", cmd)
+        self.assertEqual(cmd[cmd.index("-map_chapters") + 1], "-1")
+        self.assertIn("-map_metadata:s", cmd)
+
+    def test_build_track_manager_command_keeps_metadata_by_default(self):
+        cmd = FFmWiz.build_track_manager_command("ffmpeg", Path("in.mkv"), [], [], Path("out.mkv"))
+        self.assertEqual(cmd[cmd.index("-map_metadata") + 1], "0")
+        self.assertNotIn("-map_metadata:s", cmd)
+
     def test_join_audio_encode_applies_loudnorm(self):
         with tempfile.TemporaryDirectory() as tmp:
             items = [make_item(Path(tmp) / "a.m4a"), make_item(Path(tmp) / "b.m4a")]
@@ -1419,6 +1432,7 @@ class TrackManagerBackTests(unittest.TestCase):
              mock.patch.object(FFmWiz, "print_track_list", lambda a: None), \
              mock.patch.object(FFmWiz, "ask_track_remove_specs", lambda a, c: []), \
              mock.patch.object(FFmWiz, "_track_manager_collect_externals", side_effect=fake_ext), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
              mock.patch.object(FFmWiz, "_track_manager_ask_loudnorm", side_effect=fake_loud):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = FFmWiz._run_track_manager_single(answers)
@@ -1447,6 +1461,7 @@ class TrackManagerBackTests(unittest.TestCase):
              mock.patch.object(FFmWiz, "print_track_list", lambda a: None), \
              mock.patch.object(FFmWiz, "ask_track_remove_specs", side_effect=fake_remove), \
              mock.patch.object(FFmWiz, "_track_manager_collect_externals", side_effect=fake_ext), \
+             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
              mock.patch.object(FFmWiz, "_track_manager_ask_loudnorm", lambda a: None):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = FFmWiz._run_track_manager_single(answers)

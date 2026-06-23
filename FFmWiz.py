@@ -21672,7 +21672,13 @@ def build_track_manager_command(
             cmd.extend(["-map", f"{input_number}:a:0"])
         if item.get("subtitle_streams"):
             cmd.extend(["-map", f"{input_number}:s:0"])
-    cmd.extend(["-map_metadata", "0"])
+    keep_metadata = True if answers is None else bool(answers.get("track_manager_keep_metadata", True))
+    if keep_metadata:
+        cmd.extend(["-map_metadata", "0"])
+    else:
+        # Drop container/global metadata, chapters, and every output stream's
+        # metadata (titles, language tags) for a clean output.
+        cmd.extend(["-map_metadata", "-1", "-map_chapters", "-1", "-map_metadata:s", "-1"])
     if answers is not None and loudnorm_transform_enabled(answers):
         # Copy everything, then override audio so loudnorm can re-encode it.
         # The later -c:a wins over the earlier -c copy for audio streams only.
@@ -21911,6 +21917,22 @@ def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | No
             except Back:
                 stage = "externals"
                 continue
+            stage = "metadata"
+        elif stage == "metadata":
+            try:
+                keep_meta = ask_yes_no(
+                    question_prompt(
+                        answers,
+                        "Keep metadata in the output (container tags, chapters, stream titles/languages)?",
+                        "y/n; n removes all source and added-track metadata for a clean output",
+                        "y",
+                    ),
+                    True,
+                )
+            except Back:
+                stage = "loudnorm"
+                continue
+            answers["track_manager_keep_metadata"] = keep_meta
             stage = "confirm"
         else:  # confirm
             if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
@@ -21926,6 +21948,7 @@ def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | No
             print("  " + field_text("remove", ", ".join(remove_specs) or "(none)", Color.ORANGE))
             print("  " + field_text("add external", ", ".join(Path(it["path"]).name for it in extra_items) or "(none)", Color.GREEN))
             print("  " + field_text("loudnorm", _track_manager_loudnorm_summary(answers), Color.GREEN))
+            print("  " + field_text("metadata", "kept" if answers.get("track_manager_keep_metadata", True) else "removed", Color.ORANGE))
             print("  " + field_text("output", output_path, Color.LIME))
             print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
             log_info("Final PowerShell command: " + command_to_powershell(cmd))
@@ -21933,7 +21956,7 @@ def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | No
             try:
                 start_now = ask_yes_no(question_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True)
             except Back:
-                stage = "loudnorm"  # Back -> previous step
+                stage = "metadata"  # Back -> previous step
                 continue
             if not start_now:
                 note("FFmpeg was not started. The command above is ready to run manually.")
@@ -21994,6 +22017,15 @@ def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | No
             error(str(exc))
     extra_items = _track_manager_collect_externals(answers)
     _track_manager_ask_loudnorm(answers, sample_path=media_files[0])
+    answers["track_manager_keep_metadata"] = ask_yes_no(
+        question_prompt(
+            answers,
+            "Keep metadata in every output (container tags, chapters, stream titles/languages)?",
+            "y/n; n removes all source and added-track metadata for clean outputs",
+            "y",
+        ),
+        True,
+    )
     if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
         note("No track was removed or added; nothing to do.")
         return None
