@@ -262,6 +262,30 @@ class PracticalFFmpegTests(unittest.TestCase):
             self.assertTrue(any(s.get("codec_type") == "audio" for s in streams), part)
             self.assertFalse(any(s.get("codec_type") == "video" for s in streams), part)
 
+    # ================= Track Manager metadata keep/drop =================
+    def test_track_manager_drop_metadata_strips_tags(self):
+        # Build a source with global + per-stream metadata, then drop it.
+        src = self._tmp / "tagged.mkv"
+        self.assertEqual(self._run(
+            [FFMPEG, "-hide_banner", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=15:duration=1",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "aac",
+             "-metadata", "title=MyMovie", "-metadata:s:a:0", "title=MyAudio",
+             "-metadata:s:a:0", "language=eng", "-shortest", str(src)]).returncode, 0)
+        out = self._tmp / "clean.mkv"
+        answers = {"track_manager_keep_metadata": False}
+        cmd = FFmWiz.build_track_manager_command(FFMPEG, src, [], [], out, answers)
+        self.assertEqual(self._run(cmd).returncode, 0)
+        probe = self._probe(out)
+        # Global title removed.
+        self.assertNotIn("title", {k.lower() for k in (probe.get("format", {}).get("tags") or {})})
+        # Per-stream title/language removed.
+        for stream in probe.get("streams", []):
+            tags = {k.lower(): v for k, v in (stream.get("tags") or {}).items()}
+            self.assertNotIn("title", tags)
+            self.assertNotIn("language", tags)
+
     def test_lossless_audio_split_user_chosen_extension(self):
         # User picks a copy-compatible extension (.aac/ADTS) for an aac source.
         src = self._make_av("vid2.mp4", audio_tracks=1, depth=8, duration=4.0)
