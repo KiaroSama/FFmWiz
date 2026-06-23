@@ -7784,12 +7784,19 @@ def build_unified_video_editor(request: dict[str, Any]):
             tmp_dir = Path(tempfile.gettempdir()) / "ffmwiz_unified_qt"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             out_path = tmp_dir / f"frame_{int(self.timestamp * 1000)}_{self.width}x{self.height}.png"
+            # PREVIEW FIX (paused-frame stretch): the requested width/height come
+            # from the preview WIDGET size, whose aspect ratio rarely matches the
+            # video. A plain "scale=W:H" forces the frame into the widget aspect,
+            # so the paused frame looked stretched while live playback (which feeds
+            # native-resolution frames) looked correct. force_original_aspect_ratio
+            # =decrease fits the frame INSIDE W:H while preserving the source aspect
+            # ratio, so the preview's own letterbox logic renders it undistorted.
             args = [
                 self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-ss", f"{max(0.0, self.timestamp):.3f}",
                 "-i", str(self.source),
                 "-frames:v", "1",
-                "-vf", f"scale={self.width}:{self.height}:flags=fast_bilinear",
+                "-vf", f"scale={self.width}:{self.height}:flags=fast_bilinear:force_original_aspect_ratio=decrease",
                 str(out_path),
             ]
             try:
