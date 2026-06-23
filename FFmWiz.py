@@ -4605,12 +4605,15 @@ def run_ffmpeg_with_progress(
                 elif progress_events == 0:
                     last_render = _render_initial_progress_line(label, initial_detail, started_at)
                     _write_progress_line(last_render)
-                elif state:
-                    current_s = _progress_seconds_from_state(state)
-                    _apply_output_file_size_progress(state, output_paths, current_s)
-                    rendered = _render_progress_line(state, total_duration, started_at)
-                    _write_progress_line(rendered)
-                    last_render = rendered
+                elif state and last_render:
+                    # Between real FFmpeg progress ticks, keep the last rendered
+                    # line as-is instead of re-rendering. Re-rendering here updated
+                    # the wall-clock ETA and the on-disk size/bitrate while the
+                    # FFmpeg-derived percent/time stayed frozen, so those fields
+                    # refreshed faster than the rest. Holding the line makes EVERY
+                    # field (percent, bitrate, size, ETA, elapsed) refresh together
+                    # on the next real tick.
+                    _write_progress_line(last_render)
                 continue
             line = line.strip()
             if "=" not in line:
