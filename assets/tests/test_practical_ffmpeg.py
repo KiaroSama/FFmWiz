@@ -86,11 +86,12 @@ class PracticalFFmpegTests(unittest.TestCase):
         return subprocess.run([str(a) for a in args], capture_output=True, timeout=timeout)
 
     def _make_av(self, name: str, *, audio_tracks: int = 1, depth: int = 8,
-                 duration: float = 1.0, volume: float | None = None) -> Path:
-        """Create a tiny synthetic video file with N audio tracks."""
+                 duration: float = 0.4, volume: float | None = None) -> Path:
+        """Create a tiny synthetic video file with N audio tracks. Kept very
+        small/short on purpose so the real-ffmpeg suite stays fast."""
         path = self._tmp / name
         args = [FFMPEG, "-hide_banner", "-y",
-                "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=30:duration={duration}"]
+                "-f", "lavfi", "-i", f"testsrc2=size=256x144:rate=10:duration={duration}"]
         for freq in (440, 880, 660)[:audio_tracks]:
             args += ["-f", "lavfi", "-i", f"sine=frequency={freq}:duration={duration}"]
         args += ["-map", "0:v"]
@@ -98,7 +99,7 @@ class PracticalFFmpegTests(unittest.TestCase):
             args += ["-map", f"{i + 1}:a"]
         pix = "yuv420p10le" if depth == 10 else "yuv420p"
         vcodec = "libx265" if depth == 10 else "libx264"
-        args += ["-c:v", vcodec, "-pix_fmt", pix, "-c:a", "aac"]
+        args += ["-c:v", vcodec, "-preset", "ultrafast", "-pix_fmt", pix, "-c:a", "aac"]
         if volume is not None:
             args += ["-filter:a", f"volume={volume}"]
         args += ["-shortest", str(path)]
@@ -135,7 +136,7 @@ class PracticalFFmpegTests(unittest.TestCase):
         ext = self._tmp / "ext.aac"
         self.assertEqual(self._run(
             [FFMPEG, "-hide_banner", "-y", "-f", "lavfi",
-             "-i", "sine=frequency=880:duration=1", "-c:a", "aac", str(ext)]).returncode, 0)
+             "-i", "sine=frequency=880:duration=0.4", "-c:a", "aac", str(ext)]).returncode, 0)
         ext_item = {"path": ext,
                     "audio_streams": self._audio_streams(ext),
                     "subtitle_streams": []}
@@ -163,8 +164,11 @@ class PracticalFFmpegTests(unittest.TestCase):
     # ================= 10-bit Main10 pixel format =================
     def _encode_with_filter(self, src: Path, vfilter: str, encoder: str,
                             profile: str, out: Path) -> subprocess.CompletedProcess:
+        # Fastest preset per encoder family (NVENC uses p1..p7, x26x uses words).
+        preset = "p1" if str(encoder).endswith("_nvenc") else "ultrafast"
         return self._run([FFMPEG, "-hide_banner", "-y", "-i", str(src),
-                          "-filter:v", vfilter, "-c:v", encoder, "-profile:v", profile, str(out)])
+                          "-filter:v", vfilter, "-c:v", encoder, "-preset", preset,
+                          "-profile:v", profile, str(out)])
 
     def test_cpu_main10_encode_produces_10bit_hevc(self):
         src = self._make_av("src10.mkv", depth=10, audio_tracks=0)
@@ -228,11 +232,11 @@ class PracticalFFmpegTests(unittest.TestCase):
     def test_run_with_progress_renders_and_completes(self):
         # Exercise run_ffmpeg_with_progress (and the smoothed-ETA renderer) on a
         # real short encode; it must complete cleanly without raising.
-        src = self._make_av("psrc.mkv", audio_tracks=1, duration=2.0)
+        src = self._make_av("psrc.mkv", audio_tracks=1, duration=0.6)
         out = self._tmp / "pout.mp4"
         cmd = [FFMPEG, "-hide_banner", "-y", "-i", str(src),
                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(out)]
-        rc, elapsed = FFmWiz.run_ffmpeg_with_progress(cmd, total_duration=2.0, label="PracticalProgress")
+        rc, elapsed = FFmWiz.run_ffmpeg_with_progress(cmd, total_duration=0.6, label="PracticalProgress")
         self.assertEqual(rc, 0)
         self.assertGreaterEqual(elapsed, 0.0)
         self.assertTrue(out.exists() and out.stat().st_size > 0)
@@ -241,12 +245,12 @@ class PracticalFFmpegTests(unittest.TestCase):
     def test_lossless_audio_split_from_video_excludes_video(self):
         # Mode 11 (Audio Cut) on a VIDEO input must split ONLY the selected
         # audio track losslessly and produce audio-only parts (no video).
-        src = self._make_av("vid.mp4", audio_tracks=1, depth=8, duration=4.0)
+        src = self._make_av("vid.mp4", audio_tracks=1, depth=8, duration=1.0)
         answers = {
             "ffmpeg": FFMPEG, "input_path": src, "output_location": self._tmp,
             "audio_index": 0, "audio_streams": self._audio_streams(src),
         }
-        cmd, pattern = FFmWiz.build_lossless_split_command(answers, [2.0])
+        cmd, pattern = FFmWiz.build_lossless_split_command(answers, [0.5])
         text = " ".join(str(c) for c in cmd)
         self.assertIn("-map 0:a:0", text)
         self.assertIn("-vn", text)
@@ -268,8 +272,8 @@ class PracticalFFmpegTests(unittest.TestCase):
         src = self._tmp / "tagged.mkv"
         self.assertEqual(self._run(
             [FFMPEG, "-hide_banner", "-y",
-             "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=15:duration=1",
-             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-f", "lavfi", "-i", "testsrc2=size=128x72:rate=10:duration=0.4",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=0.4",
              "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "aac",
              "-metadata", "title=MyMovie", "-metadata:s:a:0", "title=MyAudio",
              "-metadata:s:a:0", "language=eng", "-shortest", str(src)]).returncode, 0)
@@ -288,13 +292,13 @@ class PracticalFFmpegTests(unittest.TestCase):
 
     def test_lossless_audio_split_user_chosen_extension(self):
         # User picks a copy-compatible extension (.aac/ADTS) for an aac source.
-        src = self._make_av("vid2.mp4", audio_tracks=1, depth=8, duration=4.0)
+        src = self._make_av("vid2.mp4", audio_tracks=1, depth=8, duration=1.0)
         answers = {
             "ffmpeg": FFMPEG, "input_path": src, "output_location": self._tmp,
             "audio_index": 0, "audio_streams": self._audio_streams(src),
             "lossless_split_ext": "aac",
         }
-        cmd, pattern = FFmWiz.build_lossless_split_command(answers, [2.0])
+        cmd, pattern = FFmWiz.build_lossless_split_command(answers, [0.5])
         self.assertIn("_part%03d.aac", str(pattern))
         self.assertEqual(self._run(cmd).returncode, 0)
         part1 = self._tmp / "vid2_part001.aac"
