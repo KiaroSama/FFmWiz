@@ -39,7 +39,18 @@ ApplicationWindow {
     property var separatorPoints: []
     property var cuts: []          // ranges to REMOVE; keep = complement
     property var peaks: []
+    property var chapters: []      // [{t, title}] drawn on the timeline
     property bool ready: false
+
+    // ---- Audio / volume (parity with classic mute + volume control) ----
+    property real volume: 0.6
+    property bool muted: false
+    // ---- Crop overlay can be shown independently of edit mode (Ctrl+U) ----
+    property bool cropOverlayOn: true
+    // ---- Selection on the timeline (what Delete acts on) ----
+    property string selMarker: ""  // "in" | "out" | ""
+    property int selSplit: -1
+    property int selCut: -1
 
     // ---- Phase 5: timeline zoom/pan + interactive crop ----
     property real zoom: 1.0        // 1 = whole clip visible; higher = zoomed in
@@ -110,7 +121,7 @@ ApplicationWindow {
         speed = o.sp; reverse = o.rv; includeAudio = o.ia
         markIn = o.mi; markOut = o.mo
         cuts = o.cuts; separatorPoints = o.splits
-        var idx = speedBox.model.indexOf(Math.round(speed * 100) + "%"); if (idx >= 0) speedBox.currentIndex = idx
+        var idx = speedBox.model.indexOf(Math.round(speed * 100) + "%"); if (idx >= 0) speedBox.currentIndex = idx; else speedBox.editText = Math.round(speed * 100) + "%"
         restoring = false
         tl.requestPaint()
     }
@@ -236,6 +247,15 @@ ApplicationWindow {
         reverse = !!req.initial_reverse
         includeAudio = (req.initial_include_audio !== undefined) ? !!req.initial_include_audio : hasAudio
         separatorPoints = req.initial_separator_points || []
+        // Chapters (parity with classic): [{start,title}] -> [{t,title}] for drawing.
+        var chs = req.chapters || []
+        var clist = []
+        for (var ci = 0; ci < chs.length; ++ci) {
+            var ct = Number(chs[ci].start !== undefined ? chs[ci].start : chs[ci].t)
+            if (!isNaN(ct) && ct >= 0 && ct <= totalDuration)
+                clist.push({ t: ct, title: String(chs[ci].title || chs[ci].name || ("Chapter " + (ci + 1))) })
+        }
+        chapters = clist
         var keep = req.initial_keep_ranges || []
         if (keep.length > 0) { markIn = Number(keep[0][0]) || 0; markOut = Number(keep[keep.length - 1][1]) || totalDuration }
         else { markIn = 0; markOut = totalDuration }
@@ -274,14 +294,14 @@ ApplicationWindow {
     MediaPlayer {
         id: playerA
         videoOutput: voA
-        audioOutput: AudioOutput { id: aoA; volume: 0.85 }
+        audioOutput: AudioOutput { id: aoA; volume: win.muted ? 0.0 : win.volume }
         onPositionChanged: { if (ready && activeAB === 0 && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
         onMediaStatusChanged: { if (activeAB === 0 && mediaStatus === MediaPlayer.EndOfMedia) advanceToNext() }
     }
     MediaPlayer {
         id: playerB
         videoOutput: voB
-        audioOutput: AudioOutput { id: aoB; volume: 0.85 }
+        audioOutput: AudioOutput { id: aoB; volume: win.muted ? 0.0 : win.volume }
         onPositionChanged: { if (ready && activeAB === 1 && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
         onMediaStatusChanged: { if (activeAB === 1 && mediaStatus === MediaPlayer.EndOfMedia) advanceToNext() }
     }
@@ -388,11 +408,68 @@ ApplicationWindow {
     function addSplit() {
         var sp = separatorPoints.slice(); sp.push(snapTime(cti, -1, null)); separatorPoints = sp; tl.requestPaint(); commit()
     }
-    function setMarkIn() { markIn = snapTime(cti, -1, "in"); commit() }
-    function setMarkOut() { markOut = snapTime(cti, -1, "out"); commit() }
+    function setMarkIn() { markIn = snapTime(cti, -1, "in"); selMarker = "in"; commit() }
+    function setMarkOut() { markOut = snapTime(cti, -1, "out"); selMarker = "out"; commit() }
+
+    // Add a cut: like classic add_cut — first press sets mark-in, second builds
+    // the cut from [markIn, CTI].
+    function addCutSmart() {
+        if (markIn === null || markIn === undefined) { setMarkIn(); return }
+        markOut = cti
+        cutSelection()
+    }
+    // Invert the removed/kept ranges (classic invert_cuts).
+    function invertCutsAll() {
+        if (!cuts.length) return
+        cuts = invertRanges(cuts, totalDuration); selCut = -1; tl.requestPaint(); commit()
+    }
+    // Convert the selected mark in<->out (classic convert_selected_marker).
+    function convertMarker() {
+        if (selMarker === "in") { markOut = markIn; markIn = totalDuration + 1; selMarker = "out" }
+        else if (selMarker === "out") { markIn = markOut; markOut = -1; selMarker = "in" }
+        else return
+        // clamp the "cleared" sentinel back into range visually
+        if (markIn > totalDuration) markIn = 0
+        if (markOut < 0) markOut = totalDuration
+        commit(); tl.requestPaint()
+    }
+    // Delete whatever is selected (classic delete_selection routing).
+    function deleteSelection() {
+        if (selMarker === "in") { markIn = 0; selMarker = ""; commit(); tl.requestPaint(); return }
+        if (selMarker === "out") { markOut = totalDuration; selMarker = ""; commit(); tl.requestPaint(); return }
+        if (selSplit >= 0 && selSplit < separatorPoints.length) {
+            var sp = separatorPoints.slice(); sp.splice(selSplit, 1); separatorPoints = sp; selSplit = -1; commit(); tl.requestPaint(); return
+        }
+        if (selCut >= 0 && selCut < cuts.length) {
+            var c = cuts.slice(); c.splice(selCut, 1); cuts = c; selCut = -1; commit(); tl.requestPaint(); return
+        }
+        deleteCutAtCti()
+    }
+    // Jump to the previous/next cut edge (classic seek_nearest_cut_edge).
+    function seekCutEdge(dir) {
+        var edges = []
+        for (var i = 0; i < cuts.length; ++i) { edges.push(cuts[i][0]); edges.push(cuts[i][1]) }
+        edges.sort(function (a, b) { return a - b })
+        if (!edges.length) return
+        var t = cti, target
+        if (dir < 0) { var lo = edges.filter(function (v) { return v < t - 1e-4 }); target = lo.length ? lo[lo.length - 1] : edges[edges.length - 1] }
+        else { var hi = edges.filter(function (v) { return v > t + 1e-4 }); target = hi.length ? hi[0] : edges[0] }
+        seekTo(target)
+    }
+    function resetCrop() { cropTop = cropLeft = cropRight = cropBottom = 0; tl.requestPaint(); commit() }
+    // Snap crop margins so the OUTPUT width/height stay even (chroma-phase safe),
+    // mirroring the classic _normalize_crop_margins_even applied on confirm.
+    function evenMargins(t, l, r, b) {
+        if ((t + l + r + b) <= 0) return [t, l, r, b]
+        var ow = sourceW - l - r, oh = sourceH - t - b
+        if (ow % 2 !== 0) { if (sourceW - l - (r + 1) >= 2) r += 1; else if (sourceW - (l + 1) - r >= 2) l += 1 }
+        if (oh % 2 !== 0) { if (sourceH - t - (b + 1) >= 2) b += 1; else if (sourceH - (t + 1) - b >= 2) t += 1 }
+        return [t, l, r, b]
+    }
 
     function buildResult() {
-        return JSON.stringify({ status: "ok", margins: [cropTop, cropLeft, cropRight, cropBottom],
+        var m = evenMargins(cropTop, cropLeft, cropRight, cropBottom)
+        return JSON.stringify({ status: "ok", margins: m,
             keep_ranges: keepFromCuts(), separator_points: separatorPoints,
             speed: speed, reverse: reverse, include_audio: includeAudio })
     }
@@ -448,6 +525,11 @@ ApplicationWindow {
                             CropField { Layout.fillWidth: true; label: "R"; maxv: sourceW; v: cropRight; onEdited: (value) => { cropRight = value; commit() } }
                         }
                         Switch { text: "Edit crop on preview"; checked: cropEdit; onToggled: cropEdit = checked }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 8
+                            PadButton { Layout.fillWidth: true; text: "Reset Crop"; onClicked: resetCrop() }
+                            Switch { text: "Overlay"; checked: cropOverlayOn; onToggled: cropOverlayOn = checked }
+                        }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
@@ -458,10 +540,27 @@ ApplicationWindow {
                             ComboBox {
                                 id: speedBox
                                 Layout.fillWidth: true
-                                model: ["25%", "50%", "75%", "100%", "125%", "150%", "200%"]
+                                editable: true
+                                model: ["25%", "50%", "75%", "100%", "125%", "150%", "200%", "300%", "400%", "500%", "800%", "1000%"]
                                 currentIndex: 3
-                                onActivated: { speed = parseFloat(currentText) / 100.0; commit() }
-                                Component.onCompleted: { var idx = model.indexOf(Math.round(speed * 100) + "%"); if (idx >= 0) currentIndex = idx }
+                                function applyText(txt) {
+                                    var raw = String(txt)
+                                    var v = parseFloat(raw.replace("%", "").replace("x", "").replace("X", ""))
+                                    if (isNaN(v) || v <= 0) return
+                                    // "2x" or a bare value <= 10 means a factor; otherwise it is a percent.
+                                    var f = (raw.toLowerCase().indexOf("x") >= 0 || v <= 10) ? v : v / 100.0
+                                    speed = Math.max(0.1, Math.min(10.0, f)); commit()
+                                }
+                                onActivated: applyText(currentText)
+                                onAccepted: applyText(editText)
+                                Component.onCompleted: { var idx = model.indexOf(Math.round(speed * 100) + "%"); if (idx >= 0) currentIndex = idx; else editText = Math.round(speed * 100) + "%" }
+                                WheelHandler {
+                                    onWheel: (ev) => {
+                                        var stepv = (ev.modifiers & Qt.ControlModifier) ? 0.25 : 0.05
+                                        speed = Math.max(0.1, Math.min(10.0, speed + (ev.angleDelta.y > 0 ? stepv : -stepv)))
+                                        speedBox.editText = Math.round(speed * 100) + "%"; commit()
+                                    }
+                                }
                             }
                         }
                         Switch { text: "Reverse video"; checked: reverse; onToggled: { reverse = checked; commit() } }
@@ -480,10 +579,23 @@ ApplicationWindow {
                             PadButton { Layout.fillWidth: true; text: "Add Split"; onClicked: addSplit() }
                             PadButton { Layout.fillWidth: true; text: "Del Split"; onClicked: deleteSplitAtCti() }
                         }
-                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; onClicked: { cuts = []; tl.requestPaint(); commit() } }
+                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; onClicked: { cuts = []; selCut = -1; tl.requestPaint(); commit() } }
+                        GridLayout {
+                            Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
+                            PadButton { Layout.fillWidth: true; text: "Invert Cuts"; onClicked: invertCutsAll() }
+                            PadButton { Layout.fillWidth: true; text: "Convert In/Out"; onClicked: convertMarker() }
+                            PadButton { Layout.fillWidth: true; text: "Delete Selected"; onClicked: deleteSelection() }
+                            PadButton { Layout.fillWidth: true; text: "Prev/Next edge"; onClicked: seekCutEdge(1) }
+                        }
                         Label {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
-                            text: cuts.length + " cut(s) • " + separatorPoints.length + " split(s)\nKept: " + fmt(keepTotal()) + " of " + fmt(totalDuration)
+                            text: {
+                                var ow = sourceW - cropLeft - cropRight, oh = sourceH - cropTop - cropBottom
+                                var cropTxt = (cropTop + cropLeft + cropRight + cropBottom) > 0 ? ("Crop \u2192 " + ow + "\u00d7" + oh) : "No crop"
+                                return cropTxt + "  \u2022  Speed " + Math.round(speed * 100) + "%" + (reverse ? "  \u2022  Reversed" : "")
+                                    + "\n" + cuts.length + " cut(s) \u2022 " + separatorPoints.length + " split(s) \u2022 " + chapters.length + " chapter(s)"
+                                    + "\nKept: " + fmt(keepTotal()) + " of " + fmt(totalDuration)
+                            }
                             color: win.col("marker_in", "#2ddc7f"); font.pixelSize: 11
                         }
 
@@ -529,7 +641,7 @@ ApplicationWindow {
                         Item {
                             id: cropOverlay
                             anchors.fill: parent
-                            visible: ready && (cropEdit || (cropTop + cropLeft + cropRight + cropBottom) > 0)
+                            visible: ready && cropOverlayOn && (cropEdit || (cropTop + cropLeft + cropRight + cropBottom) > 0)
                             property rect cr: (win.activeAB === 0 ? voA.contentRect : voB.contentRect)
                             property real rx: cr.x + cr.width * (cropLeft / Math.max(1, sourceW))
                             property real ry: cr.y + cr.height * (cropTop / Math.max(1, sourceH))
@@ -649,7 +761,7 @@ ApplicationWindow {
                                 var cx0 = t2x(cz[c1][0]), cx1 = t2x(cz[c1][1])
                                 ctx.fillStyle = "rgba(248,81,73,0.32)"
                                 ctx.fillRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
-                                ctx.strokeStyle = "rgba(248,81,73,0.9)"; ctx.lineWidth = 1
+                                ctx.strokeStyle = (c1 === win.selCut) ? "rgba(255,255,255,0.95)" : "rgba(248,81,73,0.9)"; ctx.lineWidth = (c1 === win.selCut) ? 2 : 1
                                 ctx.strokeRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
                             }
                             ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "center"
@@ -659,10 +771,20 @@ ApplicationWindow {
                                 ctx.beginPath(); ctx.moveTo(bx, 4); ctx.lineTo(bx, height - 4); ctx.stroke(); ctx.setLineDash([])
                                 ctx.fillStyle = "rgba(240,200,150,0.92)"; ctx.fillText(segs[i].name, bx, 13)
                             }
+                            // Chapters: dashed purple markers with titles (parity with classic).
+                            for (var ch = 0; ch < chapters.length; ++ch) {
+                                var chx = t2x(Number(chapters[ch].t))
+                                if (chx < pad - 1 || chx > width - pad + 1) continue
+                                ctx.strokeStyle = win.col("chapter_text", "#d9bdff"); ctx.lineWidth = 1; ctx.setLineDash([2, 3])
+                                ctx.beginPath(); ctx.moveTo(chx, height - 16); ctx.lineTo(chx, height - 4); ctx.stroke(); ctx.setLineDash([])
+                                ctx.fillStyle = win.col("chapter_text", "#d9bdff"); ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "left"
+                                ctx.fillText(chapters[ch].title, chx + 3, height - 6)
+                            }
                             function vbar(x, c) { ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke() }
                             vbar(xi, win.col("marker_in", "#2ddc7f")); vbar(xo, win.col("marker_out", "#d29922"))
                             for (var k = 0; k < separatorPoints.length; ++k) {
-                                var sx = t2x(Number(separatorPoints[k])); ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 2
+                                var sx = t2x(Number(separatorPoints[k]))
+                                ctx.strokeStyle = (k === win.selSplit) ? "#ffffff" : "#38bdf8"; ctx.lineWidth = (k === win.selSplit) ? 3 : 2
                                 ctx.beginPath(); ctx.moveTo(sx, 6); ctx.lineTo(sx, height - 6); ctx.stroke()
                             }
                             var px = t2x(cti); ctx.strokeStyle = win.col("playhead", "#ff4d55"); ctx.lineWidth = 2
@@ -670,8 +792,45 @@ ApplicationWindow {
                         }
                         MouseArea {
                             anchors.fill: parent
-                            onPressed: (m) => seekTo(snapTime(tl.x2t(m.x), -1, null))
-                            onPositionChanged: (m) => { if (pressed) seekTo(snapTime(tl.x2t(m.x), -1, null)) }
+                            property string dragKind: ""   // in|out|split|cutS|cutE|""
+                            property int dragIdx: -1
+                            // Pick the nearest draggable handle within ~7px of x.
+                            function pick(x) {
+                                var best = { kind: "", idx: -1, d: 7 }
+                                function consider(k, idx, t) { var d = Math.abs(tl.t2x(t) - x); if (d <= best.d) best = { kind: k, idx: idx, d: d } }
+                                consider("in", -1, markIn); consider("out", -1, markOut)
+                                for (var i = 0; i < separatorPoints.length; ++i) consider("split", i, Number(separatorPoints[i]))
+                                for (var c = 0; c < cuts.length; ++c) { consider("cutS", c, cuts[c][0]); consider("cutE", c, cuts[c][1]) }
+                                return best
+                            }
+                            onPressed: (m) => {
+                                var p = pick(m.x); dragKind = p.kind; dragIdx = p.idx
+                                if (p.kind === "in") { selMarker = "in"; selSplit = -1; selCut = -1 }
+                                else if (p.kind === "out") { selMarker = "out"; selSplit = -1; selCut = -1 }
+                                else if (p.kind === "split") { selSplit = p.idx; selCut = -1; selMarker = "" }
+                                else if (p.kind === "cutS" || p.kind === "cutE") { selCut = p.idx; selSplit = -1; selMarker = "" }
+                                else { selMarker = ""; selSplit = -1; selCut = -1; seekTo(snapTime(tl.x2t(m.x), -1, null)) }
+                            }
+                            onPositionChanged: (m) => {
+                                if (!pressed) return
+                                if (dragKind === "") { seekTo(snapTime(tl.x2t(m.x), -1, null)); return }
+                                var t = snapTime(tl.x2t(m.x), dragKind === "split" ? dragIdx : -1,
+                                                 dragKind === "in" ? "in" : (dragKind === "out" ? "out" : null))
+                                if (dragKind === "in") markIn = t
+                                else if (dragKind === "out") markOut = t
+                                else if (dragKind === "split") { var sp = separatorPoints.slice(); sp[dragIdx] = t; separatorPoints = sp }
+                                else if (dragKind === "cutS") { var c = cuts.slice(); c[dragIdx] = [Math.min(t, c[dragIdx][1] - 0.02), c[dragIdx][1]]; cuts = c }
+                                else if (dragKind === "cutE") { var c2 = cuts.slice(); c2[dragIdx] = [c2[dragIdx][0], Math.max(t, c2[dragIdx][0] + 0.02)]; cuts = c2 }
+                                tl.requestPaint()
+                            }
+                            onReleased: {
+                                if (dragKind !== "") {
+                                    if (dragKind === "cutS" || dragKind === "cutE") { cuts = normRanges(cuts); selCut = -1 }
+                                    if (dragKind === "split") separatorPoints = separatorPoints.slice().sort(function (a, b) { return a - b })
+                                    commit()
+                                }
+                                dragKind = ""; dragIdx = -1
+                            }
                             // Wheel zooms the timeline around the cursor time.
                             onWheel: (wheel) => {
                                 var tUnder = tl.x2t(wheel.x)
@@ -688,6 +847,10 @@ ApplicationWindow {
                     Connections { target: win; function onReadyChanged() { tl.requestPaint() } }
                     Connections { target: win; function onZoomChanged() { tl.requestPaint() } }
                     Connections { target: win; function onViewStartChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onChaptersChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onSeparatorPointsChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onSelCutChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onSelSplitChanged() { tl.requestPaint() } }
                     // Pan bar (only when zoomed in).
                     ScrollBar {
                         id: tlScroll
@@ -708,19 +871,27 @@ ApplicationWindow {
                 // Transport
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 6
-                    PadButton { Layout.preferredWidth: 104; text: actP().playbackState === MediaPlayer.PlayingState ? "❚❚  Pause" : "▶  Play"; onClicked: togglePlay() }
-                    PadButton { Layout.preferredWidth: 50; text: "◀◀"; onClicked: seekTo(cti - 1) }    // -1 s
-                    PadButton { Layout.preferredWidth: 44; text: "◀|"; onClicked: frameStep(-1) }       // -1 frame
-                    PadButton { Layout.preferredWidth: 44; text: "|▶"; onClicked: frameStep(1) }        // +1 frame
-                    PadButton { Layout.preferredWidth: 50; text: "▶▶"; onClicked: seekTo(cti + 1) }     // +1 s
-                    Label { text: fmt(cti) + "  /  " + fmt(totalDuration); color: win.col("text", "#e6edf3"); font.pixelSize: 13; font.family: "Consolas" }
-                    Label { text: "f " + curFrame() + " / " + totalFrames(); color: win.col("text_mute", "#7d8590"); font.pixelSize: 11; font.family: "Consolas" }
+                    spacing: 5
+                    PadButton { Layout.preferredWidth: 92; text: actP().playbackState === MediaPlayer.PlayingState ? "\u275a\u275a  Pause" : "\u25b6  Play"; onClicked: togglePlay() }
+                    PadButton { Layout.preferredWidth: 36; text: "\u23ee"; onClicked: seekTo(0) }                        // Home
+                    PadButton { Layout.preferredWidth: 42; text: "-5s"; autoRepeat: true; onClicked: seekTo(cti - 5) }
+                    PadButton { Layout.preferredWidth: 42; text: "-1s"; autoRepeat: true; onClicked: seekTo(cti - 1) }
+                    PadButton { Layout.preferredWidth: 38; text: "\u25c0|"; onClicked: frameStep(-1) }                   // -1 frame
+                    PadButton { Layout.preferredWidth: 38; text: "|\u25b6"; onClicked: frameStep(1) }                    // +1 frame
+                    PadButton { Layout.preferredWidth: 42; text: "+1s"; autoRepeat: true; onClicked: seekTo(cti + 1) }
+                    PadButton { Layout.preferredWidth: 42; text: "+5s"; autoRepeat: true; onClicked: seekTo(cti + 5) }
+                    PadButton { Layout.preferredWidth: 36; text: "\u23ed"; onClicked: seekTo(totalDuration) }            // End
+                    PadButton { Layout.preferredWidth: 32; text: "\u27dd"; onClicked: seekCutEdge(-1) }                  // prev cut edge
+                    PadButton { Layout.preferredWidth: 32; text: "\u27de"; onClicked: seekCutEdge(1) }                   // next cut edge
+                    Label { text: fmt(cti) + " / " + fmt(totalDuration); color: win.col("text", "#e6edf3"); font.pixelSize: 12; font.family: "Consolas" }
+                    Label { text: "f " + curFrame() + "/" + totalFrames(); color: win.col("text_mute", "#7d8590"); font.pixelSize: 10; font.family: "Consolas" }
                     Item { Layout.fillWidth: true }
-                    PadButton { Layout.preferredWidth: 40; text: "−"; onClicked: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
-                    Label { text: (Math.round(win.zoom * 100) / 100) + "×"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
-                    PadButton { Layout.preferredWidth: 40; text: "+"; onClicked: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
-                    PadButton { Layout.preferredWidth: 54; text: "Fit"; onClicked: { win.fitZoom(); tl.requestPaint() } }
+                    PadButton { Layout.preferredWidth: 74; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
+                    Slider { Layout.preferredWidth: 88; from: 0; to: 1; value: win.volume; onMoved: { win.volume = value; win.muted = false } }
+                    PadButton { Layout.preferredWidth: 34; text: "\u2212"; onClicked: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
+                    Label { text: (Math.round(win.zoom * 100) / 100) + "\u00d7"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
+                    PadButton { Layout.preferredWidth: 34; text: "+"; onClicked: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
+                    PadButton { Layout.preferredWidth: 46; text: "Fit"; onClicked: { win.fitZoom(); tl.requestPaint() } }
                 }
             }
         }
@@ -732,7 +903,7 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                 PadButton { text: "Reset all"; implicitWidth: 110
-                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; tl.requestPaint(); commit() } }
+                    onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; cropOverlayOn = true; muted = false; selMarker = ""; selSplit = -1; selCut = -1; tl.requestPaint(); commit() } }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
                 PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
@@ -746,11 +917,29 @@ ApplicationWindow {
     Shortcut { sequence: "Enter"; onActivated: bridge.submit(buildResult()) }
     Shortcut { sequence: "I"; onActivated: setMarkIn() }
     Shortcut { sequence: "O"; onActivated: setMarkOut() }
+    Shortcut { sequence: "A"; onActivated: addCutSmart() }
+    Shortcut { sequence: "S"; onActivated: addSplit() }
+    Shortcut { sequence: "Delete"; onActivated: deleteSelection() }
+    Shortcut { sequence: "M"; onActivated: win.muted = !win.muted }
+    Shortcut { sequence: "Ctrl+I"; onActivated: convertMarker() }
+    Shortcut { sequence: "Ctrl+O"; onActivated: convertMarker() }
+    Shortcut { sequence: "Ctrl+Shift+I"; onActivated: invertCutsAll() }
+    Shortcut { sequence: "Ctrl+R"; onActivated: resetCrop() }
+    Shortcut { sequence: "Ctrl+U"; onActivated: cropOverlayOn = !cropOverlayOn }
     Shortcut { sequence: "Ctrl+Z"; onActivated: doUndo() }
     Shortcut { sequence: "Ctrl+Y"; onActivated: doRedo() }
     Shortcut { sequence: "Ctrl+Shift+Z"; onActivated: doRedo() }
-    Shortcut { sequence: "Left"; onActivated: frameStep(-1) }
-    Shortcut { sequence: "Right"; onActivated: frameStep(1) }
-    Shortcut { sequence: "Shift+Left"; onActivated: seekTo(cti - 1) }
-    Shortcut { sequence: "Shift+Right"; onActivated: seekTo(cti + 1) }
+    Shortcut { sequence: "Home"; onActivated: seekTo(0) }
+    Shortcut { sequence: "End"; onActivated: seekTo(totalDuration) }
+    Shortcut { sequence: "Left"; onActivated: seekTo(cti - 1) }
+    Shortcut { sequence: "Right"; onActivated: seekTo(cti + 1) }
+    Shortcut { sequence: "Shift+Left"; onActivated: seekTo(cti - 5) }
+    Shortcut { sequence: "Shift+Right"; onActivated: seekTo(cti + 5) }
+    Shortcut { sequence: "Ctrl+Alt+Left"; onActivated: seekCutEdge(-1) }
+    Shortcut { sequence: "Ctrl+Alt+Right"; onActivated: seekCutEdge(1) }
+    Shortcut { sequence: ","; onActivated: frameStep(-1) }
+    Shortcut { sequence: "."; onActivated: frameStep(1) }
+    Shortcut { sequence: "+"; onActivated: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
+    Shortcut { sequence: "="; onActivated: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
+    Shortcut { sequence: "-"; onActivated: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
 }
