@@ -52,6 +52,20 @@ ApplicationWindow {
     property int selSplit: -1
     property int selCut: -1
 
+    // ---- Preview (video) pan/zoom — parity with classic Hand/Zoom tools ----
+    property real pvZoom: 1.0
+    property real pvOffX: 0
+    property real pvOffY: 0
+    property string tool: "hand"   // "hand" | "zoom"
+
+    // ---- Live reverse preview state (renders reversed proxy chunks) ----
+    property bool revActive: false
+    property int revGen: 0
+    property real revPlayBase: 0   // CTI where the current reverse run began
+    property real revWinStart: 0
+    property real revWinEnd: 0
+    readonly property real revWindow: 15.0
+
     // ---- Phase 5: timeline zoom/pan + interactive crop ----
     property real zoom: 1.0        // 1 = whole clip visible; higher = zoomed in
     property real viewStart: 0     // left edge of the visible window, in seconds
@@ -78,6 +92,21 @@ ApplicationWindow {
         clampView()
     }
     function fitZoom() { zoom = 1.0; viewStart = 0 }
+
+    // ---- Preview pan/zoom (zoom INTO the video; classic Hand/Zoom tools) ----
+    function pvZoomAt(factor, ax, ay) {
+        var z = Math.max(1, Math.min(8, pvZoom * factor))
+        if (z === pvZoom) return
+        var cx = (ax - pvOffX) / pvZoom, cy = (ay - pvOffY) / pvZoom
+        pvZoom = z; pvOffX = ax - cx * pvZoom; pvOffY = ay - cy * pvZoom; clampPan()
+    }
+    function clampPan() {
+        if (pvZoom <= 1.0001) { pvOffX = 0; pvOffY = 0; return }
+        var w = previewArea.width, h = previewArea.height
+        pvOffX = Math.max(w - w * pvZoom, Math.min(0, pvOffX))
+        pvOffY = Math.max(h - h * pvZoom, Math.min(0, pvOffY))
+    }
+    function resetPreviewView() { pvZoom = 1.0; pvOffX = 0; pvOffY = 0 }
 
     // ---- Frame-accurate scrubbing ----
     function curFrame() { return Math.round(cti * fps) }
@@ -295,15 +324,36 @@ ApplicationWindow {
         id: playerA
         videoOutput: voA
         audioOutput: AudioOutput { id: aoA; volume: win.muted ? 0.0 : win.volume }
-        onPositionChanged: { if (ready && activeAB === 0 && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
-        onMediaStatusChanged: { if (activeAB === 0 && mediaStatus === MediaPlayer.EndOfMedia) advanceToNext() }
+        onPositionChanged: {
+            if (!ready || activeAB !== 0) return
+            if (revActive) cti = Math.min(totalDuration, revPlayBase + position / 1000.0)
+            else if (segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0)
+        }
+        onMediaStatusChanged: { if (activeAB === 0 && mediaStatus === MediaPlayer.EndOfMedia) { if (revActive) advanceReverse(); else advanceToNext() } }
     }
     MediaPlayer {
         id: playerB
         videoOutput: voB
         audioOutput: AudioOutput { id: aoB; volume: win.muted ? 0.0 : win.volume }
-        onPositionChanged: { if (ready && activeAB === 1 && segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0) }
-        onMediaStatusChanged: { if (activeAB === 1 && mediaStatus === MediaPlayer.EndOfMedia) advanceToNext() }
+        onPositionChanged: {
+            if (!ready || activeAB !== 1) return
+            if (revActive) cti = Math.min(totalDuration, revPlayBase + position / 1000.0)
+            else if (segs.length) cti = Math.min(totalDuration, segs[curSeg].start + position / 1000.0)
+        }
+        onMediaStatusChanged: { if (activeAB === 1 && mediaStatus === MediaPlayer.EndOfMedia) { if (revActive) advanceReverse(); else advanceToNext() } }
+    }
+
+    // A reversed preview proxy finished rendering: load + play it (CTI advances
+    // forward via the player's position; playbackRate bakes in the chosen speed).
+    Connections {
+        target: bridge
+        function onReverseReady(gen, path) {
+            if (gen !== revGen || !revActive || path === "") return
+            actP().source = "file:///" + String(path).replace(/\\/g, "/")
+            actP().position = 0
+            actP().playbackRate = Math.max(0.25, Math.min(4.0, speed))
+            if (wantPlaying) actP().play(); else actP().pause()
+        }
     }
 
     function preloadNext() {
@@ -340,14 +390,58 @@ ApplicationWindow {
         return { index: 0, local: t }
     }
     function seekTo(t) {
+        if (reverse) {
+            // Re-anchor reverse playback: stop the proxy, show the mirrored frame.
+            revActive = false; actP().playbackRate = 1.0
+            cti = Math.max(0, Math.min(totalDuration, t))
+            var sr = segmentForTime(srcTime(cti))
+            if (sr.index === curSeg) actP().position = Math.round(sr.local * 1000)
+            else loadSegment(sr.index, sr.local, false)
+            return
+        }
         var s = segmentForTime(t)
         cti = Math.max(0, Math.min(totalDuration, t))
         if (s.index === curSeg) actP().position = Math.round(s.local * 1000)
         else loadSegment(s.index, s.local, actP().playbackState === MediaPlayer.PlayingState)
     }
+    // Source time shown for a timeline CTI. Reverse mirrors the whole clip.
+    function srcTime(t) { return reverse ? Math.max(0, Math.min(totalDuration, totalDuration - t)) : t }
     function togglePlay() {
+        if (reverse) {
+            if (actP().playbackState === MediaPlayer.PlayingState) { actP().pause(); wantPlaying = false }
+            else if (revActive) { actP().play(); wantPlaying = true }
+            else startReverse(cti)
+            return
+        }
         if (actP().playbackState === MediaPlayer.PlayingState) { actP().pause(); wantPlaying = false }
         else { actP().play(); wantPlaying = true }
+    }
+    // Render + play a reversed proxy window ending at the current source time;
+    // the CTI moves FORWARD while the source content plays BACKWARD (mirror).
+    function startReverse(fromCti) {
+        var c = Math.max(0, Math.min(totalDuration, fromCti))
+        revPlayBase = c
+        var winEnd = srcTime(c)
+        var winStart = Math.max(0, winEnd - revWindow)
+        if (winEnd <= 0.05) return        // already at the source start
+        revActive = true; wantPlaying = true
+        renderReverseChunk(winStart, winEnd)
+    }
+    function renderReverseChunk(winStart, winEnd) {
+        revWinStart = winStart; revWinEnd = winEnd
+        revGen += 1
+        var s = segmentForTime(Math.max(0, winEnd - 1e-3))   // map window to its segment (joins)
+        var ss = Math.max(0, winStart - segs[s.index].start)
+        var dur = Math.max(0.05, winEnd - winStart)
+        var w = Math.max(320, Math.min(1280, Math.round(previewArea.width)))
+        bridge.renderReverse(JSON.stringify({ gen: revGen, src: segs[s.index].path, ss: ss, dur: dur, width: w }))
+    }
+    function advanceReverse() {
+        revPlayBase = revPlayBase + (revWinEnd - revWinStart)
+        var winEnd = revWinStart
+        var winStart = Math.max(0, winEnd - revWindow)
+        if (winEnd <= 0.05) { actP().pause(); revActive = false; wantPlaying = false; return }
+        renderReverseChunk(winStart, winEnd)
     }
     function fmt(t) {
         t = Math.max(0, t)
@@ -495,17 +589,18 @@ ApplicationWindow {
             }
         }
 
-        // ---- Main: left controls + center preview/timeline ----
-        RowLayout {
+        // ---- Main: resizable left controls | center preview/timeline ----
+        SplitView {
+            id: mainSplit
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 8
+            orientation: Qt.Horizontal
 
             // ----- Left control column -----
             Card {
-                Layout.preferredWidth: 300
-                Layout.minimumWidth: 260
-                Layout.fillHeight: true
+                id: leftPanel
+                SplitView.preferredWidth: 300
+                SplitView.minimumWidth: 240
                 ScrollView {
                     anchors.fill: parent
                     anchors.margins: 12
@@ -530,6 +625,13 @@ ApplicationWindow {
                             PadButton { Layout.fillWidth: true; text: "Reset Crop"; onClicked: resetCrop() }
                             Switch { text: "Overlay"; checked: cropOverlayOn; onToggled: cropOverlayOn = checked }
                         }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 8
+                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; baseColor: win.tool === "hand" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
+                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; baseColor: win.tool === "zoom" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
+                            PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
+                        }
+                        Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
@@ -563,7 +665,10 @@ ApplicationWindow {
                                 }
                             }
                         }
-                        Switch { text: "Reverse video"; checked: reverse; onToggled: { reverse = checked; commit() } }
+                        Switch { text: "Reverse video"; checked: reverse; onToggled: {
+                                reverse = checked; commit()
+                                if (!checked) { revActive = false; actP().playbackRate = 1.0; var s = segmentForTime(cti); loadSegment(s.index, s.local, false) }
+                            } }
                         Switch { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: { includeAudio = checked; commit() } }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
@@ -606,8 +711,8 @@ ApplicationWindow {
 
             // ----- Center: preview + timeline + transport -----
             ColumnLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
+                SplitView.fillWidth: true
+                SplitView.minimumWidth: 520
                 spacing: 8
 
                 Card {
@@ -622,6 +727,18 @@ ApplicationWindow {
                         id: previewArea
                         anchors.fill: parent
                         anchors.margins: 6
+                        clip: true
+                        // pvContent holds the video + crop overlay and is the layer
+                        // the Hand/Zoom preview tools scale & pan. The pan MouseArea
+                        // lives OUTSIDE it so it works in untransformed view coords.
+                        Item {
+                            id: pvContent
+                            anchors.fill: parent
+                            transformOrigin: Item.TopLeft
+                            transform: [
+                                Scale { xScale: win.pvZoom; yScale: win.pvZoom },
+                                Translate { x: win.pvOffX; y: win.pvOffY }
+                            ]
                         // Two stacked outputs for double-buffered seamless joins.
                         // PreserveAspectFit keeps each segment's native aspect ratio
                         // (black bars instead of stretching when dimensions differ).
@@ -709,6 +826,28 @@ ApplicationWindow {
                                     onReleased: commit()
                                 }
                             }
+                        }
+                        }
+                        // Pan/zoom interaction layer. Hand drags to pan; Zoom click
+                        // zooms (Alt = out); wheel zooms; double-click resets. Disabled
+                        // while editing crop so the crop handles receive the mouse.
+                        MouseArea {
+                            id: panArea
+                            anchors.fill: parent
+                            enabled: !cropEdit
+                            acceptedButtons: Qt.LeftButton
+                            property real lastX: 0
+                            property real lastY: 0
+                            cursorShape: win.tool === "zoom" ? Qt.CrossCursor : (pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
+                            onPressed: (m) => {
+                                lastX = m.x; lastY = m.y
+                                if (win.tool === "zoom") win.pvZoomAt((m.modifiers & Qt.AltModifier) ? 0.8 : 1.25, m.x, m.y)
+                            }
+                            onPositionChanged: (m) => {
+                                if (pressed && win.tool === "hand") { win.pvOffX += (m.x - lastX); win.pvOffY += (m.y - lastY); lastX = m.x; lastY = m.y; win.clampPan() }
+                            }
+                            onDoubleClicked: win.resetPreviewView()
+                            onWheel: (w) => win.pvZoomAt(w.angleDelta.y > 0 ? 1.25 : 0.8, w.x, w.y)
                         }
                         Label {
                             anchors.centerIn: parent
@@ -904,6 +1043,7 @@ ApplicationWindow {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                 PadButton { text: "Reset all"; implicitWidth: 110
                     onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; cropOverlayOn = true; muted = false; selMarker = ""; selSplit = -1; selCut = -1; tl.requestPaint(); commit() } }
+                PadButton { text: "Reset Panels"; implicitWidth: 130; onClicked: leftPanel.SplitView.preferredWidth = 300 }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
                 PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
@@ -942,4 +1082,10 @@ ApplicationWindow {
     Shortcut { sequence: "+"; onActivated: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
     Shortcut { sequence: "="; onActivated: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
     Shortcut { sequence: "-"; onActivated: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
+    Shortcut { sequence: "H"; onActivated: win.tool = "hand" }
+    Shortcut { sequence: "Z"; onActivated: win.tool = "zoom" }
+    Shortcut { sequence: "Ctrl+0"; onActivated: resetPreviewView() }
+    Shortcut { sequence: "Ctrl++"; onActivated: pvZoomAt(1.25, previewArea.width / 2, previewArea.height / 2) }
+    Shortcut { sequence: "Ctrl+="; onActivated: pvZoomAt(1.25, previewArea.width / 2, previewArea.height / 2) }
+    Shortcut { sequence: "Ctrl+-"; onActivated: pvZoomAt(0.8, previewArea.width / 2, previewArea.height / 2) }
 }
