@@ -1470,5 +1470,64 @@ class TrackManagerBackTests(unittest.TestCase):
         self.assertEqual(len(ext_calls), 2)
 
 
+class AudioSampleRateTests(unittest.TestCase):
+    """Output audio sample-rate selection and uniform join resampling."""
+
+    def setUp(self):
+        FFmWiz.USE_COLOR = False
+
+    def test_resolve_explicit_and_keep(self):
+        self.assertEqual(FFmWiz.resolve_audio_sample_rate({"audio_sample_rate": 44100}), 44100)
+        self.assertIsNone(FFmWiz.resolve_audio_sample_rate({"audio_sample_rate": None}))
+        self.assertIsNone(FFmWiz.resolve_audio_sample_rate({}))
+
+    def test_source_sample_rate_detection(self):
+        answers = {"audio_streams": [audio_stream()], "audio_tracks": [0]}
+        self.assertEqual(FFmWiz.source_audio_sample_rate(answers), 48000)
+
+    def test_append_audio_encode_options_adds_ar(self):
+        cmd = []
+        FFmWiz.append_audio_encode_options(cmd, {"audio_codec": "aac", "audio_sample_rate": 44100, "output_ext": "mp4"}, True)
+        self.assertIn("-ar", cmd)
+        self.assertEqual(cmd[cmd.index("-ar") + 1], "44100")
+
+    def test_append_audio_encode_options_omits_ar_when_keep(self):
+        cmd = []
+        FFmWiz.append_audio_encode_options(cmd, {"audio_codec": "aac", "output_ext": "mp4"}, True)
+        self.assertNotIn("-ar", cmd)
+
+    def test_join_target_rate_is_uniform_highest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, _ = self.join_answers_for_rate(tmp)
+            with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+                target = FFmWiz.join_target_sample_rate(answers)
+        self.assertEqual(target, 96000)  # highest among inputs (44100/48000/96000)
+
+    def test_join_explicit_rate_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, _ = self.join_answers_for_rate(tmp)
+            answers["audio_sample_rate"] = 48000
+            self.assertEqual(FFmWiz.join_target_sample_rate(answers), 48000)
+
+    def test_join_prep_filter_uses_target_rate(self):
+        self.assertIn("aresample=44100:", FFmWiz.join_audio_prep_filter(44100))
+
+    def join_answers_for_rate(self, tmp):
+        def vid_audio(sr):
+            a = {"codec_type": "audio", "codec_name": "aac", "channels": 2, "sample_rate": str(sr), "bit_rate": "128000"}
+            return a
+        v = video_stream()
+        def item(name, sr):
+            return {"path": Path(tmp) / name, "streams": [v, vid_audio(sr)], "video_streams": [v],
+                    "audio_streams": [vid_audio(sr)], "format": {"duration": "5"}, "duration": 5.0}
+        answers = {
+            "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "input_path": Path(tmp) / "A.mov",
+            "format": {"duration": "5"}, "video_streams": [v], "audio_streams": [vid_audio(48000)],
+            "data_streams": [], "subtitle_streams": [], "attachment_streams": [], "duration": 5.0,
+            "join_input_items": [item("B.mov", 44100), item("C.mov", 96000)],
+        }
+        return answers, None
+
+
 if __name__ == "__main__":
     unittest.main()

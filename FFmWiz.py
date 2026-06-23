@@ -286,6 +286,10 @@ KNOWN_OUTPUT_FORMATS = {
 }
 COMMON_VIDEO_CODECS = ["H265", "H264", "AV1", "VP9", "MPEG4", "copy"]
 COMMON_AUDIO_CODECS = ["aac", "libopus", "opus", "libmp3lame", "flac", "pcm_s16le", "copy"]
+# Common output audio sample rates (Hz) shown as prompt examples.
+COMMON_AUDIO_SAMPLE_RATES = [44100, 48000, 96000]
+MIN_AUDIO_SAMPLE_RATE = 8000
+MAX_AUDIO_SAMPLE_RATE = 192000
 CONFIG_FILE_NAME = "config.json"
 LAUNCHER_FILE_NAME = "run.ps1"
 ASSET_DIR_NAME = "assets"
@@ -730,6 +734,8 @@ class Color:
     MUX_SALMON = "\033[38;5;210m"
     MUX_STEEL = "\033[38;5;110m"
     MUX_SILVER = "\033[38;5;250m"
+    # Audio sample-rate (Hz) value styling, distinct from bitrate/volume colors.
+    AUDIO_SAMPLE_RATE = "\033[38;5;43m"
     MUX_HEADER = "\033[1m\033[38;2;255;50;115m"
     MUX_SCAN_HEADER = "\033[1m\033[38;2;68;221;255m"
     MUX_SUMMARY_HEADER = "\033[1m\033[38;2;170;255;82m"
@@ -1629,6 +1635,85 @@ def apply_folder_batch_color_range(job: dict[str, Any], settings_answers: dict[s
     )
 
 
+def stream_sample_rate(stream: dict[str, Any]) -> int | None:
+    """Parse an audio stream's sample rate (Hz) to int, or None when unknown."""
+    value = stream.get("sample_rate")
+    try:
+        return int(value) if value is not None and str(value).strip().isdigit() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def source_audio_sample_rate(answers: dict[str, Any]) -> int | None:
+    """Sample rate (Hz) of the first selected audio stream (or first audio
+    stream), used as the default 'keep current rate' value in prompts."""
+    streams = answers.get("audio_streams") or []
+    if not streams:
+        return None
+    try:
+        selected = selected_audio_streams(answers) if answers.get("audio_tracks") is not None else []
+    except Exception:
+        selected = []
+    idx = selected[0] if selected else 0
+    if 0 <= idx < len(streams):
+        rate = stream_sample_rate(streams[idx])
+        if rate:
+            return rate
+    for stream in streams:
+        rate = stream_sample_rate(stream)
+        if rate:
+            return rate
+    return None
+
+
+def join_source_audio_sample_rate(answers: dict[str, Any]) -> int | None:
+    """Highest source audio sample rate (Hz) across all joined inputs, so the
+    unified join rate does not downsample the best source."""
+    rates: list[int] = []
+    items = join_ordered_items_for_answers(answers) or []
+    if items:
+        for item in items:
+            for stream in item.get("audio_streams") or []:
+                rate = stream_sample_rate(stream)
+                if rate:
+                    rates.append(rate)
+    if not rates:
+        rate = source_audio_sample_rate(answers)
+        if rate:
+            rates.append(rate)
+    return max(rates) if rates else None
+
+
+def resolve_audio_sample_rate(answers: dict[str, Any]) -> int | None:
+    """Chosen OUTPUT audio sample rate in Hz, or None to keep the source rate.
+
+    An explicit answers['audio_sample_rate'] (int Hz) wins; otherwise fall back
+    to the module default AUDIO_SAMPLE_RATE (None = keep source)."""
+    value = answers.get("audio_sample_rate")
+    if value in (None, "", "n", "keep"):
+        return int(AUDIO_SAMPLE_RATE) if AUDIO_SAMPLE_RATE else None
+    try:
+        rate = int(value)
+    except (TypeError, ValueError):
+        return None
+    return rate if rate > 0 else None
+
+
+def join_target_sample_rate(answers: dict[str, Any]) -> int:
+    """The single sample rate (Hz) every joined input is resampled to, so the
+    joined output has a uniform rate. Prefers an explicit user choice, then the
+    highest source rate among inputs, then 48000 Hz."""
+    rate = resolve_audio_sample_rate(answers)
+    if rate:
+        return rate
+    return join_source_audio_sample_rate(answers) or 48000
+
+
+def join_audio_prep_filter(rate: int) -> str:
+    """Per-input audio prep for Join graphs at the given uniform sample rate."""
+    return f"aresample={int(rate)}:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS"
+
+
 def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_audio: bool) -> None:
     if not has_audio:
         cmd.append("-an")
@@ -1648,8 +1733,9 @@ def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_aud
         cmd.extend(["-b:a", f"{audio_bitrate}k"])
     if AUDIO_CHANNELS:
         cmd.extend(["-ac", str(AUDIO_CHANNELS)])
-    if AUDIO_SAMPLE_RATE:
-        cmd.extend(["-ar", str(AUDIO_SAMPLE_RATE)])
+    sample_rate = resolve_audio_sample_rate(answers)
+    if sample_rate:
+        cmd.extend(["-ar", str(sample_rate)])
 
 
 def append_container_options(cmd: list[str], output_ext: str) -> None:
@@ -2416,8 +2502,13 @@ def loudnorm_mode(answers: dict[str, Any]) -> str:
 JOIN_AUDIO_PREP_FILTER = "aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS"
 
 
-def _loudnorm_output_sample_rate() -> int:
-    """Return the sample rate to apply after LoudNorm to stabilize the output."""
+def _loudnorm_output_sample_rate(answers: dict[str, Any] | None = None) -> int:
+    """Return the sample rate to apply after LoudNorm to stabilize the output.
+    Honors the chosen output sample rate when available."""
+    if answers is not None:
+        rate = resolve_audio_sample_rate(answers)
+        if rate:
+            return rate
     return int(AUDIO_SAMPLE_RATE) if AUDIO_SAMPLE_RATE else 48000
 
 
@@ -2438,7 +2529,7 @@ def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
     if loudnorm_transform_enabled(answers):
         filters.append(build_loudnorm_filter(answers))
         # Explicitly resample after LoudNorm to guarantee a stable output rate.
-        filters.append(f"aresample={_loudnorm_output_sample_rate()}")
+        filters.append(f"aresample={_loudnorm_output_sample_rate(answers)}")
     filters.append("asetpts=PTS-STARTPTS")
     chain = ",".join(filters)
     if loudnorm_transform_enabled(answers):
@@ -2516,7 +2607,8 @@ def resolve_audio_tool_output_ext(answers: dict[str, Any]) -> str:
     return "m4a"
 
 
-def audio_tool_encode_options(output_ext: str, bitrate_kbps: int = DEFAULT_SPEED_AUDIO_BITRATE_KBPS) -> list[str]:
+def audio_tool_encode_options(output_ext: str, bitrate_kbps: int = DEFAULT_SPEED_AUDIO_BITRATE_KBPS,
+                              sample_rate: int | None = None) -> list[str]:
     ext = str(output_ext or "").lower().lstrip(".")
     if ext == "mp3":
         options = ["-c:a", "libmp3lame", "-b:a", f"{int(bitrate_kbps)}k"]
@@ -2530,6 +2622,8 @@ def audio_tool_encode_options(output_ext: str, bitrate_kbps: int = DEFAULT_SPEED
         options = ["-c:a", DEFAULT_AUDIO_CODEC, "-b:a", f"{int(bitrate_kbps)}k"]
     if AUDIO_CHANNELS:
         options.extend(["-ac", str(AUDIO_CHANNELS)])
+    if sample_rate:
+        options.extend(["-ar", str(int(sample_rate))])
     return options
 
 
@@ -6699,8 +6793,9 @@ def build_join_loudnorm_analysis_args(
         args.extend(["-i", str(item["path"])])
     filters: list[str] = []
     concat_inputs: list[str] = []
+    prep = join_audio_prep_filter(join_target_sample_rate(answers))
     for input_idx, _item in enumerate(items):
-        filters.append(f"[{input_idx}:a:{int(audio_index)}]{JOIN_AUDIO_PREP_FILTER}[mja{input_idx}]")
+        filters.append(f"[{input_idx}:a:{int(audio_index)}]{prep}[mja{input_idx}]")
         concat_inputs.append(f"[mja{input_idx}]")
     filters.append(f"{''.join(concat_inputs)}concat=n={len(items)}:v=0:a=1[mjcat]")
     # Same cut trims as the final encode (across the joined timeline).
@@ -15663,6 +15758,51 @@ def step_audio_bitrate(answers: dict[str, Any]) -> None:
         return
 
 
+def ask_audio_sample_rate(answers: dict[str, Any], default_rate: int | None) -> None:
+    """Prompt for the OUTPUT audio sample rate in Hz. Enter / 'n' keeps the
+    current source rate (default_rate). Stores answers['audio_sample_rate']."""
+    default_text = str(default_rate) if default_rate else "n"
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter audio sample rate in Hz",
+                f"examples: {example_text('44100,48000,96000')}; "
+                f"{keep_value_text('n=keep current rate' + (f' ({default_rate} Hz)' if default_rate else ''))}",
+                default_text,
+            )
+        )
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = default_text
+        if value.lower() in {"n", "keep"}:
+            answers["audio_sample_rate"] = default_rate if default_rate else None
+            answers["audio_sample_rate_keep"] = True
+            log_info(f"User choice: audio_sample_rate=keep ({default_rate or 'source'} Hz)")
+            return
+        if not re.fullmatch(r"\d+", value):
+            error("Enter an integer sample rate in Hz (e.g. 48000), or n to keep the current rate.")
+            continue
+        rate = int(value)
+        if rate < MIN_AUDIO_SAMPLE_RATE or rate > MAX_AUDIO_SAMPLE_RATE:
+            error(f"Enter a sample rate between {MIN_AUDIO_SAMPLE_RATE} and {MAX_AUDIO_SAMPLE_RATE} Hz.")
+            continue
+        answers["audio_sample_rate"] = rate
+        answers["audio_sample_rate_keep"] = False
+        log_info(f"User choice: audio_sample_rate={rate} Hz")
+        return
+
+
+def step_audio_sample_rate(answers: dict[str, Any]) -> None:
+    if answers.get("join_input_items"):
+        default_rate = join_source_audio_sample_rate(answers)
+        note("Join resamples every input to one common sample rate (uniform output).")
+    else:
+        default_rate = source_audio_sample_rate(answers)
+    ask_audio_sample_rate(answers, default_rate)
+
+
 def step_loudnorm(answers: dict[str, Any]) -> None:
     answers.pop("loudnorm_enabled", None)
     answers.pop("loudnorm_target_i", None)
@@ -16780,8 +16920,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                 cmd.extend(["-b:a", f"{audio_bitrate}k"])
             if AUDIO_CHANNELS:
                 cmd.extend(["-ac", str(AUDIO_CHANNELS)])
-            if AUDIO_SAMPLE_RATE:
-                cmd.extend(["-ar", str(AUDIO_SAMPLE_RATE)])
+            _ar = resolve_audio_sample_rate(answers)
+            if _ar:
+                cmd.extend(["-ar", str(_ar)])
     else:
         cmd.append("-an")
 
@@ -17174,7 +17315,7 @@ def build_audio_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
         "-filter:a",
         build_audio_speed_filter(speed, reverse),
     ]
-    cmd.extend(audio_tool_encode_options(answers["output_ext"]))
+    cmd.extend(audio_tool_encode_options(answers["output_ext"], sample_rate=resolve_audio_sample_rate(answers)))
     cmd.append(str(output_path))
     log_info(
         f"Audio speed/reverse command built: audio_index={audio_index}; "
@@ -17227,7 +17368,7 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
         parts.append(f"{''.join(labels)}concat=n={len(keep_ranges)}:v=0:a=1[a]")
         cmd.extend(["-filter_complex", ";".join(parts), "-map", "[a]", "-vn", "-sn", "-dn"])
 
-    cmd.extend(audio_tool_encode_options(answers["output_ext"]))
+    cmd.extend(audio_tool_encode_options(answers["output_ext"], sample_rate=resolve_audio_sample_rate(answers)))
     cmd.append(str(output_path))
     log_info(
         f"Audio cut command built: audio_index={audio_index}; ranges={keep_ranges}; output={output_path}"
@@ -17271,7 +17412,7 @@ def build_audio_transform_command(answers: dict[str, Any]) -> list[str]:
         "-sn",
         "-dn",
     ]
-    cmd.extend(audio_tool_encode_options(answers["output_ext"]))
+    cmd.extend(audio_tool_encode_options(answers["output_ext"], sample_rate=resolve_audio_sample_rate(answers)))
     cmd.append(str(output_path))
     log_info(
         f"Audio transform command built: audio_index={audio_index}; "
@@ -17595,6 +17736,7 @@ def run_wizard(answers: dict[str, Any]) -> None:
         Step("audio_speed_reverse", audio_only_transform_prompt_applicable, step_audio_speed_reverse_for_encode),
         Step("audio_codec", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_audio_codec),
         Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
+        Step("audio_sample_rate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy", step_audio_sample_rate),
         Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
         Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
         Step("color_range", color_range_prompt_applicable, step_color_range),
@@ -17915,6 +18057,11 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         print("  " + field_text("audio tracks", answers.get("audio_tracks"), Color.LIGHT_BLUE))
         print("  " + field_text("audio codec", answers.get("audio_codec"), Color.CYAN))
         print("  " + field_text("audio bitrate", str(answers.get("audio_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
+        _sr = resolve_audio_sample_rate(answers)
+        if answers.get("join_input_items"):
+            print("  " + field_text("audio sample rate", f"{join_target_sample_rate(answers)} Hz (uniform across joined inputs)", Color.AUDIO_SAMPLE_RATE))
+        else:
+            print("  " + field_text("audio sample rate", f"{_sr} Hz" if _sr else "keep source", Color.AUDIO_SAMPLE_RATE))
         if audio_cut_transform_enabled(answers):
             print(paint(format_audio_ranges_for_summary(answers["audio_cut_keep_ranges"], "audio cuts (keep ranges)"), Color.LIME))
         if audio_speed_transform_enabled(answers):
@@ -20969,6 +21116,7 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
         Step("audio_speed_reverse", audio_only_transform_prompt_applicable, step_audio_speed_reverse_for_encode),
         Step("audio_codec", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_audio_codec),
         Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
+        Step("audio_sample_rate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy", step_audio_sample_rate),
         Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
         Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
         Step("color_range", folder_batch_color_range_applicable, step_folder_batch_color_range),
@@ -21692,6 +21840,9 @@ def build_track_manager_command(
         bitrate = answers.get("audio_bitrate_kbps")
         if bitrate:
             cmd.extend(["-b:a", f"{int(bitrate)}k"])
+        _ar = resolve_audio_sample_rate(answers)
+        if _ar:
+            cmd.extend(["-ar", str(_ar)])
         # -filter:a applies the loudnorm chain to every mapped audio stream.
         cmd.extend(["-filter:a", build_loudnorm_filter(answers)])
     else:
@@ -23551,6 +23702,8 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     filters: list[str] = []
     inputs: list[str] = []
     any_audio = any(item.get("audio_streams") for item in items)
+    join_rate = join_target_sample_rate(answers)
+    prep = join_audio_prep_filter(join_rate)
     for idx, item in enumerate(items):
         filters.append(
             f"[{idx}:v:0]fps={target_fps:g},"
@@ -23560,11 +23713,11 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
         )
         inputs.append(f"[v{idx}]")
         if any_audio and item.get("audio_streams"):
-            filters.append(f"[{idx}:a:0]{JOIN_AUDIO_PREP_FILTER}[a{idx}]")
+            filters.append(f"[{idx}:a:0]{prep}[a{idx}]")
             inputs.append(f"[a{idx}]")
         elif any_audio:
             duration = max(0.001, float(item.get("duration") or 0.001))
-            filters.append(f"anullsrc=channel_layout=stereo:sample_rate=48000:d={duration:.6f}[a{idx}]")
+            filters.append(f"anullsrc=channel_layout=stereo:sample_rate={join_rate}:d={duration:.6f}[a{idx}]")
             inputs.append(f"[a{idx}]")
     filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=1:a={1 if any_audio else 0}[v]{'[a]' if any_audio else ''}")
     cmd.extend(["-filter_complex", ";".join(filters), "-map", "[v]"])
@@ -23723,7 +23876,7 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         for audio_pos, audio_index in enumerate(selected_audio):
             filters.append(
                 f"[{input_idx}:a:{audio_index}]"
-                f"{JOIN_AUDIO_PREP_FILTER}[ja{input_idx}_{audio_pos}]"
+                f"{join_audio_prep_filter(join_target_sample_rate(join_answers))}[ja{input_idx}_{audio_pos}]"
             )
             concat_inputs.append(f"[ja{input_idx}_{audio_pos}]")
 
@@ -23835,8 +23988,9 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
         cmd.extend(["-i", str(item["path"])])
     filters: list[str] = []
     inputs: list[str] = []
+    prep = join_audio_prep_filter(join_target_sample_rate(answers))
     for idx, _item in enumerate(items):
-        filters.append(f"[{idx}:a:0]{JOIN_AUDIO_PREP_FILTER}[a{idx}]")
+        filters.append(f"[{idx}:a:0]{prep}[a{idx}]")
         inputs.append(f"[a{idx}]")
     filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=0:a=1[acat]")
     # Apply the same transforms the wizard collected to the JOINED audio:
@@ -23857,7 +24011,7 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
         "-map", "[a]",
         "-vn", "-sn", "-dn",
         "-map_metadata", "-1", "-map_chapters", "-1",
-        "-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2",
+        "-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2", "-ar", str(join_target_sample_rate(answers)),
     ])
     if output_path.suffix.lower() in {".mp4", ".m4a", ".mov"}:
         cmd.extend(["-movflags", "+faststart"])
