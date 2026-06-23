@@ -4389,8 +4389,16 @@ def _apply_output_file_size_progress(
 
     display_size_bytes = total_size_bytes
     size_source = "file"
+    # Single-output mp4 +faststart defers flushing, so between flushes we
+    # extrapolate the size from the recent write rate (or the target bitrate)
+    # to keep it moving. For a Split (multiple output parts) this extrapolation
+    # is HARMFUL: the per-tick progress is byte-derived, so extrapolating at the
+    # target bitrate makes the displayed size/bitrate fake and frozen at the
+    # target. For Split we therefore always show the REAL summed on-disk bytes.
+    multi_output_split = len(output_paths) > 1
     if (
-        state.get("progress") != "end"
+        not multi_output_split
+        and state.get("progress") != "end"
         and last_size > 0
         and current_s > last_size_s + 0.01
         and total_size_bytes <= last_size
