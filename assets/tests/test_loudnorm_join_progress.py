@@ -1489,6 +1489,37 @@ class AudioSampleRateTests(unittest.TestCase):
         FFmWiz.append_audio_encode_options(cmd, {"audio_codec": "aac", "output_ext": "mp4"}, True)
         self.assertNotIn("-ar", cmd)
 
+    def test_sample_rate_warns_when_above_source(self):
+        # A rate above the source rate must trigger the over-source confirmation;
+        # declining re-prompts, a rate <= source is accepted without a warning.
+        import builtins
+
+        def drive(inputs, default_rate):
+            queue = list(inputs)
+
+            def fake_input(prompt=""):
+                print(prompt, end="")
+                return queue.pop(0)
+
+            answers = {}
+            buf = io.StringIO()
+            with mock.patch.object(builtins, "input", fake_input), contextlib.redirect_stdout(buf):
+                FFmWiz.ask_audio_sample_rate(answers, default_rate)
+            return answers.get("audio_sample_rate"), buf.getvalue()
+
+        # Above source, confirmed -> accepted with a warning shown.
+        rate, out = drive(["96000", "y"], 48000)
+        self.assertEqual(rate, 96000)
+        self.assertIn("higher than source", out)
+        # Above source, declined, then a lower rate -> stored lower, warned once.
+        rate2, out2 = drive(["96000", "n", "44100"], 48000)
+        self.assertEqual(rate2, 44100)
+        self.assertEqual(out2.count("higher than source"), 1)
+        # Equal to source -> no warning.
+        rate3, out3 = drive(["48000"], 48000)
+        self.assertEqual(rate3, 48000)
+        self.assertNotIn("higher than source", out3)
+
     def test_join_target_rate_is_uniform_highest(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers_for_rate(tmp)

@@ -15816,6 +15816,19 @@ def ask_audio_sample_rate(answers: dict[str, Any], default_rate: int | None) -> 
         if rate < MIN_AUDIO_SAMPLE_RATE or rate > MAX_AUDIO_SAMPLE_RATE:
             error(f"Enter a sample rate between {MIN_AUDIO_SAMPLE_RATE} and {MAX_AUDIO_SAMPLE_RATE} Hz.")
             continue
+        # Warn (like video/audio bitrate, FPS and resolution) before accepting a
+        # rate above the source: upsampling cannot add real audio detail and only
+        # grows the file. For a join the reference is the highest source rate.
+        if not confirm_numeric_target_not_above_source(
+            answers,
+            "audio sample rate",
+            rate,
+            default_rate,
+            "highest source rate" if answers.get("join_input_items") else "source rate",
+            "Hz",
+            "upsampling cannot add real audio detail and only increases file size.",
+        ):
+            continue
         answers["audio_sample_rate"] = rate
         answers["audio_sample_rate_keep"] = False
         log_info(f"User choice: audio_sample_rate={rate} Hz")
