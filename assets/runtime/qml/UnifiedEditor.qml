@@ -204,6 +204,9 @@ ApplicationWindow {
         property color textColor: win.col("text", "#e6edf3")
         implicitHeight: 34
         padding: 8
+        hoverEnabled: true
+        // Pointing-hand cursor on hover/click so buttons feel clickable.
+        HoverHandler { cursorShape: Qt.PointingHandCursor }
         background: Rectangle {
             radius: 7
             color: pb.down ? Qt.darker(pb.baseColor, 1.25)
@@ -599,15 +602,17 @@ ApplicationWindow {
             // ----- Left control column -----
             Card {
                 id: leftPanel
-                SplitView.preferredWidth: 300
-                SplitView.minimumWidth: 240
+                SplitView.preferredWidth: 340
+                SplitView.minimumWidth: 300
                 ScrollView {
+                    id: leftScroll
                     anchors.fill: parent
                     anchors.margins: 12
                     contentWidth: availableWidth
                     clip: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
-                        width: parent.parent.availableWidth
+                        width: leftScroll.availableWidth
                         spacing: 16
 
                         SectionLabel { text: "CROP (pixels)" }
@@ -715,9 +720,16 @@ ApplicationWindow {
                 SplitView.minimumWidth: 520
                 spacing: 8
 
-                Card {
+                // Vertical splitter: drag the divider to resize the preview vs the
+                // audio/timeline panel (parity with the classic resizable panels).
+                SplitView {
+                    orientation: Qt.Vertical
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+
+                Card {
+                    SplitView.fillHeight: true
+                    SplitView.minimumHeight: 220
                     color: win.col("timeline_bg", "#0a0d12")
                     border.color: win.col("border_strong", "#3a4150")
                     clip: true
@@ -858,8 +870,8 @@ ApplicationWindow {
                 }
 
                 Card {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 78
+                    SplitView.preferredHeight: 140
+                    SplitView.minimumHeight: 72
                     color: win.col("timeline_bg", "#0a0d12")
                     border.color: win.col("border_strong", "#3a4150")
                     Canvas {
@@ -1006,6 +1018,7 @@ ApplicationWindow {
                         }
                     }
                 }
+                }
 
                 // Transport
                 RowLayout {
@@ -1043,7 +1056,7 @@ ApplicationWindow {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 10
                 PadButton { text: "Reset all"; implicitWidth: 110
                     onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; cropOverlayOn = true; muted = false; selMarker = ""; selSplit = -1; selCut = -1; tl.requestPaint(); commit() } }
-                PadButton { text: "Reset Panels"; implicitWidth: 130; onClicked: leftPanel.SplitView.preferredWidth = 300 }
+                PadButton { text: "Reset Panels"; implicitWidth: 130; onClicked: leftPanel.SplitView.preferredWidth = 340 }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
                 PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
