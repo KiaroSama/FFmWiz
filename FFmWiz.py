@@ -508,6 +508,11 @@ audio_codec=aac
 # source bitrate. Ignored for flac / pcm_*.
 audio_bitrate_kbps=n
 
+# Output audio sample rate in Hz (44100, 48000, 96000). Use  n  to keep the
+# source rate. Ignored when audio_codec=copy. You are warned before exceeding
+# the source rate.
+audio_sample_rate=n
+
 
 # ---- Streams / metadata ----------------------------------------------------
 
@@ -526,6 +531,53 @@ keep_embedded_attachments=n
 
 # y lets FFmWiz flag duplicate / empty audio tracks (used by the d/e/de shortcuts).
 detect_duplicate_audio=y
+
+
+# ---- Loudness / speed / advanced encode (all optional) ---------------------
+
+# Single-pass EBU R128 loudness normalization on the output audio.
+# off = no normalization (default).  on = normalize to loudnorm_target_i.
+# Requires audio re-encoding; if audio_codec=copy it is switched to AAC.
+# (Two-pass / measured loudnorm is interactive only; config drives single-pass.)
+loudnorm=off
+
+# Integrated loudness target in LUFS for loudnorm=on (e.g. -16, -14, -23).
+# Streaming platforms commonly target about -14 LUFS.
+loudnorm_target_i=-16
+
+# NVENC multi-pass (quality) when use_gpu=y and the resolved encoder is NVENC:
+#   disabled = single pass (fastest)
+#   qres     = two-pass, quarter-resolution first pass
+#   fullres  = two-pass, full-resolution first pass (best quality, slowest)
+# Ignored on CPU encoders.
+nvenc_multipass=disabled
+
+# CPU two-pass encoding (y/n) for supported CPU encoders (libx264, libx265,
+# libvpx-vp9, libaom-av1, libsvtav1, mpeg4). Improves bitrate accuracy at the
+# cost of a second pass. Ignored on NVENC / unsupported encoders.
+cpu_two_pass=n
+
+# Output color range when the SOURCE range is unknown and video is re-encoded:
+#   source       = keep / auto-detect (default; do nothing special)
+#   tv           = assume TV / Limited range
+#   pc           = assume PC / Full range
+#   unspecified  = do not force a range (encoder default signaling)
+# No pixel-value conversion is performed; this only affects range signaling.
+color_range=source
+
+# Global video speed multiplier (0.10-8.0). 1.0 / n = no change.
+# Example: 2 = 2x faster, 0.5 = half speed. Changing speed forces a re-encode.
+video_speed=n
+
+# Reverse the whole video (y/n). Forces a re-encode.
+reverse_video=n
+
+# Global audio speed: a number (0.10-8.0), match_video (follow video_speed and
+# reverse_video so A/V stay in sync), or n = no change.
+audio_speed=n
+
+# Reverse the audio (y/n). Ignored when audio_speed=match_video.
+reverse_audio=n
 
 
 # ---- App behaviour ---------------------------------------------------------
@@ -12047,6 +12099,20 @@ def parse_int_config(value: str, default: int | None = None, allow_n: bool = Tru
     return int(value)
 
 
+def parse_float_config(value: str, default: float | None = None, allow_n: bool = True) -> float | str | None:
+    """Parse a float config value. Empty -> default; 'n'/'keep' -> 'n' (when
+    allowed) to mean "no change / keep source"; otherwise a float."""
+    if not value:
+        return default
+    lowered = value.lower()
+    if lowered in {"n", "keep"} and allow_n:
+        return "n"
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid number value: {value}") from exc
+
+
 def parse_selection_config(value: str, max_count: int, default: list[int], allow_none: bool = False) -> list[int] | str:
     lowered = value.lower().strip()
     if not lowered:
@@ -17806,6 +17872,116 @@ def apply_config_source_extra_options(answers: dict[str, Any], config: dict[str,
     )
 
 
+def apply_config_extra_recipe_options(answers: dict[str, Any], config: dict[str, Any]) -> None:
+    """Apply optional Mode-2 recipe answers that go beyond the core video/audio
+    blocks: NVENC multipass, CPU two-pass, color range, audio sample rate,
+    single-pass loudnorm, and global video/audio speed + reverse.
+
+    Every key here is optional. Missing or empty keys keep the interactive
+    defaults, so older config.env files (and config.env.example users who only
+    fill the basics) keep working unchanged. This applier runs AFTER the
+    video/audio/subtitle appliers so it can see the resolved codec and the
+    selected audio streams. Downstream applicability checks (NVENC vs CPU,
+    encoder two-pass support, known vs unknown color range) still decide
+    whether a value is actually used, so setting a value is always safe."""
+
+    # --- Color range (only meaningful when video is re-encoded; harmless if
+    # the source range is already known, since resolve_color_range ignores it). ---
+    if output_has_video(answers):
+        color_range = config_value(config, "color_range").strip().lower()
+        if color_range and color_range not in {"n", "source", "auto", "keep", ""}:
+            cr_map = {
+                "tv": "tv", "limited": "tv",
+                "pc": "pc", "full": "pc",
+                "unspecified": "unspecified", "none": "unspecified",
+            }
+            choice = cr_map.get(color_range)
+            if choice is None:
+                raise ValueError(f"Invalid color_range: {color_range} (use source/tv/pc/unspecified)")
+            answers["color_range_choice"] = choice
+
+    # --- NVENC multipass (consumed only when the resolved encoder is NVENC). ---
+    multipass = config_value(config, "nvenc_multipass").strip().lower()
+    if multipass:
+        mp_map = {
+            "disabled": "disabled", "off": "disabled", "n": "disabled", "no": "disabled", "0": "disabled",
+            "qres": "qres", "quarter": "qres", "1": "qres",
+            "fullres": "fullres", "full": "fullres", "2": "fullres",
+        }
+        mode = mp_map.get(multipass)
+        if mode is None:
+            raise ValueError(f"Invalid nvenc_multipass: {multipass} (use disabled/qres/fullres)")
+        answers["nvenc_multipass"] = mode
+
+    # --- CPU two-pass (consumed only when the resolved CPU encoder supports it). ---
+    two_pass_value = config_value(config, "cpu_two_pass")
+    if two_pass_value:
+        answers["cpu_two_pass"] = parse_bool_config(two_pass_value, False)
+
+    has_audio = bool(answers.get("audio_streams")) and bool(selected_audio_streams(answers))
+    audio_codec = str(answers.get("audio_codec") or "")
+
+    # --- Output audio sample rate (Hz). 'n'/keep keeps the source rate. ---
+    if has_audio and audio_codec != "copy":
+        rate_value = parse_int_config(config_value(config, "audio_sample_rate"), None, allow_n=True)
+        if rate_value not in (None, ""):
+            if rate_value == "n":
+                answers["audio_sample_rate"] = source_audio_sample_rate(answers)
+                answers["audio_sample_rate_keep"] = True
+            else:
+                answers["audio_sample_rate"] = int(rate_value)
+                answers["audio_sample_rate_keep"] = False
+
+    # --- Loudnorm (single-pass only). Two-pass needs a live measurement that a
+    # static config cannot supply, so config drives single-pass with a target. ---
+    loudnorm_value = config_value(config, "loudnorm").strip().lower()
+    if loudnorm_value and loudnorm_value not in {"off", "n", "no", "false", "0", ""}:
+        if loudnorm_value not in {"on", "y", "yes", "true", "1", "single", "single_pass", "singlepass"}:
+            raise ValueError(f"Invalid loudnorm: {loudnorm_value} (use off or on)")
+        if has_audio:
+            if audio_codec == "copy":
+                answers["audio_codec"] = DEFAULT_AUDIO_CODEC
+                answers.setdefault("audio_bitrate_kbps", DEFAULT_AUDIO_BITRATE_KBPS)
+                note("LoudNorm requires re-encoding; audio codec switched from copy to AAC.")
+            target = parse_float_config(
+                config_value(config, "loudnorm_target_i"), LOUDNORM_DEFAULT_TARGET_I, allow_n=False
+            )
+            answers["loudnorm_enabled"] = True
+            answers["loudnorm_mode"] = "single"
+            answers["loudnorm_target_i"] = float(target if target not in (None, "n") else LOUDNORM_DEFAULT_TARGET_I)
+            answers.pop("loudnorm_measured", None)
+
+    # --- Global video speed + reverse (a single factor for the whole clip). ---
+    if output_has_video(answers):
+        speed_value = parse_float_config(config_value(config, "video_speed"), None, allow_n=True)
+        reverse_video = parse_bool_config(config_value(config, "reverse_video"), False)
+        factor = DEFAULT_SPEED_FACTOR
+        if speed_value not in (None, "n"):
+            factor = clamp_speed_factor(speed_value)
+        if (speed_value not in (None, "n") and abs(factor - 1.0) > 1e-6) or reverse_video:
+            answers["video_speed_enabled"] = True
+            answers["video_speed_factor"] = factor
+            answers["reverse_video"] = reverse_video
+
+    # --- Global audio speed + reverse. 'match_video' ties audio to the video
+    # speed/reverse so A/V stay in sync; an explicit number is independent. ---
+    if has_audio:
+        audio_speed_raw = config_value(config, "audio_speed").strip().lower()
+        reverse_audio = parse_bool_config(config_value(config, "reverse_audio"), False)
+        if audio_speed_raw in {"match_video", "match", "video"}:
+            answers["audio_speed_from_video"] = True
+        elif audio_speed_raw and audio_speed_raw not in {"n", "keep"}:
+            factor = clamp_speed_factor(parse_float_config(audio_speed_raw, DEFAULT_SPEED_FACTOR, allow_n=False))
+            if abs(factor - 1.0) > 1e-6 or reverse_audio:
+                answers["audio_speed_enabled"] = True
+                answers["audio_speed_factor"] = factor
+                answers["reverse_audio"] = reverse_audio
+        elif reverse_audio:
+            answers["audio_speed_enabled"] = True
+            answers["audio_speed_factor"] = DEFAULT_SPEED_FACTOR
+            answers["reverse_audio"] = True
+
+
 def apply_unified_video_editor_answers(answers: dict[str, Any]) -> None:
     if not answers.get("_unified_video_editor_used"):
         return
@@ -17852,6 +18028,7 @@ def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: boo
     apply_config_audio_options(answers, config)
     apply_config_source_extra_options(answers, config)
     apply_config_subtitle_options(answers, config)
+    apply_config_extra_recipe_options(answers, config)
 
 
 def run_wizard(answers: dict[str, Any]) -> None:

@@ -459,6 +459,11 @@ fps=n
 audio_tracks=de
 audio_codec=aac
 audio_bitrate_kbps=160
+audio_sample_rate=n
+loudnorm=off
+nvenc_multipass=disabled
+cpu_two_pass=n
+video_speed=n
 keep_source_metadata=y
 subtitle_tracks=none
 gui_engine=classic
@@ -469,6 +474,7 @@ Editing tips:
 - Missing keys and empty values fall back to interactive defaults.
 - Use `n` where supported to mean "keep source / no change". Mode 2 always asks `crop` interactively and ignores it in the file.
 - Booleans accept `y/yes/true/1/on` or `n/no/false/0/off`.
+- Beyond the basics, the file also drives audio sample rate, single‑pass loudnorm, NVENC multipass, CPU two‑pass, color range, and global video/audio speed + reverse.
 - Every key is documented inline in `config.env.example` and explained in full in **[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)** (including ready-made recipes).
 
 ## FFmpeg Capability Reference
