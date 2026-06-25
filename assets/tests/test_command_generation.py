@@ -2429,6 +2429,36 @@ class CommandGenerationTests(unittest.TestCase):
         for enc in ("libx264", "libaom-av1", "av1_qsv", "", "copy", None):
             self.assertFalse(FFmWiz.is_nvenc_multipass_encoder(enc), enc)
 
+    def test_encoder_supports_multipass_detected_from_probe(self):
+        # Any encoder whose `ffmpeg -h encoder=...` output advertises -multipass
+        # is supported — detected dynamically, not from a hardcoded list.
+        import subprocess as _sp
+        FFmWiz._MULTIPASS_ENCODER_CACHE.clear()
+
+        def fake_run(args, **kw):
+            class R:
+                pass
+            r = R()
+            has = "fake_mp_enc" in " ".join(str(a) for a in args)
+            r.stdout = (b"Encoder fake_mp_enc\n  -multipass  <int>  E..V..  set multipass\n"
+                        if has else b"Encoder other\n  -preset  <int>  E..V..\n")
+            return r
+
+        with mock.patch.object(_sp, "run", side_effect=fake_run):
+            self.assertTrue(FFmWiz.encoder_supports_multipass("fake_mp_enc"))
+            self.assertFalse(FFmWiz.encoder_supports_multipass("fake_no_mp"))
+        FFmWiz._MULTIPASS_ENCODER_CACHE.clear()
+
+    def test_encoder_supports_multipass_fallback_without_ffmpeg(self):
+        # When ffmpeg cannot be probed, fall back to the known NVENC set.
+        import subprocess as _sp
+        FFmWiz._MULTIPASS_ENCODER_CACHE.clear()
+        with mock.patch.object(_sp, "run", side_effect=FileNotFoundError("no ffmpeg")):
+            self.assertTrue(FFmWiz.encoder_supports_multipass("h264_nvenc"))
+            self.assertTrue(FFmWiz.encoder_supports_multipass("av1_nvenc"))
+            self.assertFalse(FFmWiz.encoder_supports_multipass("libx264"))
+        FFmWiz._MULTIPASS_ENCODER_CACHE.clear()
+
     def test_run_wizard_question_numbers_continue_after_join_subquestions(self):
         class StopRun(Exception):
             pass

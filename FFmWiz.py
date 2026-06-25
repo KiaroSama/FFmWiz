@@ -1271,10 +1271,46 @@ def append_video_encode_options(
         cmd.extend(["-tag:v", tag])
 
 
+_MULTIPASS_ENCODER_CACHE: dict[str, bool] = {}
+# Used only when ffmpeg cannot be probed (e.g. CI without ffmpeg): the encoders
+# known to expose -multipass on current FFmpeg/NVENC builds.
+_MULTIPASS_FALLBACK_ENCODERS = {"h264_nvenc", "hevc_nvenc", "av1_nvenc"}
+_MULTIPASS_OPTION_RE = re.compile(r"(?m)^\s*-multipass\b")
+
+
+def encoder_supports_multipass(video_encoder: Any, ffmpeg: str | None = None) -> bool:
+    """True if the FFmpeg encoder exposes the -multipass option.
+
+    Detected DYNAMICALLY by probing `ffmpeg -h encoder=<name>` (cached per
+    encoder), so ANY current or future encoder that supports multipass gets the
+    prompt — not a hardcoded list. Falls back to the known NVENC set only when
+    ffmpeg cannot be probed."""
+    encoder = str(video_encoder or "").strip().lower()
+    if not encoder or encoder in {"copy", "n"}:
+        return False
+    if encoder in _MULTIPASS_ENCODER_CACHE:
+        return _MULTIPASS_ENCODER_CACHE[encoder]
+    exe = ffmpeg or shutil.which("ffmpeg") or "ffmpeg"
+    try:
+        result = subprocess.run(
+            [exe, "-hide_banner", "-h", f"encoder={encoder}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        )
+        text, _ = decode_subprocess_bytes(result.stdout, "utf-8")
+        supported = bool(_MULTIPASS_OPTION_RE.search(text))
+    except Exception:
+        log_exception(f"Could not probe -multipass support for encoder {encoder}")
+        supported = encoder in _MULTIPASS_FALLBACK_ENCODERS
+    _MULTIPASS_ENCODER_CACHE[encoder] = supported
+    log_info(f"Encoder -multipass capability: {encoder}={supported}")
+    return supported
+
+
 def is_nvenc_multipass_encoder(video_encoder: Any) -> bool:
-    # av1_nvenc also exposes -multipass (disabled/qres/fullres) on AV1-capable
-    # NVENC (Ada+), so it gets the same prompt as h264_nvenc / hevc_nvenc.
-    return str(video_encoder or "").strip().lower() in {"hevc_nvenc", "h264_nvenc", "av1_nvenc"}
+    # Kept for call-site/back-compat; now driven by a dynamic capability probe so
+    # every encoder that actually supports -multipass gets the prompt (not just a
+    # fixed h264/hevc/av1 NVENC list).
+    return encoder_supports_multipass(video_encoder)
 
 
 def normalize_nvenc_multipass_mode(value: Any) -> str:
