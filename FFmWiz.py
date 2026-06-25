@@ -303,7 +303,8 @@ COMMON_AUDIO_CODECS = ["aac", "libopus", "opus", "libmp3lame", "flac", "pcm_s16l
 COMMON_AUDIO_SAMPLE_RATES = [44100, 48000, 96000]
 MIN_AUDIO_SAMPLE_RATE = 8000
 MAX_AUDIO_SAMPLE_RATE = 192000
-CONFIG_FILE_NAME = "config.json"
+CONFIG_FILE_NAME = "config.env"
+CONFIG_EXAMPLE_FILE_NAME = "config.env.example"
 LAUNCHER_FILE_NAME = "run.ps1"
 ASSET_DIR_NAME = "assets"
 ICON_DIR_NAME = "icons"
@@ -410,128 +411,136 @@ HARDSUB_BITMAP_SUBTITLE_ERROR = (
 
 FFMPEG_REFERENCE_FILE_NAME = "ffmwiz-ffmpeg-reference.txt"
 
-CONFIG_TEMPLATE = """{
-    "_name": "FFmWiz config",
-    "_version": "2",
-    "_documentation": {
-        "overview": "FFmWiz is a Windows-focused interactive FFmpeg command builder. This file feeds Mode 2 (load config and ask crop only) and is also a reference document for every setting the wizard understands.",
-        "how_to_edit": "Edit values inside the 'settings' object. JSON does not support /* comments */, so explanations live in the '_help' object below each section. Keys starting with an underscore are documentation only and are ignored by the parser.",
-        "parser_rules": "Empty strings and missing keys fall back to interactive defaults. Use the string 'n' where supported to mean 'keep source / no change'. Booleans accept y/yes/true/1/on or n/no/false/0/off.",
-        "json_syntax": "Use only double quotes for strings. No trailing commas. Backslashes in Windows paths must be escaped: C:\\\\\\\\Users\\\\\\\\Me\\\\\\\\Videos\\\\\\\\input.mkv -> in JSON that becomes \\"C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\Me\\\\\\\\\\\\\\\\Videos\\\\\\\\\\\\\\\\input.mkv\\".",
-        "windows_paths": "Forward slashes also work on Windows for FFmpeg input/output paths and are easier inside JSON. Quoted paths with spaces and Unicode characters are supported in any case.",
-        "unicode": "FFmWiz uses UTF-8 throughout. Save this file as UTF-8 (no BOM is required) if you put Unicode characters in paths or titles.",
-        "ffmpeg_capabilities": "Available formats, codecs, encoders, filters, etc. are build-specific. Generate a snapshot of what your installed ffmpeg.exe supports into the companion file 'ffmwiz-ffmpeg-reference.txt'. FFmWiz creates it next to this config on first run and refreshes it any time you delete it.",
-        "modes": "Mode 1 = full interactive wizard (every question asked; can use the Premiere-style Unified Video Editor for crop, cuts, Split points, waveform preview, and speed/reverse in one workspace). Mode 2 = read this file, then only ask the crop question. Mode 3 = stream-copy cut tool (does not read this file). Mode 4 = folder encode. Mode 5 = add audio/subtitle files to a video without re-encoding and optionally set language/title metadata for added streams. Mode 6 = extract one video/audio/subtitle stream by ffprobe stream index. Mode 7 = write detailed ffprobe media info reports for a file or folder. Mode 8 = stream-cleanup remux for keeping selected audio/subtitle streams without re-encoding, optionally editing kept stream metadata, copying unchanged videos directly, and copying non-video files in folder mode. Mode 9 = hard-sub encode for burning an internal or external subtitle into the video. Mode 10 = video speed/reverse editor. Mode 11 = audio cut/speed/reverse editor. Mode 12 = join videos with stream copy when possible or re-encode when needed. Mode 13 = metadata editor for stream tags, dispositions, chapters, cover art, bitstream metadata, and metadata reports.",
-        "safety": "FFmWiz never modifies the input file. The final FFmpeg command is shown before it runs and you can cancel."
-    },
-    "_capability_reference": {
-        "_doc": "FFmpeg-supported formats, codecs, encoders, decoders, muxers, demuxers, filters, protocols, pixel formats, sample formats, and hardware accelerators all depend on the build of ffmpeg.exe installed on this machine. Do NOT assume the lists below are exhaustive.",
-        "file_next_to_config": "ffmwiz-ffmpeg-reference.txt",
-        "regenerate": "Delete the file or run FFmWiz; the script regenerates it from your installed FFmpeg. To inspect manually, run: ffmpeg -formats / -muxers / -demuxers / -codecs / -encoders / -decoders / -filters / -protocols / -hwaccels / -pix_fmts / -sample_fmts.",
-        "container_compatibility_notes": [
-            "MP4/MOV/M4V/ISMV: H.264/H.265/AV1/MPEG-4 video; AAC/AC3/EAC3/Opus(*caveat*)/ALAC audio; mov_text text subtitles only.",
-            "MKV: Almost any video/audio/subtitle codec including SRT, ASS, PGS, VobSub.",
-            "WebM: VP8/VP9/AV1 video; Opus/Vorbis audio; WebVTT subtitles.",
-            "MP3 / M4A / WAV / FLAC / OGG / OPUS: audio-only containers. Video streams are dropped automatically by FFmWiz."
-        ]
-    },
-    "_help": {
-        "input_path": "Absolute path to the source file. Required in Mode 2. Examples: \\"C:\\\\\\\\Videos\\\\\\\\input.mkv\\", \\"D:/clips/cam01.mov\\", \\"\\\\\\\\\\\\\\\\NAS\\\\\\\\share\\\\\\\\episode.ts\\".",
-        "output_path": "Either a folder (\\"E:\\\\output\\"), a full file path (\\"E:\\\\out\\\\final.mp4\\"), or a bare base name (\\"lesson6\\" -> dropped into the input folder using the chosen output_format extension). Empty uses the input folder. If the resolved output would overwrite the input, encode/re-encode adds _Encode and cut-only mode adds _cut; existing generated names receive a numeric suffix like (2).",
-        "output_format": "Final container extension without leading dot. Examples: mp4, mkv, mov, webm, mp3, m4a, opus. Use the string 'n' to inherit the input extension. Container choice affects which codecs are allowed - see _capability_reference.container_compatibility_notes.",
-        "video_codec": "H265 | H264 | AV1 | VP9 | MPEG4 | copy | <any encoder name from ffmpeg -encoders>. FFmWiz maps aliases to a CPU encoder and (when GPU is enabled) an NVENC encoder. Use 'copy' to stream-copy the video without re-encoding. 'copy' is incompatible with crop/fps/scale/setparams/cuts and will be auto-promoted to H265 if any filter is required.",
-        "use_gpu": "y/n. y enables NVIDIA NVENC and CUDA decode/filter pipeline when the resolved encoder supports it. Falls back to CPU encoding silently when the encoder is not NVENC. Requires an FFmpeg build compiled with CUDA/NVENC support and a compatible NVIDIA GPU + driver.",
-        "crop": "n (off), y (use crop_top/crop_left/crop_right/crop_bottom below), or an inline top,left,right,bottom string like '100,300,200,550'. Crop margins are pixels removed from each side, NOT x/y offsets. Mode 2 ignores this and asks crop interactively.",
-        "crop_top": "Pixels removed from the top. Integer >= 0. Used only when 'crop' = y.",
-        "crop_left": "Pixels removed from the left. Integer >= 0.",
-        "crop_right": "Pixels removed from the right. Integer >= 0.",
-        "crop_bottom": "Pixels removed from the bottom. Integer >= 0.",
-        "video_bitrate_kbps": "Target average video bitrate in kbps. Examples: 400, 800, 1500, 3500, 8000. Use 'n' to keep the detected source bitrate. Interactive prompts warn before accepting a target above the detected source bitrate.",
-        "video_bitrate_mode": "quality_vbr or strict_size. quality_vbr uses -b:v Xk -maxrate:v 2Xk -bufsize:v 4Xk. strict_size uses -b:v Xk -maxrate:v Xk -bufsize:v 2Xk.",
-        "resolution": "Output scale target. Presets/plain numbers like 480p or 480 preserve aspect ratio using closest-edge scaling against the standard preset box. Use w720/720w for explicit width, h480/480h for explicit height, WIDTHxHEIGHT for a preserve-aspect target box, and stretch:WIDTHxHEIGHT only when intentional distortion is wanted. Use 'n' to keep source/cropped size. SAR is forced to 1 by default.",
-        "fps": "Output frames-per-second as an integer. Use 'n' to keep the source rate. Examples: 24, 25, 30, 50, 60. Interactive prompts warn before accepting an FPS above the detected source FPS. Float rates (e.g. 23.976) are not exposed here; if you need fractional rates, prefer the interactive wizard or edit the FFmpeg command before running.",
-        "audio_tracks": "Selection for which audio streams to keep. Accepts: '0' or '0,1,2' (stream indices among audio streams), 'all', 'd' (drop confirmed duplicates), 'e' (drop empty / near-empty), 'de' (both). Empty defaults to 'de'.",
-        "audio_codec": "aac | libopus | opus | libmp3lame | flac | pcm_s16le | copy | <any encoder name from ffmpeg -encoders>. The opus alias is normalized to libopus to avoid FFmpeg's experimental native opus encoder. Container compatibility is enforced: WebM forces libopus; pcm_*/flac ignore bitrate; 'copy' skips re-encoding.",
-        "audio_bitrate_kbps": "Target audio bitrate per stream in kbps. Used only for bitrate-based codecs (aac/libopus/libmp3lame/etc.). Use 'n' to keep the source bitrate. Interactive prompts warn before accepting a target above the detected selected source audio bitrate. Common values: 64, 96, 128, 160, 192, 256, 320.",
-        "keep_source_metadata": "y/n. y keeps source container/stream metadata, chapters, extra source video/data streams, and allows subtitle stream selection. n removes metadata, chapters, extra source video streams, source subtitle/data streams, and embedded font/attachment streams from encode outputs.",
-        "subtitle_tracks": "Selection for which subtitle streams to keep when keep_source_metadata is y. Same syntax as audio_tracks plus 'none' / 'clear' / 'delete' to drop all subtitles. MP4/MOV outputs convert text subtitles to mov_text and drop non-text (PGS, VobSub).",
-        "keep_embedded_attachments": "y/n. y copies MKV attachment streams such as embedded subtitle fonts when keep_source_metadata is y and the output container supports attachments. Non-MKV outputs cannot keep attachment streams reliably here.",
-        "detect_duplicate_audio": "y/n. When y, FFmWiz uses stream metadata plus exact packet sizes when needed to flag empty/near-empty tracks. Likely duplicate tracks are prechecked with short sampled hashes, then confirmed with a full audio hash. Used by the 'd' / 'e' / 'de' shortcuts.",
-        "logging_enabled": "y/n. Logging is enabled by default and writes dated UTF-8 logs into the Logs folder next to FFmWiz.py. Set to n only when you intentionally want no log file for future runs.",
-        "log_retention_days": "Optional integer. 0 keeps logs forever. Any positive value deletes FFmWiz log files older than that many days when logging starts.",
-        "gui_engine": "classic or qml. 'classic' (default) uses the stable PySide6-widgets unified video editor. 'qml' uses the new modern QtQuick editor (faster to appear, no white flash, aspect-correct preview). Env FFMWIZ_GUI_ENGINE overrides this."
-    },
-    "settings": {
-        "input_path": "",
-        "output_path": "",
-        "output_format": "n",
-        "video_codec": "H265",
-        "use_gpu": "y",
-        "crop": "n",
-        "crop_top": 0,
-        "crop_left": 0,
-        "crop_right": 0,
-        "crop_bottom": 0,
-        "video_bitrate_kbps": "n",
-        "video_bitrate_mode": "quality_vbr",
-        "resolution": "n",
-        "fps": "n",
-        "audio_tracks": "de",
-        "audio_codec": "aac",
-        "audio_bitrate_kbps": "n",
-        "keep_source_metadata": "y",
-        "subtitle_tracks": "none",
-        "keep_embedded_attachments": "n",
-        "detect_duplicate_audio": "y",
-        "logging_enabled": "y",
-        "log_retention_days": 0,
-        "gui_engine": "classic"
-    },
-    "_examples": {
-        "fast_stream_copy_same_container": {
-            "_doc": "Stream-copy the source video/audio without re-encoding while keeping the original container. Pure copy/remux workflows should not change the output extension.",
-            "settings": {"output_format": "n", "video_codec": "copy", "use_gpu": "n", "crop": "n", "audio_codec": "copy", "subtitle_tracks": "none"}
-        },
-        "h264_mp4_1080p_cpu": {
-            "_doc": "Classic 1080p H.264 MP4, CPU encode, AAC stereo audio at 160 kbps.",
-            "settings": {"output_format": "mp4", "video_codec": "H264", "use_gpu": "n", "resolution": "1080p", "fps": "n", "video_bitrate_kbps": 6000, "audio_codec": "aac", "audio_bitrate_kbps": 160, "subtitle_tracks": "none"}
-        },
-        "h265_mp4_nvenc": {
-            "_doc": "HEVC NVENC for fast GPU-accelerated 1080p encodes; tag:v hvc1 is added automatically for Apple compatibility.",
-            "settings": {"output_format": "mp4", "video_codec": "H265", "use_gpu": "y", "resolution": "1080p", "video_bitrate_kbps": 4500, "audio_codec": "aac", "audio_bitrate_kbps": 160}
-        },
-        "av1_webm": {
-            "_doc": "AV1 in WebM with Opus audio. AV1 NVENC is preferred when use_gpu=y and the build supports av1_nvenc.",
-            "settings": {"output_format": "webm", "video_codec": "AV1", "use_gpu": "y", "video_bitrate_kbps": 2500, "audio_codec": "libopus", "audio_bitrate_kbps": 96}
-        },
-        "audio_only_aac_m4a": {
-            "_doc": "Extract first audio track as AAC in an M4A container.",
-            "settings": {"output_format": "m4a", "audio_tracks": "0", "audio_codec": "aac", "audio_bitrate_kbps": 192, "subtitle_tracks": "none"}
-        },
-        "audio_only_flac": {
-            "_doc": "Lossless FLAC audio. audio_bitrate_kbps is ignored for FLAC.",
-            "settings": {"output_format": "flac", "audio_tracks": "all", "audio_codec": "flac", "subtitle_tracks": "none"}
-        },
-        "drop_duplicate_and_empty_audio": {
-            "_doc": "Keep all audio but drop confirmed duplicates and empty/near-empty tracks before encoding.",
-            "settings": {"audio_tracks": "de", "detect_duplicate_audio": "y"}
-        },
-        "crop_and_scale_720p": {
-            "_doc": "Crop a letterboxed source and scale down to 720p with H.265 NVENC.",
-            "settings": {"video_codec": "H265", "use_gpu": "y", "crop": "y", "crop_top": 132, "crop_left": 0, "crop_right": 0, "crop_bottom": 132, "resolution": "720p", "video_bitrate_kbps": 3000, "audio_codec": "aac", "audio_bitrate_kbps": 128}
-        }
-    },
-    "_glossary": {
-        "stream_copy_vs_reencode": "Stream copy (-c copy) skips decoding/encoding entirely. It is keyframe-bound for video, so cut points snap to nearby keyframes. Re-encoding is slower and lossy per pass but is frame-accurate and lets filters run.",
-        "crf_vs_bitrate": "CRF (Constant Rate Factor) targets a perceptual quality level (libx264/libx265 default ~ 23; smaller = higher quality). Bitrate mode (-b:v + -maxrate + -bufsize) targets a file size. FFmWiz currently uses bitrate mode with NVENC's VBR rc.",
-        "preset_tune_profile": "preset = encoder speed/quality tradeoff (NVENC: p1..p7; libx264/libx265: ultrafast..veryslow). tune = content hint (NVENC: hq/ll/ull/lossless). profile = stream profile (HEVC: main / main10 / rext).",
-        "gop": "GOP = Group of Pictures; the keyframe interval. Larger GOP = better compression but slower seeking. Default GOP is set by the encoder.",
-        "movflags_faststart": "Moves the MP4 moov atom to the start of the file so streaming/progressive playback can begin without downloading the whole file. FFmWiz applies +faststart to MP4/MOV outputs by default.",
-        "tag_hvc1_vs_hev1": "Apple devices and some browsers require the hvc1 tag instead of hev1 for HEVC in MP4. FFmWiz applies -tag:v hvc1 automatically for HEVC -> MP4-like outputs.",
-        "color_range_tv_vs_pc": "tv = limited range 16..235 (YUV broadcast). pc = full range 0..255. FFmWiz defaults to tv for compatibility.",
-        "yuv420p_vs_nv12": "yuv420p is the most compatible CPU pixel format. NV12 is the typical NVENC input. FFmWiz handles conversion automatically based on the pipeline."
-    }
-}
+CONFIG_TEMPLATE = """# ============================================================================
+# FFmWiz configuration  (config.env)
+# ============================================================================
+# This file stores the DEFAULT ANSWERS that Mode 2 ("Load config and ask crop
+# only") loads, so you can batch-encode with a fixed recipe and only confirm
+# the crop. Mode 1 (full interactive wizard) ignores this file.
+#
+# FORMAT
+#   - One setting per line:  key=value
+#   - Lines starting with #  are comments and are ignored.
+#   - Blank lines are ignored.
+#   - Do NOT quote values (quotes are stripped if present). Paths may contain
+#     spaces and Unicode directly:  input_path=I:/My Videos/clip 01.mkv
+#   - Forward slashes work on Windows and are easiest here. Backslashes also
+#     work and do NOT need escaping in this .env file.
+#
+# PARSER RULES
+#   - Missing keys / empty values fall back to interactive defaults.
+#   - Use the string  n  where supported to mean "keep source / no change".
+#   - Booleans accept: y/yes/true/1/on  or  n/no/false/0/off.
+#
+# FULL DOCUMENTATION
+#   Every mode, command, prompt, and option is explained in docs/DOCUMENTATION.md
+#   (in this repository / next to the README on GitHub). Read it for the complete
+#   reference; the comments below are only short reminders.
+#
+# This is the SAMPLE file (config.env.example). Copy it to "config.env" and edit
+# your personal values there. config.env is git-ignored and never published.
+# ============================================================================
+
+
+# ---- Input / output --------------------------------------------------------
+
+# Absolute path to the source file. REQUIRED for Mode 2.
+# Examples: I:/Videos/input.mkv   |   C:/clips/cam01.mov
+input_path=
+
+# Output destination: a folder, a full file path, or a bare base name (dropped
+# into the input folder using the chosen output_format). Empty = input folder.
+# FFmWiz never overwrites the input; it adds a suffix when names would collide.
+output_path=
+
+# Final container extension WITHOUT the leading dot: mp4, mkv, mov, webm, mp3,
+# m4a, opus, flac, ...  Use  n  to inherit the input's extension.
+output_format=n
+
+
+# ---- Video -----------------------------------------------------------------
+
+# H265 | H264 | AV1 | VP9 | MPEG4 | copy | <any ffmpeg -encoders name>
+# 'copy' stream-copies the video (no re-encode); it is auto-promoted to H265 if
+# a filter such as crop/scale/fps/cut is required.
+video_codec=H265
+
+# y = use NVIDIA NVENC + CUDA when the resolved encoder supports it; otherwise
+# CPU encoding is used. n = always CPU.
+use_gpu=y
+
+# n (off) | y (use the crop_* margins below) | inline "top,left,right,bottom".
+# Margins are PIXELS REMOVED from each side, not x/y offsets.
+# NOTE: Mode 2 always asks the crop question interactively and ignores this.
+crop=n
+crop_top=0
+crop_left=0
+crop_right=0
+crop_bottom=0
+
+# Target average video bitrate in kbps (e.g. 400, 1500, 4500). Use  n  to keep
+# the detected source bitrate. You are warned before exceeding the source.
+video_bitrate_kbps=n
+
+# quality_vbr  -> -b:v X -maxrate 2X -bufsize 4X (better quality)
+# strict_size  -> -b:v X -maxrate X  -bufsize 2X (tighter size)
+video_bitrate_mode=quality_vbr
+
+# Output scale. Presets like 480p/720p/1080p (closest-edge, aspect-preserving),
+# w1280 / 720h for one explicit edge, WIDTHxHEIGHT for a fit box, or
+# stretch:WIDTHxHEIGHT to force distortion. Use  n  to keep the source size.
+resolution=n
+
+# Output frame rate as an integer (24, 30, 60). Use  n  to keep the source rate.
+fps=n
+
+
+# ---- Audio -----------------------------------------------------------------
+
+# Which audio streams to keep: 0 | 0,1,2 | all | d (drop duplicates) |
+# e (drop empty/near-empty) | de (both). Empty defaults to de.
+audio_tracks=de
+
+# aac | libopus | opus | libmp3lame | flac | pcm_s16le | copy | <encoder name>
+audio_codec=aac
+
+# Audio bitrate per stream in kbps (64, 128, 192, 256, 320). Use  n  to keep the
+# source bitrate. Ignored for flac / pcm_*.
+audio_bitrate_kbps=n
+
+
+# ---- Streams / metadata ----------------------------------------------------
+
+# y keeps source metadata, chapters, extra video/data streams and allows
+# subtitle selection. n strips metadata/chapters/extra streams from encodes.
+keep_source_metadata=y
+
+# Which subtitles to keep when keep_source_metadata=y. Same syntax as
+# audio_tracks, plus none/clear/delete to drop all. MP4/MOV convert text subs
+# to mov_text and drop image subs (PGS/VobSub).
+subtitle_tracks=none
+
+# y copies MKV attachment streams (e.g. embedded subtitle fonts) when the output
+# container supports them. Non-MKV outputs cannot keep attachments reliably.
+keep_embedded_attachments=n
+
+# y lets FFmWiz flag duplicate / empty audio tracks (used by the d/e/de shortcuts).
+detect_duplicate_audio=y
+
+
+# ---- App behaviour ---------------------------------------------------------
+
+# y writes dated UTF-8 logs into the logs/ folder next to FFmWiz.py.
+logging_enabled=y
+
+# 0 keeps logs forever. A positive integer deletes FFmWiz logs older than that
+# many days when logging starts.
+log_retention_days=0
+
+# classic = stable PySide6-widgets unified video editor (default).
+# qml      = modern QtQuick editor (GPU-rendered, aspect-correct preview).
+# Env var FFMWIZ_GUI_ENGINE overrides this value.
+gui_engine=classic
 """
 
 
@@ -3594,7 +3603,7 @@ def _config_setting_for_logging(key: str, fallback: Any) -> Any:
         path = script_dir() / CONFIG_FILE_NAME
         if not path.exists():
             return fallback
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = parse_env_config(path.read_text(encoding="utf-8-sig"))
         settings = data.get("settings", {}) if isinstance(data, dict) else {}
         if isinstance(settings, dict) and key in settings:
             return settings.get(key)
@@ -11974,10 +11983,34 @@ def ensure_ffmpeg_reference_file(path: Path, ffmpeg_path: str, force: bool = Fal
         note(f"Could not write FFmpeg reference next to the script: {exc}")
 
 
+def parse_env_config(text: str) -> dict[str, Any]:
+    """Parse a config.env (dotenv-style) file into the same {"settings": {...}}
+    shape the rest of FFmWiz expects, so all config_value() consumers are
+    unchanged. Lines are key=value; '#' lines and blanks are ignored; an
+    optional leading 'export ' is accepted; surrounding quotes are stripped."""
+    settings: dict[str, Any] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line[:7].lower() == "export ":
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            settings[key] = value
+    return {"settings": settings}
+
+
 def config_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings = config.get("settings", {})
     if not isinstance(settings, dict):
-        raise ValueError("config.json must contain a settings object.")
+        raise ValueError("config file must contain settings (key=value lines).")
     return settings
 
 
@@ -17792,11 +17825,9 @@ def apply_unified_video_editor_answers(answers: dict[str, Any]) -> None:
 def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: bool = False) -> None:
     ensure_config_file(path)
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON config file: {path}. {exc}") from exc
-    if not isinstance(config, dict) or not isinstance(config.get("settings"), dict):
-        raise ValueError(f"Invalid config file: {path}. Expected a JSON object with a settings object.")
+        config = parse_env_config(path.read_text(encoding="utf-8-sig"))
+    except OSError as exc:
+        raise ValueError(f"Could not read config file: {path}. {exc}") from exc
 
     input_value = config_value(config, "input_path")
     if not input_value:
