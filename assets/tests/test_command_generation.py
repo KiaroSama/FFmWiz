@@ -2421,6 +2421,14 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertFalse(FFmWiz.nvenc_multipass_prompt_applicable(answers))
         self.assertEqual(answers.get("nvenc_multipass_skip_reason"), "CPU encoder selected")
 
+    def test_is_nvenc_multipass_encoder_includes_av1(self):
+        # av1_nvenc exposes -multipass too, so the prompt must apply to it just
+        # like h264_nvenc / hevc_nvenc (it was previously omitted).
+        for enc in ("h264_nvenc", "hevc_nvenc", "av1_nvenc", "AV1_NVENC"):
+            self.assertTrue(FFmWiz.is_nvenc_multipass_encoder(enc), enc)
+        for enc in ("libx264", "libaom-av1", "av1_qsv", "", "copy", None):
+            self.assertFalse(FFmWiz.is_nvenc_multipass_encoder(enc), enc)
+
     def test_run_wizard_question_numbers_continue_after_join_subquestions(self):
         class StopRun(Exception):
             pass
