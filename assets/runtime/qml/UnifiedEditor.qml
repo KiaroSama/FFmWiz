@@ -478,6 +478,13 @@ ApplicationWindow {
         function p(n, w) { var x = String(n); while (x.length < w) x = "0" + x; return x }
         return p(h, 2) + ":" + p(m, 2) + ":" + p(s, 2) + "." + p(ms, 3)
     }
+    // Compact HH:MM:SS (no milliseconds) for the timeline ruler tick labels.
+    function fmtShort(t) {
+        t = Math.max(0, t)
+        var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60)
+        function p(n) { var x = String(n); return x.length < 2 ? ("0" + x) : x }
+        return (h > 0 ? (p(h) + ":") : "") + p(m) + ":" + p(s)
+    }
 
     // ---- Cut/keep range maths ----
     function normRanges(arr) {
@@ -864,6 +871,68 @@ ApplicationWindow {
                                     onReleased: commit()
                                 }
                             }
+                            // Corner handles — drag BOTH axes at once (parity with
+                            // the classic editor's corner dots).
+                            Rectangle {   // top-left
+                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
+                                width: 14; height: 14; x: cropOverlay.rx - 7; y: cropOverlay.ry - 7
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeFDiagCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                        var vy = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                        cropLeft = Math.max(0, Math.min(sourceW - cropRight - 10, vx))
+                                        cropTop = Math.max(0, Math.min(sourceH - cropBottom - 10, vy))
+                                    }
+                                    onReleased: commit()
+                                }
+                            }
+                            Rectangle {   // top-right
+                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
+                                width: 14; height: 14; x: cropOverlay.rx + cropOverlay.rw - 7; y: cropOverlay.ry - 7
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeBDiagCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                        var vy = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                        cropRight = Math.max(0, Math.min(sourceW - cropLeft - 10, sourceW - vx))
+                                        cropTop = Math.max(0, Math.min(sourceH - cropBottom - 10, vy))
+                                    }
+                                    onReleased: commit()
+                                }
+                            }
+                            Rectangle {   // bottom-left
+                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
+                                width: 14; height: 14; x: cropOverlay.rx - 7; y: cropOverlay.ry + cropOverlay.rh - 7
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeBDiagCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                        var vy = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                        cropLeft = Math.max(0, Math.min(sourceW - cropRight - 10, vx))
+                                        cropBottom = Math.max(0, Math.min(sourceH - cropTop - 10, sourceH - vy))
+                                    }
+                                    onReleased: commit()
+                                }
+                            }
+                            Rectangle {   // bottom-right
+                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
+                                width: 14; height: 14; x: cropOverlay.rx + cropOverlay.rw - 7; y: cropOverlay.ry + cropOverlay.rh - 7
+                                MouseArea {
+                                    anchors.fill: parent; cursorShape: Qt.SizeFDiagCursor
+                                    onPositionChanged: (mouse) => {
+                                        var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                        var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                        var vy = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                        cropRight = Math.max(0, Math.min(sourceW - cropLeft - 10, sourceW - vx))
+                                        cropBottom = Math.max(0, Math.min(sourceH - cropTop - 10, sourceH - vy))
+                                    }
+                                    onReleased: commit()
+                                }
+                            }
                         }
                         }
                         // Pan/zoom interaction layer. Hand drags to pan; Zoom click
@@ -913,6 +982,24 @@ ApplicationWindow {
                             var midY = height * 0.52
                             ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
                             ctx.beginPath(); ctx.moveTo(pad, midY); ctx.lineTo(width - pad, midY); ctx.stroke()
+                            // Time ruler: gridlines + absolute timecode labels for the
+                            // visible window, at a "nice" step so labels never overlap
+                            // (parity with the classic editor's ruler).
+                            var span = win.viewSpan()
+                            var niceSteps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200]
+                            var targetTicks = Math.max(2, Math.floor((width - 2 * pad) / 90))
+                            var rawStep = span / targetTicks
+                            var rstep = niceSteps[niceSteps.length - 1]
+                            for (var ni = 0; ni < niceSteps.length; ++ni) { if (niceSteps[ni] >= rawStep) { rstep = niceSteps[ni]; break } }
+                            ctx.font = "9px 'Consolas'"; ctx.textAlign = "left"
+                            var t0r = Math.ceil(win.viewStart / rstep) * rstep
+                            for (var tr = t0r; tr <= win.viewStart + span + 1e-6; tr += rstep) {
+                                var trx = t2x(tr)
+                                if (trx < pad - 1 || trx > width - pad + 1) continue
+                                ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
+                                ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(trx, 12); ctx.lineTo(trx, height - 4); ctx.stroke(); ctx.globalAlpha = 1.0
+                                ctx.fillStyle = win.col("tick_lo", "#7d8590"); ctx.fillText(win.fmtShort(tr), trx + 2, 9)
+                            }
                             var xi = t2x(markIn), xo = t2x(markOut)
                             ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1f3a66")
                             ctx.fillRect(xi, 6, Math.max(0, xo - xi), height - 12); ctx.globalAlpha = 1.0
@@ -1108,6 +1195,15 @@ ApplicationWindow {
                     PadButton { Layout.preferredWidth: 74; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
                     Slider { Layout.preferredWidth: 88; from: 0; to: 1; value: win.volume; onMoved: { win.volume = value; win.muted = false } }
                     PadButton { Layout.preferredWidth: 34; text: "\u2212"; onClicked: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
+                    Slider {
+                        Layout.preferredWidth: 120
+                        from: 0; to: 100
+                        value: 100 * Math.log(Math.max(1, win.zoom)) / Math.log(400)
+                        onMoved: {
+                            win.zoom = Math.max(1, Math.pow(400, value / 100))
+                            var sp = win.viewSpan(); win.viewStart = win.cti - sp / 2; win.clampView(); tl.requestPaint()
+                        }
+                    }
                     Label { text: (Math.round(win.zoom * 100) / 100) + "\u00d7"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
                     PadButton { Layout.preferredWidth: 34; text: "+"; onClicked: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
                     PadButton { Layout.preferredWidth: 46; text: "Fit"; onClicked: { win.fitZoom(); tl.requestPaint() } }
