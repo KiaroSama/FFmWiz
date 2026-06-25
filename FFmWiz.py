@@ -84,6 +84,19 @@ NVENC_HEVC_PROFILE = "main"
 # CPU_PRESET options for x264/x265: ultrafast,superfast,veryfast,faster,fast,medium,slow,slower,veryslow
 CPU_PRESET = "medium"
 
+# SVT-AV1 (libsvtav1) defaults. SVT-AV1 is the recommended CPU AV1 encoder
+# (much faster than libaom-av1 at comparable quality). preset is an INTEGER
+# 0-13 (lower = slower/better); 6 is a widely recommended balance. tune=0
+# targets subjective visual quality (tune=1 = PSNR).
+SVTAV1_PRESET = "6"
+SVTAV1_PARAMS = "tune=0"
+
+# CPU encoders that support FFmpeg's -pass 1/2 two-pass rate control. Verified
+# against `ffmpeg -h encoder=<name>` and by running a real 2-pass cycle:
+# libx264/libx265 (-passlogfile/-x265-stats), libvpx-vp9 and libaom-av1
+# ("2-pass only" options), libsvtav1 (SVT 2PASS RC), and generic mpeg4.
+TWO_PASS_CPU_ENCODERS = {"libx264", "libx265", "libvpx-vp9", "libaom-av1", "libsvtav1", "mpeg4"}
+
 # Audio defaults:
 # DEFAULT_AUDIO_CODEC options depend on your FFmpeg build; common: aac,libopus,libmp3lame,flac,copy
 # AUDIO_CHANNELS options/examples: 1=mono, 2=stereo, 6=5.1; set None to keep source channel layout
@@ -621,7 +634,7 @@ VIDEO_CODEC_ALIASES = {
     "hevc": {"cpu": "libx265", "gpu": "hevc_nvenc", "tag": "hvc1", "profile": NVENC_HEVC_PROFILE},
     "h264": {"cpu": "libx264", "gpu": "h264_nvenc", "tag": "avc1", "profile": None},
     "avc": {"cpu": "libx264", "gpu": "h264_nvenc", "tag": "avc1", "profile": None},
-    "av1": {"cpu": "libaom-av1", "gpu": "av1_nvenc", "tag": None, "profile": None},
+    "av1": {"cpu": "libsvtav1", "gpu": "av1_nvenc", "tag": None, "profile": None},
     "vp9": {"cpu": "libvpx-vp9", "gpu": None, "tag": None, "profile": None},
     "mpeg4": {"cpu": "mpeg4", "gpu": None, "tag": "mp4v", "profile": None},
 }
@@ -1256,6 +1269,10 @@ def append_video_encode_options(
         cmd.extend(["-preset", CPU_PRESET])
         if video_encoder == "libx265":
             cmd.extend(["-profile:v", hevc_profile_for_output(answers, "main")])
+    elif video_encoder == "libsvtav1":
+        # SVT-AV1: integer preset (0-13, lower = slower/better) + tune=0 for
+        # subjective visual quality. (libaom-style 2-pass is handled separately.)
+        cmd.extend(["-preset", SVTAV1_PRESET, "-svtav1-params", SVTAV1_PARAMS])
     video_bitrate = answers.get("video_bitrate_kbps")
     if video_bitrate:
         append_video_bitrate_args(cmd, answers, int(video_bitrate))
@@ -2195,7 +2212,7 @@ def cpu_encoder_for_high_bit_depth(answers: dict[str, Any], video_encoder: str) 
     elif "hevc" in str(video_encoder) or "h265" in requested:
         cpu_encoder, tag, profile = "libx265", "hvc1", NVENC_HEVC_PROFILE
     elif "av1" in str(video_encoder) or requested == "av1":
-        cpu_encoder, tag, profile = "libaom-av1", None, None
+        cpu_encoder, tag, profile = "libsvtav1", None, None
     else:
         cpu_encoder, tag, profile = "libx265", "hvc1", NVENC_HEVC_PROFILE
     if cpu_encoder == "libx264" and output_video_bit_depth(answers) > 10:
@@ -11610,7 +11627,7 @@ def list_encoders(ffmpeg: str, kind: str) -> list[str]:
         output = run_capture([ffmpeg, "-hide_banner", "-encoders"])
     except Exception:
         if kind == "video":
-            return ["hevc_nvenc", "h264_nvenc", "av1_nvenc", "libx265", "libx264", "libaom-av1"]
+            return ["hevc_nvenc", "h264_nvenc", "av1_nvenc", "libx265", "libx264", "libsvtav1"]
         return ["aac", "libopus", "libmp3lame", "flac"]
 
     wanted = "V" if kind == "video" else "A"
@@ -15221,6 +15238,12 @@ def step_use_gpu(answers: dict[str, Any]) -> None:
     )
 
 
+def encoder_supports_two_pass(video_encoder: Any) -> bool:
+    """True if the CPU encoder supports FFmpeg's -pass 1/2 two-pass rate
+    control (verified set; see TWO_PASS_CPU_ENCODERS)."""
+    return str(video_encoder or "").strip().lower() in TWO_PASS_CPU_ENCODERS
+
+
 def cpu_two_pass_applicable(answers: dict[str, Any]) -> bool:
     if not output_has_video(answers) or answers.get("use_gpu"):
         return False
@@ -15231,7 +15254,7 @@ def cpu_two_pass_applicable(answers: dict[str, Any]) -> bool:
     if answers.get("cut_keep_ranges") or answers.get("video_speed_enabled") or answers.get("reverse_video"):
         return False
     video_encoder, _tag, _profile = resolve_video_encoder(answers)
-    if video_encoder not in {"libx264", "libx265"}:
+    if not encoder_supports_two_pass(video_encoder):
         return False
     return True
 
@@ -16535,6 +16558,15 @@ def append_video_bitrate_args(
     stream_spec: str = ":v",
 ) -> None:
     mode = video_bitrate_mode(answers)
+    # SVT-AV1 uses simple VBR targeting (-b:v); HRD-style -maxrate/-bufsize are
+    # not part of its recommended rate control, so emit only the target bitrate.
+    recent_encoder = ""
+    for _i in range(len(cmd) - 1):
+        if cmd[_i] in ("-c:v", "-c:v:0"):
+            recent_encoder = str(cmd[_i + 1]).strip().lower()
+    if recent_encoder == "libsvtav1":
+        cmd.extend([f"-b{stream_spec}", f"{bitrate_kbps}k"])
+        return
     if mode == "strict_size":
         maxrate = bitrate_kbps
         bufsize = bitrate_kbps * 2
@@ -16941,6 +16973,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                 cmd.extend(["-preset", CPU_PRESET])
                 if video_encoder == "libx265":
                     cmd.extend(["-profile:v:0" if full_source_map else "-profile:v", hevc_profile_for_output(answers, "main")])
+            elif video_encoder == "libsvtav1":
+                # SVT-AV1: integer preset + tune=0 (subjective visual quality).
+                cmd.extend(["-preset", SVTAV1_PRESET, "-svtav1-params", SVTAV1_PARAMS])
 
             if video_bitrate:
                 append_video_bitrate_args(cmd, answers, int(video_bitrate), ":v:0" if full_source_map else ":v")
@@ -18185,7 +18220,11 @@ def cpu_two_pass_enabled_for_command(answers: dict[str, Any], cmd: list[str]) ->
     if not answers.get("cpu_two_pass"):
         return False
     text = " ".join(str(part) for part in cmd)
-    return ("-c:v libx264" in text or "-c:v:0 libx264" in text or "-c:v libx265" in text or "-c:v:0 libx265" in text)
+    # The chosen video encoder appears as "-c:v <enc>" or "-c:v:0 <enc>".
+    for enc in TWO_PASS_CPU_ENCODERS:
+        if f"-c:v {enc}" in text or f"-c:v:0 {enc}" in text:
+            return True
+    return False
 
 
 def cpu_two_pass_log_prefix(answers: dict[str, Any]) -> Path:
@@ -18226,6 +18265,8 @@ def cpu_two_pass_video_output_args(output_args: list[str]) -> list[str]:
         "-pix_fmt",
         "-x264-params",
         "-x265-params",
+        "-svtav1-params",
+        "-aom-params",
     )
     result: list[str] = []
     idx = 0

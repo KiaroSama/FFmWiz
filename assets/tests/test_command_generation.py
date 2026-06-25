@@ -2459,6 +2459,49 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertFalse(FFmWiz.encoder_supports_multipass("libx264"))
         FFmWiz._MULTIPASS_ENCODER_CACHE.clear()
 
+    def test_encoder_supports_two_pass_set(self):
+        for enc in ("libx264", "libx265", "libvpx-vp9", "libaom-av1", "libsvtav1", "mpeg4"):
+            self.assertTrue(FFmWiz.encoder_supports_two_pass(enc), enc)
+        for enc in ("h264_nvenc", "hevc_nvenc", "av1_nvenc", "av1_qsv", "copy", "", None):
+            self.assertFalse(FFmWiz.encoder_supports_two_pass(enc), enc)
+
+    def test_av1_cpu_resolves_to_libsvtav1_with_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["video_codec"] = "av1"
+            answers["use_gpu"] = False
+            text = self.command_text(answers)
+        self.assertIn("-c:v libsvtav1", text)
+        self.assertIn("-preset 6", text)
+        self.assertIn("-svtav1-params tune=0", text)
+        self.assertIn("-b:v 400k", text)
+        # SVT-AV1 VBR targets -b:v only; no HRD maxrate/bufsize.
+        self.assertNotIn("-maxrate", text)
+        self.assertNotIn("-bufsize", text)
+
+    def test_cpu_two_pass_applicable_for_av1_and_vp9(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for codec in ("av1", "vp9"):
+                answers = self.base_answers(tmp)
+                answers["video_codec"] = codec
+                answers["use_gpu"] = False
+                self.assertTrue(FFmWiz.cpu_two_pass_applicable(answers), codec)
+
+    def test_cpu_two_pass_command_detects_and_preserves_libsvtav1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.base_answers(tmp)
+            answers["video_codec"] = "av1"
+            answers["use_gpu"] = False
+            answers["cpu_two_pass"] = True
+            cmd = self.command_for(answers)
+            self.assertTrue(FFmWiz.cpu_two_pass_enabled_for_command(answers, cmd))
+            first, second, _passlog = FFmWiz.build_cpu_two_pass_commands(cmd, answers)
+        first_text = " ".join(first)
+        # The SVT-AV1 params must survive into the analysis (pass 1) too.
+        self.assertIn("-svtav1-params tune=0", first_text)
+        self.assertIn("-pass 1", first_text)
+        self.assertIn("-pass 2", " ".join(second))
+
     def test_run_wizard_question_numbers_continue_after_join_subquestions(self):
         class StopRun(Exception):
             pass
