@@ -77,6 +77,128 @@ def _log(level: str, message: str) -> None:
     print(f"[QML] {level}: {message}", file=sys.stderr)
 
 
+# ----------------------------------------------------------------------------
+# Waveform model (classic-quality, backend-heavy).
+#
+# The heavy work lives here in Python so QML only draws. Audio is decoded once
+# to 4000 Hz mono int16 PCM (same rate as the classic editor) and kept in
+# memory, plus a decimated min/max envelope for fast zoomed-out rendering. The
+# editor then asks for a per-viewport array of [min, max] pairs (one per canvas
+# pixel column) via waveform_window(); zoomed-in views read the raw PCM for full
+# detail, zoomed-out views read the envelope. Amplitudes are scaled against the
+# int16 full scale (32768), NOT the clip's own peak, so quiet stays quiet and
+# loud stays loud. This is a hybrid of options (1) full PCM and (2) a min/max
+# pyramid from the task brief.
+# ----------------------------------------------------------------------------
+
+WAVE_RATE = 4000          # mono PCM sample rate for the waveform (matches classic)
+WAVE_ENV_STEP = 256       # samples per decimated envelope bucket
+WAVE_MAX_BUCKETS = 4000   # cap on columns returned for one viewport
+
+
+def compute_wave_key(req: dict) -> str:
+    """Stable cache key for the decoded waveform. Changes only when the input
+    file, the join input list, the selected audio stream, the duration, or the
+    sample rate change — so the waveform is decoded once and reused otherwise."""
+    import hashlib
+
+    segs = req.get("join_segments") or []
+    if segs:
+        parts = [str(s.get("path") or "") + ":" + str(s.get("duration") or "") for s in segs]
+    else:
+        parts = [str(req.get("input_path") or "")]
+    payload = "|".join(parts)
+    payload += f"|dur={req.get('duration')}|rate={WAVE_RATE}|astream={req.get('audio_stream', 'a:0')}"
+    return hashlib.sha1(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
+    """FFmpeg args that decode the (joined) audio to WAVE_RATE mono s16le PCM.
+    For a join the audio of every input is concatenated on the joined timeline."""
+    segs = req.get("join_segments") or []
+    args = ["-hide_banner", "-loglevel", "error", "-y"]
+    if segs:
+        for seg in segs:
+            args += ["-i", str(seg.get("path"))]
+        filt = [
+            f"[{i}:a:0]aformat=channel_layouts=mono,aresample={WAVE_RATE},asetpts=PTS-STARTPTS[a{i}]"
+            for i in range(len(segs))
+        ]
+        filt.append("".join(f"[a{i}]" for i in range(len(segs))) + f"concat=n={len(segs)}:v=0:a=1[mix]")
+        args += ["-filter_complex", ";".join(filt), "-map", "[mix]"]
+    else:
+        args += [
+            "-i", str(req.get("input_path") or ""),
+            "-filter_complex", f"[0:a:0]aformat=channel_layouts=mono,aresample={WAVE_RATE}[mix]",
+            "-map", "[mix]",
+        ]
+    args += ["-f", "s16le", "-acodec", "pcm_s16le", out_path]
+    return args
+
+
+def build_wave_envelope(pcm, step: int = WAVE_ENV_STEP):
+    """Decimated (min, max) envelope of the int16 PCM for fast zoomed-out views.
+    Returns (env_min, env_max) numpy arrays, or (None, None) without numpy."""
+    try:
+        import numpy as np
+    except Exception:
+        return None, None
+    if pcm is None or len(pcm) == 0:
+        return None, None
+    n = len(pcm)
+    m = n // step
+    if m < 2:
+        return None, None
+    block = pcm[: m * step].reshape(m, step)
+    return block.min(axis=1), block.max(axis=1)
+
+
+def waveform_window(pcm, env_min, env_max, rate, start, end, width,
+                    env_step: int = WAVE_ENV_STEP):
+    """Return up to `width` [min, max] amplitude pairs (each in -1..1) covering
+    the time window [start, end]. Zoomed-in windows read raw PCM for full detail;
+    zoomed-out windows read the decimated envelope. Pure function (no Qt) so it
+    is unit-testable with a synthetic PCM array."""
+    try:
+        import numpy as np
+    except Exception:
+        return []
+    if pcm is None or rate <= 0 or width <= 0:
+        return []
+    total = int(len(pcm))
+    if total <= 0:
+        return []
+    s0 = max(0, min(total, int(float(start) * rate)))
+    s1 = max(s0 + 1, min(total, int(float(end) * rate)))
+    nwin = s1 - s0
+    if nwin <= 0:
+        return []
+    width = int(min(width, WAVE_MAX_BUCKETS))
+    fs = 32768.0
+    use_env = (env_min is not None and env_max is not None and (nwin / max(1, width)) > env_step)
+    if use_env:
+        e0 = max(0, s0 // env_step)
+        e1 = max(e0 + 1, min(env_min.size, s1 // env_step))
+        src_min = env_min[e0:e1]
+        src_max = env_max[e0:e1]
+    else:
+        seg = pcm[s0:s1]
+        src_min = seg
+        src_max = seg
+    m = int(src_min.size)
+    if m <= 0:
+        return []
+    buckets = int(min(width, m))
+    edges = (np.arange(buckets + 1, dtype=np.int64) * m) // buckets
+    starts = edges[:-1]
+    mins = np.minimum.reduceat(src_min, starts)
+    maxs = np.maximum.reduceat(src_max, starts)
+    out = []
+    for i in range(int(mins.size)):
+        out.append([float(mins[i]) / fs, float(maxs[i]) / fs])
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="FFmWiz QML unified video editor")
     parser.add_argument("--request", required=True)
@@ -122,9 +244,11 @@ def main() -> int:
     class Bridge(QObject):
         """Exposes the request to QML and collects the editor result."""
 
-        # Emitted (queued) from the decode thread with a JSON array of peak
-        # amplitudes (0..1) spanning the whole timeline, for the waveform.
-        waveformReady = Signal(str)
+        # Emitted (queued) from the decode thread when the waveform is ready:
+        # (cacheKey, overviewJson) where overviewJson is a JSON array of
+        # [min, max] pairs (each in -1..1) spanning the whole timeline. Per-
+        # viewport detail is fetched on demand via waveformWindow().
+        waveformReady = Signal(str, str)
         # Emitted when a reversed preview proxy has finished rendering:
         # (generation, output_path). output_path is "" on failure.
         reverseReady = Signal(int, str)
@@ -138,6 +262,12 @@ def main() -> int:
             self._palette_json = json.dumps(_PALETTE, ensure_ascii=False)
             self._wave_thread: threading.Thread | None = None
             self._rev_files: list[str] = []
+            # Cached waveform source (decoded once per cache key; reused after).
+            self._wave_key: str | None = None
+            self._pcm = None          # numpy int16 mono PCM at WAVE_RATE
+            self._env_min = None      # decimated min envelope
+            self._env_max = None      # decimated max envelope
+            self._wave_rate = 0
 
         # --- Read-only data for QML ---
         def _get_request(self) -> str:
@@ -177,48 +307,39 @@ def main() -> int:
 
         @Slot()
         def startWaveform(self) -> None:  # noqa: N802 (QML camelCase)
-            """Decode the (joined) audio to mono PCM in a background thread and
-            emit waveformReady with a downsampled peak array for the timeline."""
+            """Decode the (joined) audio to WAVE_RATE mono PCM once (background
+            thread), build a min/max envelope, and emit waveformReady with a
+            full-timeline overview. Re-decoding is skipped when the cache key is
+            unchanged, so this does NOT run again on playback ticks/seeks."""
             if os.environ.get("FFMWIZ_QML_SELFTEST") == "1":
-                self.waveformReady.emit("[]")
+                self.waveformReady.emit("", "[]")
                 return
             if not self._req.get("has_audio"):
-                self.waveformReady.emit("[]")
+                self.waveformReady.emit("", "[]")
                 return
-            if self._wave_thread is not None:
+            key = compute_wave_key(self._req)
+            if self._wave_key == key and self._pcm is not None:
+                self.waveformReady.emit(key, json.dumps(self._overview()))
                 return
-            self._wave_thread = threading.Thread(target=self._decode_waveform, daemon=True)
+            if self._wave_thread is not None and self._wave_thread.is_alive():
+                return
+            self._wave_thread = threading.Thread(target=self._decode_waveform, args=(key,), daemon=True)
             self._wave_thread.start()
 
-        def _decode_waveform(self) -> None:
+        def _decode_waveform(self, key: str) -> None:
             try:
-                peaks = self._compute_peaks()
-                self.waveformReady.emit(json.dumps(peaks))
+                self._load_pcm(key)
+                self.waveformReady.emit(key, json.dumps(self._overview()))
             except Exception as exc:  # noqa: BLE001
                 _log("DEBUG", f"Waveform decode failed: {exc}")
-                self.waveformReady.emit("[]")
+                self.waveformReady.emit(key, "[]")
 
-        def _compute_peaks(self) -> list[float]:
+        def _load_pcm(self, key: str) -> None:
             ffmpeg = str(self._req.get("ffmpeg") or "ffmpeg")
-            rate = 2000  # mono samples/sec — enough for an amplitude envelope
-            segs = self._req.get("join_segments") or []
-            args = ["-hide_banner", "-loglevel", "error", "-y"]
-            if segs:
-                for seg in segs:
-                    args += ["-i", str(seg.get("path"))]
-                filt = [f"[{i}:a:0]aformat=channel_layouts=mono,aresample={rate},asetpts=PTS-STARTPTS[a{i}]"
-                        for i in range(len(segs))]
-                filt.append("".join(f"[a{i}]" for i in range(len(segs)))
-                            + f"concat=n={len(segs)}:v=0:a=1[mix]")
-                args += ["-filter_complex", ";".join(filt), "-map", "[mix]"]
-            else:
-                args += ["-i", str(self._req.get("input_path") or ""),
-                         "-filter_complex", f"[0:a:0]aformat=channel_layouts=mono,aresample={rate}[mix]",
-                         "-map", "[mix]"]
             fd, pcm_path = tempfile.mkstemp(suffix=".pcm", prefix="ffmwiz_qmlwave_")
             os.close(fd)
             try:
-                args += ["-f", "s16le", "-acodec", "pcm_s16le", pcm_path]
+                args = build_wave_decode_args(self._req, pcm_path)
                 subprocess.run([ffmpeg, *args], check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -228,28 +349,43 @@ def main() -> int:
                     os.remove(pcm_path)
                 except OSError:
                     pass
-            if len(data) < 2:
+            try:
+                import numpy as np
+                pcm = np.frombuffer(data[: len(data) - (len(data) % 2)], dtype=np.int16)
+                if pcm.size == 0:
+                    pcm = None
+            except Exception:
+                pcm = None
+            self._pcm = pcm
+            self._wave_rate = WAVE_RATE
+            self._env_min, self._env_max = build_wave_envelope(pcm)
+            self._wave_key = key
+
+        def _overview(self) -> list:
+            dur = float(self._req.get("duration") or 0.0)
+            if self._pcm is None or self._wave_rate <= 0:
                 return []
-            samples = array.array("h")
-            samples.frombytes(data[: len(data) - (len(data) % 2)])
-            n = len(samples)
-            if n == 0:
-                return []
-            buckets = min(2400, n)
-            step = n / buckets
-            peaks: list[float] = []
-            for b in range(buckets):
-                s0 = int(b * step)
-                s1 = int((b + 1) * step)
-                if s1 <= s0:
-                    s1 = s0 + 1
-                chunk = samples[s0:s1]
-                if chunk:
-                    mx = max(max(chunk), -min(chunk))  # C-fast min/max on array
-                    peaks.append(min(1.0, mx / 32768.0))
-                else:
-                    peaks.append(0.0)
-            return peaks
+            if dur <= 0:
+                dur = len(self._pcm) / float(self._wave_rate)
+            return waveform_window(self._pcm, self._env_min, self._env_max,
+                                   self._wave_rate, 0.0, dur, 1600)
+
+        @Slot(result=str)
+        def waveformKey(self) -> str:  # noqa: N802 (QML camelCase)
+            return self._wave_key or ""
+
+        @Slot(float, float, int, result=str)
+        def waveformWindow(self, start: float, end: float, width: int) -> str:  # noqa: N802
+            """Return JSON [[min,max],...] for the viewport [start,end] at the
+            given pixel width. Fast (reads cached PCM/envelope); called only when
+            the viewport (zoom/pan) or canvas width changes, never per tick."""
+            try:
+                pairs = waveform_window(self._pcm, self._env_min, self._env_max,
+                                        self._wave_rate, start, end, int(width))
+                return json.dumps(pairs)
+            except Exception as exc:  # noqa: BLE001
+                _log("DEBUG", f"waveformWindow failed: {exc}")
+                return "[]"
 
         def finalize_if_unsubmitted(self) -> None:
             if not self._submitted:

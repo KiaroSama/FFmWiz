@@ -38,7 +38,8 @@ ApplicationWindow {
     property bool includeAudio: true
     property var separatorPoints: []
     property var cuts: []          // ranges to REMOVE; keep = complement
-    property var peaks: []
+    property var wf: []            // [min,max] amplitude pairs for the CURRENT viewport
+    property string wfKey: ""      // backend waveform cache key (changes => re-fetch)
     property var chapters: []      // [{t, title}] drawn on the timeline
     property bool ready: false
 
@@ -301,14 +302,39 @@ ApplicationWindow {
         if (win.visibility !== Window.Maximized) win.showMaximized()
     }
 
-    // Waveform peaks arrive asynchronously from the audio decode.
+    // Waveform overview arrives asynchronously from the backend decode; then we
+    // immediately request a precise window for the current viewport.
     Connections {
         target: bridge
-        function onWaveformReady(peaksJson) {
-            try { win.peaks = JSON.parse(peaksJson) || [] } catch (e) { win.peaks = [] }
+        function onWaveformReady(cacheKey, overviewJson) {
+            win.wfKey = cacheKey
+            try { win.wf = JSON.parse(overviewJson) || [] } catch (e) { win.wf = [] }
             tl.requestPaint()
+            win.refreshWaveform()
         }
     }
+    // Fetch per-viewport [min,max] data from the backend. Called ONLY when the
+    // viewport (zoom/pan) or canvas width changes — never on playback ticks — so
+    // the heavy work stays in Python and the CTI overlay can move independently.
+    function refreshWaveform() {
+        if (!ready || wfKey === "") return
+        var a = viewStart
+        var b = viewStart + viewSpan()
+        var w = Math.max(16, Math.round(tl.width - 2 * tl.pad))
+        try {
+            var s = bridge.waveformWindow(a, b, w)
+            win.wf = JSON.parse(s) || []
+        } catch (e) { /* keep previous wf */ }
+        tl.requestPaint()
+    }
+    // Debounce viewport-driven refreshes so dragging zoom/pan doesn't spam the
+    // backend; the actual fetch runs once motion settles.
+    Timer {
+        id: wfTimer
+        interval: 60; repeat: false
+        onTriggered: win.refreshWaveform()
+    }
+    function scheduleWaveform() { wfTimer.restart() }
 
     // ---------- Playback (two players: preload next segment for near-seamless joins) ----------
     property int activeAB: 0       // 0 -> playerA active, 1 -> playerB active
@@ -878,6 +904,7 @@ ApplicationWindow {
                         id: tl
                         anchors.fill: parent; anchors.margins: 8
                         property real pad: 6
+                        onWidthChanged: win.scheduleWaveform()
                         // Zoom/pan-aware mapping: the visible window is [viewStart, viewStart+span].
                         function t2x(t) { var sp = win.viewSpan(); return pad + ((t - win.viewStart) / Math.max(0.001, sp)) * (width - 2 * pad) }
                         function x2t(x) { var sp = win.viewSpan(); return Math.max(0, Math.min(totalDuration, win.viewStart + (x - pad) / Math.max(1, (width - 2 * pad)) * sp)) }
@@ -889,18 +916,23 @@ ApplicationWindow {
                             var xi = t2x(markIn), xo = t2x(markOut)
                             ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1f3a66")
                             ctx.fillRect(xi, 6, Math.max(0, xo - xi), height - 12); ctx.globalAlpha = 1.0
-                            // Audio waveform (amplitude envelope), centered on midY.
-                            var pk = win.peaks
-                            if (pk && pk.length > 1) {
+                            // Audio waveform: per-column min/max for the CURRENT
+                            // viewport (fetched from the backend on viewport change).
+                            // The pair values are already in -1..1 vs int16 full
+                            // scale, so quiet stays quiet and loud stays loud.
+                            var wv = win.wf
+                            if (wv && wv.length > 1) {
                                 var halfMax = Math.min(midY - 4, height - 4 - midY)
-                                var np = pk.length
-                                ctx.strokeStyle = "rgba(47,129,247,0.85)"; ctx.lineWidth = 1
-                                for (var w = 0; w < np; ++w) {
-                                    var wt = (w / (np - 1)) * totalDuration
-                                    var wx = t2x(wt)
-                                    if (wx < pad - 1 || wx > width - pad + 1) continue   // outside zoom window
-                                    var hh = Math.max(0.4, pk[w] * halfMax)
-                                    ctx.beginPath(); ctx.moveTo(wx, midY - hh); ctx.lineTo(wx, midY + hh); ctx.stroke()
+                                var inner = width - 2 * pad
+                                var nb = wv.length
+                                ctx.strokeStyle = "rgba(47,129,247,0.9)"; ctx.lineWidth = 1
+                                for (var w = 0; w < nb; ++w) {
+                                    var wx = pad + (w + 0.5) / nb * inner
+                                    var mn = wv[w][0], mx = wv[w][1]
+                                    var yTop = midY - mx * halfMax
+                                    var yBot = midY - mn * halfMax
+                                    if (yBot - yTop < 0.8) { yTop -= 0.4; yBot += 0.4 }
+                                    ctx.beginPath(); ctx.moveTo(wx, yTop); ctx.lineTo(wx, yBot); ctx.stroke()
                                 }
                             } else if (win.hasAudio) {
                                 ctx.fillStyle = win.col("text_subtle", "#484f58"); ctx.font = "10px 'Segoe UI'"; ctx.textAlign = "center"
@@ -938,11 +970,15 @@ ApplicationWindow {
                                 ctx.strokeStyle = (k === win.selSplit) ? "#ffffff" : "#38bdf8"; ctx.lineWidth = (k === win.selSplit) ? 3 : 2
                                 ctx.beginPath(); ctx.moveTo(sx, 6); ctx.lineTo(sx, height - 6); ctx.stroke()
                             }
-                            var px = t2x(cti); ctx.strokeStyle = win.col("playhead", "#ff4d55"); ctx.lineWidth = 2
-                            ctx.beginPath(); ctx.moveTo(px, 2); ctx.lineTo(px, height - 2); ctx.stroke()
+                            // NOTE: the CTI/playhead is drawn as a separate overlay
+                            // item (below) so playback moves it WITHOUT repainting
+                            // this canvas / regenerating the waveform.
                         }
                         MouseArea {
+                            id: tlMouse
                             anchors.fill: parent
+                            hoverEnabled: true
+                            onExited: hov.hx = -1
                             property string dragKind: ""   // in|out|split|cutS|cutE|""
                             property int dragIdx: -1
                             // Pick the nearest draggable handle within ~7px of x.
@@ -963,6 +999,7 @@ ApplicationWindow {
                                 else { selMarker = ""; selSplit = -1; selCut = -1; seekTo(snapTime(tl.x2t(m.x), -1, null)) }
                             }
                             onPositionChanged: (m) => {
+                                hov.hx = m.x   // hover marker + timestamp follows the cursor
                                 if (!pressed) return
                                 if (dragKind === "") { seekTo(snapTime(tl.x2t(m.x), -1, null)); return }
                                 var t = snapTime(tl.x2t(m.x), dragKind === "split" ? dragIdx : -1,
@@ -990,14 +1027,44 @@ ApplicationWindow {
                                 tl.requestPaint()
                             }
                         }
+                        // CTI / playhead overlay — bound to cti, so playback moves
+                        // it WITHOUT repainting the waveform canvas (the heavy paint
+                        // only runs on edits/zoom/pan, never on a playback tick).
+                        Rectangle {
+                            width: 2; color: win.col("playhead", "#ff4d55")
+                            y: 0; height: tl.height
+                            x: Math.max(0, Math.min(tl.width, tl.t2x(win.cti))) - 1
+                            visible: win.ready && win.cti >= win.viewStart - 1e-6
+                                     && win.cti <= win.viewStart + win.viewSpan() + 1e-6
+                        }
+                        // Hover marker + timestamp tooltip following the cursor.
+                        Item {
+                            id: hov
+                            anchors.fill: parent
+                            property real hx: -1
+                            Rectangle {
+                                visible: hov.hx >= 0; width: 1; x: hov.hx; y: 0; height: tl.height
+                                color: win.col("tick_lo", "#7d8590"); opacity: 0.7
+                            }
+                            Rectangle {
+                                visible: hov.hx >= 0
+                                color: win.col("surface", "#21262d"); border.color: win.col("border_strong", "#3a4150")
+                                radius: 4; height: 16; width: hovLbl.implicitWidth + 10
+                                x: Math.max(0, Math.min(tl.width - width, hov.hx - width / 2)); y: 2
+                                Label {
+                                    id: hovLbl; anchors.centerIn: parent
+                                    color: win.col("text", "#e6edf3"); font.pixelSize: 10; font.family: "Consolas"
+                                    text: fmt(tl.x2t(hov.hx))
+                                }
+                            }
+                        }
                     }
-                    Connections { target: win; function onCtiChanged() { tl.requestPaint() } }
                     Connections { target: win; function onMarkInChanged() { tl.requestPaint() } }
                     Connections { target: win; function onMarkOutChanged() { tl.requestPaint() } }
                     Connections { target: win; function onCutsChanged() { tl.requestPaint() } }
-                    Connections { target: win; function onReadyChanged() { tl.requestPaint() } }
-                    Connections { target: win; function onZoomChanged() { tl.requestPaint() } }
-                    Connections { target: win; function onViewStartChanged() { tl.requestPaint() } }
+                    Connections { target: win; function onReadyChanged() { tl.requestPaint(); win.scheduleWaveform() } }
+                    Connections { target: win; function onZoomChanged() { tl.requestPaint(); win.scheduleWaveform() } }
+                    Connections { target: win; function onViewStartChanged() { tl.requestPaint(); win.scheduleWaveform() } }
                     Connections { target: win; function onChaptersChanged() { tl.requestPaint() } }
                     Connections { target: win; function onSeparatorPointsChanged() { tl.requestPaint() } }
                     Connections { target: win; function onSelCutChanged() { tl.requestPaint() } }
