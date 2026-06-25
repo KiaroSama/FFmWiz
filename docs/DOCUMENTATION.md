@@ -33,6 +33,13 @@ runs, and you can cancel.
 16. [Logging](#16-logging)
 17. [Troubleshooting / FAQ](#17-troubleshooting--faq)
 18. [Glossary](#18-glossary)
+19. [Appendix A — Mode 1 prompt-by-prompt reference](#appendix-a--mode-1-prompt-by-prompt-reference)
+20. [Appendix B — Complete config.env key reference](#appendix-b--complete-configenv-key-reference)
+21. [Appendix C — Recipe cookbook](#appendix-c--recipe-cookbook)
+22. [Appendix D — FFmpeg concepts in depth](#appendix-d--ffmpeg-concepts-in-depth)
+23. [Appendix E — Encoder and container compatibility](#appendix-e--encoder-and-container-compatibility)
+24. [Appendix F — Extended troubleshooting matrix](#appendix-f--extended-troubleshooting-matrix)
+25. [Appendix G — Extended FAQ](#appendix-g--extended-faq)
 
 ---
 
@@ -736,6 +743,875 @@ errors with context. Attach the relevant log when reporting a problem.
 - **yuv420p / nv12 / p010le** — common 8‑bit CPU / NVENC / 10‑bit pixel formats.
 - **multipass (NVENC)** — NVENC's `-multipass` (disabled/qres/fullres) first‑pass analysis.
 - **two‑pass (CPU)** — FFmpeg's `-pass 1/2` analysis + final pass for accurate target bitrate.
+
+---
+
+## Appendix A — Mode 1 prompt-by-prompt reference
+
+This appendix documents **every question** the interactive wizard (Mode 1) can ask, in the
+order the wizard evaluates them. A step is **skipped automatically** when it does not apply to
+your input or to your earlier answers (for example, audio questions are skipped for a video
+with no audio, and crop sub-questions are skipped when you use the graphical editor). At almost
+every prompt you can type `0` to go **back** one question, and `exit` to quit FFmWiz.
+
+The numbered question counter you see on screen only counts the prompts that actually apply, so
+the numbers stay continuous even when steps are skipped.
+
+### A.1 Input file
+
+```
+Prompt:   Drag and drop a file here or paste a path
+Accepts:  a quoted or unquoted path; surrounding quotes are stripped
+Notes:    Unicode and spaces are fine. The file must exist and be readable.
+          FFmWiz immediately probes the file (ffprobe) and prints a Source file
+          info block: container, duration, size, total bitrate, and a per-stream
+          breakdown for video (size, fps, bit depth, color range, SAR/DAR, pixel
+          shape) and audio (codec, channels, sample rate, bitrate, mean/max
+          volume, duplicate/near-empty flags).
+```
+
+### A.2 Join additional inputs (video or audio-only inputs)
+
+```
+Prompt:   Join another file before encoding? (and the follow-up file prompts)
+When:     Offered for video inputs and for audio-only inputs.
+Effect:   Multiple inputs are concatenated into a single timeline before the
+          encode recipe is applied. Video/audio settings apply by track number to
+          every joined input. FFmWiz stream-copies compatible inputs or
+          re-encodes to a common format when they differ (see §10).
+```
+
+### A.3 Output location
+
+```
+Prompt:   Output destination (folder, full file path, or base name)
+Default:  the input's folder
+Notes:    A bare base name is dropped into the input folder using the chosen
+          output format. FFmWiz never overwrites the input; on a name collision it
+          adds a numeric suffix. Split jobs append _Part01, _Part02, ...
+```
+
+### A.4 Output format (container)
+
+```
+Prompt:   Output container/extension
+Accepts:  mp4, mkv, mov, webm, mp3, m4a, opus, flac, wav, ... or n to inherit
+Notes:    The container constrains which codecs and features are valid (for
+          example MP4/MOV convert text subtitles to mov_text and drop image subs;
+          attachments need MKV). Audio-only containers switch the job to an
+          audio-only encode.
+```
+
+### A.5 Video codec
+
+```
+Prompt:   Video codec
+Accepts:  H265, H264, AV1, VP9, MPEG4, copy, or any literal ffmpeg encoder name
+Default:  H265
+copy:     stream-copies the video bitstream (no quality loss, very fast). It is
+          AUTO-PROMOTED to a real encoder (H265) when any filter is required
+          (crop, scale, fps change, cut, split, or speed/reverse), because a
+          stream copy cannot be filtered.
+```
+
+### A.6 Use GPU (NVENC)
+
+```
+Prompt:   Use the GPU (NVIDIA NVENC) for encoding?
+Default:  y when a usable NVENC GPU is detected
+Effect:   y uses the NVENC variant of the chosen codec (h264_nvenc, hevc_nvenc,
+          av1_nvenc) with CUDA filtering where possible; n forces CPU encoding
+          (libx264/libx265/libsvtav1/libvpx-vp9/mpeg4). If NVENC is unavailable
+          for the chosen codec, FFmWiz falls back to CPU automatically.
+```
+
+### A.7 Unified video editor (graphical)
+
+```
+Prompt:   Open the graphical editor to set crop / cuts / split / speed?
+Effect:   Opens the classic or QML Unified Video Editor (see §12). When used, the
+          crop sub-questions (A.8–A.12) and the terminal speed/cut prompts are
+          skipped because you set them visually. Declining keeps the terminal
+          prompts.
+```
+
+### A.8–A.12 Crop
+
+```
+A.8  Crop enabled?              y/n (skipped if you used the editor)
+A.9  Crop TOP pixels            integer >= 0
+A.10 Crop LEFT pixels           integer >= 0
+A.11 Crop RIGHT pixels          integer >= 0
+A.12 Crop BOTTOM pixels         integer >= 0
+Notes: Values are PIXELS REMOVED from each side (not x/y offsets). FFmWiz snaps
+       the resulting width/height to even numbers for chroma-safe output. You can
+       also paste an inline "top,left,right,bottom" to answer in one line.
+```
+
+### A.13 Video bitrate
+
+```
+Prompt:   Target average video bitrate in kbps
+Accepts:  an integer (e.g. 400, 1500, 4500) or n to keep the detected source rate
+Warning:  if you enter a value above the detected source bitrate, FFmWiz warns and
+          defaults to "no" so you do not waste space upscaling bitrate.
+Pairs with: the bitrate MODE (quality_vbr vs strict_size) from config / defaults.
+```
+
+### A.14 NVENC multipass
+
+```
+Prompt:   NVENC multipass mode
+When:     only when the resolved encoder is NVENC AND exposes -multipass
+Options:  1 = Disabled (fastest, single pass)
+          2 = qres   (two-pass, quarter-resolution first pass)
+          3 = fullres(two-pass, full-resolution first pass; best quality, slowest)
+```
+
+### A.15 CPU two-pass
+
+```
+Prompt:   Use two-pass CPU video encoding?
+When:     only for CPU encoders that support -pass (libx264, libx265, libvpx-vp9,
+          libaom-av1, libsvtav1, mpeg4) and only for single-output encodes
+Effect:   runs an analysis pass then a final pass for accurate target bitrate.
+          Skipped for joins, splits, cuts, and speed/reverse workflows.
+```
+
+### A.16 Resolution
+
+```
+Prompt:   Output resolution
+Accepts:  presets 144p..2160p (closest-edge, aspect-preserving), a single edge
+          like w1280 or 720h, a fit box WIDTHxHEIGHT, stretch:WIDTHxHEIGHT to
+          force distortion, or n to keep the source size.
+Notes:    FFmWiz keeps even dimensions; you are warned before upscaling above the
+          source resolution.
+```
+
+### A.17 FPS
+
+```
+Prompt:   Output frame rate (integer) or n to keep the source rate
+Notes:    Lowering fps drops frames; raising it duplicates frames. You are warned
+          before exceeding the source rate.
+```
+
+### A.18 Video speed / reverse
+
+```
+Prompt:   Change video speed and/or reverse the video?
+When:     terminal prompt only if you did NOT use the graphical editor
+Accepts:  a speed multiplier 0.10..8.0 (1.0 = no change) and a reverse y/n
+Effect:   changing speed or reversing forces a re-encode; chapter timestamps are
+          remapped to the new timeline.
+```
+
+### A.19 Cuts (keep ranges)
+
+```
+Prompt:   Cut the video (keep/remove ranges)?
+When:     re-encode workflows without the graphical editor
+Format:   times are h:m:s:frame, converted to seconds using the detected fps
+Layouts:  keep one range, remove one range, remove multiple ranges, keep multiple
+          ranges (see §10).
+```
+
+### A.20 Audio tracks
+
+```
+Prompt:   Which audio streams to keep?
+Accepts:  0 | 0,1,2 | all | d (drop duplicates) | e (drop empty/near-empty) | de
+Default:  de (drop duplicates and empty/near-empty) when duplicate detection is on
+Notes:    duplicate detection compares codec/layout/rate/bitrate, then confirms
+          with a full audio hash before dropping anything.
+```
+
+### A.21 Loudness normalization (loudnorm)
+
+```
+Prompt:   Audio loudness normalization
+Options:  1 = Off
+          2 = Single-pass loudnorm on the final output audio
+          3 = Two-pass loudnorm (measures first, then normalizes)
+Follow-up:if your audio is set to copy, FFmWiz offers to switch to AAC (loudnorm
+          requires re-encoding). Two-pass asks to measure current loudness first.
+Target:   EBU R128 integrated loudness (LUFS); TP and LRA ceilings are applied.
+```
+
+### A.22 Audio cut
+
+```
+Prompt:   Cut the audio (keep/remove ranges)?
+When:     audio-only transform workflows
+Behavior: same range model as video cuts; output keeps everything outside the
+          removed ranges.
+```
+
+### A.23 Audio speed / reverse
+
+```
+Prompt:   Change audio speed and/or reverse the audio?
+Accepts:  a multiplier 0.10..8.0 (atempo chain) and reverse y/n
+Notes:    when audio follows video speed, the same factor is reused so A/V stay in
+          sync.
+```
+
+### A.24 Audio codec
+
+```
+Prompt:   Audio codec
+Accepts:  aac, libopus (opus alias), libmp3lame, flac, pcm_s16le, copy, or an
+          encoder name
+Notes:    the container picks a sensible default (e.g. opus for webm). flac/pcm_*
+          ignore bitrate; copy skips audio re-encoding.
+```
+
+### A.25 Audio bitrate
+
+```
+Prompt:   Audio bitrate per stream in kbps
+Accepts:  64, 128, 192, 256, 320, ... or n to keep the source bitrate
+When:     only for lossy codecs that use a bitrate (not flac/pcm_*/copy)
+```
+
+### A.26 Audio sample rate
+
+```
+Prompt:   Output audio sample rate in Hz
+Accepts:  44100, 48000, 96000, ... or n/keep to keep the source rate
+Warning:  you are warned before choosing a rate above the source rate.
+```
+
+### A.27 Source extras (metadata / chapters / extra streams)
+
+```
+Prompt:   Keep source metadata, chapters, subtitles, attachments, extra streams?
+Effect:   y preserves container/stream metadata, chapters, subtitle selection,
+          data streams, extra video streams, and (optionally) MKV attachments. n
+          strips them from the encode.
+```
+
+### A.28 Subtitle tracks
+
+```
+Prompt:   Which subtitles to keep?
+Accepts:  selection (0 | 0,1 | all) or none/clear/delete to drop all
+When:     video output with kept metadata and at least one subtitle stream
+Notes:    MP4/MOV convert text subtitles to mov_text and drop image subs
+          (PGS/VobSub).
+```
+
+### A.29 Color range (unknown source range)
+
+```
+Prompt:   Select source color range
+Options:  1 = Assume TV/Limited; 2 = Do not force a range; 3 = Assume PC/Full
+When:     only when the source range is unknown and the video is re-encoded
+Notes:    no pixel-value conversion is performed; this only affects range
+          signaling written into the output.
+```
+
+### A.30 Start now
+
+```
+Prompt:   Start FFmpeg now?
+Default:  y
+Notes:    declining prints the final PowerShell command and the settings summary
+          so you can run or adapt it manually.
+```
+
+---
+
+## Appendix B — Complete config.env key reference
+
+This appendix expands every `config.env` key with its purpose, accepted values, interactions,
+and gotchas. The short table is in §7; this is the prose reference. All keys are optional
+except `input_path`. Empty values fall back to the interactive default, so a minimal
+`config.env` only needs `input_path`.
+
+### B.1 Input / output
+
+**`input_path`** — Absolute path to the source file. Required for Mode 2. May contain spaces
+and Unicode. Forward or back slashes both work and need no escaping. The file must exist and be
+a readable media file; otherwise Mode 2 stops with a clear error.
+
+**`output_path`** — Where to write the result. Accepts a folder (output is named from the
+input), a full file path, or a bare base name (placed in the input folder using
+`output_format`). Empty means the input's folder. FFmWiz never overwrites the input; a numeric
+suffix is added on collision.
+
+**`output_format`** — The output container extension without a dot (`mp4`, `mkv`, `mov`,
+`webm`, `mp3`, `m4a`, `opus`, `flac`, `wav`, ...). `n` inherits the input's extension. The
+container limits valid codecs and features (subtitles, attachments, faststart).
+
+### B.2 Video
+
+**`video_codec`** — `H265`, `H264`, `AV1`, `VP9`, `MPEG4`, `copy`, or any literal ffmpeg
+encoder name. Aliases map to a CPU encoder or its NVENC variant depending on `use_gpu`. `copy`
+is promoted to `H265` automatically when a filter is required.
+
+**`use_gpu`** — `y` selects the NVENC variant when available; `n` forces CPU. Falls back to CPU
+if NVENC is unavailable for the chosen codec.
+
+**`crop`, `crop_top`, `crop_left`, `crop_right`, `crop_bottom`** — `crop=n` disables cropping;
+`crop=y` uses the four margin values (pixels removed per side); an inline
+`crop=top,left,right,bottom` sets all four at once. **Mode 2 always asks the crop question
+interactively and ignores these**, since crop is the one thing Mode 2 is designed to vary per
+file. The keys still apply to other config-driven paths.
+
+**`video_bitrate_kbps`** — Target average video bitrate in kbps, or `n` to keep the detected
+source rate. You are warned before exceeding the source.
+
+**`video_bitrate_mode`** — `quality_vbr` (`-b:v X -maxrate 2X -bufsize 4X`, better quality) or
+`strict_size` (`-b:v X -maxrate X -bufsize 2X`, tighter size).
+
+**`resolution`** — A preset (`480p`/`720p`/`1080p`/...), one edge (`w1280` or `720h`), a fit box
+(`1280x720`), `stretch:1280x720` to force distortion, or `n` to keep the source size.
+
+**`fps`** — Output frame rate as an integer, or `n` to keep the source rate.
+
+### B.3 Audio
+
+**`audio_tracks`** — `0`, `0,1,2`, `all`, or the cleanup shortcuts `d` (drop duplicates), `e`
+(drop empty/near-empty), `de` (both). Defaults to `de`.
+
+**`audio_codec`** — `aac`, `libopus` (alias `opus`), `libmp3lame`, `flac`, `pcm_s16le`, `copy`,
+or an encoder name. The container default applies if omitted.
+
+**`audio_bitrate_kbps`** — Per-stream bitrate in kbps, or `n` to keep source. Ignored for
+`flac`/`pcm_*`/`copy`.
+
+**`audio_sample_rate`** — Output sample rate in Hz (`44100`, `48000`, `96000`), or `n` to keep
+the source rate. Ignored for `copy`. You are warned before exceeding the source rate.
+
+### B.4 Streams / metadata
+
+**`keep_source_metadata`** — `y` keeps container/stream metadata, chapters, extra video/data
+streams, and enables subtitle selection; `n` strips them from the encode.
+
+**`subtitle_tracks`** — A selection (`0`, `0,1`, `all`) or `none`/`clear`/`delete` to drop all.
+Only used when `keep_source_metadata=y` and the source has subtitles.
+
+**`keep_embedded_attachments`** — `y` copies MKV attachment streams (e.g. subtitle fonts) when
+the output container supports them.
+
+**`detect_duplicate_audio`** — `y` lets FFmWiz flag duplicate/near-empty audio for the
+`d`/`e`/`de` shortcuts.
+
+### B.5 Loudness / speed / advanced (optional)
+
+**`loudnorm`** — `off` (default) or `on`. `on` applies single-pass EBU R128 loudness
+normalization to the output audio and, if the audio codec was `copy`, switches it to AAC
+(loudnorm requires re-encoding). Two-pass/measured loudnorm is interactive only because it
+needs a live measurement that a static file cannot provide.
+
+**`loudnorm_target_i`** — Integrated loudness target in LUFS for `loudnorm=on`. Common values:
+`-14` (streaming), `-16`, `-23` (broadcast EBU R128). Default `-16`.
+
+**`nvenc_multipass`** — `disabled`, `qres`, or `fullres`. Used only when the resolved encoder is
+NVENC and exposes `-multipass`. `qres` does a quarter-resolution first pass; `fullres` does a
+full-resolution first pass (best quality, slowest). Ignored on CPU encoders.
+
+**`cpu_two_pass`** — `y`/`n`. Enables FFmpeg `-pass 1/2` for supported CPU encoders (libx264,
+libx265, libvpx-vp9, libaom-av1, libsvtav1, mpeg4). Ignored on NVENC and unsupported encoders,
+and on join/split/cut/speed workflows.
+
+**`color_range`** — `source` (default, do nothing special), `tv` (limited), `pc` (full), or
+`unspecified` (do not force a range). Only meaningful when the source range is unknown and the
+video is re-encoded. No pixel-value conversion is performed; only range signaling changes.
+
+**`video_speed`** — A multiplier `0.10`–`8.0` (`2` = twice as fast, `0.5` = half speed) or `n`
+for no change. Changing speed forces a re-encode and remaps chapters.
+
+**`reverse_video`** — `y`/`n`. Reverses the whole video (forces a re-encode).
+
+**`audio_speed`** — A multiplier `0.10`–`8.0`, `match_video` (follow `video_speed` and
+`reverse_video` so audio and video stay in sync), or `n` for no change.
+
+**`reverse_audio`** — `y`/`n`. Reverses the audio. Ignored when `audio_speed=match_video`
+(the audio then follows the video's reverse flag instead).
+
+### B.6 App behaviour
+
+**`logging_enabled`** — `y` writes dated UTF-8 logs into `Logs/` next to `FFmWiz.py`.
+
+**`log_retention_days`** — `0` keeps logs forever; a positive integer deletes FFmWiz logs older
+than that many days when logging starts.
+
+**`gui_engine`** — `classic` (default, PySide6 widgets) or `qml` (QtQuick). The environment
+variable `FFMWIZ_GUI_ENGINE` overrides this value.
+
+---
+
+## Appendix C — Recipe cookbook
+
+Ready-to-paste `config.env` recipes for common goals. Set `input_path` (and usually
+`output_path`) for your own files; the keys shown are the ones that matter for each goal.
+Anything omitted keeps the interactive default.
+
+### C.1 Lossless remux (change container only)
+
+```ini
+output_format=mkv
+video_codec=copy
+audio_codec=copy
+subtitle_tracks=all
+keep_source_metadata=y
+```
+
+Use this to move a stream into MKV (or MP4) without re-encoding. Fast and lossless. If the
+target container cannot hold a codec or subtitle type, switch that stream to a compatible codec.
+
+### C.2 Web-friendly 1080p H.264 (broad compatibility)
+
+```ini
+output_format=mp4
+video_codec=H264
+use_gpu=y
+resolution=1080p
+video_bitrate_kbps=6000
+video_bitrate_mode=quality_vbr
+audio_codec=aac
+audio_bitrate_kbps=160
+audio_sample_rate=48000
+```
+
+H.264 in MP4 plays almost everywhere. Faststart is added automatically for progressive playback.
+
+### C.3 Efficient 1080p H.265 (smaller files)
+
+```ini
+output_format=mp4
+video_codec=H265
+use_gpu=y
+resolution=1080p
+video_bitrate_kbps=3500
+nvenc_multipass=fullres
+audio_codec=aac
+audio_bitrate_kbps=160
+```
+
+HEVC at a lower bitrate matches H.264 quality at a smaller size. `fullres` multipass improves
+NVENC bitrate distribution. For Apple compatibility, the `hvc1` tag is added for HEVC-in-MP4.
+
+### C.4 Archival AV1 (CPU, SVT-AV1)
+
+```ini
+output_format=mkv
+video_codec=AV1
+use_gpu=n
+video_bitrate_kbps=2500
+cpu_two_pass=y
+audio_codec=libopus
+audio_bitrate_kbps=128
+```
+
+SVT-AV1 gives excellent compression. CPU two-pass improves bitrate accuracy. AV1 emits `-b:v`
+only (no HRD maxrate/bufsize), matching its rate control.
+
+### C.5 Normalized lecture, sped up 1.5×
+
+```ini
+output_format=mp4
+video_codec=H264
+use_gpu=y
+audio_tracks=0
+audio_codec=aac
+audio_bitrate_kbps=128
+audio_sample_rate=48000
+loudnorm=on
+loudnorm_target_i=-16
+video_speed=1.5
+audio_speed=match_video
+```
+
+Speeds the video to 1.5× and keeps audio in sync, then normalizes loudness to a comfortable
+level. Great for long talks/recordings.
+
+### C.6 Extract one audio track to MP3
+
+```ini
+output_format=mp3
+audio_tracks=0
+audio_codec=libmp3lame
+audio_bitrate_kbps=192
+```
+
+The video is dropped (audio-only container), leaving a single MP3.
+
+### C.7 Loud-safe podcast master (-14 LUFS)
+
+```ini
+output_format=m4a
+audio_tracks=0
+audio_codec=aac
+audio_bitrate_kbps=192
+audio_sample_rate=48000
+loudnorm=on
+loudnorm_target_i=-14
+```
+
+### C.8 Downscale 4K to 720p for sharing
+
+```ini
+output_format=mp4
+video_codec=H265
+use_gpu=y
+resolution=720p
+video_bitrate_kbps=2500
+audio_codec=aac
+audio_bitrate_kbps=128
+```
+
+### C.9 Reverse a clip (boomerang-style)
+
+```ini
+output_format=mp4
+video_codec=H264
+use_gpu=y
+reverse_video=y
+audio_speed=match_video
+```
+
+### C.10 Strip everything except video + first audio
+
+```ini
+output_format=mp4
+video_codec=copy
+audio_tracks=0
+audio_codec=copy
+subtitle_tracks=none
+keep_source_metadata=n
+```
+
+---
+
+## Appendix D — FFmpeg concepts in depth
+
+This appendix explains the ffmpeg concepts FFmWiz exposes, so the prompts make sense even if
+you are new to video encoding.
+
+### D.1 Containers vs codecs
+
+A **container** (MP4, MKV, MOV, WebM, ...) is the file wrapper that holds streams and metadata.
+A **codec** is how each stream is compressed (H.264, HEVC/H.265, AV1, VP9 for video; AAC, Opus,
+MP3, FLAC, PCM for audio). The container limits which codecs and features are legal:
+
+- **MP4/MOV** — H.264/HEVC/AV1 video, AAC/AC3 audio, `mov_text` subtitles only (image subs are
+  dropped), supports faststart, needs `hvc1` tag for HEVC on Apple.
+- **MKV** — almost any codec, all subtitle types, font/attachment streams, chapters.
+- **WebM** — VP9/AV1 video, Opus/Vorbis audio, WebVTT subtitles.
+
+Choosing a container in FFmWiz (`output_format`) therefore changes which downstream options are
+valid.
+
+### D.2 Stream copy vs re-encode
+
+**Stream copy** (`-c copy`) repackages the existing bitstream without decoding it: instant,
+lossless, but it cannot apply filters and cuts land on keyframes. **Re-encoding** decodes and
+re-compresses, which is required for crop, scale, fps change, frame-accurate cuts, speed,
+reverse, loudnorm, or hardsub. FFmWiz auto-promotes a `copy` request to a real encoder whenever
+a filter is required, so you never get a silently broken command.
+
+### D.3 Bitrate control: VBR, CRF, CQ
+
+- **Average bitrate (VBR)** targets a size. FFmWiz's `quality_vbr` mode sets `-b:v X -maxrate 2X
+  -bufsize 4X` (loose ceiling, better quality); `strict_size` sets `-b:v X -maxrate X -bufsize
+  2X` (tight ceiling, predictable size).
+- **CRF (Constant Rate Factor)** targets a quality level on CPU encoders (`-crf`); smaller is
+  higher quality and larger files. NVENC's equivalent is `-cq:v`.
+- **Two-pass** (CPU) and **multipass** (NVENC) analyze the video first so the encoder can
+  distribute bits more accurately for a target average bitrate.
+
+### D.4 Pixel formats and bit depth
+
+A **pixel format** describes how color is stored. Common ones FFmWiz uses:
+
+- `yuv420p` — 8-bit planar, the universal default for delivery.
+- `nv12` — 8-bit, NVENC's native input layout.
+- `p010le` — 10-bit, used for NVENC 10-bit input.
+- `yuv420p10le` — 10-bit planar for CPU (libx265 Main10).
+
+FFmWiz delivers **8-bit or 10-bit**: 8-bit sources stay 8-bit; 10-bit sources stay 10-bit;
+12-bit-and-up sources are reduced to 10-bit (Main10) with a precision note.
+
+### D.5 Color range and signaling
+
+**Color range** is `tv`/limited (luma 16–235) or `pc`/full (0–255). The wrong flag makes video
+look washed-out or crushed in some players. FFmWiz does **not** convert pixel values; it only
+writes the correct **signaling**. When the source range is unknown and you re-encode, the
+color-range prompt (or `color_range` config key) decides what gets written.
+
+### D.6 faststart
+
+For MP4/MOV, FFmWiz adds `-movflags +faststart`, moving the `moov` atom to the front so a player
+can begin before the whole file downloads — important for web playback.
+
+### D.7 Loudness normalization (EBU R128)
+
+`loudnorm` measures perceived loudness in **LUFS** and adjusts gain toward a target integrated
+loudness, with true-peak (TP) and loudness-range (LRA) ceilings. Single-pass applies the target
+directly; two-pass measures first for more accurate results. Typical targets: `-14` LUFS
+(streaming), `-23` LUFS (broadcast).
+
+### D.8 Speed and reverse
+
+Speed changes use `setpts` (video) and an `atempo` chain (audio). Reverse uses `reverse`/
+`areverse`. Both force a re-encode and FFmWiz remaps chapter timestamps to the new timeline.
+
+---
+
+## Appendix E — Encoder and container compatibility
+
+### E.1 Codec → encoder mapping
+
+| Alias | CPU encoder | NVENC encoder | Typical containers |
+|-------|-------------|---------------|--------------------|
+| H264  | libx264     | h264_nvenc    | mp4, mkv, mov |
+| H265  | libx265     | hevc_nvenc    | mp4 (hvc1), mkv, mov |
+| AV1   | libsvtav1   | av1_nvenc     | mkv, webm, mp4 |
+| VP9   | libvpx-vp9  | (none)        | webm, mkv |
+| MPEG4 | mpeg4       | (none)        | mp4, mkv, avi |
+| copy  | (passthrough) | (passthrough) | matching container |
+
+NVENC is used only when `use_gpu=y` and your ffmpeg build + GPU/driver support that encoder.
+Otherwise FFmWiz uses the CPU encoder.
+
+### E.2 Multipass / two-pass support
+
+| Encoder | NVENC multipass | CPU two-pass |
+|---------|-----------------|--------------|
+| h264_nvenc / hevc_nvenc / av1_nvenc | yes (`-multipass`, detected) | n/a |
+| libx264 / libx265 | n/a | yes (`-pass 1/2`) |
+| libsvtav1 / libaom-av1 | n/a | yes |
+| libvpx-vp9 | n/a | yes |
+| mpeg4 | n/a | yes |
+
+Multipass support is detected at runtime from `ffmpeg -h encoder=<name>`; CPU two-pass uses a
+verified encoder set. Two-pass is skipped for join/split/cut/speed/reverse workflows.
+
+### E.3 Audio codec by container (typical defaults)
+
+| Container | Default audio | Also valid |
+|-----------|---------------|-----------|
+| mp4 / m4a / mov | aac | ac3, alac |
+| mkv | aac | libopus, flac, mp3, pcm |
+| webm | libopus | libvorbis |
+| mp3 | libmp3lame | — |
+| opus | libopus | — |
+| flac | flac | — |
+| wav | pcm_s16le | — |
+
+### E.4 Subtitles by container
+
+| Container | Text subtitles | Image subtitles |
+|-----------|----------------|------------------|
+| mkv | ASS/SSA/SRT/WebVTT | PGS/VobSub kept |
+| mp4 / mov | converted to `mov_text` | dropped |
+| webm | WebVTT | dropped |
+
+---
+
+## Appendix F — Extended troubleshooting matrix
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `Python was not found` from `run.ps1` | Python not installed / not in PATH | Install Python 3.10+ from python.org or `winget install Python.Python.3.12`, reopen the terminal. |
+| `ffmpeg is not installed` | FFmpeg not on PATH | Accept the install prompt, or `winget install Gyan.FFmpeg`, then reopen the terminal. |
+| GUI editor does not open | PySide6 missing | Accept the PySide6 install prompt, or `py -3 -m pip install --upgrade -r requirements.txt`. |
+| GUI opens but reports an internal error | runtime/Qt issue | Set `FFMWIZ_DEBUG=1` and re-run to get a full traceback; attach the log. |
+| No native playback for a clip | Qt Multimedia lacks that decoder | Timeline/frame extraction still work; use the manual `h:m:s:frame` flow in Mode 3 if needed. |
+| NVENC not used despite `use_gpu=y` | ffmpeg build lacks NVENC, or GPU/driver unsupported | Check `ffmpeg -hide_banner -encoders`; FFmWiz falls back to CPU automatically. |
+| `.ps1` will not run on double-click | Execution policy | `powershell -ExecutionPolicy Bypass -File ".\run.ps1"` or right-click → Run with PowerShell. |
+| Multipass / two-pass prompt missing | Encoder does not support it, or workflow excludes it | Multipass needs an NVENC encoder exposing `-multipass`; CPU two-pass is skipped for join/split/cut/speed. |
+| Output looks washed-out / crushed | Wrong color-range signaling | Set `color_range` (or answer the color-range prompt) to `tv` or `pc` to match the source. |
+| Output bigger than expected | Bitrate above source, or loose VBR | Lower `video_bitrate_kbps`, or use `video_bitrate_mode=strict_size`. |
+| Audio out of sync after speed change | Audio not following video | Use `audio_speed=match_video` so audio tracks the video speed/reverse. |
+| Subtitles disappeared in MP4 | Image subs / MP4 limits | MP4 keeps only text subs (as `mov_text`); use MKV to keep PGS/VobSub. |
+| Attachments (fonts) lost | Non-MKV output | Keep MKV output and set `keep_embedded_attachments=y`. |
+| Mode 2 ignores my `crop` value | By design | Mode 2 always asks crop interactively; set the rest of the recipe in `config.env`. |
+| Want to see what ffmpeg can do | Capability reference | FFmWiz writes `ffmwiz-ffmpeg-reference.txt` next to the script; delete it to regenerate. |
+
+---
+
+## Appendix G — Extended FAQ
+
+**Q: Does Mode 1 use `config.env`?**
+No. Mode 1 is the full interactive wizard and ignores the config file. `config.env` is for
+Mode 2 (and the other config-driven paths).
+
+**Q: Will FFmWiz overwrite my input file?**
+No. It writes to a different path and adds a numeric suffix on name collisions.
+
+**Q: Why was my `copy` codec changed to an encoder?**
+A stream copy cannot be filtered. When you request crop/scale/fps/cut/split/speed/reverse,
+FFmWiz promotes `copy` to a real encoder (H.265) so the filter can run.
+
+**Q: What is the difference between `qres` and `fullres` multipass?**
+Both are two-pass NVENC. `qres` runs the first (analysis) pass at quarter resolution (faster);
+`fullres` runs it at full resolution (slightly slower, best quality).
+
+**Q: Why can't I set two-pass loudnorm in `config.env`?**
+Two-pass loudnorm needs a live loudness measurement of your specific file, which a static
+config cannot supply. Config drives single-pass loudnorm with a target; use the interactive
+prompt for measured two-pass.
+
+**Q: How do I keep all audio tracks?**
+Set `audio_tracks=all`. To drop duplicates/empty tracks, use `d`, `e`, or `de`.
+
+**Q: How do I change only the container without re-encoding?**
+Set `video_codec=copy` and `audio_codec=copy` and pick the new `output_format`.
+
+**Q: Where are the logs?**
+In the `Logs/` folder next to `FFmWiz.py`, one dated UTF-8 file per run. Control them with
+`logging_enabled` and `log_retention_days`.
+
+**Q: How do I pick the modern editor?**
+Set `gui_engine=qml` (or the `FFMWIZ_GUI_ENGINE=qml` environment variable). It falls back to
+classic if the QML files are missing.
+
+**Q: Which bitrate mode should I use?**
+`quality_vbr` for the best quality at roughly a target size; `strict_size` when you must stay
+close to a size budget.
+
+**Q: How do I make a file for an Apple device?**
+Use MP4 with H.265 (FFmWiz adds the `hvc1` tag) or H.264, and AAC audio.
+
+---
+
+## Appendix H — Worked example sessions
+
+These transcripts show the shape of a typical run. Exact wording may vary slightly with your
+FFmpeg build and source file; the flow and decisions are what matter.
+
+### H.1 Mode 1 — 4K ultrawide lecture to 1080p H.265, normalized, 1.5×
+
+```text
+> .\run.ps1
+                 FFmpeg Wizard (FFmWiz)
+================================================
+Prerequisite check:
+  Python: 3.11.9 (OK)
+  FFmpeg: found (...\ffmpeg.EXE)
+  FFprobe: found (...\ffprobe.EXE)
+  PySide6 (GUI): installed
+FFmpeg: found.
+GPU: detected - NVIDIA GeForce RTX 4070 Ti (NVENC hardware encoding).
+
+[1] Drag and drop a file here or paste a path: I:\...\Bac13.mkv
+Source file info
+  Container: matroska,webm   Duration: 01:13:13   Size: 358.3 MB
+  Video 0: h264 3440x1440 30fps 8-bit  Color range: TV
+  Audio 0: aac 48000 Hz  (CONFIRMED duplicate of 1)
+  Audio 1: aac 48000 Hz  (CONFIRMED duplicate of 0)
+  Audio 2: aac 48000 Hz  (NEAR-EMPTY)
+
+[2] Output destination [<input folder>]: <Enter>
+[3] Output container [mkv]: mp4
+[4] Video codec [H265]: <Enter>
+[5] Use the GPU (NVENC)? [y]: y
+[6] Open the graphical editor? [n]: n
+[7] Crop? [n]: n
+[8] Target video bitrate kbps [keep source]: 3500
+[9] NVENC multipass [1=Disabled]: 3        # fullres
+[10] Resolution [keep]: 1080p
+[11] FPS [keep]: <Enter>
+[12] Change speed / reverse? speed [1.0]: 1.5   reverse [n]: n
+[13] Audio tracks [de]: de                 # drops the duplicate + near-empty
+[14] Loudness normalization [1=Off]: 2     # single-pass
+     Target LUFS [-16]: -16
+[15] Audio codec [aac]: aac
+[16] Audio bitrate kbps [keep]: 160
+[17] Audio sample rate Hz [keep]: 48000
+[18] Keep source metadata/chapters/subs? [y]: y
+[19] Start FFmpeg now? [y]: y
+
+Final PowerShell command:
+  ffmpeg -i "...Bac13.mkv" -map 0:v:0 -vf "scale=...,setpts=(PTS-STARTPTS)/1.5"
+    -c:v hevc_nvenc -preset p4 -tune hq -rc vbr -b:v 3500k -multipass fullres
+    -map 0:a:0 -c:a aac -b:a 160k -ar 48000 -af "atempo=1.5,loudnorm=I=-16:..."
+    -movflags +faststart "...\Bac13.mp4"
+[#####.....] 41%  fps=...  speed=...  ETA 02:31
+```
+
+### H.2 Mode 2 — fixed recipe, vary only crop
+
+```text
+> .\run.ps1
+... Prerequisite check ...
+Main menu: 2          # Load config and ask crop only
+Loaded config.env (input_path=..., video_codec=H265, loudnorm=on, ...)
+[1] Crop? top,left,right,bottom or n [n]: 0,140,140,0
+Final PowerShell command: ffmpeg -i ... -vf "crop=..." -c:v hevc_nvenc ...
+[#######...] 63% ...
+```
+
+### H.3 Mode 3 — lossless cut (stream copy)
+
+```text
+Main menu: 3
+[1] Input: clip.mp4
+[2] Output [<input folder>]: <Enter>
+[3] Cut layout: keep one range
+    Start h:m:s:frame: 0:1:30:0
+    End   h:m:s:frame: 0:2:45:0
+Final command: ffmpeg -ss 90 -i "clip.mp4" -t 75 -c copy "clip_cut.mp4"
+```
+
+### H.4 Mode 12 — join two clips
+
+```text
+Main menu: 12
+[1] First input: a.mp4
+[2] Join another? y -> b.mp4 ; Join another? n
+Join input summary: 2 inputs, compatible -> stream copy concat
+Final command: ffmpeg -f concat -safe 0 -i list.txt -c copy "a_joined.mp4"
+```
+
+### H.5 Mode 7 — media info report
+
+```text
+Main menu: 7
+[1] File or folder: movie.mkv
+Wrote: MediaReports\movie_info.txt and movie_info.html (dark mode)
+```
+
+---
+
+## Appendix I — ffmpeg flags FFmWiz can emit
+
+A reference for the main flags FFmWiz builds, so you can read or adapt the final command.
+
+| Flag | Meaning | When FFmWiz emits it |
+|------|---------|----------------------|
+| `-i <input>` | Input file | Every job (one per input; joins use a concat list). |
+| `-map 0:v:0` / `-map 0:a:N` | Select streams | Stream selection per your track choices. |
+| `-c:v copy` | Copy video bitstream | `video_codec=copy` with no filters. |
+| `-c:v libx264/libx265/libsvtav1/libvpx-vp9/mpeg4` | CPU video encoder | `use_gpu=n` or NVENC unavailable. |
+| `-c:v h264_nvenc/hevc_nvenc/av1_nvenc` | NVENC encoder | `use_gpu=y` and supported. |
+| `-preset p4 -tune hq -rc vbr` | NVENC quality settings | NVENC encodes. |
+| `-multipass qres/fullres` | NVENC two-pass | `nvenc_multipass` on a capable NVENC encoder. |
+| `-pass 1` / `-pass 2` | CPU two-pass | `cpu_two_pass=y` on a supported CPU encoder. |
+| `-preset 6 -svtav1-params tune=0` | SVT-AV1 tuning | AV1 CPU encodes (libsvtav1). |
+| `-b:v Xk -maxrate -bufsize` | Average bitrate + ceiling | `video_bitrate_kbps` set (shape from `video_bitrate_mode`). |
+| `-crf` / `-cq:v` | Quality-based rate | Quality mode (CPU `-crf`, NVENC `-cq:v`). |
+| `-vf "crop=..."` | Crop filter | Crop enabled (margins normalized to even sizes). |
+| `-vf "scale=..."` / `scale_cuda` | Resize | `resolution` set (CUDA path when on GPU). |
+| `-r N` / `fps=N` | Frame rate | `fps` set. |
+| `-vf "setpts=..."` / `reverse` | Speed / reverse video | `video_speed`/`reverse_video`. |
+| `-pix_fmt yuv420p/p010le/yuv420p10le` | Pixel format | Chosen for encoder + bit depth. |
+| `-color_range tv/pc` | Range signaling | Resolved color range (no pixel conversion). |
+| `-tag:v hvc1` | Apple HEVC tag | HEVC in MP4/MOV. |
+| `-c:a aac/libopus/libmp3lame/flac/pcm_s16le/copy` | Audio codec | Per `audio_codec`. |
+| `-b:a Xk` | Audio bitrate | Lossy audio codecs. |
+| `-ar N` | Audio sample rate | `audio_sample_rate` set. |
+| `-af "atempo=...,areverse,loudnorm=..."` | Audio filters | Speed/reverse/loudnorm. |
+| `-map_metadata 0` / `-1` | Keep / drop metadata | `keep_source_metadata`. |
+| `-map_chapters 0` / `-1` / `<idx>` | Chapters | Kept, dropped, or remapped to a modified timeline. |
+| `-movflags +faststart` | Web-friendly MP4 | MP4/MOV outputs. |
+| `-ss <start> -t <dur> -c copy` | Lossless cut | Mode 3 stream-copy cuts. |
+| `-f concat -safe 0 -i list.txt` | Join inputs | Mode 12 compatible joins. |
 
 ---
 
