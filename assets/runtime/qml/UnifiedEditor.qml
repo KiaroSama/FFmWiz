@@ -203,6 +203,7 @@ ApplicationWindow {
         id: pb
         property color baseColor: win.col("surface", "#21262d")
         property color textColor: win.col("text", "#e6edf3")
+        property url iconSource: ""
         implicitHeight: 34
         padding: 8
         hoverEnabled: true
@@ -215,13 +216,27 @@ ApplicationWindow {
             border.color: win.col("border_strong", "#3a4150")
             border.width: 1
         }
-        contentItem: Label {
-            text: pb.text
-            color: pb.enabled ? pb.textColor : win.col("text_mute", "#7d8590")
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            font.pixelSize: 13
-            elide: Text.ElideRight
+        contentItem: RowLayout {
+            spacing: 6
+            Image {
+                visible: String(pb.iconSource) !== ""
+                Layout.preferredWidth: visible ? 16 : 0
+                Layout.preferredHeight: 16
+                Layout.alignment: Qt.AlignVCenter
+                source: pb.iconSource
+                sourceSize.width: 16; sourceSize.height: 16
+                fillMode: Image.PreserveAspectFit
+                opacity: pb.enabled ? 1.0 : 0.5
+            }
+            Label {
+                Layout.fillWidth: true
+                text: pb.text
+                color: pb.enabled ? pb.textColor : win.col("text_mute", "#7d8590")
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                font.pixelSize: 13
+                elide: Text.ElideRight
+            }
         }
     }
 
@@ -665,8 +680,8 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; baseColor: win.tool === "hand" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: { win.tool = "hand"; win.cropEdit = false } }
-                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; baseColor: win.tool === "zoom" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: { win.tool = "zoom"; win.cropEdit = false } }
+                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: { win.tool = "hand"; win.cropEdit = false } }
+                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: { win.tool = "zoom"; win.cropEdit = false } }
                             PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
                         }
                         Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
@@ -847,10 +862,27 @@ ApplicationWindow {
                                     y: cropOverlay.ry + cropOverlay.rh * (index + 1) / 3 }
                             }
 
+                            // Live crop-size readout (output dimensions after crop).
+                            // A clear, professional touch: it shows exactly what the
+                            // encoded frame size will be and follows the crop box.
+                            Rectangle {
+                                visible: cropEdit || (cropTop + cropLeft + cropRight + cropBottom) > 0
+                                radius: 4; color: "#cc000000"
+                                x: Math.max(cropOverlay.cr.x + 2, Math.min(cropOverlay.rx + 4, cropOverlay.cr.x + cropOverlay.cr.width - width - 2))
+                                y: Math.max(cropOverlay.cr.y + 2, cropOverlay.ry + 4)
+                                width: cropSizeLabel.implicitWidth + 12; height: cropSizeLabel.implicitHeight + 6
+                                Label {
+                                    id: cropSizeLabel
+                                    anchors.centerIn: parent
+                                    text: Math.max(0, sourceW - cropLeft - cropRight) + " \u00d7 " + Math.max(0, sourceH - cropTop - cropBottom) + " px"
+                                    color: "#ffffff"; font.pixelSize: 12; font.bold: true
+                                }
+                            }
+
                             // Drag the WHOLE crop box (keeps its size). Declared before
                             // the edge/corner handles so those win along the borders.
                             MouseArea {
-                                visible: cropEdit; hoverEnabled: true; cursorShape: Qt.SizeAllCursor
+                                visible: cropEdit; cursorShape: Qt.SizeAllCursor
                                 x: cropOverlay.rx + 14; y: cropOverlay.ry + 14
                                 width: Math.max(0, cropOverlay.rw - 28); height: Math.max(0, cropOverlay.rh - 28)
                                 property real sx: 0; property real sy: 0
@@ -877,7 +909,7 @@ ApplicationWindow {
                                 visible: cropEdit
                                 x: cropOverlay.rx; y: cropOverlay.ry - 10; width: cropOverlay.rw; height: 20
                                 MouseArea {
-                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeVerCursor
+                                    anchors.fill: parent; cursorShape: Qt.SizeVerCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
@@ -893,7 +925,7 @@ ApplicationWindow {
                                 visible: cropEdit
                                 x: cropOverlay.rx; y: cropOverlay.ry + cropOverlay.rh - 10; width: cropOverlay.rw; height: 20
                                 MouseArea {
-                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeVerCursor
+                                    anchors.fill: parent; cursorShape: Qt.SizeVerCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
@@ -909,7 +941,7 @@ ApplicationWindow {
                                 visible: cropEdit
                                 x: cropOverlay.rx - 10; y: cropOverlay.ry; width: 20; height: cropOverlay.rh
                                 MouseArea {
-                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeHorCursor
+                                    anchors.fill: parent; cursorShape: Qt.SizeHorCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -925,7 +957,7 @@ ApplicationWindow {
                                 visible: cropEdit
                                 x: cropOverlay.rx + cropOverlay.rw - 10; y: cropOverlay.ry; width: 20; height: cropOverlay.rh
                                 MouseArea {
-                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeHorCursor
+                                    anchors.fill: parent; cursorShape: Qt.SizeHorCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -940,7 +972,7 @@ ApplicationWindow {
                             Item {   // top-left
                                 visible: cropEdit
                                 x: cropOverlay.rx - 11; y: cropOverlay.ry - 11; width: 22; height: 22
-                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeFDiagCursor
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.SizeFDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -955,7 +987,7 @@ ApplicationWindow {
                             Item {   // top-right
                                 visible: cropEdit
                                 x: cropOverlay.rx + cropOverlay.rw - 11; y: cropOverlay.ry - 11; width: 22; height: 22
-                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeBDiagCursor
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.SizeBDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -970,7 +1002,7 @@ ApplicationWindow {
                             Item {   // bottom-left
                                 visible: cropEdit
                                 x: cropOverlay.rx - 11; y: cropOverlay.ry + cropOverlay.rh - 11; width: 22; height: 22
-                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeBDiagCursor
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.SizeBDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -985,7 +1017,7 @@ ApplicationWindow {
                             Item {   // bottom-right
                                 visible: cropEdit
                                 x: cropOverlay.rx + cropOverlay.rw - 11; y: cropOverlay.ry + cropOverlay.rh - 11; width: 22; height: 22
-                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeFDiagCursor
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.SizeFDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
