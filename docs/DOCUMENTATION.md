@@ -40,6 +40,11 @@ runs, and you can cancel.
 23. [Appendix E — Encoder and container compatibility](#appendix-e--encoder-and-container-compatibility)
 24. [Appendix F — Extended troubleshooting matrix](#appendix-f--extended-troubleshooting-matrix)
 25. [Appendix G — Extended FAQ](#appendix-g--extended-faq)
+26. [Appendix H — Worked example sessions](#appendix-h--worked-example-sessions)
+27. [Appendix I — ffmpeg flags FFmWiz can emit](#appendix-i--ffmpeg-flags-ffmwiz-can-emit)
+28. [Appendix J — Command-line flags](#appendix-j--command-line-flags)
+29. [Appendix K — Environment variables](#appendix-k--environment-variables)
+30. [Appendix L — Output naming and folder behavior](#appendix-l--output-naming-and-folder-behavior)
 
 ---
 
@@ -125,7 +130,9 @@ command without reopening the script.
 ### Command‑line flags
 
 - `--preview-colors` — print the ANSI color palette used by prompts/progress and exit.
-- Environment variables:
+- `--refresh-ffmpeg-reference` — regenerate `ffmwiz-ffmpeg-reference.txt` from your installed ffmpeg, then continue.
+- See **Appendix J** for the full flag list and **Appendix K** for all environment variables.
+- Common environment variables:
   - `FFMWIZ_GUI_ENGINE=classic|qml` — choose the unified‑editor engine (overrides `config.env`).
   - `FFMWIZ_DEBUG=1` — print full tracebacks if a GUI reports an internal error.
 
@@ -1614,6 +1621,90 @@ A reference for the main flags FFmWiz builds, so you can read or adapt the final
 | `-f concat -safe 0 -i list.txt` | Join inputs | Mode 12 compatible joins. |
 
 ---
+
+---
+
+## Appendix J — Command-line flags
+
+FFmWiz is normally run with no arguments (interactive). These optional flags are recognized;
+unknown arguments are ignored with a note.
+
+| Flag | Alias | Effect |
+|------|-------|--------|
+| `--preview-colors` | `--preview-progress-colors` | Print the ANSI color palette used by prompts/progress and exit (no menu). Useful to check terminal color support. |
+| `--refresh-ffmpeg-reference` | `--regen-ffmpeg-reference` | Force-regenerate `ffmwiz-ffmpeg-reference.txt` from your installed `ffmpeg.exe` at startup, then continue normally. |
+
+Examples:
+
+```powershell
+py -3 .\FFmWiz.py --preview-colors
+py -3 .\FFmWiz.py --refresh-ffmpeg-reference
+.\run.ps1 --refresh-ffmpeg-reference
+```
+
+Internal flags `--request` / `--reply` are used only when FFmWiz launches the Qt GUI as a
+subprocess (JSON IPC); you never pass them by hand.
+
+---
+
+## Appendix K — Environment variables
+
+These environment variables tune behavior. Set them in the shell before launching (for example
+`$env:FFMWIZ_GUI_ENGINE = "qml"` in PowerShell). All are optional.
+
+### Behavior
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `FFMWIZ_GUI_ENGINE` | classic / qml | Overrides the `gui_engine` config value for the unified editor. |
+| `FFMWIZ_DEBUG` | set / unset | When set, also prints GUI subprocess tracebacks to the console (in addition to the log). |
+| `FFMWIZ_NO_AUTO_INSTALL` | set / unset | Skip the PySide6 install prompt entirely; GUI editors stay unavailable until you install it yourself. |
+| `FFMWIZ_AUTO_INSTALL` / `FFMWIZ_AUTO_INSTALL_PYSIDE` | set / unset | Install PySide6 without asking (good for unattended/CI). |
+| `FFMWIZ_AUTO_INSTALL_FFMPEG` | set / unset | Allow the FFmpeg auto-install fallback to proceed without asking. |
+| `NO_COLOR` | set / unset | Standard "no color" convention; disables ANSI coloring of console output. |
+| `QT_QPA_PLATFORM` | e.g. `offscreen` | Standard Qt platform selector; `offscreen` runs the GUI headless (used for tests). |
+
+### Performance tuning (advanced)
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `FFMWIZ_PACKET_SCAN_MAX_MB` | 64 | Max megabytes scanned when estimating per-stream sizes from packets. |
+| `FFMWIZ_DUP_HASH_SECONDS` | 8.0 | Seconds of audio hashed when confirming duplicate audio tracks. |
+| `FFMWIZ_DUP_HASH_WORKERS` | 2 | Parallel workers for duplicate-audio hashing. |
+| `FFMWIZ_VOLUME_SCAN_WORKERS` | 3 | Parallel workers for audio mean/max volume scans. |
+| `FFMWIZ_FOLDER_PROBE_WORKERS` | 4 | Parallel workers for probing files in Folder Encode. |
+
+Larger worker counts speed up scanning of many tracks/files on fast disks and CPUs; lower them
+on slow storage or to reduce load. The packet-scan cap balances size-estimate accuracy against
+probe time on very large files.
+
+---
+
+## Appendix L — Output naming and folder behavior
+
+FFmWiz never overwrites your input and follows predictable naming rules.
+
+- **Single output** — written to `output_path` if given, otherwise the input's folder using the
+  chosen `output_format`. If the chosen name would collide with an existing file (or equal the
+  input), a numeric suffix is appended so nothing is overwritten.
+- **Split parts** — when split points are set, parts are named `<base>_Part01`, `<base>_Part02`,
+  ... in order along the processed timeline.
+- **Folder Encode (Mode 4)** — outputs go into a sibling folder named `<folder>_Encode`,
+  preserving each input's base name with the chosen output format.
+- **Stream Cleanup Remux (Mode 8)** — writes into an output base folder, mirroring the input
+  folder structure for recursive scans.
+- **Media info (Mode 7)** — reports are written to `MediaReports/<name>_info.txt` and
+  `MediaReports/<name>_info.html` (plus a raw ffprobe JSON sidecar). Folder mode writes one
+  report per readable file.
+- **Metadata reports (Mode 13 / inspect)** — written next to the source with suffixes like
+  `_metadata_report`, `_metadata_tags`, `_metadata_color`, `_metadata_disposition`,
+  `_metadata_chapters`.
+- **Capability reference** — `ffmwiz-ffmpeg-reference.txt` is generated next to `FFmWiz.py`
+  (delete it or use `--refresh-ffmpeg-reference` to regenerate).
+- **Logs** — dated UTF-8 files in `Logs/` next to the script.
+
+All generated/output folders (`Logs/`, `MediaReports/`, `output/`, `*_Encode`, the capability
+reference, and caches) are git-ignored so your repository stays clean.
 
 ---
 
