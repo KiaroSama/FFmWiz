@@ -2502,6 +2502,36 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertIn("-pass 1", first_text)
         self.assertIn("-pass 2", " ".join(second))
 
+    def test_parse_env_config_parses_settings(self):
+        text = "\n".join([
+            "# a comment line",
+            "input_path=I:/My Videos/clip 01.mkv",
+            'video_codec="AV1"',
+            "use_gpu=n",
+            "crop_top=12",
+            "export gui_engine=qml",
+            "",
+            "line_without_equals",
+        ])
+        cfg = FFmWiz.parse_env_config(text)
+        s = cfg["settings"]
+        self.assertEqual(s["input_path"], "I:/My Videos/clip 01.mkv")  # spaces ok
+        self.assertEqual(s["video_codec"], "AV1")                       # quotes stripped
+        self.assertEqual(s["use_gpu"], "n")
+        self.assertEqual(s["crop_top"], "12")
+        self.assertEqual(s["gui_engine"], "qml")                        # export prefix
+        self.assertNotIn("line_without_equals", s)
+        self.assertEqual(FFmWiz.config_value(cfg, "video_codec"), "AV1")
+        self.assertFalse(FFmWiz.parse_bool_config(FFmWiz.config_value(cfg, "use_gpu"), True))
+
+    def test_config_is_env_and_template_matches_example(self):
+        from pathlib import Path as _P
+        self.assertEqual(FFmWiz.CONFIG_FILE_NAME, "config.env")
+        example = (_P(FFmWiz.__file__).parent / "config.env.example").read_text(encoding="utf-8")
+        # The auto-created config.env must match the committed sample exactly.
+        self.assertEqual(FFmWiz.CONFIG_TEMPLATE, example)
+
+
     def test_run_wizard_question_numbers_continue_after_join_subquestions(self):
         class StopRun(Exception):
             pass

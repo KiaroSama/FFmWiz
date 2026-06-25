@@ -4,6 +4,8 @@ FFmWiz is a Windows-focused interactive FFmpeg command builder. It inspects a so
 
 It is designed for repeated local encoding work with NVIDIA/NVENC support, config-driven presets, audio-track cleanup helpers, and a unified graphical video editor.
 
+> 📖 **Full reference:** for the complete explanation of every mode, command, prompt, option, GUI editor, and the `config.env` settings file, read the **[full FFmWiz documentation → docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)**. This README is a quick overview; the documentation is the authoritative guide.
+
 ## Features
 
 - Checks that FFmpeg, ffprobe, and optional ffplay are available.
@@ -49,7 +51,8 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 
 ```text
 FFmWiz.py             # main CLI / wizard
-config.json
+config.env             # personal Mode-2 defaults (git-ignored; created on first run)
+config.env.example     # committed sample config (copy to config.env and edit)
 requirements.txt
 pyproject.toml
 run.ps1                # canonical local launcher
@@ -161,7 +164,7 @@ Mode `1` is the default and asks every question. For video inputs it can open th
 
 For encode/re-encode workflows, FFmWiz asks whether to keep source metadata and extra streams when they exist. Choosing keep preserves source container/stream metadata and chapters, keeps extra source video/data streams by stream copy when the timeline is not being cut/split/speed-changed, allows subtitle stream selection, and can copy MKV embedded font/attachment streams when the output container supports them. Choosing remove writes explicit `-map_metadata -1` and `-map_chapters -1`, drops extra source video streams and source subtitle/data streams, and does not map embedded font/attachment streams.
 
-Mode `2` reads settings from `config.json`, then asks only the crop question. Use this when encode settings stay the same but crop changes per file.
+Mode `2` reads settings from `config.env`, then asks only the crop question. Use this when encode settings stay the same but crop changes per file. See [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md) for the full list of `config.env` keys.
 
 Mode `3` is a dedicated stream-copy cut tool. No re-encoding happens, so cuts are very fast and lossless, but cut points snap to nearby keyframes. Inside Mode 3 you can pick:
 
@@ -426,47 +429,47 @@ For separate crop questions, `0` means back, so enter `00` when you really want 
 
 ## Config File
 
-The config file is:
+Mode 2 ("Load config and ask crop only") reads default answers from a dotenv-style file:
 
 ```text
-config.json
+config.env            # your personal file (git-ignored, never published)
+config.env.example    # committed sample/template
 ```
 
-It is more than a settings file: every option is documented inline in `_help`, every section is described in `_documentation`, ready-to-paste presets live in `_examples`, and `_glossary` defines the FFmpeg vocabulary used throughout. The parser only reads the `settings` object — keys starting with `_` are documentation only and are ignored at load time, so you can comment freely.
+On first run FFmWiz creates `config.env` from the template if it is missing. Because `config.env` holds your own input paths and preferences, it is git-ignored; only the sanitized `config.env.example` is committed. To start, copy the example:
 
-Minimal core:
+```powershell
+Copy-Item config.env.example config.env
+```
 
-```json
-{
-  "settings": {
-    "input_path": "C:\\Videos\\input.mkv",
-    "output_path": "E:\\output",
-    "output_format": "mp4",
-    "video_codec": "H265",
-    "use_gpu": "y",
-    "crop": "n",
-    "video_bitrate_kbps": 400,
-    "video_bitrate_mode": "quality_vbr",
-    "resolution": "480",
-    "fps": 4,
-    "audio_tracks": "de",
-    "audio_codec": "aac",
-    "audio_bitrate_kbps": 128,
-    "keep_source_metadata": "y",
-    "subtitle_tracks": "none",
-    "keep_embedded_attachments": "n",
-    "detect_duplicate_audio": "y"
-  }
-}
+The format is simple `key=value` lines; `#` lines are comments, blank lines are ignored, and values are not quoted (quotes are stripped if present). Paths may contain spaces and Unicode directly, and forward slashes work on Windows:
+
+```ini
+# config.env (excerpt)
+input_path=I:/Videos/input.mkv
+output_path=E:/output
+output_format=mp4
+video_codec=H265
+use_gpu=y
+crop=n
+video_bitrate_kbps=4500
+video_bitrate_mode=quality_vbr
+resolution=1080p
+fps=n
+audio_tracks=de
+audio_codec=aac
+audio_bitrate_kbps=160
+keep_source_metadata=y
+subtitle_tracks=none
+gui_engine=classic
 ```
 
 Editing tips:
 
-- Use only double quotes for strings; no trailing commas; escape Windows backslashes (`C:\\\\Videos\\\\input.mkv`) or just use forward slashes (`C:/Videos/input.mkv`).
-- Save as UTF-8 if you use Unicode characters in paths or titles.
-- Empty strings and missing keys fall back to interactive defaults.
-- Use the string `"n"` where supported to mean "keep source / no change". Mode `2` ignores `crop` in config and asks crop interactively.
-- See the `_examples` object in `config.json` for ready-made profiles (same-container stream copy, H.264 1080p, HEVC NVENC, AV1 WebM, AAC/FLAC audio-only, crop+scale, etc.).
+- Missing keys and empty values fall back to interactive defaults.
+- Use `n` where supported to mean "keep source / no change". Mode 2 always asks `crop` interactively and ignores it in the file.
+- Booleans accept `y/yes/true/1/on` or `n/no/false/0/off`.
+- Every key is documented inline in `config.env.example` and explained in full in **[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)** (including ready-made recipes).
 
 ## FFmpeg Capability Reference
 
@@ -558,17 +561,17 @@ The repository is prepared for normal GitHub use:
 - `requirements.txt` pins the runtime Python dependency used by the dedicated Qt GUI.
 - `pyproject.toml` records project metadata and the same runtime dependency for modern Python tooling.
 - The core CLI uses only the Python standard library. PySide6 is the only runtime Python package and is pinned consistently in `requirements.txt`, `pyproject.toml`, and the runtime auto-install check.
-- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py`, `assets/runtime/ffmwiz_gui.py`, and `assets/runtime/MuxCls.py`, validates `config.json`, runs a lightweight import/API smoke check, and runs command-generation regression tests from `assets/tests` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
+- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py`, `assets/runtime/ffmwiz_gui.py`, and `assets/runtime/MuxCls.py`, validates the `config.env.example` template, runs a lightweight import/API smoke check, and runs command-generation regression tests from `assets/tests` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
 - `.github/dependabot.yml` checks for Python dependency and GitHub Actions updates weekly.
 - `.gitattributes` normalizes text line endings and marks image/icon assets as binary.
 - `.editorconfig` keeps indentation, UTF-8, and final-newline rules consistent across editors.
 - `.gitignore` excludes runtime logs, generated media info reports, Python caches, generated command shims, virtual environments, build outputs, and the local `ffmwiz-ffmpeg-reference.txt` capability snapshot.
 
-Keep `config.json`, `assets/`, `FFmWiz.py`, `run.ps1`, `install-command.ps1`, `requirements.txt`, `pyproject.toml`, `.github/`, `.gitattributes`, `.gitignore`, and `.editorconfig` in the repository.
+Keep `config.env.example`, `assets/`, `FFmWiz.py`, `run.ps1`, `install-command.ps1`, `requirements.txt`, `pyproject.toml`, `.github/`, `.gitattributes`, `.gitignore`, and `.editorconfig` in the repository. Your personal `config.env` stays local (git-ignored).
 
 ## Logs
 
-Logging is enabled by default. Every run creates a dated UTF-8 log file in the `Logs/` folder next to the script, and Unicode paths are preserved there. In `config.json`, `settings.logging_enabled` can disable future log creation and `settings.log_retention_days` can prune old `ffmwiz_*.log` files when set above `0`:
+Logging is enabled by default. Every run creates a dated UTF-8 log file in the `Logs/` folder next to the script, and Unicode paths are preserved there. In `config.env`, `logging_enabled` can disable future log creation and `log_retention_days` can prune old `ffmwiz_*.log` files when set above `0`:
 
 ```text
 Logs/

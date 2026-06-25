@@ -9,6 +9,11 @@ env/
 .env.*
 .claude/
 
+# Personal Mode-2 config (your own input paths / default answers); never commit.
+# The sanitized template config.env.example IS committed.
+config.env
+!config.env.example
+
 Logs/
 Commands/
 .Comments/
@@ -43,7 +48,17 @@ Desktop.ini
 
 # Private local-only documents; never commit.
 explain-AI.md
+/secrets.md
+secrets.md
+
+# AI assistant local config directories; never commit.
+.kiro/
+**/.kiro/
+.codex/
+**/.codex/
+**/.claude/
 
 # Local-only sandboxes named .ignoreme at any depth; never commit.
 .ignoreme
 .ignoreme/
+**/.ignoreme
