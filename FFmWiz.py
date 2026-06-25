@@ -23649,6 +23649,27 @@ def build_cut_filter_complex(
     return ";".join(fc_parts)
 
 
+def print_prerequisite_summary(ffmpeg: str | None, ffprobe: str | None) -> None:
+    """Visible first-run prerequisite check. The required tools (FFmpeg/FFprobe)
+    and the optional GUI runtime (PySide6) are already validated earlier with
+    interactive install prompts by check_tools()/ensure_pyside6_installed();
+    this prints a clear summary so the user can see what was checked."""
+    print()
+    print(paint("Prerequisite check:", Color.BOLD + Color.LIGHT_BLUE))
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    startup_line("  Python", f"{py_ver} (OK)", Color.LIME)
+    startup_line("  FFmpeg", f"found ({ffmpeg})" if ffmpeg else "missing",
+                 Color.LIME if ffmpeg else Color.RED, Color.WHITE if ffmpeg else Color.RED)
+    startup_line("  FFprobe", f"found ({ffprobe})" if ffprobe else "missing",
+                 Color.LIME if ffprobe else Color.RED, Color.WHITE if ffprobe else Color.RED)
+    if _pyside6_available():
+        startup_line("  PySide6 (GUI)", "installed", Color.LIME)
+    else:
+        startup_line("  PySide6 (GUI)",
+                     "not installed - graphical editors disabled (the CLI still works)",
+                     Color.YELLOW, Color.YELLOW)
+
+
 def print_startup_banner(config_path: Path, launcher_path: Path, answers: dict[str, Any] | None = None) -> None:
     _ = (config_path, launcher_path)
     startup_line("FFmpeg", "found.", Color.LIME)
@@ -24723,6 +24744,8 @@ def main() -> int:
         ensure_pyside6_installed(interactive=True)
     except Exception as exc:
         note(f"PySide6 auto-install check failed: {exc}")
+
+    print_prerequisite_summary(ffmpeg, ffprobe)
 
     video_encoders = list_encoders(ffmpeg, "video")
     base_answers: dict[str, Any] = {
