@@ -1272,7 +1272,9 @@ def append_video_encode_options(
 
 
 def is_nvenc_multipass_encoder(video_encoder: Any) -> bool:
-    return str(video_encoder or "").strip().lower() in {"hevc_nvenc", "h264_nvenc"}
+    # av1_nvenc also exposes -multipass (disabled/qres/fullres) on AV1-capable
+    # NVENC (Ada+), so it gets the same prompt as h264_nvenc / hevc_nvenc.
+    return str(video_encoder or "").strip().lower() in {"hevc_nvenc", "h264_nvenc", "av1_nvenc"}
 
 
 def normalize_nvenc_multipass_mode(value: Any) -> str:
