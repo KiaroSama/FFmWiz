@@ -70,7 +70,7 @@ ApplicationWindow {
     // ---- Phase 5: timeline zoom/pan + interactive crop ----
     property real zoom: 1.0        // 1 = whole clip visible; higher = zoomed in
     property real viewStart: 0     // left edge of the visible window, in seconds
-    property bool cropEdit: false  // show draggable crop handles on the preview
+    property bool cropEdit: true   // show draggable crop handles on the preview
     property bool snapEnabled: true   // magnetic snapping of marks/splits/CTI to targets
     // Undo/redo: JSON snapshots of the editable state (mirrors classic HistoryStack).
     property var histUndo: []
@@ -665,8 +665,8 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; baseColor: win.tool === "hand" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
-                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; baseColor: win.tool === "zoom" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
+                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; baseColor: win.tool === "hand" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: { win.tool = "hand"; win.cropEdit = false } }
+                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; baseColor: win.tool === "zoom" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: { win.tool = "zoom"; win.cropEdit = false } }
                             PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
                         }
                         Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
@@ -781,8 +781,8 @@ ApplicationWindow {
                             anchors.fill: parent
                             transformOrigin: Item.TopLeft
                             transform: [
-                                Scale { xScale: win.pvZoom; yScale: win.pvZoom },
-                                Translate { x: win.pvOffX; y: win.pvOffY }
+                                Translate { x: win.pvOffX; y: win.pvOffY },
+                                Scale { xScale: win.pvZoom; yScale: win.pvZoom }
                             ]
                         // Two stacked outputs for double-buffered seamless joins.
                         // PreserveAspectFit keeps each segment's native aspect ratio
@@ -811,16 +811,73 @@ ApplicationWindow {
                             property real rh: cr.height * Math.max(0, (sourceH - cropTop - cropBottom)) / Math.max(1, sourceH)
                             property color handleCol: win.col("accent", "#1f6feb")
 
+                            // Dim the area OUTSIDE the crop rectangle (4 panels) so the
+                            // kept region stands out, like a professional crop tool.
+                            Rectangle { color: "#000000"; opacity: 0.5
+                                x: cropOverlay.cr.x; y: cropOverlay.cr.y
+                                width: cropOverlay.cr.width; height: Math.max(0, cropOverlay.ry - cropOverlay.cr.y) }
+                            Rectangle { color: "#000000"; opacity: 0.5
+                                x: cropOverlay.cr.x; y: cropOverlay.ry + cropOverlay.rh
+                                width: cropOverlay.cr.width
+                                height: Math.max(0, (cropOverlay.cr.y + cropOverlay.cr.height) - (cropOverlay.ry + cropOverlay.rh)) }
+                            Rectangle { color: "#000000"; opacity: 0.5
+                                x: cropOverlay.cr.x; y: cropOverlay.ry
+                                width: Math.max(0, cropOverlay.rx - cropOverlay.cr.x); height: cropOverlay.rh }
+                            Rectangle { color: "#000000"; opacity: 0.5
+                                x: cropOverlay.rx + cropOverlay.rw; y: cropOverlay.ry
+                                width: Math.max(0, (cropOverlay.cr.x + cropOverlay.cr.width) - (cropOverlay.rx + cropOverlay.rw))
+                                height: cropOverlay.rh }
+
+                            // Crisp thin crop border.
                             Rectangle {
-                                color: "transparent"; border.color: win.col("warn", "#d29922"); border.width: 2
+                                color: "transparent"; border.color: "#ffffff"; border.width: 1; antialiasing: true
                                 x: cropOverlay.rx; y: cropOverlay.ry; width: cropOverlay.rw; height: cropOverlay.rh
                             }
-                            // Top edge handle
-                            Rectangle {
-                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
-                                height: 10; x: cropOverlay.rx; width: cropOverlay.rw; y: cropOverlay.ry - 5
+                            // Rule-of-thirds guides (only while editing).
+                            Repeater {
+                                model: cropEdit ? 2 : 0
+                                Rectangle { color: "#ffffff"; opacity: 0.25; width: 1; antialiasing: true
+                                    height: cropOverlay.rh; y: cropOverlay.ry
+                                    x: cropOverlay.rx + cropOverlay.rw * (index + 1) / 3 }
+                            }
+                            Repeater {
+                                model: cropEdit ? 2 : 0
+                                Rectangle { color: "#ffffff"; opacity: 0.25; height: 1; antialiasing: true
+                                    width: cropOverlay.rw; x: cropOverlay.rx
+                                    y: cropOverlay.ry + cropOverlay.rh * (index + 1) / 3 }
+                            }
+
+                            // Drag the WHOLE crop box (keeps its size). Declared before
+                            // the edge/corner handles so those win along the borders.
+                            MouseArea {
+                                visible: cropEdit; hoverEnabled: true; cursorShape: Qt.SizeAllCursor
+                                x: cropOverlay.rx + 14; y: cropOverlay.ry + 14
+                                width: Math.max(0, cropOverlay.rw - 28); height: Math.max(0, cropOverlay.rh - 28)
+                                property real sx: 0; property real sy: 0
+                                property int oL: 0; property int oR: 0; property int oT: 0; property int oB: 0
+                                onPressed: (mouse) => { var p = mapToItem(cropOverlay, mouse.x, mouse.y); sx = p.x; sy = p.y; oL = cropLeft; oR = cropRight; oT = cropTop; oB = cropBottom }
+                                onPositionChanged: (mouse) => {
+                                    var p = mapToItem(cropOverlay, mouse.x, mouse.y)
+                                    var dvx = Math.round((p.x - sx) / Math.max(1, cropOverlay.cr.width) * sourceW)
+                                    var dvy = Math.round((p.y - sy) / Math.max(1, cropOverlay.cr.height) * sourceH)
+                                    var nL = oL + dvx, nR = oR - dvx
+                                    if (nL < 0) { nR += nL; nL = 0 }
+                                    if (nR < 0) { nL += nR; nR = 0 }
+                                    var nT = oT + dvy, nB = oB - dvy
+                                    if (nT < 0) { nB += nT; nT = 0 }
+                                    if (nB < 0) { nT += nB; nB = 0 }
+                                    cropLeft = Math.max(0, nL); cropRight = Math.max(0, nR)
+                                    cropTop = Math.max(0, nT); cropBottom = Math.max(0, nB)
+                                }
+                                onReleased: commit()
+                            }
+
+                            // Top edge: full-width grab strip + centered affordance bar.
+                            Item {
+                                visible: cropEdit
+                                x: cropOverlay.rx; y: cropOverlay.ry - 10; width: cropOverlay.rw; height: 20
                                 MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeVerCursor
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeVerCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
@@ -828,13 +885,15 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; antialiasing: true
+                                    width: Math.min(40, parent.width * 0.5); height: 5; radius: 2.5; color: cropOverlay.handleCol }
                             }
-                            // Bottom edge handle
-                            Rectangle {
-                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
-                                height: 10; x: cropOverlay.rx; width: cropOverlay.rw; y: cropOverlay.ry + cropOverlay.rh - 5
+                            // Bottom edge
+                            Item {
+                                visible: cropEdit
+                                x: cropOverlay.rx; y: cropOverlay.ry + cropOverlay.rh - 10; width: cropOverlay.rw; height: 20
                                 MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeVerCursor
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeVerCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.y - cropOverlay.cr.y) / Math.max(1, cropOverlay.cr.height) * sourceH)
@@ -842,13 +901,15 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; antialiasing: true
+                                    width: Math.min(40, parent.width * 0.5); height: 5; radius: 2.5; color: cropOverlay.handleCol }
                             }
-                            // Left edge handle
-                            Rectangle {
-                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
-                                width: 10; y: cropOverlay.ry; height: cropOverlay.rh; x: cropOverlay.rx - 5
+                            // Left edge
+                            Item {
+                                visible: cropEdit
+                                x: cropOverlay.rx - 10; y: cropOverlay.ry; width: 20; height: cropOverlay.rh
                                 MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeHorCursor
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeHorCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -856,13 +917,15 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; antialiasing: true
+                                    width: 5; height: Math.min(40, parent.height * 0.5); radius: 2.5; color: cropOverlay.handleCol }
                             }
-                            // Right edge handle
-                            Rectangle {
-                                visible: cropEdit; radius: 3; opacity: 0.92; color: cropOverlay.handleCol
-                                width: 10; y: cropOverlay.ry; height: cropOverlay.rh; x: cropOverlay.rx + cropOverlay.rw - 5
+                            // Right edge
+                            Item {
+                                visible: cropEdit
+                                x: cropOverlay.rx + cropOverlay.rw - 10; y: cropOverlay.ry; width: 20; height: cropOverlay.rh
                                 MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeHorCursor
+                                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeHorCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var v = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -870,14 +933,14 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; antialiasing: true
+                                    width: 5; height: Math.min(40, parent.height * 0.5); radius: 2.5; color: cropOverlay.handleCol }
                             }
-                            // Corner handles — drag BOTH axes at once (parity with
-                            // the classic editor's corner dots).
-                            Rectangle {   // top-left
-                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
-                                width: 14; height: 14; x: cropOverlay.rx - 7; y: cropOverlay.ry - 7
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeFDiagCursor
+                            // Corner handles (drag both axes). 22px hit area, 12px dot.
+                            Item {   // top-left
+                                visible: cropEdit
+                                x: cropOverlay.rx - 11; y: cropOverlay.ry - 11; width: 22; height: 22
+                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeFDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -887,12 +950,12 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; width: 12; height: 12; radius: 2; color: "#ffffff"; border.color: cropOverlay.handleCol; border.width: 2; antialiasing: true }
                             }
-                            Rectangle {   // top-right
-                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
-                                width: 14; height: 14; x: cropOverlay.rx + cropOverlay.rw - 7; y: cropOverlay.ry - 7
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeBDiagCursor
+                            Item {   // top-right
+                                visible: cropEdit
+                                x: cropOverlay.rx + cropOverlay.rw - 11; y: cropOverlay.ry - 11; width: 22; height: 22
+                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeBDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -902,12 +965,12 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; width: 12; height: 12; radius: 2; color: "#ffffff"; border.color: cropOverlay.handleCol; border.width: 2; antialiasing: true }
                             }
-                            Rectangle {   // bottom-left
-                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
-                                width: 14; height: 14; x: cropOverlay.rx - 7; y: cropOverlay.ry + cropOverlay.rh - 7
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeBDiagCursor
+                            Item {   // bottom-left
+                                visible: cropEdit
+                                x: cropOverlay.rx - 11; y: cropOverlay.ry + cropOverlay.rh - 11; width: 22; height: 22
+                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeBDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -917,12 +980,12 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; width: 12; height: 12; radius: 2; color: "#ffffff"; border.color: cropOverlay.handleCol; border.width: 2; antialiasing: true }
                             }
-                            Rectangle {   // bottom-right
-                                visible: cropEdit; radius: 3; opacity: 0.97; color: cropOverlay.handleCol
-                                width: 14; height: 14; x: cropOverlay.rx + cropOverlay.rw - 7; y: cropOverlay.ry + cropOverlay.rh - 7
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.SizeFDiagCursor
+                            Item {   // bottom-right
+                                visible: cropEdit
+                                x: cropOverlay.rx + cropOverlay.rw - 11; y: cropOverlay.ry + cropOverlay.rh - 11; width: 22; height: 22
+                                MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.SizeFDiagCursor
                                     onPositionChanged: (mouse) => {
                                         var p = mapToItem(cropOverlay, mouse.x, mouse.y)
                                         var vx = Math.round((p.x - cropOverlay.cr.x) / Math.max(1, cropOverlay.cr.width) * sourceW)
@@ -932,6 +995,7 @@ ApplicationWindow {
                                     }
                                     onReleased: commit()
                                 }
+                                Rectangle { anchors.centerIn: parent; width: 12; height: 12; radius: 2; color: "#ffffff"; border.color: cropOverlay.handleCol; border.width: 2; antialiasing: true }
                             }
                         }
                         }
@@ -954,7 +1018,11 @@ ApplicationWindow {
                                 if (pressed && win.tool === "hand") { win.pvOffX += (m.x - lastX); win.pvOffY += (m.y - lastY); lastX = m.x; lastY = m.y; win.clampPan() }
                             }
                             onDoubleClicked: win.resetPreviewView()
-                            onWheel: (w) => win.pvZoomAt(w.angleDelta.y > 0 ? 1.25 : 0.8, w.x, w.y)
+                        }
+                        // Wheel zoom works in ANY mode (even while editing crop),
+                        // independent of the Hand/Zoom pan MouseArea above.
+                        WheelHandler {
+                            onWheel: (ev) => win.pvZoomAt(ev.angleDelta.y > 0 ? 1.25 : 0.8, ev.point.position.x, ev.point.position.y)
                         }
                         Label {
                             anchors.centerIn: parent
