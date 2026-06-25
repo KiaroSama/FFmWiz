@@ -193,6 +193,11 @@ question. Use it when your encode recipe is fixed and only the crop changes per 
 `config.env` is missing, it is created from the template on first run. `input_path` is
 required in `config.env` for this mode.
 
+Beyond the core video/audio settings, Mode 2 also reads the optional recipe keys for audio
+sample rate, single‑pass loudnorm, NVENC multipass, CPU two‑pass, color range, and global
+video/audio speed + reverse (see the table in §7). Anything you leave blank keeps the normal
+interactive default, so an old `config.env` keeps working unchanged.
+
 ---
 
 ## 7. The `config.env` file (full reference)
@@ -230,10 +235,20 @@ default answers Mode 2 loads.
 | `audio_tracks` | 0 / 0,1,2 / all / d / e / de | `de` | Which audio streams to keep. |
 | `audio_codec` | aac, libopus, opus, libmp3lame, flac, pcm_s16le, copy, ... | `aac` | Audio encoder. |
 | `audio_bitrate_kbps` | integer or `n` | `n` | Audio bitrate per stream (kbps). |
+| `audio_sample_rate` | integer Hz or `n` | `n` | Output audio sample rate; `n` keeps source. Ignored for `copy`. |
 | `keep_source_metadata` | y/n | `y` | Keep metadata/chapters/extra streams + subtitle selection. |
 | `subtitle_tracks` | selection / none / clear / delete | `none` | Which subtitles to keep. |
 | `keep_embedded_attachments` | y/n | `n` | Keep MKV attachment streams (fonts). |
 | `detect_duplicate_audio` | y/n | `y` | Flag duplicate/empty audio for d/e/de. |
+| `loudnorm` | off / on | `off` | Single‑pass EBU R128 loudness normalization (switches `copy`→AAC). |
+| `loudnorm_target_i` | LUFS (e.g. -16, -14, -23) | `-16` | Integrated‑loudness target when `loudnorm=on`. |
+| `nvenc_multipass` | disabled / qres / fullres | `disabled` | NVENC multi‑pass quality (NVENC encoders only). |
+| `cpu_two_pass` | y/n | `n` | CPU two‑pass encoding (supported CPU encoders only). |
+| `color_range` | source / tv / pc / unspecified | `source` | Range signaling when the source range is unknown (no pixel conversion). |
+| `video_speed` | number 0.10–8.0 or `n` | `n` | Global video speed multiplier (forces re‑encode). |
+| `reverse_video` | y/n | `n` | Reverse the whole video (forces re‑encode). |
+| `audio_speed` | number 0.10–8.0 / match_video / `n` | `n` | Global audio speed; `match_video` follows the video speed/reverse. |
+| `reverse_audio` | y/n | `n` | Reverse the audio (ignored when `audio_speed=match_video`). |
 | `logging_enabled` | y/n | `y` | Write dated logs into `logs/`. |
 | `log_retention_days` | integer | `0` | `0` keeps forever; N deletes logs older than N days. |
 | `gui_engine` | classic / qml | `classic` | Unified‑editor engine (env `FFMWIZ_GUI_ENGINE` overrides). |
@@ -277,6 +292,43 @@ audio_tracks=0
 audio_codec=aac
 audio_bitrate_kbps=192
 subtitle_tracks=none
+```
+
+```ini
+# Normalized, slightly faster lecture: 2x speed, loudness -14 LUFS, 48 kHz
+output_format=mp4
+video_codec=H264
+use_gpu=y
+audio_tracks=0
+audio_codec=aac
+audio_bitrate_kbps=160
+audio_sample_rate=48000
+loudnorm=on
+loudnorm_target_i=-14
+video_speed=2
+audio_speed=match_video
+```
+
+```ini
+# High-quality CPU two-pass H.265 at a fixed size target
+output_format=mp4
+video_codec=H265
+use_gpu=n
+video_bitrate_kbps=3000
+video_bitrate_mode=strict_size
+cpu_two_pass=y
+audio_codec=aac
+audio_bitrate_kbps=160
+```
+
+```ini
+# NVENC HEVC with full-resolution two-pass (best NVENC quality)
+output_format=mp4
+video_codec=H265
+use_gpu=y
+video_bitrate_kbps=6000
+nvenc_multipass=fullres
+audio_codec=aac
 ```
 
 ---

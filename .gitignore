@@ -13,6 +13,9 @@ env/
 # The sanitized template config.env.example IS committed.
 config.env
 !config.env.example
+# Legacy / alternate personal config names; never commit if a user keeps one.
+config.json
+config.ini
 
 Logs/
 Commands/

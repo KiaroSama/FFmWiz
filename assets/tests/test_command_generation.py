@@ -2531,6 +2531,65 @@ class CommandGenerationTests(unittest.TestCase):
         # The auto-created config.env must match the committed sample exactly.
         self.assertEqual(FFmWiz.CONFIG_TEMPLATE, example)
 
+    def _extra_recipe_answers(self):
+        # Minimal answers with one video + one audio stream selected.
+        return {
+            "video_streams": [{"codec_name": "h264", "width": 1920, "height": 1080}],
+            "audio_streams": [{"codec_name": "aac", "sample_rate": "44100"}],
+            "audio_tracks": [0],
+            "audio_codec": "aac",
+            "output_ext": "mp4",
+            "video_codec": "H265",
+        }
+
+    def test_apply_config_extra_recipe_options_sets_all_keys(self):
+        answers = self._extra_recipe_answers()
+        cfg = FFmWiz.parse_env_config("\n".join([
+            "nvenc_multipass=fullres",
+            "cpu_two_pass=y",
+            "color_range=tv",
+            "audio_sample_rate=48000",
+            "loudnorm=on",
+            "loudnorm_target_i=-14",
+            "video_speed=2",
+            "reverse_video=y",
+            "audio_speed=match_video",
+        ]))
+        FFmWiz.apply_config_extra_recipe_options(answers, cfg)
+        self.assertEqual(answers["nvenc_multipass"], "fullres")
+        self.assertTrue(answers["cpu_two_pass"])
+        self.assertEqual(answers["color_range_choice"], "tv")
+        self.assertEqual(answers["audio_sample_rate"], 48000)
+        self.assertFalse(answers.get("audio_sample_rate_keep"))
+        self.assertTrue(answers["loudnorm_enabled"])
+        self.assertEqual(answers["loudnorm_mode"], "single")
+        self.assertEqual(answers["loudnorm_target_i"], -14.0)
+        self.assertTrue(answers["video_speed_enabled"])
+        self.assertEqual(answers["video_speed_factor"], 2.0)
+        self.assertTrue(answers["reverse_video"])
+        self.assertTrue(answers["audio_speed_from_video"])
+
+    def test_apply_config_extra_recipe_options_defaults_change_nothing(self):
+        # Empty / default config must not enable any optional transform.
+        answers = self._extra_recipe_answers()
+        cfg = FFmWiz.parse_env_config(FFmWiz.CONFIG_TEMPLATE)
+        FFmWiz.apply_config_extra_recipe_options(answers, cfg)
+        self.assertNotIn("loudnorm_enabled", answers)
+        self.assertNotIn("video_speed_enabled", answers)
+        self.assertNotIn("audio_speed_enabled", answers)
+        self.assertNotIn("audio_speed_from_video", answers)
+        self.assertNotIn("color_range_choice", answers)
+        # nvenc_multipass=disabled and cpu_two_pass=n are explicit no-ops.
+        self.assertEqual(answers.get("nvenc_multipass"), "disabled")
+        self.assertFalse(answers.get("cpu_two_pass"))
+
+    def test_apply_config_extra_recipe_options_rejects_bad_values(self):
+        answers = self._extra_recipe_answers()
+        for bad in ("nvenc_multipass=triple", "color_range=rec709", "loudnorm=maybe"):
+            cfg = FFmWiz.parse_env_config(bad)
+            with self.assertRaises(ValueError):
+                FFmWiz.apply_config_extra_recipe_options(self._extra_recipe_answers(), cfg)
+
 
     def test_run_wizard_question_numbers_continue_after_join_subquestions(self):
         class StopRun(Exception):
