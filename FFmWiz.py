@@ -414,9 +414,11 @@ FFMPEG_REFERENCE_FILE_NAME = "ffmwiz-ffmpeg-reference.txt"
 CONFIG_TEMPLATE = """# ============================================================================
 # FFmWiz configuration  (config.env)
 # ============================================================================
-# This file stores the DEFAULT ANSWERS that Mode 2 ("Load config and ask crop
-# only") loads, so you can batch-encode with a fixed recipe and only confirm
-# the crop per file. Mode 1 (the full interactive wizard) ignores this file.
+# This file stores DEFAULT ANSWERS for Mode 2 ("Wizard from config"). Mode 2
+# runs the full wizard but auto-fills every question whose value is set here and
+# only ASKS the questions you leave blank. The graphical editor question is
+# always asked, and any crop/speed/reverse/audio set here are pre-applied inside
+# the editor. Mode 1 (the full interactive wizard) ignores this file.
 #
 # It is also a self-contained REFERENCE: every setting below has a help comment,
 # and the bottom of the file has container-compatibility notes, ready-made
@@ -511,8 +513,8 @@ use_gpu=y
 
 # crop: n (off) | y (use the crop_* margins below) | inline "top,left,right,bottom"
 #   like 100,300,200,550. Margins are PIXELS REMOVED from each side, NOT x/y
-#   offsets. NOTE: Mode 2 ALWAYS asks the crop question interactively and ignores
-#   this value (crop is the one thing Mode 2 is designed to vary per file).
+#   offsets. In Mode 2 these are pre-applied and shown in the graphical editor;
+#   leave crop blank to be asked. Snapped to even output width/height.
 crop=n
 # crop_top/left/right/bottom: pixels removed per side (integer >= 0). Used only
 #   when crop=y. FFmWiz snaps the result to even width/height (chroma-safe).
@@ -15600,16 +15602,20 @@ def step_unified_video_editor_for_encode(answers: dict[str, Any]) -> None:
             answers["_unified_video_editor_used"] = False
             answers["_unified_video_editor_declined"] = True
             answers["_disable_followup_video_gui_prompts"] = True
-            answers["crop_enabled"] = False
-            answers["crop_values_inline"] = False
-            for key in ("crop_top", "crop_left", "crop_right", "crop_bottom"):
-                answers.pop(key, None)
-            answers["video_speed_enabled"] = False
-            answers["reverse_video"] = False
-            answers["audio_speed_from_video"] = False
-            answers["cut_keep_ranges"] = []
-            answers.pop("separator_points", None)
-            answers.pop("_unified_separator_points", None)
+            # In the config wizard (Mode 2), declining the editor must NOT discard
+            # crop/speed/reverse that came from config.env; those were already
+            # applied and should still take effect.
+            if not answers.get("_config_mode"):
+                answers["crop_enabled"] = False
+                answers["crop_values_inline"] = False
+                for key in ("crop_top", "crop_left", "crop_right", "crop_bottom"):
+                    answers.pop(key, None)
+                answers["video_speed_enabled"] = False
+                answers["reverse_video"] = False
+                answers["audio_speed_from_video"] = False
+                answers["cut_keep_ranges"] = []
+                answers.pop("separator_points", None)
+                answers.pop("_unified_separator_points", None)
             return
         if lowered in {"y", "yes"}:
             note("Loading Unified Graphical Video Editor...")
@@ -18206,6 +18212,47 @@ def apply_unified_video_editor_answers(answers: dict[str, Any]) -> None:
         answers["cut_keep_ranges"] = normalize_cut_ranges(answers.get("_unified_cut_keep_ranges") or [], duration)
 
 
+def apply_config_settings_after_input(
+    answers: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    skip_crop: bool = False,
+    force_video_options: bool = False,
+) -> None:
+    """Apply every config.env setting to `answers` once the input file's metadata
+    is already loaded. Shared by Mode 2 (config wizard) and the legacy loader."""
+    answers["detect_duplicate_audio"] = parse_bool_config(config_value(config, "detect_duplicate_audio"), True)
+    apply_output_location_value(answers, config_value(config, "output_path"))
+
+    input_path = Path(str(answers.get("input_path") or ""))
+    input_ext = input_path.suffix.lstrip(".") or "mp4"
+    default_ext = "mp4" if answers.get("video_streams") else "mp3"
+    output_format = config_value(config, "output_format") or default_ext
+    answers["output_ext"] = normalize_format(output_format, input_ext)
+
+    if output_has_video(answers):
+        apply_config_video_options(answers, config, skip_crop=skip_crop, force_video_options=force_video_options)
+
+    apply_config_audio_options(answers, config)
+    apply_config_source_extra_options(answers, config)
+    apply_config_subtitle_options(answers, config)
+    apply_config_extra_recipe_options(answers, config)
+
+
+def seed_unified_editor_from_config(answers: dict[str, Any], config: dict[str, Any]) -> None:
+    """Seed the unified graphical editor's initial state from config so that any
+    crop margins, speed, reverse, or audio settings provided in config.env are
+    visible (and pre-applied) when the editor opens in the config wizard.
+
+    Crop margins are read from answers['crop_*'] directly by the editor; here we
+    seed the editor-specific keys for speed / reverse / include-audio."""
+    if config_value(config, "video_speed").strip() or config_value(config, "reverse_video").strip():
+        answers["_unified_video_speed"] = encode_video_speed_factor(answers)
+        answers["_unified_reverse_video"] = bool(answers.get("reverse_video"))
+    has_audio = bool(answers.get("audio_streams")) and bool(selected_audio_streams(answers))
+    answers["_unified_include_audio"] = has_audio
+
+
 def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: bool = False) -> None:
     ensure_config_file(path)
     try:
@@ -18221,25 +18268,72 @@ def load_answers_from_config(answers: dict[str, Any], path: Path, skip_crop: boo
         raise ValueError(f"input_path does not exist: {input_path}")
 
     load_input_metadata(answers, input_path)
-    answers["detect_duplicate_audio"] = parse_bool_config(config_value(config, "detect_duplicate_audio"), True)
-    apply_output_location_value(answers, config_value(config, "output_path"))
     print_source_info(answers)
-
-    input_ext = input_path.suffix.lstrip(".") or "mp4"
-    default_ext = "mp4" if answers.get("video_streams") else "mp3"
-    output_format = config_value(config, "output_format") or default_ext
-    answers["output_ext"] = normalize_format(output_format, input_ext)
-
-    if output_has_video(answers):
-        apply_config_video_options(answers, config, skip_crop=skip_crop, force_video_options=skip_crop)
-
-    apply_config_audio_options(answers, config)
-    apply_config_source_extra_options(answers, config)
-    apply_config_subtitle_options(answers, config)
-    apply_config_extra_recipe_options(answers, config)
+    apply_config_settings_after_input(answers, config, skip_crop=skip_crop, force_video_options=skip_crop)
 
 
-def run_wizard(answers: dict[str, Any]) -> None:
+def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) -> None:
+    # config is None for Mode 1 (full wizard). In Mode 2 it is the parsed
+    # config.env: every question whose config value is non-empty is auto-applied
+    # and SKIPPED; empty ones are asked (just like Mode 1). The unified graphical
+    # editor and the final "start now?" question are ALWAYS asked.
+    config_mode = config is not None
+
+    def cfg_has(key: str) -> bool:
+        return config_mode and config_value(config, key).strip() != ""
+
+    # step name -> config key(s). A step is skipped only when ALL its keys are
+    # provided. Steps not listed (join_inputs, unified_video_editor, cuts,
+    # audio_cut, start_now) are NEVER auto-skipped, so they are always asked.
+    skip_map: dict[str, tuple[str, ...]] = {
+        "input_path": ("input_path",),
+        "output_location": ("output_path",),
+        "output_format": ("output_format",),
+        "video_codec": ("video_codec",),
+        "use_gpu": ("use_gpu",),
+        "crop_enabled": ("crop",),
+        "crop_top": ("crop",), "crop_left": ("crop",), "crop_right": ("crop",), "crop_bottom": ("crop",),
+        "video_bitrate": ("video_bitrate_kbps",),
+        "nvenc_multipass": ("nvenc_multipass",),
+        "cpu_two_pass": ("cpu_two_pass",),
+        "resolution": ("resolution",),
+        "fps": ("fps",),
+        "video_speed_reverse": ("video_speed", "reverse_video"),
+        "audio_tracks": ("audio_tracks",),
+        "loudnorm": ("loudnorm",),
+        "audio_speed_reverse": ("audio_speed", "reverse_audio"),
+        "audio_codec": ("audio_codec",),
+        "audio_bitrate": ("audio_bitrate_kbps",),
+        "audio_sample_rate": ("audio_sample_rate",),
+        "source_extras": ("keep_source_metadata",),
+        "subtitle_tracks": ("subtitle_tracks",),
+        "color_range": ("color_range",),
+    }
+
+    applied = {"done": False}
+
+    def ensure_config_applied() -> None:
+        if not config_mode or applied["done"]:
+            return
+        if not answers.get("input_path"):
+            return
+        if not (answers.get("video_streams") or answers.get("audio_streams")):
+            return
+        apply_config_settings_after_input(
+            answers, config, skip_crop=not cfg_has("crop"), force_video_options=True
+        )
+        seed_unified_editor_from_config(answers, config)
+        answers["_config_mode"] = True
+        applied["done"] = True
+
+    def is_config_skipped(step: "Step") -> bool:
+        if not config_mode or not applied["done"]:
+            return False
+        keys = skip_map.get(step.name)
+        if not keys:
+            return False
+        return all(cfg_has(k) for k in keys)
+
     steps = [
         Step("input_path", lambda a: True, step_input_path),
         Step("join_inputs", wizard_join_inputs_applicable, step_join_additional_inputs_for_encode),
@@ -18273,16 +18367,19 @@ def run_wizard(answers: dict[str, Any]) -> None:
         Step("start_now", lambda a: True, step_start_now),
     ]
 
+    def runnable(pos: int) -> bool:
+        return steps[pos].applicable(answers) and not is_config_skipped(steps[pos])
+
     def next_index(start: int) -> int:
         idx = start
-        while idx < len(steps) and not steps[idx].applicable(answers):
+        while idx < len(steps) and not runnable(idx):
             idx += 1
         return idx
 
     def prev_index(start: int) -> int:
         idx = start
         while idx > 0 and (
-            not steps[idx].applicable(answers)
+            not runnable(idx)
             or is_auto_unified_crop_step(idx)
             or step_is_auto_back_skip(steps[idx], answers)
         ):
@@ -18299,10 +18396,20 @@ def run_wizard(answers: dict[str, Any]) -> None:
         count = 0
         join_pos = next((pos for pos, step in enumerate(steps) if step.name == "join_inputs"), -1)
         for pos in range(current + 1):
-            if steps[pos].applicable(answers) and not is_auto_unified_crop_step(pos):
+            if runnable(pos) and not is_auto_unified_crop_step(pos):
                 count += 1
         extra = int(answers.get("_join_question_extra", 0) or 0) if join_pos >= 0 and current >= join_pos else 0
         return answers.get("_question_offset", 0) + count + extra
+
+    # In config mode, pre-load the input file from config (so the input question
+    # is skipped) and apply every provided setting before the first question.
+    if config_mode and cfg_has("input_path"):
+        cfg_input = terminal_path(config_value(config, "input_path"))
+        if not cfg_input.exists() or not cfg_input.is_file():
+            fail(f"input_path in config.env does not exist: {cfg_input}")
+        load_input_metadata(answers, cfg_input)
+        print_source_info(answers)
+    ensure_config_applied()
 
     idx = next_index(0)
     while idx < len(steps):
@@ -18310,6 +18417,7 @@ def run_wizard(answers: dict[str, Any]) -> None:
             answers["_question_number"] = question_number(idx)
             steps[idx].run(answers)
             apply_unified_video_editor_answers(answers)
+            ensure_config_applied()
             idx = next_index(idx + 1)
         except Back:
             if idx == 0:
@@ -20492,7 +20600,7 @@ def ask_main_menu(answers: dict[str, Any], config_path: Path) -> int:
     print()
     print(paint("FFmWiz Main menu:", Color.BOLD + Color.LIGHT_BLUE))
     print(f"  {paint('1.', Color.LIGHT_BLUE)} Interactive wizard {paint('[1]', Color.GREEN)}")
-    print(f"  {paint('2.', Color.LIGHT_BLUE)} Load config and ask crop only")
+    print(f"  {paint('2.', Color.LIGHT_BLUE)} Wizard from config (ask only what is blank)")
     print(f"  {paint('3.', Color.LIGHT_BLUE)} Cut video only with copy")
     print(f"  {paint('4.', Color.LIGHT_BLUE)} Folder Encode")
     print(f"  {paint('5.', Color.LIGHT_BLUE)} Add files to video")
@@ -23858,24 +23966,17 @@ def build_cut_filter_complex(
 
 
 def print_prerequisite_summary(ffmpeg: str | None, ffprobe: str | None) -> None:
-    """Visible first-run prerequisite check. The required tools (FFmpeg/FFprobe)
-    and the optional GUI runtime (PySide6) are already validated earlier with
-    interactive install prompts by check_tools()/ensure_pyside6_installed();
-    this prints a clear summary so the user can see what was checked."""
-    print()
-    print(paint("Prerequisite check:", Color.BOLD + Color.LIGHT_BLUE))
+    """Prerequisites (FFmpeg/FFprobe and the optional PySide6 GUI runtime) are
+    validated behind the scenes by check_tools()/ensure_pyside6_installed(),
+    which prompt to install anything missing. This summary is intentionally
+    silent: it only records the resolved tools to the log, with no console
+    output, so startup stays clean."""
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    startup_line("  Python", f"{py_ver} (OK)", Color.LIME)
-    startup_line("  FFmpeg", f"found ({ffmpeg})" if ffmpeg else "missing",
-                 Color.LIME if ffmpeg else Color.RED, Color.WHITE if ffmpeg else Color.RED)
-    startup_line("  FFprobe", f"found ({ffprobe})" if ffprobe else "missing",
-                 Color.LIME if ffprobe else Color.RED, Color.WHITE if ffprobe else Color.RED)
-    if _pyside6_available():
-        startup_line("  PySide6 (GUI)", "installed", Color.LIME)
-    else:
-        startup_line("  PySide6 (GUI)",
-                     "not installed - graphical editors disabled (the CLI still works)",
-                     Color.YELLOW, Color.YELLOW)
+    log_info(
+        f"Prerequisites OK: Python={py_ver}; ffmpeg={ffmpeg or 'missing'}; "
+        f"ffprobe={ffprobe or 'missing'}; pyside6={'installed' if _pyside6_available() else 'absent'}",
+        component="Startup",
+    )
 
 
 def print_startup_banner(config_path: Path, launcher_path: Path, answers: dict[str, Any] | None = None) -> None:
@@ -24796,25 +24897,20 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     if start_mode == 3:
         return run_copy_cut_mode(base_answers)
     if start_mode == 2:
+        ensure_config_file(config_path)
         try:
-            load_answers_from_config(answers, config_path, skip_crop=True)
+            wizard_config = parse_env_config(config_path.read_text(encoding="utf-8-sig"))
         except Exception as exc:
-            fail(str(exc))
-        answers["_question_offset"] = 1
-        try:
-            run_crop_only_prompt(answers)
-            answers["_question_number"] = answers.get("_last_question_number", 1) + 1
-            step_start_now(answers)
-        except Back:
-            note("Returning to main menu.")
+            fail(f"Could not read config file: {config_path}. {exc}")
             return None
     else:
-        answers["_question_offset"] = 1
-        try:
-            run_wizard(answers)
-        except Back:
-            note("Returning to main menu.")
-            return None
+        wizard_config = None
+    answers["_question_offset"] = 1
+    try:
+        run_wizard(answers, config=wizard_config)
+    except Back:
+        note("Returning to main menu.")
+        return None
 
     cmd = answers["cmd"]
     if not answers.get("start_now", True):
