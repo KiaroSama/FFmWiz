@@ -23096,47 +23096,28 @@ def step_extract_stream_index(answers: dict[str, Any]) -> None:
 
 
 def step_extract_stream_format(answers: dict[str, Any]) -> None:
-    """Ask which output container to extract into. Every option keeps the stream
+    """Ask which output container to extract into, as a single-line prompt
+    consistent with the other questions. Every listed option keeps the stream
     with -c copy (no re-encode). Default is m4a for common MP4-family audio."""
     stream = answers["extract_stream"]
     options, default_ext = extract_stream_container_options(stream)
     codec_type = str(stream.get("codec_type") or "stream").lower()
     codec = str(stream.get("codec_name") or "unknown")
-    type_color = {"video": Color.MAGENTA, "audio": Color.BLUE, "subtitle": Color.LIGHT_YELLOW}.get(codec_type, Color.WHITE)
-    while True:
-        print()
-        print(paint(f"Output container for the extracted {codec_type} stream", Color.BOLD + Color.LIGHT_BLUE)
-              + " " + paint(f"({codec})", type_color))
-        note("All options below keep the original stream as-is with -c copy (no re-encode).")
-        for idx, ext in enumerate(options, start=1):
-            label = ext + (f"   {paint('[default]', Color.GREEN)}" if idx == 1 else "")
-            print(selection_menu_line(idx, label))
-        value = ask_raw(
-            question_prompt(
-                answers,
-                "Select an output format",
-                f"1-{len(options)} or type an extension; example: {example_text(default_ext)}",
-                "1",
-            )
-        ).strip().lower().lstrip(".")
-        if is_back_value(value):
-            raise Back()
-        if not value:
-            chosen = default_ext
-        elif value.isdigit():
-            num = int(value)
-            if not (1 <= num <= len(options)):
-                error(f"Enter a number from 1 to {len(options)}, or a file extension.")
-                continue
-            chosen = options[num - 1]
-        else:
-            chosen = value
-        answers["extract_output_ext"] = chosen
-        log_info(
-            f"User choice: extract container={chosen}; type={codec_type}; codec={codec}; "
-            f"offered={options}"
+    value = ask_raw(
+        question_prompt(
+            answers,
+            "Enter output container",
+            f"no re-encode, copy-compatible: {','.join(options)}",
+            default_ext,
         )
-        return
+    ).strip().lower().lstrip(".")
+    if is_back_value(value):
+        raise Back()
+    chosen = value or default_ext
+    answers["extract_output_ext"] = chosen
+    log_info(
+        f"User choice: extract container={chosen}; type={codec_type}; codec={codec}; offered={options}"
+    )
 
 
 def step_extract_stream_output_path(answers: dict[str, Any]) -> None:
