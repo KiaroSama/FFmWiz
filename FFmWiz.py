@@ -4578,15 +4578,16 @@ def _write_progress_line(rendered: str) -> None:
         return
     _enable_windows_vt_mode()
     width = _progress_terminal_width()
-    visible = _visible_len(rendered)
-    rows = max(1, (visible + max(1, width - 1) - 1) // max(1, width - 1))
-    sys.stdout.write("\r")
-    for _ in range(max(0, _PROGRESS_LAST_ROWS - 1)):
-        sys.stdout.write("\033[2K\033[1A\r")
-    sys.stdout.write("\033[2K" + rendered)
+    # Clamp the status to a SINGLE terminal row so it never wraps. Line wrapping
+    # is what made the in-place redraw walk up too far and eat earlier lines
+    # (e.g. the "Final PowerShell command:" line). One column of margin avoids
+    # the deferred-wrap edge case on some terminals. With no wrapping, a plain
+    # carriage-return + clear-line is always correct.
+    rendered = _truncate_ansi_visible(rendered, max(1, width - 1))
+    sys.stdout.write("\r\033[2K" + rendered)
     sys.stdout.flush()
-    _PROGRESS_LAST_LEN = visible
-    _PROGRESS_LAST_ROWS = rows
+    _PROGRESS_LAST_LEN = _visible_len(rendered)
+    _PROGRESS_LAST_ROWS = 1
 
 
 def _finish_progress_line(rendered: str | None) -> None:
@@ -4605,11 +4606,8 @@ def _finish_progress_line(rendered: str | None) -> None:
             return
         _enable_windows_vt_mode()
         width = _progress_terminal_width()
-        visible = _visible_len(rendered)
-        sys.stdout.write("\r")
-        for _ in range(max(0, _PROGRESS_LAST_ROWS - 1)):
-            sys.stdout.write("\033[2K\033[1A\r")
-        sys.stdout.write("\033[2K" + rendered + "\n")
+        rendered = _truncate_ansi_visible(rendered, max(1, width - 1))
+        sys.stdout.write("\r\033[2K" + rendered + "\n")
     else:
         sys.stdout.write("")
     sys.stdout.flush()
