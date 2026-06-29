@@ -22876,6 +22876,79 @@ EXTRACT_SUBTITLE_EXTENSIONS = {
     "xsub": ".avi",
 }
 
+# Containers that accept each codec via -c copy (NO re-encode). The FIRST entry
+# is the recommended default shown to the user. A universal MKV/MKA option is
+# always appended so a clean copy target always exists.
+EXTRACT_COPY_CONTAINERS_AUDIO = {
+    "aac": ["m4a", "mp4", "aac", "ts", "mov"],
+    "alac": ["m4a", "mov", "caf"],
+    "ac3": ["m4a", "ac3", "mp4", "ts"],
+    "eac3": ["m4a", "eac3", "mp4", "ts"],
+    "mp3": ["m4a", "mp3", "mp4"],
+    "mp2": ["mp2", "mpg", "ts"],
+    "opus": ["opus", "ogg", "webm"],
+    "vorbis": ["ogg", "webm"],
+    "flac": ["flac", "ogg"],
+    "pcm_s16le": ["wav", "mov", "caf"],
+    "pcm_s24le": ["wav", "mov", "caf"],
+    "pcm_s32le": ["wav", "mov", "caf"],
+    "pcm_f32le": ["wav", "mov", "caf"],
+    "dts": ["dts", "ts"],
+    "truehd": ["thd"],
+}
+EXTRACT_COPY_CONTAINERS_VIDEO = {
+    "h264": ["mp4", "mov", "ts", "m4v"],
+    "hevc": ["mp4", "mov", "ts"],
+    "h265": ["mp4", "mov", "ts"],
+    "av1": ["mp4", "webm"],
+    "vp9": ["webm", "mp4"],
+    "vp8": ["webm"],
+    "mpeg4": ["mp4", "avi", "mov"],
+    "mpeg2video": ["mpg", "ts"],
+    "prores": ["mov"],
+}
+EXTRACT_COPY_CONTAINERS_SUBTITLE = {
+    "subrip": ["srt", "ass"],
+    "srt": ["srt", "ass"],
+    "text": ["srt"],
+    "mov_text": ["srt"],
+    "ass": ["ass", "ssa"],
+    "ssa": ["ssa", "ass"],
+    "webvtt": ["vtt"],
+    "hdmv_pgs_subtitle": ["sup"],
+    "pgs": ["sup"],
+    "dvd_subtitle": ["sub"],
+    "vobsub": ["sub"],
+    "dvbsub": ["sub"],
+}
+
+
+def extract_stream_container_options(stream: dict[str, Any]) -> tuple[list[str], str]:
+    """Return (ordered copy-compatible container extensions, default) for the
+    given stream. All options keep the stream with -c copy (no re-encode). The
+    first option is the recommended default (m4a for common MP4-family audio)."""
+    codec_type = str(stream.get("codec_type") or "").lower()
+    codec = str(stream.get("codec_name") or "").lower()
+    native = extract_stream_default_extension(stream).lstrip(".")
+    if codec_type == "audio":
+        base = EXTRACT_COPY_CONTAINERS_AUDIO.get(codec, [native])
+        universal = "mka"
+    elif codec_type == "video":
+        base = EXTRACT_COPY_CONTAINERS_VIDEO.get(codec, ["mkv", "mp4"])
+        universal = "mkv"
+    elif codec_type == "subtitle":
+        base = EXTRACT_COPY_CONTAINERS_SUBTITLE.get(codec, [native])
+        universal = "mkv"
+    else:
+        base = [native or "bin"]
+        universal = "mkv"
+    options: list[str] = []
+    for ext in [*base, universal]:
+        ext = (ext or "").lstrip(".").lower()
+        if ext and ext not in options:
+            options.append(ext)
+    return options, options[0]
+
 
 def stream_global_index(stream: dict[str, Any]) -> int | None:
     try:
@@ -22913,16 +22986,16 @@ def extract_stream_codec_args(stream: dict[str, Any]) -> tuple[list[str], str]:
     return ["-c", "copy"], "stream copy"
 
 
-def default_extract_stream_output_path(input_path: Path, stream: dict[str, Any]) -> Path:
+def default_extract_stream_output_path(input_path: Path, stream: dict[str, Any], ext: str | None = None) -> Path:
     stream_index = stream_global_index(stream)
     codec_type = str(stream.get("codec_type") or "stream").lower()
-    suffix = extract_stream_default_extension(stream)
+    suffix = ("." + ext.lstrip(".")) if ext else extract_stream_default_extension(stream)
     stem = f"{sanitize_output_stem(input_path.stem)}{EXTRACT_STREAM_OUTPUT_SUFFIX}{stream_index}_{codec_type}"
     return input_path.parent / f"{stem}{suffix}"
 
 
-def choose_extract_stream_output_path(input_path: Path, stream: dict[str, Any], value: str) -> Path:
-    default_path = default_extract_stream_output_path(input_path, stream)
+def choose_extract_stream_output_path(input_path: Path, stream: dict[str, Any], value: str, ext: str | None = None) -> Path:
+    default_path = default_extract_stream_output_path(input_path, stream, ext)
     default_suffix = default_path.suffix
     if not value:
         candidate = default_path
@@ -23022,9 +23095,54 @@ def step_extract_stream_index(answers: dict[str, Any]) -> None:
         return
 
 
+def step_extract_stream_format(answers: dict[str, Any]) -> None:
+    """Ask which output container to extract into. Every option keeps the stream
+    with -c copy (no re-encode). Default is m4a for common MP4-family audio."""
+    stream = answers["extract_stream"]
+    options, default_ext = extract_stream_container_options(stream)
+    codec_type = str(stream.get("codec_type") or "stream").lower()
+    codec = str(stream.get("codec_name") or "unknown")
+    type_color = {"video": Color.MAGENTA, "audio": Color.BLUE, "subtitle": Color.LIGHT_YELLOW}.get(codec_type, Color.WHITE)
+    while True:
+        print()
+        print(paint(f"Output container for the extracted {codec_type} stream", Color.BOLD + Color.LIGHT_BLUE)
+              + " " + paint(f"({codec})", type_color))
+        note("All options below keep the original stream as-is with -c copy (no re-encode).")
+        for idx, ext in enumerate(options, start=1):
+            label = ext + (f"   {paint('[default]', Color.GREEN)}" if idx == 1 else "")
+            print(selection_menu_line(idx, label))
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Select an output format",
+                f"1-{len(options)} or type an extension; example: {example_text(default_ext)}",
+                "1",
+            )
+        ).strip().lower().lstrip(".")
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            chosen = default_ext
+        elif value.isdigit():
+            num = int(value)
+            if not (1 <= num <= len(options)):
+                error(f"Enter a number from 1 to {len(options)}, or a file extension.")
+                continue
+            chosen = options[num - 1]
+        else:
+            chosen = value
+        answers["extract_output_ext"] = chosen
+        log_info(
+            f"User choice: extract container={chosen}; type={codec_type}; codec={codec}; "
+            f"offered={options}"
+        )
+        return
+
+
 def step_extract_stream_output_path(answers: dict[str, Any]) -> None:
     stream = answers["extract_stream"]
-    default_path = default_extract_stream_output_path(answers["input_path"], stream)
+    ext = answers.get("extract_output_ext")
+    default_path = default_extract_stream_output_path(answers["input_path"], stream, ext)
     folder_example = example_text(r"E:\output")
     name_example = example_text('"Extracted track"')
     value = ask_raw(
@@ -23036,7 +23154,7 @@ def step_extract_stream_output_path(answers: dict[str, Any]) -> None:
     )
     if is_back_value(value):
         raise Back()
-    answers["extract_output_path"] = choose_extract_stream_output_path(answers["input_path"], stream, value)
+    answers["extract_output_path"] = choose_extract_stream_output_path(answers["input_path"], stream, value, ext)
     log_info(f"Resolved extracted stream output path: {answers['extract_output_path']}")
 
 
@@ -23068,6 +23186,7 @@ def print_extract_stream_summary(answers: dict[str, Any], cmd: list[str]) -> Non
     print("  " + field_text("Selected stream", f"#{answers['extract_stream_index']}", Color.LIGHT_BLUE))
     print("  " + field_text("Type", stream.get("codec_type", "unknown"), Color.MAGENTA))
     print("  " + field_text("Codec", stream.get("codec_name", "unknown"), Color.CYAN))
+    print("  " + field_text("Container", Path(str(output_path)).suffix.lstrip(".") or "unknown", Color.AQUA))
     print("  " + field_text("Extraction mode", mode, Color.YELLOW))
     print("  " + field_text("Output", output_path, Color.LIME))
     print()
@@ -23104,6 +23223,7 @@ def run_extract_stream_mode(base_answers: dict[str, Any]) -> tuple[int, float] |
     steps = [
         Step("input_path", lambda a: True, step_extract_stream_input),
         Step("extract_stream_index", lambda a: True, step_extract_stream_index),
+        Step("extract_format", lambda a: True, step_extract_stream_format),
         Step("extract_output_path", lambda a: True, step_extract_stream_output_path),
         Step("start_now", lambda a: True, step_extract_stream_start_now),
     ]
