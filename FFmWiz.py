@@ -23049,92 +23049,261 @@ def print_extract_stream_candidates(answers: dict[str, Any]) -> None:
         print("  " + extract_stream_description(stream, answers))
 
 
+def parse_stream_index_spec(value: str) -> list[int]:
+    """Parse a stream selection into a sorted, de-duplicated list of ffprobe
+    stream indexes. Supports a single index (4), a list (1,2,3), a range (1-5),
+    and any mix (1-5,6,8-10)."""
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Enter at least one stream index.")
+    result: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            bits = [b.strip() for b in part.split("-")]
+            if len(bits) != 2 or not bits[0].isdigit() or not bits[1].isdigit():
+                raise ValueError(f"Invalid range: {part!r}. Use like 1-5.")
+            lo, hi = int(bits[0]), int(bits[1])
+            if hi < lo:
+                lo, hi = hi, lo
+            result.update(range(lo, hi + 1))
+        elif part.isdigit():
+            result.add(int(part))
+        else:
+            raise ValueError(
+                f"Invalid stream index: {part!r}. Use numbers, commas, and ranges (e.g. 1-5,6,8-10)."
+            )
+    if not result:
+        raise ValueError("Enter at least one stream index.")
+    return sorted(result)
+
+
+def extract_scan_files(answers: dict[str, Any], path: Path) -> list[dict[str, Any]]:
+    """Return extract entries for a file or folder path. A folder is scanned
+    (non-recursively) for media files. Each entry: {path, format, candidates,
+    by_index}. Files that fail to probe or have no extractable streams are
+    skipped."""
+    ffprobe = answers["ffprobe"]
+    if path.is_dir():
+        paths = sorted(
+            (p for p in path.iterdir()
+             if is_folder_media_candidate(p) and not looks_like_generated_output_file(p)),
+            key=lambda p: p.name.lower(),
+        )
+    else:
+        paths = [path]
+    entries: list[dict[str, Any]] = []
+    for p in paths:
+        try:
+            probe = ffprobe_json(ffprobe, p)
+        except Exception:
+            log_warn(f"Extract Stream skipped unreadable file: {p}")
+            continue
+        streams = probe.get("streams") or []
+        candidates = [s for s in streams if str(s.get("codec_type") or "").lower() in {"video", "audio", "subtitle"}]
+        if not candidates:
+            continue
+        by_index = {stream_global_index(s): s for s in candidates if stream_global_index(s) is not None}
+        entries.append({
+            "path": p,
+            "format": probe.get("format", {}),
+            "candidates": candidates,
+            "by_index": by_index,
+        })
+    return entries
+
+
+def extract_describe_stream(stream: dict[str, Any], fmt: dict[str, Any]) -> str:
+    """Compact per-stream description for the extract listing (no packet probe)."""
+    codec_type = str(stream.get("codec_type") or "unknown")
+    codec = str(stream.get("codec_name") or "unknown")
+    idx = stream_global_index(stream)
+    color = {"video": Color.MAGENTA, "audio": Color.BLUE, "subtitle": Color.LIGHT_YELLOW}.get(codec_type, Color.WHITE)
+    parts = [
+        field_text("stream index", idx if idx is not None else "unknown", Color.LIGHT_BLUE),
+        field_text("type", codec_type, color),
+        field_text("codec", codec, Color.CYAN),
+        field_text("duration", format_duration(stream_duration_seconds(stream, fmt)), Color.MAGENTA),
+    ]
+    if codec_type == "video":
+        parts.append(field_text("size", f"{stream.get('width', '?')}x{stream.get('height', '?')}", Color.LIME))
+    elif codec_type == "audio":
+        parts.append(field_text("channels", stream.get("channels", "?"), Color.GREEN))
+        parts.append(field_text("sample_rate", stream.get("sample_rate", "?"), Color.MAGENTA))
+        lang = display_language((stream.get("tags") or {}).get("language"))
+        if lang:
+            parts.append(field_text("lang", lang, Color.AQUA))
+    elif codec_type == "subtitle":
+        lang = display_language((stream.get("tags") or {}).get("language"))
+        parts.append(field_text("language", lang or "unknown", Color.AQUA))
+    return " | ".join(parts)
+
+
+def print_extract_files_listing(entries: list[dict[str, Any]]) -> None:
+    """List each file and its extractable streams (per file)."""
+    for entry in entries:
+        print()
+        print(
+            paint(entry["path"].name, Color.BOLD + Color.LIGHT_BLUE)
+            + paint(f"  ({len(entry['candidates'])} extractable stream(s))", Color.GRAY)
+        )
+        for stream in entry["candidates"]:
+            print("  " + extract_describe_stream(stream, entry["format"]))
+
+
+def build_extract_jobs(
+    entries: list[dict[str, Any]],
+    requested: list[int],
+    ext_override: str | None,
+) -> tuple[list[dict[str, Any]], list[tuple[str, list[int], bool]], list[int]]:
+    """Resolve the per-file extraction plan.
+
+    Returns (jobs, per_file_summary, missing_everywhere).
+      jobs: list of {path, stream, output_path, multi, fmt}
+      per_file_summary: [(file_name, [extracted indexes], multi_bool)]
+      missing_everywhere: requested indexes present in NO file
+    A file yielding >= 2 streams gets its own "<file.name>" subfolder; a file
+    yielding exactly one stream writes next to itself. When a single stream is
+    extracted from a single file, ext_override (if any) is honored; otherwise
+    each stream keeps its own copy-compatible default container.
+    """
+    jobs: list[dict[str, Any]] = []
+    per_file: list[tuple[str, list[int], bool]] = []
+    present_any: set[int] = set()
+    single_file_single_stream = len(entries) == 1 and len([i for i in requested if i in entries[0]["by_index"]]) == 1
+    for entry in entries:
+        got = [i for i in requested if i in entry["by_index"]]
+        present_any.update(got)
+        if not got:
+            continue
+        matching = [entry["by_index"][i] for i in got]
+        multi = len(matching) >= 2
+        # A file with several extracted streams gets its own folder named exactly
+        # after the file (e.g. "movie.mkv"). It lives under an "_Extracted" root
+        # so the folder name never clashes with the source file that sits in the
+        # same directory (a file and a folder cannot share a name).
+        out_dir = (entry["path"].parent / "_Extracted" / entry["path"].name) if multi else entry["path"].parent
+        for stream in matching:
+            if ext_override and single_file_single_stream:
+                ext = ext_override
+            else:
+                ext = extract_stream_container_options(stream)[1]
+            idx = stream_global_index(stream)
+            ctype = str(stream.get("codec_type") or "stream").lower()
+            stem = f"{sanitize_output_stem(entry['path'].stem)}{EXTRACT_STREAM_OUTPUT_SUFFIX}{idx}_{ctype}"
+            candidate = out_dir / f"{stem}.{ext.lstrip('.')}"
+            candidate = resolve_output_collision_against_inputs(candidate, [entry["path"]], "_Extract")
+            candidate = unique_numbered_path(candidate)
+            jobs.append({"path": entry["path"], "stream": stream, "output_path": candidate, "multi": multi, "fmt": entry["format"]})
+        per_file.append((entry["path"].name, got, multi))
+    missing_everywhere = [i for i in requested if i not in present_any]
+    return jobs, per_file, missing_everywhere
+
+
 def step_extract_stream_input(answers: dict[str, Any]) -> None:
-    step_input_path(answers)
-    print_source_info(answers)
-
-
-def step_extract_stream_index(answers: dict[str, Any]) -> None:
-    candidates = extract_stream_candidates(answers)
-    if not candidates:
-        raise ValueError("No extractable video, audio, or subtitle streams were found.")
-    print_extract_stream_candidates(answers)
-    by_index = {stream_global_index(stream): stream for stream in candidates}
     while True:
         value = ask_raw(
             question_prompt(
                 answers,
-                "Enter stream index to extract",
-                "use the ffprobe stream index shown above; 0 is stream index 0 here",
+                "Enter a media file OR a folder to extract from",
+                "a file extracts its streams; a folder extracts from every media file inside",
                 back="back=b, quit=exit",
             )
         )
-        lowered = value.lower().strip()
+        lowered = value.strip().lower()
         if lowered in {"b", "back"}:
             raise Back()
-        if not value:
-            error("Enter a stream index.")
+        if not value.strip():
+            error("Enter a file or folder path.")
             continue
-        if not re.fullmatch(r"\d+", value):
-            error("Enter a numeric stream index from the list above.")
+        path = terminal_path(value)
+        if not path.exists():
+            error("Path not found. Enter an existing file or folder path.")
             continue
-        stream_index = int(value)
-        stream = by_index.get(stream_index)
-        if stream is None:
-            allowed = ", ".join(str(idx) for idx in sorted(index for index in by_index if index is not None))
-            error(f"Stream index {stream_index} was not found. Available indexes: {allowed}")
+        entries = extract_scan_files(answers, path)
+        if not entries:
+            error("No extractable video/audio/subtitle streams were found here.")
             continue
-        answers["extract_stream"] = stream
-        answers["extract_stream_index"] = stream_index
-        log_info(
-            "User choice: extract_stream_index="
-            f"{stream_index}; type={stream.get('codec_type')}; codec={stream.get('codec_name')}"
+        answers["_extract_files"] = entries
+        answers["_extract_is_folder"] = path.is_dir()
+        answers["input_path"] = path
+        note(
+            f"Found {len(entries)} media file(s) with extractable streams."
+            if path.is_dir() else f"Loaded: {path.name}"
         )
+        print_extract_files_listing(entries)
+        log_info(f"Extract input resolved: path={path}; is_folder={path.is_dir()}; files={len(entries)}")
+        return
+
+
+def step_extract_stream_index(answers: dict[str, Any]) -> None:
+    entries = answers["_extract_files"]
+    all_indices = sorted({i for e in entries for i in e["by_index"]})
+    while True:
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter stream index(es) to extract",
+                "single 4; list 1,2,3; range 1-5; mix 1-5,6,8-10",
+                back="back=b, quit=exit",
+            )
+        )
+        lowered = value.strip().lower()
+        if lowered in {"b", "back"}:
+            raise Back()
+        try:
+            requested = parse_stream_index_spec(value)
+        except ValueError as exc:
+            error(str(exc))
+            continue
+        jobs, per_file, missing = build_extract_jobs(entries, requested, None)
+        if not jobs:
+            error(f"None of the requested stream(s) {requested} exist in any file. Available indexes: {all_indices}")
+            continue
+        answers["_extract_requested"] = requested
+        print()
+        print(paint("Extraction plan", Color.BOLD + Color.LIME))
+        for name, got, multi in per_file:
+            suffix = paint("  -> subfolder", Color.GRAY) if multi else ""
+            print("  " + field_text(name, "stream(s) " + ",".join(str(i) for i in got), Color.LIGHT_BLUE) + suffix)
+        if missing:
+            note("Requested stream index(es) not present in ANY file (skipped): "
+                 + ",".join(str(i) for i in missing))
+        skipped = [e["path"].name for e in entries if not any(i in e["by_index"] for i in requested)]
+        if skipped:
+            note("Files with none of the requested streams (skipped): " + ", ".join(skipped))
+        log_info(f"Extract spec: requested={requested}; jobs={len(jobs)}; missing={missing}")
         return
 
 
 def step_extract_stream_format(answers: dict[str, Any]) -> None:
-    """Ask which output container to extract into, as a single-line prompt
-    consistent with the other questions. Every listed option keeps the stream
-    with -c copy (no re-encode). Default is m4a for common MP4-family audio."""
-    stream = answers["extract_stream"]
-    options, default_ext = extract_stream_container_options(stream)
-    codec_type = str(stream.get("codec_type") or "stream").lower()
-    codec = str(stream.get("codec_name") or "unknown")
-    value = ask_raw(
-        question_prompt(
-            answers,
-            "Enter output container",
-            f"no re-encode, copy-compatible: {','.join(options)}",
-            default_ext,
-        )
-    ).strip().lower().lstrip(".")
-    if is_back_value(value):
-        raise Back()
-    chosen = value or default_ext
-    answers["extract_output_ext"] = chosen
-    log_info(
-        f"User choice: extract container={chosen}; type={codec_type}; codec={codec}; offered={options}"
-    )
-
-
-def step_extract_stream_output_path(answers: dict[str, Any]) -> None:
-    stream = answers["extract_stream"]
-    ext = answers.get("extract_output_ext")
-    default_path = default_extract_stream_output_path(answers["input_path"], stream, ext)
-    folder_example = example_text(r"E:\output")
-    name_example = example_text('"Extracted track"')
-    value = ask_raw(
-        question_prompt(
-            answers,
-            "Enter extracted stream output path, output folder, or bare output name",
-            f"Enter={default_path.name}; examples: {folder_example} or {name_example}",
-        )
-    )
-    if is_back_value(value):
-        raise Back()
-    answers["extract_output_path"] = choose_extract_stream_output_path(answers["input_path"], stream, value, ext)
-    log_info(f"Resolved extracted stream output path: {answers['extract_output_path']}")
+    """Ask the output container ONLY when exactly one stream from one file is
+    extracted (single-line prompt, m4a default for common audio). When several
+    streams are extracted, each keeps its own copy-compatible default container
+    automatically (no prompt), since one container cannot fit mixed types."""
+    entries = answers["_extract_files"]
+    requested = answers["_extract_requested"]
+    jobs, _per_file, _missing = build_extract_jobs(entries, requested, None)
+    if len(jobs) == 1:
+        stream = jobs[0]["stream"]
+        options, default_ext = extract_stream_container_options(stream)
+        value = ask_raw(
+            question_prompt(
+                answers,
+                "Enter output container",
+                f"no re-encode, copy-compatible: {','.join(options)}",
+                default_ext,
+            )
+        ).strip().lower().lstrip(".")
+        if is_back_value(value):
+            raise Back()
+        answers["_extract_ext"] = value or default_ext
+        log_info(f"User choice: extract container={answers['_extract_ext']}; offered={options}")
+    else:
+        answers["_extract_ext"] = None
+        note("Each extracted stream keeps a copy-compatible container automatically (no re-encode).")
 
 
 def build_extract_stream_command(ffmpeg: str, input_path: Path, stream: dict[str, Any], output_path: Path) -> list[str]:
@@ -23155,42 +23324,37 @@ def build_extract_stream_command(ffmpeg: str, input_path: Path, stream: dict[str
     return cmd
 
 
-def print_extract_stream_summary(answers: dict[str, Any], cmd: list[str]) -> None:
-    stream = answers["extract_stream"]
-    output_path = answers["extract_output_path"]
-    _codec_args, mode = extract_stream_codec_args(stream)
+def print_extract_stream_summary(answers: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
+    files = sorted({str(job["path"]) for job in jobs})
     print()
     print(paint("Extract Stream summary:", Color.BOLD + Color.LIME))
-    print("  " + field_text("Input", answers["input_path"], Color.WHITE))
-    print("  " + field_text("Selected stream", f"#{answers['extract_stream_index']}", Color.LIGHT_BLUE))
-    print("  " + field_text("Type", stream.get("codec_type", "unknown"), Color.MAGENTA))
-    print("  " + field_text("Codec", stream.get("codec_name", "unknown"), Color.CYAN))
-    print("  " + field_text("Container", Path(str(output_path)).suffix.lstrip(".") or "unknown", Color.AQUA))
-    print("  " + field_text("Extraction mode", mode, Color.YELLOW))
-    print("  " + field_text("Output", output_path, Color.LIME))
-    print()
-    print(paint("Final PowerShell command:", Color.FINAL_COMMAND_LABEL))
-    print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
-    log_info("Extract Stream summary: " + json.dumps({
-        "input": str(answers["input_path"]),
-        "stream_index": answers["extract_stream_index"],
-        "codec_type": stream.get("codec_type"),
-        "codec": stream.get("codec_name"),
-        "mode": mode,
-        "output": str(output_path),
-    }, ensure_ascii=False))
-    log_info("Final PowerShell command: " + command_to_powershell(cmd))
+    print("  " + field_text("Files", len(files), Color.LIGHT_BLUE))
+    print("  " + field_text("Streams to extract", len(jobs), Color.CYAN))
+    for job in jobs:
+        stream = job["stream"]
+        idx = stream_global_index(stream)
+        ctype = str(stream.get("codec_type") or "stream")
+        label = f"{Path(job['path']).name} #{idx} {ctype}"
+        out = Path(job["output_path"])
+        # For multi-stream files show the "<file.ext>" subfolder + name; else just name.
+        shown = f"{out.parent.name}/{out.name}" if job.get("multi") else out.name
+        print("    " + field_text(label, shown, Color.WHITE))
+    log_info("Extract Stream plan: " + json.dumps(
+        [{"input": str(job["path"]), "index": stream_global_index(job["stream"]),
+          "type": job["stream"].get("codec_type"), "codec": job["stream"].get("codec_name"),
+          "output": str(job["output_path"])} for job in jobs],
+        ensure_ascii=False,
+    ))
 
 
 def step_extract_stream_start_now(answers: dict[str, Any]) -> None:
-    cmd = build_extract_stream_command(
-        answers["ffmpeg"],
-        answers["input_path"],
-        answers["extract_stream"],
-        answers["extract_output_path"],
-    )
-    answers["cmd"] = cmd
-    print_extract_stream_summary(answers, cmd)
+    entries = answers["_extract_files"]
+    requested = answers["_extract_requested"]
+    jobs, _per_file, _missing = build_extract_jobs(entries, requested, answers.get("_extract_ext"))
+    if not jobs:
+        raise ValueError("No streams matched the requested selection.")
+    answers["_extract_jobs"] = jobs
+    print_extract_stream_summary(answers, jobs)
     answers["start_now"] = ask_yes_no(
         question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
         True,
@@ -23203,7 +23367,6 @@ def run_extract_stream_mode(base_answers: dict[str, Any]) -> tuple[int, float] |
         Step("input_path", lambda a: True, step_extract_stream_input),
         Step("extract_stream_index", lambda a: True, step_extract_stream_index),
         Step("extract_format", lambda a: True, step_extract_stream_format),
-        Step("extract_output_path", lambda a: True, step_extract_stream_output_path),
         Step("start_now", lambda a: True, step_extract_stream_start_now),
     ]
     try:
@@ -23212,22 +23375,37 @@ def run_extract_stream_mode(base_answers: dict[str, Any]) -> tuple[int, float] |
         note("Returning to main menu.")
         return None
     if not answers.get("start_now", True):
-        note("FFmpeg was not started. The command above is ready to run manually.")
+        note("FFmpeg was not started. The plan above is ready to run manually.")
         return None
-    output_path = Path(answers["extract_output_path"])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    duration = stream_duration_seconds(answers.get("extract_stream", {}), answers.get("format"))
-    log_info(
-        f"Extract Stream starting: input={answers['input_path']}; "
-        f"stream_index={answers.get('extract_stream_index')}; output={output_path}"
-    )
+    jobs = answers["_extract_jobs"]
+    ffmpeg = answers["ffmpeg"]
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(duration if duration and duration > 0 else None),
-        label="Extract Stream",
-    )
+    total_rc = 0
+    ok = 0
+    started_at = time.perf_counter()
+    for i, job in enumerate(jobs, start=1):
+        out = Path(job["output_path"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cmd = build_extract_stream_command(ffmpeg, Path(job["path"]), job["stream"], out)
+        idx = stream_global_index(job["stream"])
+        note(f"[{i}/{len(jobs)}] {Path(job['path']).name} #{idx} -> {out.name}")
+        log_info(f"Extract Stream job {i}/{len(jobs)}: input={job['path']}; index={idx}; output={out}")
+        duration = stream_duration_seconds(job["stream"], job.get("fmt"))
+        rc, _elapsed = run_ffmpeg_with_progress(
+            cmd,
+            total_duration=(duration if duration and duration > 0 else None),
+            label="Extract Stream",
+        )
+        if rc == 0:
+            ok += 1
+        else:
+            total_rc = rc
+            error(f"Extraction failed (exit {rc}) for {Path(job['path']).name} #{idx}.")
+    elapsed = time.perf_counter() - started_at
+    note(f"Extract Stream done: {ok}/{len(jobs)} stream(s) extracted.")
+    log_info(f"Extract Stream finished: ok={ok}/{len(jobs)}; elapsed={elapsed:.2f}s")
+    return total_rc, elapsed
 
 
 def source_video_codec_family(answers: dict[str, Any]) -> str:
