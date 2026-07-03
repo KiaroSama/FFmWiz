@@ -525,6 +525,25 @@ Join multiple videos. FFmWiz stream‑copies when the inputs are compatible, oth
 re‑encodes. The join input summary reports per‑input colors, total raw duration and frame
 count, and mean/max volume extremes. Audio is resampled to one uniform sample rate.
 
+#### Mixed frame rates (constant vs variable)
+
+When you join two or more videos whose source frame rates differ, FFmWiz asks
+**"Make all frame rates the same?"** (default **yes**). This question is asked in both
+Mode 12 and the Mode 1 wizard join, and it applies to both stream‑copy and re‑encode joins.
+
+- **Yes (unify → constant frame rate):** FFmWiz then asks **"Enter frames per second for all
+  joined videos"**, defaulting to the **highest** source rate. Every segment is converted to
+  that single rate, producing a normal constant‑frame‑rate (CFR) output. The fps question
+  always comes *after* the unify question.
+- **No (variable frame rate):** each input keeps its own frame rate and the output is a
+  variable‑frame‑rate (VFR) file.
+  - When the inputs match on everything except frame rate, FFmWiz joins them with the
+    `concat` demuxer and `-c copy` — no re‑encode — which preserves each segment's native
+    timing (a genuinely variable output).
+  - When a re‑encode is unavoidable (different codecs, resolution, etc.), FFmWiz drops the
+    per‑input `fps=` filter and adds `-fps_mode vfr` to keep variable timing instead of
+    resampling every frame to one constant rate.
+
 ---
 
 ## 11. Speed and reverse
@@ -665,7 +684,8 @@ Mode 1/4.
 
 ### Mode 12 — Join Videos
 See §10. Stream‑copy when compatible, otherwise re‑encode; uniform audio sample rate; rich
-join input summary.
+join input summary. When source frame rates differ, FFmWiz asks whether to unify them to one
+constant rate (default) or keep a variable frame rate (VFR) output.
 
 ### Mode 13 — Metadata Editor
 Inspects streams/chapters/tags/dispositions/attached pictures/bitstream metadata via ffprobe,
@@ -1618,7 +1638,8 @@ A reference for the main flags FFmWiz builds, so you can read or adapt the final
 | `-map_chapters 0` / `-1` / `<idx>` | Chapters | Kept, dropped, or remapped to a modified timeline. |
 | `-movflags +faststart` | Web-friendly MP4 | MP4/MOV outputs. |
 | `-ss <start> -t <dur> -c copy` | Lossless cut | Mode 3 stream-copy cuts. |
-| `-f concat -safe 0 -i list.txt` | Join inputs | Mode 12 compatible joins. |
+| `-f concat -safe 0 -i list.txt` | Join inputs | Mode 12 compatible joins (also VFR joins that differ only in frame rate). |
+| `-fps_mode vfr` | Keep variable frame rate | Re‑encoded joins where you declined to unify mixed source frame rates. |
 
 ---
 

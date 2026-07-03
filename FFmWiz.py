@@ -15921,6 +15921,15 @@ def step_resolution(answers: dict[str, Any]) -> None:
 
 
 def step_fps(answers: dict[str, Any]) -> None:
+    # Join with different source frame rates: ask the unify/VFR policy first, and
+    # (when unifying) ask the target fps here so the fps question comes after the
+    # unify question. When declined the join stays VFR and no fps is asked.
+    if answers.get("join_input_items") and output_has_video(answers):
+        join_items = join_ordered_items_for_answers(answers)
+        if len(join_items) >= 2 and join_frame_rates_differ(join_items):
+            ask_join_frame_rate_policy(answers, join_items)
+            return
+        answers.setdefault("join_vfr", False)
     fps = rational_to_float(answers["video_streams"][0].get("avg_frame_rate"))
     source_limit, source_limit_label = detected_fps_limit(answers)
     keep_fps_text = "n=current FPS" + (f" around {format(fps, '.3g')}" if fps else "")
@@ -17892,6 +17901,17 @@ def step_start_now(answers: dict[str, Any]) -> None:
             answers["output_path"] = output_path
             output_path.parent.mkdir(parents=True, exist_ok=True)
             copy_compatible, reasons = join_copy_compatibility(join_items)
+            # VFR join whose inputs match on everything except frame rate can use
+            # the concat demuxer (stream copy) to keep each segment's own rate.
+            if (
+                answers.get("join_vfr")
+                and not copy_compatible
+                and any(item.get("video_streams") for item in join_items)
+                and join_copy_compatible_except_fps(join_items)
+            ):
+                copy_compatible = True
+                reasons = []
+                note("VFR join: using stream copy (concat) to preserve each file's frame rate.")
             can_copy = (
                 copy_compatible
                 and str(answers.get("video_codec", "")).lower() == "copy"
@@ -24534,6 +24554,74 @@ def join_copy_compatibility(items: list[dict[str, Any]]) -> tuple[bool, list[str
     return not reasons, reasons
 
 
+def join_first_video_frame_rate(item: dict[str, Any]) -> float | None:
+    """Return the first video stream's frame rate (avg, then r_frame_rate)."""
+    video_streams = item.get("video_streams") or [
+        stream for stream in item.get("streams") or [] if stream.get("codec_type") == "video"
+    ]
+    if not video_streams:
+        return None
+    video = video_streams[0]
+    return rational_to_float(video.get("avg_frame_rate")) or rational_to_float(video.get("r_frame_rate"))
+
+
+def join_video_frame_rates(items: list[dict[str, Any]]) -> list[float]:
+    """Per-item first-video frame rates (only items that actually have video)."""
+    rates: list[float] = []
+    for item in items:
+        rate = join_first_video_frame_rate(item)
+        if rate:
+            rates.append(rate)
+    return rates
+
+
+def join_frame_rates_differ(items: list[dict[str, Any]]) -> bool:
+    """True when at least two joined video inputs have distinct frame rates.
+
+    Rounded to 3 decimals to match join_stream_signature so the copy-compat
+    logic and this detection agree (e.g. 29.970 vs 30.000 are different)."""
+    distinct = {round(rate, 3) for rate in join_video_frame_rates(items)}
+    return len(distinct) >= 2
+
+
+def join_highest_frame_rate(items: list[dict[str, Any]]) -> float | None:
+    """Highest source frame rate among joined video inputs (unify default)."""
+    rates = join_video_frame_rates(items)
+    return max(rates) if rates else None
+
+
+def join_signature_without_fps(item: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """join_stream_signature with the video frame-rate element removed, so two
+    inputs that differ ONLY in frame rate compare equal. Used to decide whether
+    a VFR join can still use the concat demuxer (stream copy), which preserves
+    each segment's native frame rate and produces a genuinely variable-fps file
+    without re-encoding."""
+    result: list[tuple[Any, ...]] = []
+    for entry in join_stream_signature(item):
+        if entry and entry[0] == "video":
+            # video tuple: ("video", codec, width, height, fps, pix_fmt)
+            result.append(entry[:4] + entry[5:])
+        else:
+            result.append(entry)
+    return result
+
+
+def join_copy_compatible_except_fps(items: list[dict[str, Any]]) -> bool:
+    """True when the joined inputs match on everything except frame rate (same
+    container, codec, resolution, pixel format, and audio layout). In that case
+    the concat demuxer + stream copy can join them into a VFR output."""
+    if len(items) < 2:
+        return False
+    first_ext = items[0]["path"].suffix.lower()
+    first_sig = join_signature_without_fps(items[0])
+    for item in items[1:]:
+        if item["path"].suffix.lower() != first_ext:
+            return False
+        if join_signature_without_fps(item) != first_sig:
+            return False
+    return True
+
+
 def join_default_output_path(answers: dict[str, Any], first_input: Path) -> Path:
     output_location = Path(answers.get("output_location") or first_input.parent)
     suffix = first_input.suffix or ".mkv"
@@ -24637,11 +24725,15 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     filters: list[str] = []
     inputs: list[str] = []
     any_audio = any(item.get("audio_streams") for item in items)
+    # VFR join re-encode: omit the per-input fps= filter (which would force CFR)
+    # and let the output keep variable timing via -fps_mode vfr.
+    vfr_join = bool(answers.get("join_vfr"))
     join_rate = join_target_sample_rate(answers)
     prep = join_audio_prep_filter(join_rate)
     for idx, item in enumerate(items):
+        fps_prefix = "" if vfr_join else f"fps={target_fps:g},"
         filters.append(
-            f"[{idx}:v:0]fps={target_fps:g},"
+            f"[{idx}:v:0]{fps_prefix}"
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:reset_sar=1,"
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
             f"format={output_pix_fmt},setpts=PTS-STARTPTS[v{idx}]"
@@ -24680,6 +24772,9 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
         cmd.extend(["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", output_pix_fmt])
     if any_audio:
         cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2"])
+    if vfr_join:
+        # Preserve variable timing across segments instead of resampling to CFR.
+        cmd.extend(["-fps_mode", "vfr"])
     if output_path.suffix.lower() in {".mp4", ".m4v", ".mov"}:
         cmd.extend(["-movflags", "+faststart"])
     cmd.append(str(output_path))
@@ -24794,12 +24889,15 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     # yuv420p for libx26x. This avoids feeding yuv420p10le to hevc_nvenc.
     output_pix_fmt = cpu_graph_pixel_format_for_encoder(join_answers, video_encoder)
 
+    # VFR join re-encode: omit the per-input fps= filter (which forces CFR) and
+    # keep variable timing on the output via -fps_mode vfr (added per output).
+    vfr_join = bool(join_answers.get("join_vfr"))
     for input_idx, _item in enumerate(items):
         chain = []
         if crop_filter:
             chain.append(crop_filter)
         chain.extend([
-            f"fps={target_fps:g}",
+            "" if vfr_join else f"fps={target_fps:g}",
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:reset_sar=1",
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2",
             output_pix_fmt and f"format={output_pix_fmt}",
@@ -24880,6 +24978,10 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         append_source_metadata_chapter_options(cmd, join_answers)
         append_negative_stream_options(cmd, join_answers, True, [], data_mapped)
         append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
+        if vfr_join and video_encoder != "copy":
+            # Preserve variable timing across the joined segments instead of
+            # resampling every frame to a single constant rate.
+            cmd.extend(["-fps_mode", "vfr"])
         append_audio_encode_options(cmd, join_answers, bool(audio_outputs_by_part[part_idx]))
         append_clear_reencoded_stream_stat_metadata(
             cmd,
@@ -24983,6 +25085,59 @@ def print_join_summary(items: list[dict[str, Any]], copy_compatible: bool, reaso
             print("    " + paint(reason, Color.YELLOW))
 
 
+def ask_join_frame_rate_policy(answers: dict[str, Any], items: list[dict[str, Any]]) -> bool:
+    """Ask how to handle joined video inputs that have different frame rates.
+
+    Only relevant for a video join of >=2 inputs whose frame rates differ.
+    Default (yes) unifies every input to one frame rate: it then asks the target
+    fps (defaulting to the highest source rate) and stores it in answers['fps'].
+    Declining (no) marks the join as VFR (variable frame rate): each file keeps
+    its own frame rate and the output has a variable frame rate. The unify
+    question is asked first and the fps question comes after it, per design.
+
+    Returns True when this join branch decided the fps (the caller must NOT ask
+    the fps question again), False when the policy does not apply."""
+    if len(items) < 2 or not join_frame_rates_differ(items):
+        answers.setdefault("join_vfr", False)
+        return False
+    rates_text = ", ".join(f"{rate:g}" for rate in join_video_frame_rates(items))
+    note(f"Joined inputs have different frame rates ({rates_text} fps).")
+    unify = ask_yes_no(
+        question_prompt(answers, "Make all frame rates the same?", "y/n", "y"),
+        True,
+    )
+    if not unify:
+        answers["join_vfr"] = True
+        answers["join_unify_fps"] = False
+        answers["fps"] = None
+        note("VFR join: each file keeps its own frame rate; the output will have a variable frame rate.")
+        return True
+    answers["join_vfr"] = False
+    answers["join_unify_fps"] = True
+    highest = join_highest_frame_rate(items) or 30.0
+    default_fps = max(1, int(round(highest)))
+    prompt = question_prompt(
+        answers,
+        "Enter frames per second for all joined videos",
+        f"examples: {example_text('24,30,60')}; highest source is {format(highest, '.3g')}",
+        str(default_fps),
+    )
+    while True:
+        value = ask_raw(prompt)
+        if is_back_value(value):
+            raise Back()
+        if not value:
+            value = str(default_fps)
+        if not re.fullmatch(r"\d+", value):
+            error("Enter an integer only.")
+            continue
+        number = int(value)
+        if number == 0:
+            raise Back()
+        answers["fps"] = number
+        return True
+
+
 def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
     answers = dict(base_answers)
     answers["_question_number"] = 1
@@ -25076,7 +25231,28 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
     if audio_only_join:
         note("Detected audio-only inputs: performing an audio join.")
 
+    # Variable frame rate policy: when joining videos with different frame rates,
+    # ask whether to unify them (then ask the target fps) or keep them variable.
+    if not audio_only_join:
+        try:
+            ask_join_frame_rate_policy(answers, items)
+        except Back:
+            note("Returning to main menu.")
+            return None
+
     copy_compatible, reasons = join_copy_compatibility(items)
+    # A VFR join whose inputs match on everything except frame rate can be joined
+    # with the concat demuxer (stream copy), which preserves each segment's own
+    # frame rate and yields a genuine variable-frame-rate file with no re-encode.
+    if (
+        not copy_compatible
+        and answers.get("join_vfr")
+        and not audio_only_join
+        and join_copy_compatible_except_fps(items)
+    ):
+        copy_compatible = True
+        reasons = []
+        note("VFR join: using stream copy (concat) to preserve each file's frame rate.")
     print_join_summary(items, copy_compatible, reasons)
     if copy_compatible:
         cmd = build_join_copy_command(answers, items, output_path)

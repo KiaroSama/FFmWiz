@@ -880,6 +880,70 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertIn("-c", cmd)
             self.assertIn("copy", cmd)
 
+    def test_join_frame_rate_helpers_detect_and_classify_mixed_rates(self):
+        def item(rate, **over):
+            stream = {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": rate,
+                "pix_fmt": "yuv420p",
+            }
+            stream.update(over)
+            return {
+                "path": Path(f"clip_{rate.replace('/', '_')}.mkv"),
+                "streams": [stream],
+                "video_streams": [stream],
+                "audio_streams": [],
+                "format": {},
+                "duration": 1.0,
+            }
+
+        mixed = [item("24/1"), item("30/1"), item("60/1")]
+        self.assertEqual(FFmWiz.join_video_frame_rates(mixed), [24.0, 30.0, 60.0])
+        self.assertTrue(FFmWiz.join_frame_rates_differ(mixed))
+        self.assertEqual(FFmWiz.join_highest_frame_rate(mixed), 60.0)
+        # Differ only by fps -> not fully copy-compatible, but copy-compatible
+        # except for the frame rate (concat demuxer can preserve VFR).
+        self.assertFalse(FFmWiz.join_copy_compatibility(mixed)[0])
+        self.assertTrue(FFmWiz.join_copy_compatible_except_fps(mixed))
+
+        same = [item("30/1"), item("30/1")]
+        self.assertFalse(FFmWiz.join_frame_rates_differ(same))
+
+        # A resolution difference is a real incompatibility even for VFR.
+        res_diff = [item("24/1"), item("30/1", width=1920)]
+        self.assertFalse(FFmWiz.join_copy_compatible_except_fps(res_diff))
+
+    def test_join_near_quality_vfr_omits_fps_filter_and_sets_fps_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first = base / "a.mkv"
+            second = base / "b.mkv"
+            first.write_bytes(b"")
+            second.write_bytes(b"")
+            stream = {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "24/1",
+                "pix_fmt": "yuv420p",
+            }
+            items = [
+                {"path": first, "streams": [stream], "video_streams": [stream], "audio_streams": [], "format": {}, "duration": 1.0},
+                {"path": second, "streams": [dict(stream, width=1920, avg_frame_rate="60/1")], "video_streams": [dict(stream, width=1920, avg_frame_rate="60/1")], "audio_streams": [], "format": {}, "duration": 1.0},
+            ]
+            vfr_cmd = FFmWiz.build_join_near_quality_command({"ffmpeg": "ffmpeg", "join_vfr": True}, items, base / "vfr.mkv")
+            self.assertNotIn("fps=", " ".join(vfr_cmd))
+            self.assertIn("-fps_mode", vfr_cmd)
+            self.assertIn("vfr", vfr_cmd)
+
+            cfr_cmd = FFmWiz.build_join_near_quality_command({"ffmpeg": "ffmpeg", "join_vfr": False, "fps": 30}, items, base / "cfr.mkv")
+            self.assertIn("fps=", " ".join(cfr_cmd))
+            self.assertNotIn("-fps_mode", cfr_cmd)
+
     def test_join_videos_near_quality_command_uses_concat_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
