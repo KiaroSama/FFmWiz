@@ -70,8 +70,8 @@ The core CLI uses only the Python standard library; PySide6 is the only extra ru
 
 ## 2. Installation
 
-1. Clone or download the repository, keeping `FFmWiz.py`, `run.ps1`, and the `assets/` folder
-   together in the same directory.
+1. Clone or download the repository, keeping `FFmWiz.py`, `run.ps1`, and the `ffmwiz/` package
+   (which now bundles `ffmwiz/assets/`) together in the same directory.
 2. Install the optional GUI dependency:
 
    ```powershell

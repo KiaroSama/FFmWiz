@@ -22,4 +22,4 @@ dependencies = [
 py-modules = ["FFmWiz"]
 
 [tool.py_compile_check]
-files = ["FFmWiz.py", "assets/runtime/ffmwiz_gui.py", "assets/runtime/MuxCls.py"]
+files = ["FFmWiz.py", "ffmwiz/gui/ffmwiz_gui.py", "ffmwiz/gui/ffmwiz_gui_qml.py"]

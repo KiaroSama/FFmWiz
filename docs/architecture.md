@@ -122,7 +122,7 @@ menu). `ffmwiz/support/ext00.py::run_mux_cleanup_mode` calls
 py FFmWiz.py                       # run the wizard
 py -m py_compile FFmWiz.py         # syntax check the entry
 py -m compileall -q ffmwiz         # compile the whole package
-py -m unittest discover -s assets/tests   # full test suite
+py -m unittest discover -s ffmwiz/assets/tests   # full test suite
 py FFmWiz.py --preview-colors      # color/theme smoke check
 ```
 
@@ -131,8 +131,9 @@ these checks on Windows across Python 3.10–3.13.
 
 ## Test layout
 
-The unittest suite lives in `assets/tests/`. Two originally-huge test files were
-split by responsibility while preserving every test (the full suite count is the
+The unittest suite lives in `ffmwiz/assets/tests/` (the `assets/` folder is
+bundled inside the package). Two originally-huge test files were split by
+responsibility while preserving every test (the full suite count is the
 guardrail):
 
 - The command-generation suite shares one fixture base,
