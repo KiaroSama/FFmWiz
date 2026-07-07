@@ -801,174 +801,6 @@ def _run_hardsub_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, fl
     )
 
 
-def run_video_speed_reverse_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    try:
-        return _run_video_speed_reverse_mode_impl(base_answers)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-
-
-def _run_video_speed_reverse_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    answers["_question_number"] = 1
-    steps = [
-        Step("input_path", lambda a: True, wizard.step_input_path),
-        Step("speed_reverse", lambda a: True, step_video_speed_reverse_options),
-        Step("output_location", lambda a: not a.get("_speed_reverse_noop"), wizard.step_output_location),
-        Step("output_format", lambda a: not a.get("_speed_reverse_noop"), wizard.step_output_format),
-        Step("start_now", lambda a: not a.get("_speed_reverse_noop"), step_video_speed_start_now),
-    ]
-    while True:
-        try:
-            run_mode_steps(answers, steps)
-            break
-        except ValueError as exc:
-            appio.error(str(exc))
-            return None
-    ensure_video_input(answers)
-    if answers.get("_speed_reverse_noop"):
-        appio.note("Video speed/reverse was not enabled. Returning to the first question.")
-        return None
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
-    if answers.get("reverse_video"):
-        return run_segmented_reverse_video_speed(answers)
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(duration / max(0.001, float(answers.get("speed_factor", 1.0))) if duration > 0 else None),
-        label="Video Speed / Reverse",
-    )
-
-
-def run_audio_cut_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    try:
-        return _run_audio_cut_mode_impl(base_answers)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-
-
-def _run_audio_cut_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    answers["_question_number"] = 1
-    steps = [
-        Step("input_path", lambda a: True, wizard.step_input_path),
-        Step("audio_track", lambda a: True, step_audio_track_for_tool),
-        Step("output_location", lambda a: True, wizard.step_output_location),
-        Step("audio_cut_gui", lambda a: True, step_audio_cut_editor),
-        Step("start_now", lambda a: not a.get("_audio_cut_noop"), step_audio_cut_start_now),
-    ]
-    try:
-        run_mode_steps(answers, steps)
-    except ValueError as exc:
-        appio.error(str(exc))
-        return None
-    ensure_audio_input(answers)
-    if answers.get("_audio_cut_noop"):
-        appio.note("Audio cut was canceled. Returning to the first question.")
-        return None
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    total_duration = total_keep_duration(answers.get("audio_keep_ranges") or [])
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(total_duration if total_duration > 0 else None),
-        label="Audio Cut",
-    )
-
-
-def run_audio_speed_reverse_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    try:
-        return _run_audio_speed_reverse_mode_impl(base_answers)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-
-
-def _run_audio_speed_reverse_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    answers["_question_number"] = 1
-    steps = [
-        Step("input_path", lambda a: True, wizard.step_input_path),
-        Step("audio_track", lambda a: True, step_audio_track_for_tool),
-        Step("speed_reverse", lambda a: True, step_audio_speed_reverse_options),
-        Step("output_location", lambda a: not a.get("_speed_reverse_noop"), wizard.step_output_location),
-        Step("start_now", lambda a: not a.get("_speed_reverse_noop"), step_audio_speed_start_now),
-    ]
-    try:
-        run_mode_steps(answers, steps)
-    except ValueError as exc:
-        appio.error(str(exc))
-        return None
-    ensure_audio_input(answers)
-    if answers.get("_speed_reverse_noop"):
-        appio.note("Audio speed/reverse was not enabled. Returning to the first question.")
-        return None
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(duration / max(0.001, float(answers.get("speed_factor", 1.0))) if duration > 0 else None),
-        label="Audio Speed / Reverse",
-    )
-
-
-def run_audio_transform_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    try:
-        return _run_audio_transform_mode_impl(base_answers)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-
-
-def _run_audio_transform_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    answers["_question_number"] = 1
-    steps = [
-        Step("input_path", lambda a: True, wizard.step_input_path),
-        Step("audio_track", lambda a: True, step_audio_track_for_tool),
-        Step("output_location", lambda a: True, wizard.step_output_location),
-        Step("audio_transform_gui", lambda a: True, step_audio_transform_editor),
-        Step("start_now", lambda a: not a.get("_audio_transform_noop"), step_audio_transform_start_now),
-    ]
-    try:
-        run_mode_steps(answers, steps)
-    except ValueError as exc:
-        appio.error(str(exc))
-        return None
-    ensure_audio_input(answers)
-    if answers.get("_audio_transform_noop"):
-        appio.note("Audio transform was not enabled. Returning to the first question.")
-        return None
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
-    keep_duration = total_keep_duration(answers.get("audio_cut_keep_ranges") or [])
-    if keep_duration <= 0:
-        keep_duration = duration
-    speed = max(0.001, float(answers.get("audio_speed_factor", DEFAULT_SPEED_FACTOR) or DEFAULT_SPEED_FACTOR))
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(keep_duration / speed if keep_duration > 0 else None),
-        label="Audio Cut / Speed / Reverse",
-    )
-
-
 __all__ = [
     'ask_add_files_source_video',
     'ask_continue_default_yes',
@@ -976,9 +808,6 @@ __all__ = [
     'ask_hardsub_source_video',
     'print_cut_summary',
     'run_add_files_to_video_mode',
-    'run_audio_cut_mode',
-    'run_audio_speed_reverse_mode',
-    'run_audio_transform_mode',
     'run_capability_cache_menu',
     'run_copy_cut_mode',
     'run_extract_stream_mode',
@@ -986,16 +815,18 @@ __all__ = [
     'run_folder_settings_wizard',
     'run_hardsub_encode_mode',
     'run_mode_steps',
-    'run_video_speed_reverse_mode',
     '_capability_cache_clear',
     '_capability_cache_reprobe',
     '_run_add_files_to_video_mode_impl',
-    '_run_audio_cut_mode_impl',
-    '_run_audio_speed_reverse_mode_impl',
-    '_run_audio_transform_mode_impl',
     '_run_copy_cut_mode_impl',
     '_run_folder_encode_mode_impl',
     '_run_hardsub_encode_mode_impl',
-    '_run_video_speed_reverse_mode_impl',
     'MEDIA_INFO_VALUE_COLORS',
 ]
+
+
+# Speed/reverse/cut transform mode runners live in a sibling module; re-export
+# them so the flat public API (FFmWiz.run_audio_transform_mode, ...) is unchanged.
+from ffmwiz import modes_transform  # noqa: E402
+from ffmwiz.modes_transform import *  # noqa: E402,F401,F403
+__all__ += modes_transform.__all__
