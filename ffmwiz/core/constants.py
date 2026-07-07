@@ -1,0 +1,1216 @@
+"""FFmWiz core constants, default FFmpeg options, and configuration template.
+
+Extracted verbatim from FFmWiz.py during the package decomposition.
+Leaf module: depends only on the Python standard library (os).
+FFmWiz.py re-exports every name here via `from ffmwiz.core.constants import *`,
+so the public API (FFmWiz.<CONST>) is unchanged.
+"""
+from __future__ import annotations
+
+import os
+
+
+# ============================================================
+# Default FFmpeg options from the command you requested before.
+# Change these values here if you want different fixed defaults.
+# ============================================================
+
+GPU_DEVICE_INDEX = 0  # NVIDIA GPU index (0,1,2,...)
+OVERWRITE_OUTPUT = True  # FFmpeg overwrite mode (-y or -n)
+
+# Color Range / range metadata:
+# COLOR_RANGE options: "tv"=limited, "pc"=full, "unknown"=unspecified
+# SETPARAMS_RANGE options: "tv"=limited, "pc"=full, "auto", "unknown"
+COLOR_RANGE = "tv"
+SETPARAMS_RANGE = "tv"
+
+# Pixel formats:
+# CUDA_FORMAT options commonly used with NVENC: "nv12", "p010le"
+# CPU_FORMAT options commonly used: "yuv420p", "yuv422p", "yuv444p", "nv12"
+CUDA_FORMAT = "nv12"
+CPU_FORMAT = "yuv420p"
+
+# Sample aspect ratio:
+# SAR options/examples: "1", "4/3", "16/15", "64/45"
+FORCE_SAR = "1"
+
+# MP4/MOV web playback optimization:
+# MOVFLAGS options/examples: "+faststart", "empty_moov", "frag_keyframe", "+faststart+use_metadata_tags"
+MOVFLAGS = "+faststart"
+
+# NVENC defaults:
+# NVENC_PRESET options: p1,p2,p3,p4,p5,p6,p7 (p1 fastest, p7 slowest/better)
+# NVENC_TUNE options: hq,ll,ull,lossless
+# NVENC_RC options: constqp,cbr,vbr,cbr_hq,vbr_hq
+# NVENC_HEVC_PROFILE options: main,main10,rext
+NVENC_PRESET = "p4"
+NVENC_TUNE = "hq"
+NVENC_RC = "vbr"
+NVENC_HEVC_PROFILE = "main"
+
+# CPU encoder defaults:
+# CPU_PRESET options for x264/x265: ultrafast,superfast,veryfast,faster,fast,medium,slow,slower,veryslow
+CPU_PRESET = "medium"
+
+# SVT-AV1 (libsvtav1) defaults. SVT-AV1 is the recommended CPU AV1 encoder
+# (much faster than libaom-av1 at comparable quality). preset is an INTEGER
+# 0-13 (lower = slower/better); 6 is a widely recommended balance. tune=0
+# targets subjective visual quality (tune=1 = PSNR).
+SVTAV1_PRESET = "6"
+SVTAV1_PARAMS = "tune=0"
+
+# CPU encoders that support FFmpeg's -pass 1/2 two-pass rate control. Verified
+# against `ffmpeg -h encoder=<name>` and by running a real 2-pass cycle:
+# libx264/libx265 (-passlogfile/-x265-stats), libvpx-vp9 and libaom-av1
+# ("2-pass only" options), libsvtav1 (SVT 2PASS RC), and generic mpeg4.
+TWO_PASS_CPU_ENCODERS = {"libx264", "libx265", "libvpx-vp9", "libaom-av1", "libsvtav1", "mpeg4"}
+
+# Audio defaults:
+# DEFAULT_AUDIO_CODEC options depend on your FFmpeg build; common: aac,libopus,libmp3lame,flac,copy
+# AUDIO_CHANNELS options/examples: 1=mono, 2=stereo, 6=5.1; set None to keep source channel layout
+# AUDIO_SAMPLE_RATE options/examples: None=auto/source, 44100, 48000, 96000
+DEFAULT_AUDIO_CODEC = "aac"
+DEFAULT_AUDIO_BITRATE_KBPS = 128
+AUDIO_CHANNELS = 2
+AUDIO_SAMPLE_RATE: int | None = None
+LOUDNORM_DEFAULT_TARGET_I = -16.0
+LOUDNORM_TARGET_TP = -1.5
+LOUDNORM_TARGET_LRA = 11.0
+LOUDNORM_MIN_TARGET_I = -30.0
+LOUDNORM_MAX_TARGET_I = -5.0
+
+# Speed/reverse editor defaults. These modes always re-encode the affected
+# stream because timestamp reversal and tempo changes cannot be stream-copied.
+DEFAULT_SPEED_FACTOR = 1.0
+MIN_SPEED_FACTOR = 0.10
+MAX_SPEED_FACTOR = 8.0
+DEFAULT_SPEED_AUDIO_BITRATE_KBPS = DEFAULT_AUDIO_BITRATE_KBPS
+REVERSE_SEGMENT_SECONDS = 60.0
+
+# Video defaults:
+# DEFAULT_VIDEO_CODEC aliases supported by this script: H265,H264,AV1,VP9,MPEG4,copy
+DEFAULT_VIDEO_CODEC = "H265"
+DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS = 400
+
+# ============================================================
+# FULL_FFMPEG_FORMAT_CODEC_LISTS
+# FFmpeg format and codec reference.
+#
+# Important:
+# FFmpeg support is build-specific. A codec/format can exist in FFmpeg
+# documentation but still be unavailable in your installed ffmpeg.exe if that
+# build was compiled without the required library. The script therefore reads
+# live runtime lists with:
+#   ffmpeg -hide_banner -muxers
+#   ffmpeg -hide_banner -encoders
+# and stores them in:
+#   answers["muxers"], answers["video_encoders"], answers["audio_encoders"]
+#
+# To inspect your exact local build manually:
+#   ffmpeg -hide_banner -formats
+#   ffmpeg -hide_banner -muxers
+#   ffmpeg -hide_banner -demuxers
+#   ffmpeg -hide_banner -codecs
+#   ffmpeg -hide_banner -encoders
+#   ffmpeg -hide_banner -decoders
+#
+# The lists below are intentionally large and visible, but they are still a
+# source-code reference. The only truly complete list for your machine is the
+# runtime list reported by your own ffmpeg.exe. This script uses those runtime
+# lists for validation and uses the shorter COMMON_* lists only for cleaner
+# on-screen prompts.
+#
+# Reference output muxers / container format names:
+#   3g2,3gp,4xm,a64,ac3,adts,adx,aiff,alp,alsa,amr,amv,apm,apng,argo_asf,
+#   asf,ass,ast,au,avi,avif,avm2,avs2,bit,bmv,caf,cavsvideo,codec2,codec2raw,
+#   crc,dash,data,daud,dfpwm,dirac,dnxhd,dts,dv,eac3,f4v,ffmetadata,fifo,
+#   fifo_test,film_cpk,filmstrip,fits,flac,flv,framecrc,framehash,framemd5,
+#   g722,g723_1,g726,g726le,gif,gsm,gxf,h261,h263,h264,hash,hds,hevc,hls,
+#   ico,ilbc,image2,image2pipe,ipod,ircam,ismv,ivf,jacosub,kvag,latm,lrc,m4v,
+#   matroska,md5,microdvd,mjpeg,mkvtimestamp_v2,mlp,mmf,mov,mp2,mp3,mp4,mpeg,
+#   mpeg1video,mpeg2video,mpegts,mpjpeg,mxf,mxf_d10,mxf_opatom,null,nut,obu,
+#   oga,ogg,ogv,oma,opus,psp,rawvideo,rm,roq,rtp,rtsp,s16be,s16le,s24be,s24le,
+#   s32be,s32le,s8,sap,sbc,scc,segment,smjpeg,smoothstreaming,sox,spdif,
+#   spx,srt,stream_segment,streamhash,sup,svcd,swf,tee,tg2,tgp,truehd,tta,
+#   u16be,u16le,u24be,u24le,u32be,u32le,u8,uncodedframecrc,vc1,vc1test,
+#   voc,w64,wav,webm,webm_chunk,webm_dash_manifest,webp,webvtt,wsaud,wsvqa,
+#   wtv,wv,yuv4mpegpipe
+#
+# Reference input demuxers / source format names:
+#   aa,aac,aax,ac3,ace,acm,act,adf,adp,ads,adx,aea,afc,aiff,aix,alp,amr,amrnb,
+#   amrwb,anm,apac,apc,ape,apm,apng,aptx,aptx_hd,aqtitle,argo_asf,argo_brp,
+#   argo_cvg,asf,asf_o,ass,ast,au,av1,av2,avi,avisynth,avr,avs,avs2,avs3,
+#   bethsoftvid,bfi,bfstm,bink,bintext,bit,bitpacked,bmv,boa,bonk,c93,caf,
+#   cavsvideo,cdg,cdxl,cine,codec2,codec2raw,concat,dash,data,daud,dcstr,dds,
+#   derf,dfa,dfpwm,dhav,dirac,dnxhd,dsf,dsicin,dss,dts,dtshd,dv,dvbsub,dvbtxt,
+#   dxa,ea,ea_cdata,eac3,epaf,ffmetadata,film_cpk,filmstrip,fits,flac,flic,
+#   flv,fourxm,frm,fsb,fwse,g722,g723_1,g726,g726le,g729,gdv,genh,gif,grpc,
+#   gsm,gxf,h261,h263,h264,hca,hcom,hevc,hls,hnm,ico,idcin,idf,iff,ifv,ilbc,
+#   image2,image2pipe,ingenient,ipmovie,ipu,ircam,iss,iv8,ivf,ivr,jacosub,jv,
+#   kux,kvag,laf,libgme,libmodplug,live_flv,lmlm4,loas,lrc,luodat,lvf,lxf,m4v,
+#   matroska,mgsts,microdvd,mjpeg,mjpeg_2000,mlp,mlv,mm,mmf,mods,moflex,mov,
+#   mp3,mpc,mpc8,mpeg,mpegts,mpegtsraw,mpegvideo,mpjpeg,mpl2,mpsub,msf,msnwc_tcp,
+#   msp,mtaf,mtv,musx,mv,mvi,mxf,mxg,nc,nistsphere,nsp,nsv,nut,nuv,obu,ogg,oma,
+#   paf,pcm_alaw,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_mulaw,pcm_s16be,
+#   pcm_s16le,pcm_s24be,pcm_s24le,pcm_s32be,pcm_s32le,pcm_s8,pcm_u16be,pcm_u16le,
+#   pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc,pjs,psxstr,pva,pvf,
+#   qcp,r3d,rawvideo,realtext,redspark,rl2,rm,roq,rpl,rsd,rso,rtp,rtsp,s337m,
+#   sami,sap,sbc,sbg,scc,sdns,sdp,sdr2,sds,sdx,segafilm,ser,shorten,siff,simbiosis_imx,
+#   sln,smacker,smjpeg,smush,sol,sox,spdif,srt,stl,str,subviewer,subviewer1,sup,
+#   svag,svs,swf,tak,tedcaptions,thp,tiertexseq,tmv,truehd,tta,tty,txd,ty,u16be,
+#   u16le,u24be,u24le,u32be,u32le,u8,v210,v210x,vag,vc1,vc1test,vidc,vividas,
+#   vivo,vmd,vobsub,voc,vpk,vplayer,vqf,w64,wady,wav,wc3movie,webm_dash_manifest,
+#   webvtt,wsaud,wsd,wsvqa,wtv,wv,wve,xa,xbin,xmd,xmv,xvag,xwma,yop,yuv4mpegpipe
+#
+# Reference video encoders / codec names:
+#   a64multi,a64multi5,alias_pix,amv,apng,asv1,asv2,av1_nvenc,av1_qsv,av1_vaapi,
+#   bitpacked,bmp,cfhd,cinepak,cljr,comfortnoise,dnxhd,dpx,dvvideo,exr,ffv1,
+#   ffvhuff,flv,gif,h261,h263,h263_v4l2m2m,h263p,h264_amf,h264_mf,h264_nvenc,
+#   h264_qsv,h264_v4l2m2m,h264_vaapi,hap,hdr,hevc_amf,hevc_mf,hevc_nvenc,hevc_qsv,
+#   hevc_v4l2m2m,hevc_vaapi,huffyuv,jpeg2000,jpegls,libaom-av1,libopenh264,
+#   libopenjpeg,librav1e,librsvg,libsvtav1,libtheora,libvpx,libvpx-vp9,libwebp,
+#   libwebp_anim,libx264,libx264rgb,libx265,libxvid,ljpeg,magicyuv,mjpeg,mjpeg_qsv,
+#   mjpeg_vaapi,mpeg1video,mpeg2_qsv,mpeg2_vaapi,mpeg2video,mpeg4,mpeg4_v4l2m2m,
+#   msmpeg4v2,msmpeg4v3,msvideo1,pam,pbm,pcx,pfm,pgm,pgmyuv,phm,png,ppm,prores,
+#   prores_aw,prores_ks,qoi,qtrle,r10k,r210,rawvideo,roq,rv10,rv20,sgi,snow,
+#   speedhq,sunrast,svq1,targa,tiff,utvideo,v210,v308,v408,v410,vc2,wrapped_avframe,
+#   wmv1,wmv2,xbm,xface,xwd,y41p,yuv4,zlib,zmbv
+#
+# Reference audio encoders / codec names:
+#   aac,ac3,ac3_fixed,adpcm_adx,adpcm_argo,adpcm_g722,adpcm_g726,adpcm_g726le,
+#   adpcm_ima_alp,adpcm_ima_amv,adpcm_ima_apm,adpcm_ima_qt,adpcm_ima_ssi,
+#   adpcm_ima_wav,adpcm_ima_ws,adpcm_ms,adpcm_swf,adpcm_yamaha,alac,aptx,aptx_hd,
+#   comfortnoise,dfpwm,dts,eac3,flac,g723_1,libcodec2,libgsm,libgsm_ms,libilbc,
+#   libmp3lame,libopencore_amrnb,libopus,libshine,libspeex,libtwolame,libvo_amrwbenc,
+#   libvorbis,mlp,mp2,mp2fixed,nellymoser,opus,pcm_alaw,pcm_bluray,pcm_dvd,
+#   pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_mulaw,pcm_s16be,pcm_s16be_planar,
+#   pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le,pcm_s24le_planar,
+#   pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,
+#   pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,real_144,
+#   roq_dpcm,s302m,sbc,sonic,sonicls,truehd,tta,vorbis,wavpack,wmav1,wmav2
+#
+# Reference subtitle encoders / codec names:
+#   ass,dvbsub,dvdsub,mov_text,srt,ssa,subrip,text,ttml,webvtt,xsub
+#
+# Reference video decoders / codec names:
+#   aasc,aic,alias_pix,agm,aic,amv,anm,ansi,apng,arbc,argo,asv1,asv2,aura,aura2,
+#   av1,avrn,avrp,avs,avs2,avs3,bethsoftvid,bfi,binkvideo,bintext,bitpacked,bmp,
+#   bmv_video,brender_pix,c93,cavs,cdgraphics,cdtoons,cdxl,cfhd,cinepak,clearvideo,
+#   cljr,cllc,comfortnoise,cpia,cscd,cyuv,dds,dfa,dirac,dnxhd,dpx,dsicinvideo,
+#   dvvideo,dxa,dxtory,dxv,eacmv,eamad,eatgq,eatgv,eatqi,eightbps,escape124,
+#   escape130,exr,ffv1,ffvhuff,fic,fits,flashsv,flashsv2,flic,flv,fmvc,fraps,
+#   frwu,g2m,gdv,gem,gif,h261,h263,h263i,h263p,h264,hap,hca,hevc,hnm4video,hq_hqa,
+#   hqx,huffyuv,imm4,imm5,indeo2,indeo3,indeo4,indeo5,interplayvideo,jpeg2000,
+#   jpegls,jv,kgv1,kmvc,lagarith,loco,lscr,m101,mad,mdec,mimic,mjpeg,mjpegb,mmvideo,
+#   mobiclip,motionpixels,mpeg1video,mpeg2video,mpeg4,mpegvideo,msa1,mscc,msmpeg4v1,
+#   msmpeg4v2,msmpeg4v3,msrle,mss1,mss2,msvideo1,mszh,mts2,mv30,mvc1,mvc2,mvdv,
+#   mvha,mwsc,mxpeg,notchlc,nuv,paf_video,pam,pbm,pcx,pfm,pgm,pgmyuv,pgx,phm,
+#   photocd,pictor,pixlet,png,ppm,prores,prosumer,psd,ptx,qdraw,qoi,qpeg,qtrle,
+#   r10k,r210,rasc,rawvideo,rl2,roq,rv10,rv20,rv30,rv40,sanm,screenpresso,sga,
+#   sgi,sgirle,sheervideo,smackvideo,smc,smvjpeg,snow,sp5x,speedhq,srgc,sunrast,
+#   svq1,svq3,targa,targa_y216,tdsc,theora,thp,tiertexseq,tiff,tmv,truevision,
+#   truemotion1,truemotion2,truemotion2rt,tscc,tscc2,txd,ulti,utvideo,v210,v210x,
+#   v308,v408,v410,vb,vble,vc1,vc1image,vcr1,vmnc,vp3,vp4,vp5,
+#   vp6,vp6a,vp6f,vp7,vp8,vp9,vqa,webp,wmv1,wmv2,wmv3,wmv3image,wnv1,wrapped_avframe,
+#   xan_wc3,xan_wc4,xbin,xbm,xface,xl,xpm,xwd,xxan,y41p,ylc,yop,yuv4,zerocodec,zlib,zmbv
+#
+# Reference audio decoders / codec names:
+#   8svx_exp,8svx_fib,aac,aac_fixed,aac_latm,ac3,ac3_fixed,acelp_kelvin,adpcm_4xm,
+#   adpcm_adx,adpcm_afc,adpcm_agm,adpcm_aica,adpcm_argo,adpcm_ct,adpcm_dtk,
+#   adpcm_ea,adpcm_ea_maxis_xa,adpcm_ea_r1,adpcm_ea_r2,adpcm_ea_r3,adpcm_ea_xas,
+#   adpcm_g722,adpcm_g726,adpcm_g726le,adpcm_ima_acorn,adpcm_ima_alp,adpcm_ima_amv,
+#   adpcm_ima_apc,adpcm_ima_apm,adpcm_ima_cunning,adpcm_ima_dat4,adpcm_ima_dk3,
+#   adpcm_ima_dk4,adpcm_ima_ea_eacs,adpcm_ima_ea_sead,adpcm_ima_iss,adpcm_ima_moflex,
+#   adpcm_ima_mtf,adpcm_ima_oki,adpcm_ima_qt,adpcm_ima_rad,adpcm_ima_smjpeg,
+#   adpcm_ima_ssi,adpcm_ima_wav,adpcm_ima_ws,adpcm_ms,adpcm_mtaf,adpcm_psx,
+#   adpcm_sbpro_2,adpcm_sbpro_3,adpcm_sbpro_4,adpcm_swf,adpcm_thp,adpcm_thp_le,
+#   adpcm_vima,adpcm_xa,adpcm_xmd,adpcm_yamaha,alac,als,amrnb,amrwb,ape,aptx,aptx_hd,
+#   atrac1,atrac3,atrac3al,atrac3p,atrac3pal,atrac9,binkaudio_dct,binkaudio_rdft,
+#   bmv_audio,bonk,comfortnoise,cook,derf_dpcm,dfpwm,dolby_e,dsd_lsbf,dsd_lsbf_planar,
+#   dsd_msbf,dsd_msbf_planar,dsicinaudio,dss_sp,dst,dvaudio,eac3,evrc,fastaudio,
+#   flac,ftr,g723_1,g729,gremlin_dpcm,gsm,gsm_ms,hca,hcom,iac,ilbc,imc,interplay_acm,
+#   mace3,mace6,metasound,misc4,mlp,mp1,mp1float,mp2,mp2float,mp3,mp3adu,mp3adufloat,
+#   mp3float,mp3on4,mp3on4float,mpegh_3d_audio,musepack7,musepack8,nellymoser,on2avc,
+#   opus,paf_audio,pcm_alaw,pcm_bluray,pcm_dvd,pcm_f16le,pcm_f24le,pcm_f32be,pcm_f32le,
+#   pcm_f64be,pcm_f64le,pcm_lxf,pcm_mulaw,pcm_s16be,pcm_s16be_planar,pcm_s16le,
+#   pcm_s16le_planar,pcm_s24be,pcm_s24daud,pcm_s24le,pcm_s24le_planar,pcm_s32be,
+#   pcm_s32le,pcm_s32le_planar,pcm_s64be,pcm_s64le,pcm_s8,pcm_s8_planar,pcm_sga,
+#   pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,pcm_u8,pcm_vidc,
+#   qcelp,qdm2,qdmc,ra_144,ra_288,ralf,roq_dpcm,s302m,sbc,sdx2_dpcm,shorten,sipr,
+#   siren,smackaudio,sol_dpcm,sonic,tak,truehd,truespeech,tta,twinvq,vmdaudio,
+#   vorbis,wavarc,wavpack,wmalossless,wmapro,wmav1,wmav2,wmavoice,xan_dpcm,xma1,xma2
+#
+# Reference subtitle decoders / codec names:
+#   ass,cc_dec,dvbsub,dvdsub,hdmv_pgs_subtitle,jacosub,microdvd,mov_text,mpl2,
+#   pjs,realtext,sami,srt,ssa,stl,subrip,subviewer,subviewer1,text,ttml,vplayer,
+#   webvtt,xsub
+# ============================================================
+
+# Prompt display lists are intentionally short. Full FFmpeg support is
+# build-specific, so the script still loads complete runtime lists with:
+#   ffmpeg -hide_banner -muxers
+#   ffmpeg -hide_banner -encoders
+# Keep the full runtime lists in answers["muxers"], answers["video_encoders"],
+# and answers["audio_encoders"]. Only the common lists below are shown on screen.
+COMMON_VIDEO_FORMATS = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "ts"]
+COMMON_AUDIO_FORMATS = ["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"]
+
+# Recognized output container/format extensions. A value outside this set is
+# very likely a typo (e.g. "acc" for "aac") that would make FFmpeg fail with
+# "Unable to find a suitable output format"; the wizard warns and suggests the
+# closest match before accepting it.
+KNOWN_OUTPUT_FORMATS = {
+    "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "mpg", "mpeg", "wmv", "flv",
+    "ogv", "3gp", "mts", "m2ts", "vob", "mxf",
+    "mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "ac3", "eac3",
+    "wma", "alac", "aiff", "aif", "amr", "mka", "caf", "spx",
+}
+COMMON_VIDEO_CODECS = ["H265", "H264", "AV1", "VP9", "MPEG4", "copy"]
+COMMON_AUDIO_CODECS = ["aac", "libopus", "opus", "libmp3lame", "flac", "pcm_s16le", "copy"]
+# Common output audio sample rates (Hz) shown as prompt examples.
+COMMON_AUDIO_SAMPLE_RATES = [44100, 48000, 96000]
+MIN_AUDIO_SAMPLE_RATE = 8000
+MAX_AUDIO_SAMPLE_RATE = 192000
+CONFIG_FILE_NAME = "config.env"
+CONFIG_EXAMPLE_FILE_NAME = "config.env.example"
+LAUNCHER_FILE_NAME = "run.ps1"
+ASSET_DIR_NAME = "assets"
+ICON_DIR_NAME = "icons"
+CURSOR_DIR_NAME = "cursors"
+DEFAULT_OUTPUT_LOCATION_TEXT = r"E:\output"
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or str(default))
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)) or str(default))
+    except ValueError:
+        return default
+
+
+EMPTY_AUDIO_MAX_BYTES = 4096
+NEAR_EMPTY_AUDIO_MAX_BYTES = 1024 * 1024
+NEAR_EMPTY_AUDIO_RATIO = 0.03
+NEAR_EMPTY_AUDIO_MAX_KBPS = 12
+PACKET_SIZE_PROBE_MAX_MB = env_int("FFMWIZ_PACKET_SCAN_MAX_MB", 64)
+PACKET_SIZE_PROBE_MAX_BYTES = max(0, PACKET_SIZE_PROBE_MAX_MB) * 1024 * 1024
+DUPLICATE_AUDIO_HASH_SECONDS = env_float("FFMWIZ_DUP_HASH_SECONDS", 8.0)
+DUPLICATE_AUDIO_HASH_WORKERS = max(1, env_int("FFMWIZ_DUP_HASH_WORKERS", 2))
+VOLUME_SCAN_WORKERS = max(1, env_int("FFMWIZ_VOLUME_SCAN_WORKERS", 3))
+FOLDER_PROBE_WORKERS = max(1, env_int("FFMWIZ_FOLDER_PROBE_WORKERS", 4))
+
+# Container-aware safe defaults. Full support depends on your FFmpeg build and
+# muxer, so the prompt still accepts any valid runtime encoder/format name.
+AUDIO_CODEC_DEFAULTS_BY_FORMAT = {
+    "aac": "aac",
+    "m4a": "aac",
+    "mp4": "aac",
+    "mkv": "aac",
+    "mov": "aac",
+    "mp3": "libmp3lame",
+    "ogg": "libopus",
+    "opus": "libopus",
+    "webm": "libopus",
+    "weba": "libopus",
+    "flac": "flac",
+    "wav": "pcm_s16le",
+}
+
+STREAM_STAT_METADATA_TAGS = (
+    "BPS",
+    "BPS-eng",
+    "BPS-ENG",
+    "DURATION",
+    "DURATION-eng",
+    "DURATION-ENG",
+    "NUMBER_OF_FRAMES",
+    "NUMBER_OF_FRAMES-eng",
+    "NUMBER_OF_FRAMES-ENG",
+    "NUMBER_OF_BYTES",
+    "NUMBER_OF_BYTES-eng",
+    "NUMBER_OF_BYTES-ENG",
+    "_STATISTICS_WRITING_APP",
+    "_STATISTICS_WRITING_DATE_UTC",
+    "_STATISTICS_TAGS",
+)
+
+AUDIO_CODEC_ALIASES = {
+    "opus": "libopus",
+    "mp3": "libmp3lame",
+    "mp3lame": "libmp3lame",
+    "vorbis": "libvorbis",
+}
+
+BITRATE_AUDIO_CODECS = {
+    "aac",
+    "ac3",
+    "eac3",
+    "libfdk_aac",
+    "libmp3lame",
+    "libopus",
+    "libvorbis",
+    "mp2",
+    "mp3",
+    "opus",
+    "vorbis",
+}
+
+TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "ssa", "srt", "subrip", "text", "webvtt"}
+BITMAP_SUBTITLE_CODECS = {
+    "dvb_subtitle",
+    "dvbsub",
+    "dvd_subtitle",
+    "dvdsub",
+    "hdmv_pgs_subtitle",
+    "pgs",
+    "vobsub",
+    "xsub",
+}
+HARDSUB_BITMAP_SUBTITLE_ERROR = (
+    "Bitmap subtitle streams such as PGS/VobSub/DVDSub are not supported by this HardSub mode. "
+    "Choose a text subtitle stream or use an external .srt/.ass/.ssa/.vtt/.webvtt file."
+)
+
+FFMPEG_REFERENCE_FILE_NAME = "ffmwiz-ffmpeg-reference.txt"
+
+CONFIG_TEMPLATE = """# ============================================================================
+# FFmWiz configuration  (config.env)
+# ============================================================================
+# This file stores DEFAULT ANSWERS for Mode 2 ("Wizard from config"). Mode 2
+# runs the full wizard but auto-fills every question whose value is set here and
+# only ASKS the questions you leave blank. The graphical editor question is
+# always asked, and any crop/speed/reverse/audio set here are pre-applied inside
+# the editor. Mode 1 (the full interactive wizard) ignores this file.
+#
+# It is also a self-contained REFERENCE: every setting below has a help comment,
+# and the bottom of the file has container-compatibility notes, ready-made
+# example recipes, and a glossary. For the complete manual see
+# docs/DOCUMENTATION.md (next to the README on GitHub).
+#
+# ----------------------------------------------------------------------------
+# FORMAT
+#   - One setting per line:  key=value
+#   - Lines starting with #  are comments and are ignored by the parser.
+#   - Blank lines are ignored.
+#   - Do NOT quote values (surrounding quotes are stripped if present). Paths may
+#     contain spaces and Unicode directly:  input_path=I:/My Videos/clip 01.mkv
+#   - Forward slashes are recommended on Windows and are easiest here. Backslashes
+#     also work and do NOT need escaping in this .env file (unlike the old JSON).
+#   - An optional leading  export  is accepted:  export gui_engine=qml
+#
+# PARSER RULES
+#   - Missing keys / empty values fall back to the interactive defaults.
+#   - Use the string  n  where supported to mean "keep source / no change".
+#   - Booleans accept:  y / yes / true / 1 / on    or    n / no / false / 0 / off.
+#
+# UNICODE
+#   - FFmWiz uses UTF-8 throughout. Save this file as UTF-8 if you put Unicode
+#     characters in paths or titles. Persian/Arabic paths are fully supported.
+#
+# FFMPEG CAPABILITIES
+#   - Which formats/codecs/encoders/filters exist depends on YOUR ffmpeg build.
+#     FFmWiz writes a snapshot to  ffmwiz-ffmpeg-reference.txt  next to the script
+#     (delete it or pass --refresh-ffmpeg-reference to regenerate it).
+#
+# MODES (what reads this file)
+#   - Mode 1  : full interactive wizard (asks every question; ignores this file).
+#   - Mode 2  : reads THIS file, then asks only the crop question.
+#   - Mode 3  : stream-copy cut tool (does not read this file).
+#   - Mode 4  : folder encode (one shared settings pass over a whole folder).
+#   - Mode 5  : add audio/subtitle files to a video without re-encoding.
+#   - Mode 6  : extract one stream by ffprobe index.
+#   - Mode 7  : media info report (ffprobe, TXT + HTML).
+#   - Mode 8  : stream-cleanup remux (keep selected streams, no re-encode).
+#   - Mode 9  : hard-sub encode (burn subtitles into the video).
+#   - Mode 10 : video speed / reverse editor.
+#   - Mode 11 : audio cut / speed / reverse editor.
+#   - Mode 12 : join videos (stream copy when compatible, else re-encode).
+#   - Mode 13 : metadata editor (tags, dispositions, chapters, cover art).
+#
+# SAFETY
+#   - FFmWiz never modifies the input file. The final FFmpeg command is shown
+#     before it runs, and you can cancel.
+#   - For GUI troubleshooting, set FFMWIZ_DEBUG=1 to print the full Qt traceback.
+#
+# This is the SAMPLE file (config.env.example). Copy it to "config.env" and edit
+# your personal values there. config.env is git-ignored and never published.
+# ============================================================================
+
+
+# ----------------------------------------------------------------------------
+# INPUT / OUTPUT
+# ----------------------------------------------------------------------------
+
+# input_path: Absolute path to the source file. REQUIRED for Mode 2.
+#   Examples:  I:/Videos/input.mkv   |   C:/clips/cam01.mov   |   //NAS/share/ep.ts
+input_path=
+
+# output_path: A folder (E:/output), a full file path (E:/out/final.mp4), or a
+#   bare base name (lesson6 -> dropped into the input folder using output_format).
+#   Empty = the input's folder. FFmWiz never overwrites the input; it adds a
+#   suffix (e.g. _Encode, _cut, or a numeric (2)) when names would collide.
+output_path=
+
+# output_format: Final container extension WITHOUT the leading dot.
+#   Examples: mp4, mkv, mov, webm, mp3, m4a, opus, flac, wav.  Use  n  to inherit
+#   the input's extension. The container limits which codecs/subtitles are valid
+#   (see CONTAINER COMPATIBILITY NOTES at the bottom).
+output_format=n
+
+
+# ----------------------------------------------------------------------------
+# VIDEO
+# ----------------------------------------------------------------------------
+
+# video_codec: H265 | H264 | AV1 | VP9 | MPEG4 | copy | <any ffmpeg -encoders name>
+#   Aliases map to a CPU encoder and (when use_gpu=y) the matching NVENC encoder.
+#   'copy' stream-copies the video (no re-encode); it is auto-promoted to H265 if
+#   any filter is required (crop / scale / fps / cut / split / speed / reverse).
+video_codec=H265
+
+# use_gpu: y/n. y enables NVIDIA NVENC + CUDA when the resolved encoder supports
+#   it; otherwise CPU encoding is used. n always uses the CPU. Requires an FFmpeg
+#   build with NVENC/CUDA and a compatible NVIDIA GPU + driver.
+use_gpu=y
+
+# crop: n (off) | y (use the crop_* margins below) | inline "top,left,right,bottom"
+#   like 100,300,200,550. Margins are PIXELS REMOVED from each side, NOT x/y
+#   offsets. In Mode 2 these are pre-applied and shown in the graphical editor;
+#   leave crop blank to be asked. Snapped to even output width/height.
+crop=n
+# crop_top/left/right/bottom: pixels removed per side (integer >= 0). Used only
+#   when crop=y. FFmWiz snaps the result to even width/height (chroma-safe).
+crop_top=0
+crop_left=0
+crop_right=0
+crop_bottom=0
+
+# video_bitrate_kbps: target average video bitrate in kbps (e.g. 400, 1500, 4500,
+#   8000). Use  n  to keep the detected source bitrate. You are warned before
+#   accepting a target above the source bitrate.
+video_bitrate_kbps=n
+
+# video_bitrate_mode:
+#   quality_vbr -> -b:v X  -maxrate 2X -bufsize 4X  (looser ceiling, better quality)
+#   strict_size -> -b:v X  -maxrate X  -bufsize 2X  (tighter ceiling, predictable size)
+video_bitrate_mode=quality_vbr
+
+# resolution: output scale.
+#   presets 144p..2160p / plain numbers (480) -> closest-edge, aspect-preserving
+#   w1280 or 1280w -> explicit width ;  720h or h720 -> explicit height
+#   1280x720 -> fit box (preserve aspect) ;  stretch:1280x720 -> force distortion
+#   n -> keep the source/cropped size. SAR is forced to 1:1 by default.
+resolution=n
+
+# fps: output frame rate as an integer (24, 25, 30, 50, 60). Use  n  to keep the
+#   source rate. You are warned before exceeding the source rate. Fractional rates
+#   (e.g. 23.976) are not exposed here; use Mode 1 if you need them.
+fps=n
+
+
+# ----------------------------------------------------------------------------
+# AUDIO
+# ----------------------------------------------------------------------------
+
+# audio_tracks: which audio streams to keep.
+#   0 | 0,1,2 (indices among audio streams) | all | d (drop confirmed duplicates)
+#   | e (drop empty/near-empty) | de (both).  Empty defaults to  de.
+audio_tracks=de
+
+# audio_codec: aac | libopus | opus | libmp3lame | flac | pcm_s16le | copy |
+#   <any ffmpeg -encoders name>. The opus alias normalizes to libopus. Container
+#   rules are enforced (WebM forces libopus; flac/pcm_* ignore bitrate; copy skips
+#   re-encoding).
+audio_codec=aac
+
+# audio_bitrate_kbps: target audio bitrate per stream in kbps (64, 96, 128, 160,
+#   192, 256, 320). Use  n  to keep the source bitrate. Ignored for flac/pcm_*.
+audio_bitrate_kbps=n
+
+# audio_sample_rate: output audio sample rate in Hz (44100, 48000, 96000). Use  n
+#   to keep the source rate. Ignored when audio_codec=copy. You are warned before
+#   exceeding the source rate.
+audio_sample_rate=n
+
+
+# ----------------------------------------------------------------------------
+# STREAMS / METADATA
+# ----------------------------------------------------------------------------
+
+# keep_source_metadata: y/n. y keeps source container/stream metadata, chapters,
+#   extra video/data streams and allows subtitle selection. n strips metadata,
+#   chapters, extra streams, subtitles, and attachments from the encode.
+keep_source_metadata=y
+
+# subtitle_tracks: which subtitles to keep when keep_source_metadata=y.
+#   Same syntax as audio_tracks, plus none/clear/delete to drop all. MP4/MOV
+#   convert text subtitles to mov_text and drop image subs (PGS/VobSub).
+subtitle_tracks=none
+
+# keep_embedded_attachments: y/n. y copies MKV attachment streams (e.g. embedded
+#   subtitle fonts) when keep_source_metadata=y and the output container supports
+#   them. Non-MKV outputs cannot keep attachments reliably.
+keep_embedded_attachments=n
+
+# detect_duplicate_audio: y/n. y lets FFmWiz flag duplicate/empty audio tracks
+#   (metadata + sampled hash, confirmed with a full hash) for the d/e/de shortcuts.
+detect_duplicate_audio=y
+
+
+# ----------------------------------------------------------------------------
+# LOUDNESS / SPEED / ADVANCED ENCODE  (all optional)
+# ----------------------------------------------------------------------------
+
+# loudnorm: off | on. on applies single-pass EBU R128 loudness normalization to
+#   the output audio (switches audio_codec=copy to AAC because loudnorm requires
+#   re-encoding). Two-pass/measured loudnorm is interactive only (it needs a live
+#   measurement of your file that a static config cannot provide).
+loudnorm=off
+
+# loudnorm_target_i: integrated loudness target in LUFS for loudnorm=on.
+#   Common: -14 (streaming), -16, -23 (broadcast EBU R128).
+loudnorm_target_i=-16
+
+# nvenc_multipass: NVENC multi-pass quality, used only when use_gpu=y and the
+#   resolved encoder is NVENC and exposes -multipass:
+#     disabled = single pass (fastest)
+#     qres     = two-pass, quarter-resolution first pass
+#     fullres  = two-pass, full-resolution first pass (best quality, slowest)
+#   Ignored on CPU encoders.
+nvenc_multipass=disabled
+
+# cpu_two_pass: y/n. CPU two-pass (-pass 1/2) for supported CPU encoders
+#   (libx264, libx265, libvpx-vp9, libaom-av1, libsvtav1, mpeg4). Improves bitrate
+#   accuracy at the cost of a second pass. Ignored on NVENC and on
+#   join/split/cut/speed workflows.
+cpu_two_pass=n
+
+# color_range: range signaling when the SOURCE range is unknown and video is
+#   re-encoded. No pixel-value conversion is performed; only signaling changes.
+#     source       = keep / auto-detect (default; do nothing special)
+#     tv           = assume TV / Limited (16-235)
+#     pc           = assume PC / Full (0-255)
+#     unspecified  = do not force a range (encoder default signaling)
+color_range=source
+
+# video_speed: global video speed multiplier 0.10-8.0 (2 = twice as fast,
+#   0.5 = half speed) or  n  for no change. Changing speed forces a re-encode and
+#   remaps chapters.
+video_speed=n
+
+# reverse_video: y/n. Reverse the whole video (forces a re-encode).
+reverse_video=n
+
+# audio_speed: a number 0.10-8.0, match_video (follow video_speed and
+#   reverse_video so A/V stay in sync), or  n  for no change.
+audio_speed=n
+
+# reverse_audio: y/n. Reverse the audio. Ignored when audio_speed=match_video
+#   (the audio then follows the video's reverse flag).
+reverse_audio=n
+
+
+# ----------------------------------------------------------------------------
+# APP BEHAVIOUR
+# ----------------------------------------------------------------------------
+
+# logging_enabled: y/n. y writes dated UTF-8 logs into the Logs/ folder next to
+#   FFmWiz.py. Set n only when you intentionally want no log file.
+logging_enabled=y
+
+# log_retention_days: 0 keeps logs forever. A positive integer deletes FFmWiz
+#   logs older than that many days when logging starts.
+log_retention_days=0
+
+# gui_engine: classic = stable PySide6-widgets unified editor (default).
+#             qml     = modern QtQuick editor (GPU-rendered, aspect-correct).
+#   The env var FFMWIZ_GUI_ENGINE overrides this value.
+gui_engine=classic
+
+
+# ============================================================================
+# CONTAINER COMPATIBILITY NOTES (reference)
+# ============================================================================
+# Which codecs/subtitles are valid depends on the output_format you choose:
+#   MP4 / MOV / M4V : H.264 / H.265 / AV1 / MPEG-4 video; AAC / AC3 / EAC3 / ALAC
+#                     audio; text subtitles converted to mov_text (image subs are
+#                     dropped); faststart added; HEVC tagged hvc1 for Apple.
+#   MKV             : almost any video/audio codec; all subtitle types (SRT, ASS,
+#                     PGS, VobSub); font/attachment streams; chapters.
+#   WebM            : VP9 / AV1 video; Opus / Vorbis audio; WebVTT subtitles.
+#   MP3 / M4A / WAV / FLAC / OPUS / OGG : audio-only; video streams are dropped.
+
+
+# ============================================================================
+# EXAMPLE RECIPES
+# ============================================================================
+# These blocks are COMMENTED OUT so they do not change anything. To use one,
+# copy the lines you want UP INTO the settings above (and remove the leading #),
+# or replace the matching keys. Do not leave two values for the same key.
+#
+# --- Fast stream copy, same container (no re-encode) ---
+#   output_format=n
+#   video_codec=copy
+#   use_gpu=n
+#   audio_codec=copy
+#   subtitle_tracks=none
+#
+# --- 1080p H.264 MP4 (broad compatibility), AAC 160k ---
+#   output_format=mp4
+#   video_codec=H264
+#   use_gpu=y
+#   resolution=1080p
+#   video_bitrate_kbps=6000
+#   audio_codec=aac
+#   audio_bitrate_kbps=160
+#   audio_sample_rate=48000
+#
+# --- 1080p H.265 NVENC (smaller files), full-res multipass ---
+#   output_format=mp4
+#   video_codec=H265
+#   use_gpu=y
+#   resolution=1080p
+#   video_bitrate_kbps=4500
+#   nvenc_multipass=fullres
+#   audio_codec=aac
+#   audio_bitrate_kbps=160
+#
+# --- AV1 (CPU, SVT-AV1) WebM with Opus, CPU two-pass ---
+#   output_format=webm
+#   video_codec=AV1
+#   use_gpu=n
+#   video_bitrate_kbps=2500
+#   cpu_two_pass=y
+#   audio_codec=libopus
+#   audio_bitrate_kbps=96
+#
+# --- Crop a letterboxed source and scale to 720p (H.265 NVENC) ---
+#   video_codec=H265
+#   use_gpu=y
+#   crop=y
+#   crop_top=132
+#   crop_bottom=132
+#   resolution=720p
+#   video_bitrate_kbps=3000
+#   audio_codec=aac
+#   audio_bitrate_kbps=128
+#
+# --- Normalized lecture sped up 1.5x (audio follows video) ---
+#   output_format=mp4
+#   video_codec=H264
+#   use_gpu=y
+#   audio_tracks=0
+#   audio_codec=aac
+#   audio_bitrate_kbps=128
+#   audio_sample_rate=48000
+#   loudnorm=on
+#   loudnorm_target_i=-16
+#   video_speed=1.5
+#   audio_speed=match_video
+#
+# --- Podcast master, AAC m4a normalized to -14 LUFS ---
+#   output_format=m4a
+#   audio_tracks=0
+#   audio_codec=aac
+#   audio_bitrate_kbps=192
+#   audio_sample_rate=48000
+#   loudnorm=on
+#   loudnorm_target_i=-14
+#
+# --- Extract first audio track as MP3 192k ---
+#   output_format=mp3
+#   audio_tracks=0
+#   audio_codec=libmp3lame
+#   audio_bitrate_kbps=192
+#
+# --- Lossless FLAC audio (bitrate ignored) ---
+#   output_format=flac
+#   audio_tracks=all
+#   audio_codec=flac
+#   subtitle_tracks=none
+#
+# --- Drop confirmed duplicate + empty audio before encoding ---
+#   audio_tracks=de
+#   detect_duplicate_audio=y
+#
+# --- Reverse a clip (audio follows video) ---
+#   output_format=mp4
+#   video_codec=H264
+#   use_gpu=y
+#   reverse_video=y
+#   audio_speed=match_video
+
+
+# ============================================================================
+# GLOSSARY (reference)
+# ============================================================================
+# stream copy vs re-encode : -c copy repackages without decoding (fast, lossless,
+#     keyframe-bound cuts). Re-encoding is needed for filters/cuts/speed and is
+#     frame-accurate but lossy per pass.
+# CRF vs bitrate           : CRF targets a quality level (smaller = higher quality);
+#     bitrate mode (-b:v + -maxrate + -bufsize) targets a size. FFmWiz uses bitrate
+#     mode with NVENC VBR / CPU encoders.
+# preset / tune / profile  : speed-quality tradeoff / content hint / stream profile
+#     (HEVC main vs main10 for 8-bit vs 10-bit).
+# GOP                      : keyframe interval; larger = better compression, slower
+#     seeking.
+# faststart                : moves the MP4 moov atom to the front for progressive
+#     playback (applied to MP4/MOV automatically).
+# hvc1 vs hev1             : HEVC-in-MP4 tag; hvc1 is required by Apple devices and
+#     some browsers (FFmWiz uses hvc1).
+# tv vs pc color range     : limited 16-235 vs full 0-255; FFmWiz signals only and
+#     never converts pixel values.
+# yuv420p / nv12 / p010le  : 8-bit CPU / NVENC input / 10-bit pixel formats; FFmWiz
+#     picks the right one for the encoder and bit depth.
+# multipass (NVENC)        : -multipass disabled/qres/fullres first-pass analysis.
+# two-pass (CPU)           : -pass 1/2 analysis + final pass for accurate bitrate.
+# LUFS                     : perceptual loudness unit used by loudnorm (EBU R128).
+"""
+
+
+AUDIO_ONLY_EXTS = {
+    "aac",
+    "ac3",
+    "aiff",
+    "alac",
+    "amr",
+    "ape",
+    "au",
+    "dts",
+    "eac3",
+    "flac",
+    "m4a",
+    "mka",
+    "mp2",
+    "mp3",
+    "oga",
+    "ogg",
+    "opus",
+    "wav",
+    "weba",
+    "wma",
+}
+
+FOLDER_VIDEO_EXTS = {
+    "3g2",
+    "3gp",
+    "asf",
+    "avi",
+    "divx",
+    "dv",
+    "f4v",
+    "flv",
+    "hevc",
+    "m2ts",
+    "m2v",
+    "m4v",
+    "mjpeg",
+    "mkv",
+    "mov",
+    "mp4",
+    "mpeg",
+    "mpg",
+    "mts",
+    "mxf",
+    "ogm",
+    "ogv",
+    "rm",
+    "rmvb",
+    "ts",
+    "vob",
+    "webm",
+    "wmv",
+    "y4m",
+}
+FOLDER_MEDIA_EXTS = FOLDER_VIDEO_EXTS | AUDIO_ONLY_EXTS | set(COMMON_VIDEO_FORMATS) | set(COMMON_AUDIO_FORMATS)
+
+MP4_LIKE_EXTS = {"mp4", "m4a", "m4v", "mov", "ismv"}
+ATTACHMENT_COMPATIBLE_EXTS = {"mkv"}
+ADD_FILES_OUTPUT_SUFFIX = "_with_tracks"
+EXTRACT_STREAM_OUTPUT_SUFFIX = "_stream"
+MEDIA_REPORTS_DIR_NAME = "MediaReports"
+MUX_CLEANUP_VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".webm", ".mov", ".avi"}
+ROBOCOPY_BIN = "robocopy"
+HARDSUB_OUTPUT_SUFFIX = "_HardSub"
+GENERATED_OUTPUT_SUFFIXES = (
+    "_Encode",
+    "_Final",
+    HARDSUB_OUTPUT_SUFFIX,
+    "_cut",
+    ADD_FILES_OUTPUT_SUFFIX,
+    EXTRACT_STREAM_OUTPUT_SUFFIX,
+)
+HARDSUB_SUBTITLE_EXTS = {".ass", ".ssa", ".srt", ".vtt", ".webvtt"}
+HARDSUB_QUALITY_PRESETS = {
+    "near-lossless": {"cpu": 14, "cpu_hevc": 16, "nvenc": 13},
+    "high quality": {"cpu": 17, "cpu_hevc": 18, "nvenc": 16},
+    "balanced": {"cpu": 20, "cpu_hevc": 22, "nvenc": 20},
+}
+
+RESOLUTION_PRESETS = {
+    "144p": (256, 144),
+    "240p": (426, 240),
+    "360p": (640, 360),
+    # Preset shorthands are standard target boxes. Scaling preserves the
+    # cropped source aspect ratio by pinning the closest matching edge.
+    "480p": (720, 480),
+    "576p": (720, 576),
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+    "1440p": (2560, 1440),
+    "2160p": (3840, 2160),
+    "4320p": (7680, 4320),
+}
+
+VIDEO_CODEC_ALIASES = {
+    "h265": {"cpu": "libx265", "gpu": "hevc_nvenc", "tag": "hvc1", "profile": NVENC_HEVC_PROFILE},
+    "hevc": {"cpu": "libx265", "gpu": "hevc_nvenc", "tag": "hvc1", "profile": NVENC_HEVC_PROFILE},
+    "h264": {"cpu": "libx264", "gpu": "h264_nvenc", "tag": "avc1", "profile": None},
+    "avc": {"cpu": "libx264", "gpu": "h264_nvenc", "tag": "avc1", "profile": None},
+    "av1": {"cpu": "libsvtav1", "gpu": "av1_nvenc", "tag": None, "profile": None},
+    "vp9": {"cpu": "libvpx-vp9", "gpu": None, "tag": None, "profile": None},
+    "mpeg4": {"cpu": "mpeg4", "gpu": None, "tag": "mp4v", "profile": None},
+}
+
+NVENC_MULTIPASS_MODES = {"disabled", "qres", "fullres"}
+
+CUDA_CUVID_DECODER_BY_CODEC = {
+    "av1": "av1_cuvid",
+    "avc": "h264_cuvid",
+    "avc1": "h264_cuvid",
+    "h264": "h264_cuvid",
+    "h265": "hevc_cuvid",
+    "hevc": "hevc_cuvid",
+    "mjpeg": "mjpeg_cuvid",
+    "mpeg2": "mpeg2_cuvid",
+    "mpeg2video": "mpeg2_cuvid",
+    "vc1": "vc1_cuvid",
+    "vp8": "vp8_cuvid",
+    "vp9": "vp9_cuvid",
+}
+
+
+
+
+
+import re  # for regex constants consolidated below
+
+
+
+# --- Additional constants consolidated from FFmWiz.py (Layer 3) ---
+JOIN_AUDIO_PREP_FILTER = "aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS"
+
+FFMWIZ_RUNTIME_DIR_NAME = "runtime"
+
+FFMWIZ_GUI_FILE_NAME = "ffmwiz_gui.py"
+
+REQUIREMENTS_FILE_NAME = "requirements.txt"
+
+PYSIDE6_DISPLAY_NAME = "PySide6"
+
+PYSIDE6_PIP_SPEC = "PySide6==6.11.1"
+
+LOGS_DIR_NAME = "Logs"
+
+APP_VERSION = "1.3.0"
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+COLOR_RANGE_ALIASES = {
+    "tv": "tv",
+    "limited": "tv",
+    "mpeg": "tv",
+    "pc": "pc",
+    "full": "pc",
+    "jpeg": "pc",
+}
+
+CAPABILITY_CACHE_SCHEMA_VERSION = 1
+
+CAPABILITY_CACHE_DIRNAME = ".cache"
+
+CAPABILITY_CACHE_FILENAME = "ffmpeg_capabilities.json"
+
+CAPABILITY_GROUP = "color_range_do_not_force"
+
+SAR_DAR_MAX_DENOMINATOR = 1000
+
+SAR_DAR_TOLERANCE = 0.01
+
+VOLUMEDETECT_RE = re.compile(r"\b(mean_volume|max_volume):\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*dB")
+
+FOLDER_MEDIA_METADATA_KEYS = (
+    "input_path",
+    "probe",
+    "format",
+    "video_streams",
+    "audio_streams",
+    "subtitle_streams",
+    "attachment_streams",
+    "packet_sizes",
+    "audio_volume_stats",
+)
+
+BACK_INPUT_TOKENS = {"0", "۰", "٠"}
+
+INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+JOIN_ADD_ANOTHER_BACK = "back=0, quit=exit, f=join all videos in folder"
+
+JOIN_ADD_ANOTHER_BACK_AUDIO = "back=0, quit=exit"
+
+METADATA_DISPOSITION_FLAGS = (
+    "default",
+    "forced",
+    "hearing_impaired",
+    "visual_impaired",
+    "commentary",
+    "original",
+    "karaoke",
+    "lyrics",
+    "attached_pic",
+)
+
+COPY_CUT_WARNING = (
+    "Stream-copy cutting is very fast and keeps original quality, but cut "
+    "points may snap to nearby keyframes. For exact frame-accurate cutting, "
+    "use re-encode mode."
+)
+
+LOSSLESS_AUDIO_COPY_EXT_BY_CODEC = {
+    "aac": "m4a", "alac": "m4a", "mp3": "mp3", "ac3": "ac3", "eac3": "eac3",
+    "opus": "opus", "vorbis": "ogg", "flac": "flac",
+    "pcm_s16le": "wav", "pcm_s24le": "wav", "pcm_s32le": "wav", "pcm_u8": "wav",
+    "pcm_f32le": "wav", "pcm_s16be": "wav",
+}
+
+LOSSLESS_AUDIO_COPY_EXT_CHOICES = {
+    "aac": ["m4a", "aac", "mka", "mp4", "mov", "ts"],
+    "alac": ["m4a", "mka", "mov"],
+    "mp3": ["mp3", "mka", "mp4"],
+    "ac3": ["ac3", "mka", "mp4", "ts"],
+    "eac3": ["eac3", "mka", "mp4", "ts"],
+    "opus": ["opus", "ogg", "mka", "webm"],
+    "vorbis": ["ogg", "mka", "webm"],
+    "flac": ["flac", "mka", "ogg"],
+    "pcm_s16le": ["wav", "mka", "mov"],
+    "pcm_s24le": ["wav", "mka", "mov"],
+    "pcm_s32le": ["wav", "mka", "mov"],
+    "pcm_f32le": ["wav", "mka", "mov"],
+    "pcm_u8": ["wav", "mka"],
+    "pcm_s16be": ["wav", "mka", "mov"],
+}
+
+TRACK_MANAGER_MEDIA_EXTS = {
+    ".mkv", ".mp4", ".mov", ".m4v", ".webm", ".avi", ".ts", ".mpg", ".mpeg", ".wmv", ".flv",
+    ".m4a", ".mka", ".mp3", ".aac", ".flac", ".wav", ".opus", ".ogg", ".ac3", ".eac3", ".dts",
+}
+
+EXTRACT_AUDIO_EXTENSIONS = {
+    "aac": ".aac",
+    "ac3": ".ac3",
+    "eac3": ".eac3",
+    "mp3": ".mp3",
+    "mp2": ".mp2",
+    "opus": ".opus",
+    "vorbis": ".ogg",
+    "flac": ".flac",
+    "alac": ".m4a",
+    "pcm_s16le": ".wav",
+    "pcm_s24le": ".wav",
+    "pcm_s32le": ".wav",
+    "pcm_f32le": ".wav",
+    "dts": ".dts",
+    "truehd": ".thd",
+}
+
+EXTRACT_SUBTITLE_EXTENSIONS = {
+    "ass": ".ass",
+    "ssa": ".ssa",
+    "subrip": ".srt",
+    "srt": ".srt",
+    "text": ".srt",
+    "mov_text": ".srt",
+    "webvtt": ".vtt",
+    "hdmv_pgs_subtitle": ".sup",
+    "pgs": ".sup",
+    "dvd_subtitle": ".sub",
+    "dvdsub": ".sub",
+    "vobsub": ".sub",
+    "dvb_subtitle": ".sub",
+    "dvbsub": ".sub",
+    "xsub": ".avi",
+}
+
+EXTRACT_COPY_CONTAINERS_AUDIO = {
+    "aac": ["m4a", "mp4", "aac", "ts", "mov"],
+    "alac": ["m4a", "mov", "caf"],
+    "ac3": ["m4a", "ac3", "mp4", "ts"],
+    "eac3": ["m4a", "eac3", "mp4", "ts"],
+    "mp3": ["m4a", "mp3", "mp4"],
+    "mp2": ["mp2", "mpg", "ts"],
+    "opus": ["opus", "ogg", "webm"],
+    "vorbis": ["ogg", "webm"],
+    "flac": ["flac", "ogg"],
+    "pcm_s16le": ["wav", "mov", "caf"],
+    "pcm_s24le": ["wav", "mov", "caf"],
+    "pcm_s32le": ["wav", "mov", "caf"],
+    "pcm_f32le": ["wav", "mov", "caf"],
+    "dts": ["dts", "ts"],
+    "truehd": ["thd"],
+}
+
+EXTRACT_COPY_CONTAINERS_VIDEO = {
+    "h264": ["mp4", "mov", "ts", "m4v"],
+    "hevc": ["mp4", "mov", "ts"],
+    "h265": ["mp4", "mov", "ts"],
+    "av1": ["mp4", "webm"],
+    "vp9": ["webm", "mp4"],
+    "vp8": ["webm"],
+    "mpeg4": ["mp4", "avi", "mov"],
+    "mpeg2video": ["mpg", "ts"],
+    "prores": ["mov"],
+}
+
+EXTRACT_COPY_CONTAINERS_SUBTITLE = {
+    "subrip": ["srt", "ass"],
+    "srt": ["srt", "ass"],
+    "text": ["srt"],
+    "mov_text": ["srt"],
+    "ass": ["ass", "ssa"],
+    "ssa": ["ssa", "ass"],
+    "webvtt": ["vtt"],
+    "hdmv_pgs_subtitle": ["sup"],
+    "pgs": ["sup"],
+    "dvd_subtitle": ["sub"],
+    "vobsub": ["sub"],
+    "dvbsub": ["sub"],
+}
+
+
+__all__ = [
+    'GPU_DEVICE_INDEX',
+    'OVERWRITE_OUTPUT',
+    'COLOR_RANGE',
+    'SETPARAMS_RANGE',
+    'CUDA_FORMAT',
+    'CPU_FORMAT',
+    'FORCE_SAR',
+    'MOVFLAGS',
+    'NVENC_PRESET',
+    'NVENC_TUNE',
+    'NVENC_RC',
+    'NVENC_HEVC_PROFILE',
+    'CPU_PRESET',
+    'SVTAV1_PRESET',
+    'SVTAV1_PARAMS',
+    'TWO_PASS_CPU_ENCODERS',
+    'DEFAULT_AUDIO_CODEC',
+    'DEFAULT_AUDIO_BITRATE_KBPS',
+    'AUDIO_CHANNELS',
+    'AUDIO_SAMPLE_RATE',
+    'LOUDNORM_DEFAULT_TARGET_I',
+    'LOUDNORM_TARGET_TP',
+    'LOUDNORM_TARGET_LRA',
+    'LOUDNORM_MIN_TARGET_I',
+    'LOUDNORM_MAX_TARGET_I',
+    'DEFAULT_SPEED_FACTOR',
+    'MIN_SPEED_FACTOR',
+    'MAX_SPEED_FACTOR',
+    'DEFAULT_SPEED_AUDIO_BITRATE_KBPS',
+    'REVERSE_SEGMENT_SECONDS',
+    'DEFAULT_VIDEO_CODEC',
+    'DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS',
+    'COMMON_VIDEO_FORMATS',
+    'COMMON_AUDIO_FORMATS',
+    'KNOWN_OUTPUT_FORMATS',
+    'COMMON_VIDEO_CODECS',
+    'COMMON_AUDIO_CODECS',
+    'COMMON_AUDIO_SAMPLE_RATES',
+    'MIN_AUDIO_SAMPLE_RATE',
+    'MAX_AUDIO_SAMPLE_RATE',
+    'CONFIG_FILE_NAME',
+    'CONFIG_EXAMPLE_FILE_NAME',
+    'LAUNCHER_FILE_NAME',
+    'ASSET_DIR_NAME',
+    'ICON_DIR_NAME',
+    'CURSOR_DIR_NAME',
+    'DEFAULT_OUTPUT_LOCATION_TEXT',
+    'env_int',
+    'env_float',
+    'EMPTY_AUDIO_MAX_BYTES',
+    'NEAR_EMPTY_AUDIO_MAX_BYTES',
+    'NEAR_EMPTY_AUDIO_RATIO',
+    'NEAR_EMPTY_AUDIO_MAX_KBPS',
+    'PACKET_SIZE_PROBE_MAX_MB',
+    'PACKET_SIZE_PROBE_MAX_BYTES',
+    'DUPLICATE_AUDIO_HASH_SECONDS',
+    'DUPLICATE_AUDIO_HASH_WORKERS',
+    'VOLUME_SCAN_WORKERS',
+    'FOLDER_PROBE_WORKERS',
+    'AUDIO_CODEC_DEFAULTS_BY_FORMAT',
+    'STREAM_STAT_METADATA_TAGS',
+    'AUDIO_CODEC_ALIASES',
+    'BITRATE_AUDIO_CODECS',
+    'TEXT_SUBTITLE_CODECS',
+    'BITMAP_SUBTITLE_CODECS',
+    'HARDSUB_BITMAP_SUBTITLE_ERROR',
+    'FFMPEG_REFERENCE_FILE_NAME',
+    'CONFIG_TEMPLATE',
+    'AUDIO_ONLY_EXTS',
+    'FOLDER_VIDEO_EXTS',
+    'FOLDER_MEDIA_EXTS',
+    'MP4_LIKE_EXTS',
+    'ATTACHMENT_COMPATIBLE_EXTS',
+    'ADD_FILES_OUTPUT_SUFFIX',
+    'EXTRACT_STREAM_OUTPUT_SUFFIX',
+    'MEDIA_REPORTS_DIR_NAME',
+    'MUX_CLEANUP_VIDEO_EXTS',
+    'ROBOCOPY_BIN',
+    'HARDSUB_OUTPUT_SUFFIX',
+    'GENERATED_OUTPUT_SUFFIXES',
+    'HARDSUB_SUBTITLE_EXTS',
+    'HARDSUB_QUALITY_PRESETS',
+    'RESOLUTION_PRESETS',
+    'VIDEO_CODEC_ALIASES',
+    'NVENC_MULTIPASS_MODES',
+    'CUDA_CUVID_DECODER_BY_CODEC',
+    'JOIN_AUDIO_PREP_FILTER',
+    'FFMWIZ_RUNTIME_DIR_NAME',
+    'FFMWIZ_GUI_FILE_NAME',
+    'REQUIREMENTS_FILE_NAME',
+    'PYSIDE6_DISPLAY_NAME',
+    'PYSIDE6_PIP_SPEC',
+    'LOGS_DIR_NAME',
+    'APP_VERSION',
+    'ANSI_ESCAPE_RE',
+    'COLOR_RANGE_ALIASES',
+    'CAPABILITY_CACHE_SCHEMA_VERSION',
+    'CAPABILITY_CACHE_DIRNAME',
+    'CAPABILITY_CACHE_FILENAME',
+    'CAPABILITY_GROUP',
+    'SAR_DAR_MAX_DENOMINATOR',
+    'SAR_DAR_TOLERANCE',
+    'VOLUMEDETECT_RE',
+    'FOLDER_MEDIA_METADATA_KEYS',
+    'BACK_INPUT_TOKENS',
+    'INVALID_FILENAME_CHARS_RE',
+    'JOIN_ADD_ANOTHER_BACK',
+    'JOIN_ADD_ANOTHER_BACK_AUDIO',
+    'METADATA_DISPOSITION_FLAGS',
+    'COPY_CUT_WARNING',
+    'LOSSLESS_AUDIO_COPY_EXT_BY_CODEC',
+    'LOSSLESS_AUDIO_COPY_EXT_CHOICES',
+    'TRACK_MANAGER_MEDIA_EXTS',
+    'EXTRACT_AUDIO_EXTENSIONS',
+    'EXTRACT_SUBTITLE_EXTENSIONS',
+    'EXTRACT_COPY_CONTAINERS_AUDIO',
+    'EXTRACT_COPY_CONTAINERS_VIDEO',
+    'EXTRACT_COPY_CONTAINERS_SUBTITLE',
+]

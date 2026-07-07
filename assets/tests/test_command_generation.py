@@ -8,12 +8,23 @@ from pathlib import Path
 from unittest import mock
 
 import FFmWiz
+
+def _home_module(name):
+    # Return the ffmwiz submodule that DEFINES `name` (checked in dependency
+    # order so re-exporters don't shadow the real definer), else the facade.
+    for _mn in ('appio', 'runtime', 'services', 'runner', 'guibridge',
+                'trackmanager', 'metadata', 'wizard', 'modes'):
+        _m = getattr(FFmWiz, _mn, None)
+        if _m is not None and name in vars(_m):
+            return _m
+    return FFmWiz
+
 import cache_test_utils
 
 
 class CommandGenerationTests(unittest.TestCase):
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
         # Isolate the FFmpeg capability cache in a uniquely-owned temp directory
         # so tests can never touch the real/default cache. The previous value of
         # FFMWIZ_CACHE_DIR is saved and restored in tearDown (even on failure).
@@ -21,7 +32,7 @@ class CommandGenerationTests(unittest.TestCase):
         self._cache_run_id = uuid.uuid4().hex
         self._cache_dir = cache_test_utils.create_owned_temp_cache_dir(self._cache_run_id)
         os.environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
-        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
 
     def tearDown(self):
         # Restore the prior environment value rather than blindly unsetting it.
@@ -29,7 +40,7 @@ class CommandGenerationTests(unittest.TestCase):
             os.environ.pop("FFMWIZ_CACHE_DIR", None)
         else:
             os.environ["FFMWIZ_CACHE_DIR"] = self._prev_cache_env
-        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
         # Safe, ownership-verified removal of only this test's temp cache dir.
         cache_test_utils.safe_remove_owned_temp_dir(
             self._cache_dir, self._cache_run_id, tempfile.gettempdir())
@@ -104,7 +115,7 @@ class CommandGenerationTests(unittest.TestCase):
 
     def test_main_menu_routes_metadata_editor_mode(self):
         with mock.patch.object(FFmWiz, "ask_main_menu", return_value=13), \
-                mock.patch.object(FFmWiz, "run_metadata_editor_mode", return_value=None) as run_metadata:
+                mock.patch.object(FFmWiz.metadata, "run_metadata_editor_mode", return_value=None) as run_metadata:
             result = FFmWiz.run_one_job({"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"}, Path("config.json"))
         self.assertIsNone(result)
         run_metadata.assert_called_once()
@@ -777,7 +788,7 @@ class CommandGenerationTests(unittest.TestCase):
             }
             sidecars: list[Path] = []
             skipped: list[str] = []
-            with mock.patch.object(FFmWiz, "probe_packet_sizes", return_value={0: 1500, 1: 500}) as probe:
+            with mock.patch.object(FFmWiz.services, "probe_packet_sizes", return_value={0: 1500, 1: 500}) as probe:
                 analysis = FFmWiz.build_media_info_analysis(
                     "ffprobe",
                     input_path,
@@ -824,13 +835,13 @@ class CommandGenerationTests(unittest.TestCase):
             }
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                FFmWiz.print_source_info(answers)
+                FFmWiz.trackmanager.print_source_info(answers)
             self.assertIn("chapters: yes", out.getvalue())
 
             answers["probe"] = {"chapters": []}
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                FFmWiz.print_source_info(answers)
+                FFmWiz.trackmanager.print_source_info(answers)
             self.assertIn("chapters: no", out.getvalue())
 
     def test_separator_ranges_normalize_points(self):
@@ -1359,7 +1370,7 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertNotIn("-hwaccel cuda", text)
 
     def test_mux_video_stream_summary_includes_chapter_presence(self):
-        stream = FFmWiz.MuxStreamInfo(
+        stream = FFmWiz.mux.MuxStreamInfo(
             index=0,
             codec_type="video",
             codec_name="h264",
@@ -1478,12 +1489,12 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertTrue(FFmWiz.is_back_value("0"))
         self.assertTrue(FFmWiz.is_back_value("۰"))
         self.assertTrue(FFmWiz.is_back_value("٠"))
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="۰"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="۰"):
             with self.assertRaises(FFmWiz.Back):
-                FFmWiz.ask_yes_no("Continue? (y/n) [n]: ", False)
+                FFmWiz.appio.ask_yes_no("Continue? (y/n) [n]: ", False)
 
     def test_zero_based_selection_still_accepts_track_zero(self):
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
             self.assertEqual(FFmWiz.ask_selection("tracks: ", 3, [0]), [0])
 
     def test_run_mode_steps_back_skips_auto_single_audio_track_step(self):
@@ -1507,9 +1518,9 @@ class CommandGenerationTests(unittest.TestCase):
         FFmWiz.run_mode_steps(
             {"_question_offset": 0, "audio_streams": [{"codec_type": "audio"}]},
             [
-                FFmWiz.Step("input_path", lambda a: True, fake_input),
-                FFmWiz.Step("audio_track", lambda a: True, fake_audio_track),
-                FFmWiz.Step("output_location", lambda a: True, fake_output),
+                FFmWiz.wizard.Step("input_path", lambda a: True, fake_input),
+                FFmWiz.wizard.Step("audio_track", lambda a: True, fake_audio_track),
+                FFmWiz.wizard.Step("output_location", lambda a: True, fake_output),
             ],
         )
         self.assertEqual(calls, ["input", "audio_auto", "output", "input", "audio_auto", "output"])
@@ -1519,9 +1530,9 @@ class CommandGenerationTests(unittest.TestCase):
         errors: list[str] = []
         answers = self.base_answers(".")
         answers["video_encoders"] = ["libx264", "libx265"]
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=lambda _prompt: next(prompts)), \
-             mock.patch.object(FFmWiz, "error", side_effect=lambda message: errors.append(message)):
-            FFmWiz.step_video_codec(answers)
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=lambda _prompt: next(prompts)), \
+             mock.patch.object(FFmWiz.appio, "error", side_effect=lambda message: errors.append(message)):
+            FFmWiz.wizard.step_video_codec(answers)
         self.assertEqual(answers["video_codec"], "H264")
         self.assertTrue(any("Unknown video encoder" in message for message in errors))
 
@@ -1801,7 +1812,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(output.suffix, ".mkv")
 
     def test_stream_cleanup_output_suffix_matches_input_and_copy_maps_video(self):
-        rules = FFmWiz.MuxCleanupRules(
+        rules = FFmWiz.mux.MuxCleanupRules(
             audio_mode="4",
             audio_languages=[],
             audio_titles=[],
@@ -1823,10 +1834,10 @@ class CommandGenerationTests(unittest.TestCase):
             output_root.mkdir()
             output = FFmWiz.mux_make_output_path(input_file, output_root, input_file, rules)
             self.assertEqual(output.suffix, ".mp4")
-            media = FFmWiz.MuxMediaFile(
+            media = FFmWiz.mux.MuxMediaFile(
                 path=input_file,
                 format={},
-                streams=[FFmWiz.MuxStreamInfo(index=0, codec_type="video", codec_name="h264")],
+                streams=[FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264")],
             )
             cmd, _audio, _subtitle = FFmWiz.mux_build_ffmpeg_command("ffmpeg", input_file, output, media, rules)
         self.assertIn("-map", cmd)
@@ -1835,7 +1846,7 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
 
     def test_stream_cleanup_metadata_edits_and_default_dispositions_are_emitted(self):
-        rules = FFmWiz.MuxCleanupRules(
+        rules = FFmWiz.mux.MuxCleanupRules(
             audio_mode="4",
             audio_languages=[],
             audio_titles=[],
@@ -1849,20 +1860,20 @@ class CommandGenerationTests(unittest.TestCase):
             keep_chapters=True,
             overwrite=True,
             metadata_edits=[
-                FFmWiz.MuxStreamMetadataEdit(codec_type="audio", match_indexes=[1], language="jpn", title="Main"),
-                FFmWiz.MuxStreamMetadataEdit(codec_type="subtitle", match_languages=["unknown"], language="eng"),
+                FFmWiz.mux.MuxStreamMetadataEdit(codec_type="audio", match_indexes=[1], language="jpn", title="Main"),
+                FFmWiz.mux.MuxStreamMetadataEdit(codec_type="subtitle", match_languages=["unknown"], language="eng"),
             ],
         )
         input_file = Path("input.mkv")
         output = Path("output.mkv")
-        media = FFmWiz.MuxMediaFile(
+        media = FFmWiz.mux.MuxMediaFile(
             path=input_file,
             format={},
             streams=[
-                FFmWiz.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
-                FFmWiz.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", language="unknown", disposition_default=0),
-                FFmWiz.MuxStreamInfo(index=2, codec_type="audio", codec_name="aac", language="eng", disposition_default=1),
-                FFmWiz.MuxStreamInfo(index=3, codec_type="subtitle", codec_name="ass", language="unknown", disposition_default=1),
+                FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
+                FFmWiz.mux.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", language="unknown", disposition_default=0),
+                FFmWiz.mux.MuxStreamInfo(index=2, codec_type="audio", codec_name="aac", language="eng", disposition_default=1),
+                FFmWiz.mux.MuxStreamInfo(index=3, codec_type="subtitle", codec_name="ass", language="unknown", disposition_default=1),
             ],
         )
         cmd, _audio, _subtitle = FFmWiz.mux_build_ffmpeg_command("ffmpeg", input_file, output, media, rules)
@@ -1903,11 +1914,11 @@ class CommandGenerationTests(unittest.TestCase):
 
     def test_metadata_editor_menu_does_not_duplicate_media_report_mode(self):
         answers = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "metadata_input_path": Path("input.mkv"), "gpu_available": True}
-        with mock.patch.object(FFmWiz, "metadata_prompt_input", return_value=answers), \
-                mock.patch.object(FFmWiz, "ask_raw", side_effect=["6", "0"]), \
-                mock.patch.object(FFmWiz, "error") as error_call, \
+        with mock.patch.object(FFmWiz.metadata, "metadata_prompt_input", return_value=answers), \
+                mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["6", "0"]), \
+                mock.patch.object(FFmWiz.appio, "error") as error_call, \
                 contextlib.redirect_stdout(io.StringIO()) as stdout:
-            FFmWiz.run_metadata_editor_mode({})
+            FFmWiz.metadata.run_metadata_editor_mode({})
         self.assertIn("Stream Metadata Editor [1]", stdout.getvalue())
         self.assertNotIn("Metadata Report / Inspect", stdout.getvalue())
         error_call.assert_any_call("Enter a menu number from 1 to 5.")
@@ -1939,11 +1950,11 @@ class CommandGenerationTests(unittest.TestCase):
             "frames": 10,
             "conclusion": "likely limited/TV range",
         }
-        with mock.patch.object(FFmWiz, "metadata_menu_selection", side_effect=["2", "0"]), \
-                mock.patch.object(FFmWiz, "metadata_refresh_probe", return_value=probe), \
-                mock.patch.object(FFmWiz, "ask_raw", return_value="1") as ask_raw, \
-                mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-                mock.patch.object(FFmWiz, "estimate_color_range", return_value=estimate) as estimate_color, \
+        with mock.patch.object(FFmWiz.metadata, "metadata_menu_selection", side_effect=["2", "0"]), \
+                mock.patch.object(FFmWiz.metadata, "metadata_refresh_probe", return_value=probe), \
+                mock.patch.object(FFmWiz.appio, "ask_raw", return_value="1") as ask_raw, \
+                mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+                mock.patch.object(FFmWiz.services, "estimate_color_range", return_value=estimate) as estimate_color, \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz.run_video_bitstream_metadata_tools(answers)
         prompts = "\n".join(str(call.args[0]) for call in ask_raw.call_args_list)
@@ -1971,7 +1982,7 @@ class CommandGenerationTests(unittest.TestCase):
     def test_metadata_report_output_path_creates_reports_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             reports_dir = Path(tmp) / "MediaReports"
-            with mock.patch.object(FFmWiz, "default_media_reports_dir", return_value=reports_dir):
+            with mock.patch.object(FFmWiz.services, "default_media_reports_dir", return_value=reports_dir):
                 output = FFmWiz.metadata_report_output_path(Path("input.mkv"), "_metadata_report", ".txt")
             self.assertEqual(output.parent.name, "MediaReports")
             self.assertTrue(reports_dir.exists())
@@ -1985,7 +1996,7 @@ class CommandGenerationTests(unittest.TestCase):
             ]
         }
         answers = {}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="0") as ask_raw, \
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0") as ask_raw, \
                 contextlib.redirect_stdout(io.StringIO()):
             stream = FFmWiz.select_stream(probe, answers, {"video"})
         self.assertEqual(stream["index"], 0)
@@ -1993,17 +2004,17 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertIn("back=b", FFmWiz._strip_ansi(prompt))
 
     def test_metadata_value_prompt_accepts_zero_value(self):
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
             self.assertEqual(FFmWiz.metadata_value_prompt({}, "Enter metadata value"), "0")
 
     def test_video_full_range_flag_accepts_zero_limited_value(self):
         answers = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "metadata_input_path": Path("input.mkv")}
         probe = {"streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}]}
-        with mock.patch.object(FFmWiz, "metadata_menu_selection", side_effect=["3", "0"]), \
-                mock.patch.object(FFmWiz, "metadata_refresh_probe", return_value=probe), \
-                mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-                mock.patch.object(FFmWiz, "ask_raw", return_value="0"), \
-                mock.patch.object(FFmWiz, "confirm_and_run_ffmpeg", return_value=False) as confirm_run, \
+        with mock.patch.object(FFmWiz.metadata, "metadata_menu_selection", side_effect=["3", "0"]), \
+                mock.patch.object(FFmWiz.metadata, "metadata_refresh_probe", return_value=probe), \
+                mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+                mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"), \
+                mock.patch.object(FFmWiz.runner, "confirm_and_run_ffmpeg", return_value=False) as confirm_run, \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz.run_video_bitstream_metadata_tools(answers)
         command_text = " ".join(str(part) for part in confirm_run.call_args.args[1])
@@ -2015,22 +2026,22 @@ class CommandGenerationTests(unittest.TestCase):
             "video_streams": [{"width": 1920, "height": 1080}],
             "format": {},
         }
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
             FFmWiz.step_crop_top(answers)
         self.assertEqual(answers["crop_top"], 0)
 
     def test_mux_stream_index_prompt_accepts_zero_value(self):
         answers = {"_question_number": 1}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
             self.assertEqual(FFmWiz.mux_ask_text(answers, "Audio stream indexes to keep", "use b to go back", zero_is_value=True), "0")
 
     def test_mux_csv_stream_indexes_accept_zero_value(self):
         answers = {"_question_number": 1}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
             self.assertEqual(FFmWiz.mux_ask_csv_int_required(answers, "Audio stream indexes to edit", [0, 2]), [0])
 
     def test_stream_cleanup_detects_when_remux_is_not_needed(self):
-        rules = FFmWiz.MuxCleanupRules(
+        rules = FFmWiz.mux.MuxCleanupRules(
             audio_mode="4",
             audio_languages=[],
             audio_titles=[],
@@ -2044,29 +2055,29 @@ class CommandGenerationTests(unittest.TestCase):
             keep_chapters=True,
             overwrite=False,
         )
-        media = FFmWiz.MuxMediaFile(
+        media = FFmWiz.mux.MuxMediaFile(
             path=Path("input.mkv"),
             format={},
             streams=[
-                FFmWiz.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
-                FFmWiz.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", disposition_default=1),
-                FFmWiz.MuxStreamInfo(index=2, codec_type="subtitle", codec_name="ass", disposition_default=1),
+                FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
+                FFmWiz.mux.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", disposition_default=1),
+                FFmWiz.mux.MuxStreamInfo(index=2, codec_type="subtitle", codec_name="ass", disposition_default=1),
             ],
         )
         audio_keep = FFmWiz.mux_selected_audio_streams(media, rules)
         subtitle_keep = FFmWiz.mux_selected_subtitle_streams(media, rules)
         self.assertEqual(FFmWiz.mux_remux_needed_reasons(media, rules, audio_keep, subtitle_keep), [])
-        rules.metadata_edits = [FFmWiz.MuxStreamMetadataEdit(codec_type="audio", match_indexes=[1], title="Edited")]
+        rules.metadata_edits = [FFmWiz.mux.MuxStreamMetadataEdit(codec_type="audio", match_indexes=[1], title="Edited")]
         self.assertIn("stream metadata is edited", FFmWiz.mux_remux_needed_reasons(media, rules, audio_keep, subtitle_keep))
 
     def test_stream_cleanup_visible_question_numbers_do_not_jump_when_steps_are_skipped(self):
         media_files = [
-            FFmWiz.MuxMediaFile(
+            FFmWiz.mux.MuxMediaFile(
                 path=Path("input.mkv"),
                 format={},
                 streams=[
-                    FFmWiz.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
-                    FFmWiz.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", language="jpn"),
+                    FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
+                    FFmWiz.mux.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", language="jpn"),
                 ],
             )
         ]
@@ -2078,8 +2089,8 @@ class CommandGenerationTests(unittest.TestCase):
             return next(responses)
 
         answers = {"_question_number": 1, "_mux_next_question_number": 2}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask_raw), \
-             mock.patch.object(FFmWiz, "note", lambda _message: None):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask_raw), \
+             mock.patch.object(FFmWiz.appio, "note", lambda _message: None):
             FFmWiz.mux_configure_rules(answers, media_files)
             FFmWiz.mux_ask_output_base(answers, Path("input.mkv"))
             FFmWiz.mux_ask_yes_no(answers, "Start Stream Cleanup Remux now?", True)
@@ -2095,15 +2106,15 @@ class CommandGenerationTests(unittest.TestCase):
         output_calls = {"count": 0}
         method_calls = {"count": 0}
         originals = {
-            "step_input_path": FFmWiz.step_input_path,
-            "step_output_location": FFmWiz.step_output_location,
-            "ask_cut_method": FFmWiz.ask_cut_method,
-            "collect_cut_ranges_terminal": FFmWiz.collect_cut_ranges_terminal,
-            "ask_continue_default_yes": FFmWiz.ask_continue_default_yes,
-            "print_cut_summary": FFmWiz.print_cut_summary,
-            "get_video_fps": FFmWiz.get_video_fps,
-            "stream_duration_seconds": FFmWiz.stream_duration_seconds,
-            "build_output_path": FFmWiz.build_output_path,
+            "step_input_path": FFmWiz.wizard.step_input_path,
+            "step_output_location": FFmWiz.wizard.step_output_location,
+            "ask_cut_method": FFmWiz.modes.ask_cut_method,
+            "collect_cut_ranges_terminal": FFmWiz.services.collect_cut_ranges_terminal,
+            "ask_continue_default_yes": FFmWiz.modes.ask_continue_default_yes,
+            "print_cut_summary": FFmWiz.modes.print_cut_summary,
+            "get_video_fps": FFmWiz.services.get_video_fps,
+            "stream_duration_seconds": FFmWiz.services.stream_duration_seconds,
+            "build_output_path": FFmWiz.services.build_output_path,
         }
 
         def fake_input(answers):
@@ -2126,19 +2137,19 @@ class CommandGenerationTests(unittest.TestCase):
             return 1
 
         try:
-            FFmWiz.step_input_path = fake_input
-            FFmWiz.step_output_location = fake_output
-            FFmWiz.ask_cut_method = fake_method
-            FFmWiz.collect_cut_ranges_terminal = lambda _answers, fps, duration: calls.append("manual") or [(0.0, 10.0)]
-            FFmWiz.ask_continue_default_yes = lambda _answers: calls.append("confirm") or False
-            FFmWiz.print_cut_summary = lambda *args, **kwargs: calls.append("summary")
-            FFmWiz.get_video_fps = lambda _answers: 25.0
-            FFmWiz.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
-            FFmWiz.build_output_path = lambda _answers: Path("out.mkv")
+            FFmWiz.wizard.step_input_path = fake_input
+            FFmWiz.wizard.step_output_location = fake_output
+            FFmWiz.modes.ask_cut_method = fake_method
+            FFmWiz.services.collect_cut_ranges_terminal = lambda _answers, fps, duration: calls.append("manual") or [(0.0, 10.0)]
+            FFmWiz.modes.ask_continue_default_yes = lambda _answers: calls.append("confirm") or False
+            FFmWiz.modes.print_cut_summary = lambda *args, **kwargs: calls.append("summary")
+            FFmWiz.services.get_video_fps = lambda _answers: 25.0
+            FFmWiz.services.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
+            FFmWiz.services.build_output_path = lambda _answers: Path("out.mkv")
             result = FFmWiz._run_copy_cut_mode_impl({"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"})
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
 
         self.assertIsNone(result)
         self.assertEqual(calls[:4], ["input", "output", "method", "output"])
@@ -2149,11 +2160,11 @@ class CommandGenerationTests(unittest.TestCase):
         errors: list[str] = []
         gui_calls = {"count": 0}
         originals = {
-            "ask_raw": FFmWiz.ask_raw,
-            "open_cut_gui": FFmWiz.open_cut_gui,
-            "error": FFmWiz.error,
-            "get_video_fps": FFmWiz.get_video_fps,
-            "stream_duration_seconds": FFmWiz.stream_duration_seconds,
+            "ask_raw": FFmWiz.appio.ask_raw,
+            "open_cut_gui": FFmWiz.guibridge.open_cut_gui,
+            "error": FFmWiz.appio.error,
+            "get_video_fps": FFmWiz.services.get_video_fps,
+            "stream_duration_seconds": FFmWiz.services.stream_duration_seconds,
         }
 
         def fake_open_cut_gui(_answers, fps, duration):
@@ -2161,16 +2172,16 @@ class CommandGenerationTests(unittest.TestCase):
             return None
 
         try:
-            FFmWiz.ask_raw = lambda _prompt: next(prompts)
-            FFmWiz.open_cut_gui = fake_open_cut_gui
-            FFmWiz.error = lambda message: errors.append(message)
-            FFmWiz.get_video_fps = lambda _answers: 25.0
-            FFmWiz.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
+            FFmWiz.appio.ask_raw = lambda _prompt: next(prompts)
+            FFmWiz.guibridge.open_cut_gui = fake_open_cut_gui
+            FFmWiz.appio.error = lambda message: errors.append(message)
+            FFmWiz.services.get_video_fps = lambda _answers: 25.0
+            FFmWiz.services.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
             answers = {"format": {"duration": "100"}}
-            FFmWiz.step_cuts(answers)
+            FFmWiz.wizard.step_cuts(answers)
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
 
         self.assertEqual(gui_calls["count"], 0)
         self.assertNotIn("cut_keep_ranges", answers)
@@ -2179,19 +2190,19 @@ class CommandGenerationTests(unittest.TestCase):
     def test_run_wizard_uses_unified_editor_before_legacy_video_edit_prompts(self):
         calls: list[str] = []
         originals = {
-            "step_input_path": FFmWiz.step_input_path,
-            "step_output_location": FFmWiz.step_output_location,
-            "step_output_format": FFmWiz.step_output_format,
-            "step_video_codec": FFmWiz.step_video_codec,
-            "step_use_gpu": FFmWiz.step_use_gpu,
-            "step_unified_video_editor_for_encode": FFmWiz.step_unified_video_editor_for_encode,
-            "step_video_bitrate": FFmWiz.step_video_bitrate,
-            "step_resolution": FFmWiz.step_resolution,
-            "step_fps": FFmWiz.step_fps,
-            "step_start_now": FFmWiz.step_start_now,
-            "ask_raw": FFmWiz.ask_raw,
-            "get_video_fps": FFmWiz.get_video_fps,
-            "stream_duration_seconds": FFmWiz.stream_duration_seconds,
+            "step_input_path": FFmWiz.wizard.step_input_path,
+            "step_output_location": FFmWiz.wizard.step_output_location,
+            "step_output_format": FFmWiz.wizard.step_output_format,
+            "step_video_codec": FFmWiz.wizard.step_video_codec,
+            "step_use_gpu": FFmWiz.wizard.step_use_gpu,
+            "step_unified_video_editor_for_encode": FFmWiz.wizard.step_unified_video_editor_for_encode,
+            "step_video_bitrate": FFmWiz.wizard.step_video_bitrate,
+            "step_resolution": FFmWiz.wizard.step_resolution,
+            "step_fps": FFmWiz.wizard.step_fps,
+            "step_start_now": FFmWiz.wizard.step_start_now,
+            "ask_raw": FFmWiz.appio.ask_raw,
+            "get_video_fps": FFmWiz.services.get_video_fps,
+            "stream_duration_seconds": FFmWiz.services.stream_duration_seconds,
         }
 
         def fake_unified(answers):
@@ -2209,19 +2220,19 @@ class CommandGenerationTests(unittest.TestCase):
             })
 
         try:
-            FFmWiz.step_input_path = lambda answers: calls.append("input")
-            FFmWiz.step_output_location = lambda answers: calls.append("output")
-            FFmWiz.step_output_format = lambda answers: calls.append("format")
-            FFmWiz.step_video_codec = lambda answers: calls.append("codec")
-            FFmWiz.step_use_gpu = lambda answers: calls.append("gpu")
-            FFmWiz.step_unified_video_editor_for_encode = fake_unified
-            FFmWiz.step_video_bitrate = lambda answers: calls.append("bitrate")
-            FFmWiz.step_resolution = lambda answers: calls.append("resolution")
-            FFmWiz.step_fps = lambda answers: calls.append("fps")
-            FFmWiz.step_start_now = lambda answers: calls.append("start")
-            FFmWiz.ask_raw = lambda _prompt: (_ for _ in ()).throw(AssertionError("legacy prompt was shown"))
-            FFmWiz.get_video_fps = lambda _answers: 30.0
-            FFmWiz.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
+            FFmWiz.wizard.step_input_path = lambda answers: calls.append("input")
+            FFmWiz.wizard.step_output_location = lambda answers: calls.append("output")
+            FFmWiz.wizard.step_output_format = lambda answers: calls.append("format")
+            FFmWiz.wizard.step_video_codec = lambda answers: calls.append("codec")
+            FFmWiz.wizard.step_use_gpu = lambda answers: calls.append("gpu")
+            FFmWiz.wizard.step_unified_video_editor_for_encode = fake_unified
+            FFmWiz.wizard.step_video_bitrate = lambda answers: calls.append("bitrate")
+            FFmWiz.wizard.step_resolution = lambda answers: calls.append("resolution")
+            FFmWiz.wizard.step_fps = lambda answers: calls.append("fps")
+            FFmWiz.wizard.step_start_now = lambda answers: calls.append("start")
+            FFmWiz.appio.ask_raw = lambda _prompt: (_ for _ in ()).throw(AssertionError("legacy prompt was shown"))
+            FFmWiz.services.get_video_fps = lambda _answers: 30.0
+            FFmWiz.services.stream_duration_seconds = lambda _stream, _fmt=None: 100.0
             answers = {
                 "output_ext": "mp4",
                 "video_codec": "h264",
@@ -2233,7 +2244,7 @@ class CommandGenerationTests(unittest.TestCase):
             FFmWiz.run_wizard(answers)
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
 
         self.assertIn("unified", calls)
         self.assertTrue(answers["crop_enabled"])
@@ -2247,23 +2258,23 @@ class CommandGenerationTests(unittest.TestCase):
         errors: list[str] = []
         gui_calls = {"count": 0}
         originals = {
-            "ask_raw": FFmWiz.ask_raw,
-            "open_video_speed_gui": FFmWiz.open_video_speed_gui,
-            "error": FFmWiz.error,
+            "ask_raw": FFmWiz.appio.ask_raw,
+            "open_video_speed_gui": FFmWiz.guibridge.open_video_speed_gui,
+            "error": FFmWiz.appio.error,
         }
         try:
-            FFmWiz.ask_raw = lambda _prompt: next(prompts)
-            FFmWiz.open_video_speed_gui = lambda _answers: gui_calls.__setitem__("count", gui_calls["count"] + 1)
-            FFmWiz.error = lambda message: errors.append(message)
+            FFmWiz.appio.ask_raw = lambda _prompt: next(prompts)
+            FFmWiz.guibridge.open_video_speed_gui = lambda _answers: gui_calls.__setitem__("count", gui_calls["count"] + 1)
+            FFmWiz.appio.error = lambda message: errors.append(message)
             answers = {
                 "_disable_followup_video_gui_prompts": True,
                 "video_streams": [{"codec_type": "video"}],
                 "audio_streams": [],
             }
-            FFmWiz.step_video_speed_reverse_for_encode(answers)
+            FFmWiz.wizard.step_video_speed_reverse_for_encode(answers)
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
         self.assertEqual(gui_calls["count"], 0)
         self.assertFalse(answers["video_speed_enabled"])
         self.assertIn("not available", errors[-1])
@@ -2274,30 +2285,30 @@ class CommandGenerationTests(unittest.TestCase):
 
         calls: list[str] = []
         originals = {
-            "step_input_path": FFmWiz.step_input_path,
-            "step_join_additional_inputs_for_encode": FFmWiz.step_join_additional_inputs_for_encode,
-            "step_output_location": FFmWiz.step_output_location,
-            "step_output_format": FFmWiz.step_output_format,
-            "step_video_codec": FFmWiz.step_video_codec,
-            "step_use_gpu": FFmWiz.step_use_gpu,
-            "step_unified_video_editor_for_encode": FFmWiz.step_unified_video_editor_for_encode,
-            "step_crop_enabled": FFmWiz.step_crop_enabled,
-            "step_video_bitrate": FFmWiz.step_video_bitrate,
-            "step_cpu_two_pass": FFmWiz.step_cpu_two_pass,
-            "step_resolution": FFmWiz.step_resolution,
-            "step_fps": FFmWiz.step_fps,
-            "step_video_speed_reverse_for_encode": FFmWiz.step_video_speed_reverse_for_encode,
-            "step_cuts": FFmWiz.step_cuts,
-            "step_start_now": FFmWiz.step_start_now,
+            "step_input_path": FFmWiz.wizard.step_input_path,
+            "step_join_additional_inputs_for_encode": FFmWiz.wizard.step_join_additional_inputs_for_encode,
+            "step_output_location": FFmWiz.wizard.step_output_location,
+            "step_output_format": FFmWiz.wizard.step_output_format,
+            "step_video_codec": FFmWiz.wizard.step_video_codec,
+            "step_use_gpu": FFmWiz.wizard.step_use_gpu,
+            "step_unified_video_editor_for_encode": FFmWiz.wizard.step_unified_video_editor_for_encode,
+            "step_crop_enabled": FFmWiz.wizard.step_crop_enabled,
+            "step_video_bitrate": FFmWiz.wizard.step_video_bitrate,
+            "step_cpu_two_pass": FFmWiz.wizard.step_cpu_two_pass,
+            "step_resolution": FFmWiz.wizard.step_resolution,
+            "step_fps": FFmWiz.wizard.step_fps,
+            "step_video_speed_reverse_for_encode": FFmWiz.wizard.step_video_speed_reverse_for_encode,
+            "step_cuts": FFmWiz.wizard.step_cuts,
+            "step_start_now": FFmWiz.wizard.step_start_now,
         }
         try:
-            FFmWiz.step_input_path = lambda answers: calls.append("input")
-            FFmWiz.step_join_additional_inputs_for_encode = lambda answers: calls.append("join")
-            FFmWiz.step_output_location = lambda answers: calls.append("output")
-            FFmWiz.step_output_format = lambda answers: calls.append("format")
-            FFmWiz.step_video_codec = lambda answers: calls.append("codec")
-            FFmWiz.step_use_gpu = lambda answers: (calls.append("gpu"), answers.__setitem__("use_gpu", False))
-            FFmWiz.step_unified_video_editor_for_encode = lambda answers: (
+            FFmWiz.wizard.step_input_path = lambda answers: calls.append("input")
+            FFmWiz.wizard.step_join_additional_inputs_for_encode = lambda answers: calls.append("join")
+            FFmWiz.wizard.step_output_location = lambda answers: calls.append("output")
+            FFmWiz.wizard.step_output_format = lambda answers: calls.append("format")
+            FFmWiz.wizard.step_video_codec = lambda answers: calls.append("codec")
+            FFmWiz.wizard.step_use_gpu = lambda answers: (calls.append("gpu"), answers.__setitem__("use_gpu", False))
+            FFmWiz.wizard.step_unified_video_editor_for_encode = lambda answers: (
                 calls.append("unified"),
                 answers.__setitem__("_unified_video_editor_used", False),
                 answers.__setitem__("_unified_video_editor_declined", True),
@@ -2305,14 +2316,14 @@ class CommandGenerationTests(unittest.TestCase):
                 answers.__setitem__("video_speed_enabled", False),
                 answers.__setitem__("cut_keep_ranges", []),
             )
-            FFmWiz.step_crop_enabled = lambda answers: calls.append("crop")
-            FFmWiz.step_video_bitrate = lambda answers: calls.append("bitrate")
-            FFmWiz.step_cpu_two_pass = lambda answers: calls.append("two_pass")
-            FFmWiz.step_resolution = lambda answers: calls.append("resolution")
-            FFmWiz.step_fps = lambda answers: calls.append("fps")
-            FFmWiz.step_video_speed_reverse_for_encode = lambda answers: calls.append("speed")
-            FFmWiz.step_cuts = lambda answers: calls.append("cuts")
-            FFmWiz.step_start_now = lambda answers: (_ for _ in ()).throw(StopRun())
+            FFmWiz.wizard.step_crop_enabled = lambda answers: calls.append("crop")
+            FFmWiz.wizard.step_video_bitrate = lambda answers: calls.append("bitrate")
+            FFmWiz.wizard.step_cpu_two_pass = lambda answers: calls.append("two_pass")
+            FFmWiz.wizard.step_resolution = lambda answers: calls.append("resolution")
+            FFmWiz.wizard.step_fps = lambda answers: calls.append("fps")
+            FFmWiz.wizard.step_video_speed_reverse_for_encode = lambda answers: calls.append("speed")
+            FFmWiz.wizard.step_cuts = lambda answers: calls.append("cuts")
+            FFmWiz.wizard.step_start_now = lambda answers: (_ for _ in ()).throw(StopRun())
             with self.assertRaises(StopRun):
                 FFmWiz.run_wizard({
                     "output_ext": "mp4",
@@ -2324,7 +2335,7 @@ class CommandGenerationTests(unittest.TestCase):
                 })
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
         self.assertIn("unified", calls)
         self.assertNotIn("crop", calls)
         self.assertNotIn("speed", calls)
@@ -2387,8 +2398,8 @@ class CommandGenerationTests(unittest.TestCase):
 
     def test_step_use_gpu_skips_prompt_when_gpu_unavailable(self):
         answers = {"ffmpeg": "ffmpeg", "video_encoders": ["libx265"], "gpu_available": False}
-        with mock.patch.object(FFmWiz, "ask_yes_no") as ask_yes_no:
-            FFmWiz.step_use_gpu(answers)
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no") as ask_yes_no:
+            FFmWiz.wizard.step_use_gpu(answers)
         self.assertFalse(answers["use_gpu"])
         ask_yes_no.assert_not_called()
 
@@ -2441,7 +2452,7 @@ class CommandGenerationTests(unittest.TestCase):
     def test_step_nvenc_multipass_defaults_to_qres_for_bitrate_nvenc(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
-            with mock.patch.object(FFmWiz, "ask_raw", return_value=""):
+            with mock.patch.object(FFmWiz.appio, "ask_raw", return_value=""):
                 FFmWiz.step_nvenc_multipass(answers)
         self.assertEqual(answers["nvenc_multipass"], "qres")
 
@@ -2450,7 +2461,7 @@ class CommandGenerationTests(unittest.TestCase):
         for digit, expected in (("1", "disabled"), ("2", "qres"), ("3", "fullres")):
             with tempfile.TemporaryDirectory() as tmp:
                 answers = self.base_answers(tmp)
-                with mock.patch.object(FFmWiz, "ask_raw", return_value=digit):
+                with mock.patch.object(FFmWiz.appio, "ask_raw", return_value=digit):
                     FFmWiz.step_nvenc_multipass(answers)
                 self.assertEqual(answers["nvenc_multipass"], expected)
         # Prompt wording and back token.
@@ -2462,7 +2473,7 @@ class CommandGenerationTests(unittest.TestCase):
                 captured["prompt"] = prompt
                 return "1"
 
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask):
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask):
                 FFmWiz.step_nvenc_multipass(answers)
             prompt = captured["prompt"]
             self.assertIn("1=Disabled", prompt)
@@ -2474,7 +2485,7 @@ class CommandGenerationTests(unittest.TestCase):
         # Entering 0 navigates back.
         with tempfile.TemporaryDirectory() as tmp:
             answers = self.base_answers(tmp)
-            with mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+            with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
                 with self.assertRaises(FFmWiz.Back):
                     FFmWiz.step_nvenc_multipass(answers)
 
@@ -2661,9 +2672,9 @@ class CommandGenerationTests(unittest.TestCase):
 
         seen_numbers: list[int] = []
         originals = {
-            "step_input_path": FFmWiz.step_input_path,
-            "step_join_additional_inputs_for_encode": FFmWiz.step_join_additional_inputs_for_encode,
-            "step_output_location": FFmWiz.step_output_location,
+            "step_input_path": FFmWiz.wizard.step_input_path,
+            "step_join_additional_inputs_for_encode": FFmWiz.wizard.step_join_additional_inputs_for_encode,
+            "step_output_location": FFmWiz.wizard.step_output_location,
         }
 
         def fake_input(answers):
@@ -2685,21 +2696,21 @@ class CommandGenerationTests(unittest.TestCase):
             raise StopRun()
 
         try:
-            FFmWiz.step_input_path = fake_input
-            FFmWiz.step_join_additional_inputs_for_encode = fake_join
-            FFmWiz.step_output_location = fake_output
+            FFmWiz.wizard.step_input_path = fake_input
+            FFmWiz.wizard.step_join_additional_inputs_for_encode = fake_join
+            FFmWiz.wizard.step_output_location = fake_output
             with self.assertRaises(StopRun):
                 FFmWiz.run_wizard({"_question_offset": 1})
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
 
         self.assertEqual(seen_numbers, [8])
 
     def test_step_join_back_resume_preserves_existing_join_items_and_number_extra(self):
         originals = {
-            "ask_join_add_another": FFmWiz.ask_join_add_another,
-            "ask_required": FFmWiz.ask_required,
+            "ask_join_add_another": FFmWiz.wizard.ask_join_add_another,
+            "ask_required": FFmWiz.appio.ask_required,
         }
         item = {
             "path": Path("b.mkv"),
@@ -2716,8 +2727,8 @@ class CommandGenerationTests(unittest.TestCase):
             return False
 
         try:
-            FFmWiz.ask_join_add_another = fake_add_another
-            FFmWiz.ask_required = lambda _prompt: (_ for _ in ()).throw(AssertionError("path prompt should not be shown"))
+            FFmWiz.wizard.ask_join_add_another = fake_add_another
+            FFmWiz.appio.ask_required = lambda _prompt: (_ for _ in ()).throw(AssertionError("path prompt should not be shown"))
             answers = {
                 "_question_number": 5,
                 "_join_question_extra": 2,
@@ -2725,10 +2736,10 @@ class CommandGenerationTests(unittest.TestCase):
                 "video_streams": [{"codec_type": "video"}],
                 "join_input_items": [item],
             }
-            FFmWiz.step_join_additional_inputs_for_encode(answers)
+            FFmWiz.wizard.step_join_additional_inputs_for_encode(answers)
         finally:
             for name, original in originals.items():
-                setattr(FFmWiz, name, original)
+                setattr(_home_module(name), name, original)
 
         self.assertEqual(answers["join_input_items"], [item])
         self.assertEqual(answers["_join_question_extra"], 2)
@@ -2751,8 +2762,8 @@ class CommandGenerationTests(unittest.TestCase):
             for name in ("03_three.mp4", "01_one.mp4", "02_two.mp4"):
                 (vids / name).write_bytes(b"x")
 
-            original = FFmWiz.join_load_media_item
-            FFmWiz.join_load_media_item = lambda answers, path, allow_audio_only=False: {
+            original = FFmWiz.services.join_load_media_item
+            FFmWiz.services.join_load_media_item = lambda answers, path, allow_audio_only=False: {
                 "path": Path(path), "probe": {}, "format": {}, "streams": [],
                 "video_streams": [{"codec_type": "video"}], "audio_streams": [],
                 "subtitle_streams": [], "attachment_streams": [], "data_streams": [],
@@ -2776,9 +2787,9 @@ class CommandGenerationTests(unittest.TestCase):
                     "_question_number": 3,
                 }
                 with mock.patch("builtins.input", lambda _prompt="": next(script)):
-                    FFmWiz.step_join_additional_inputs_for_encode(answers)
+                    FFmWiz.wizard.step_join_additional_inputs_for_encode(answers)
             finally:
-                FFmWiz.join_load_media_item = original
+                FFmWiz.services.join_load_media_item = original
 
             names = [Path(it["path"]).name for it in answers.get("join_input_items", [])]
             self.assertEqual(
@@ -2806,10 +2817,10 @@ class CommandGenerationTests(unittest.TestCase):
                     }
                 return {"status": "ok", "keep_ranges": [[0.0, 10.0]]}
 
-            with mock.patch.object(FFmWiz, "_launch_qt_gui", side_effect=fake_launch):
-                self.assertIsNotNone(FFmWiz.open_unified_video_gui(answers))
+            with mock.patch.object(FFmWiz.guibridge, "_launch_qt_gui", side_effect=fake_launch):
+                self.assertIsNotNone(FFmWiz.guibridge.open_unified_video_gui(answers))
                 self.assertEqual(captured[-1]["chapters"], chapters)
-                self.assertEqual(FFmWiz.open_cut_gui(answers, fps=30.0, duration=100.0), [(0.0, 10.0)])
+                self.assertEqual(FFmWiz.guibridge.open_cut_gui(answers, fps=30.0, duration=100.0), [(0.0, 10.0)])
                 self.assertEqual(captured[-1]["chapters"], chapters)
 
     def test_atempo_filter_chain_splits_extreme_speed(self):
@@ -4242,7 +4253,7 @@ class CommandGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
             self.assertTrue(FFmWiz.color_range_prompt_applicable(answers))
-            with mock.patch.object(FFmWiz, "ask_raw", return_value="") as ask, \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="") as ask, \
                     contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_color_range(answers)
             self.assertTrue(ask.called)
@@ -4253,7 +4264,7 @@ class CommandGenerationTests(unittest.TestCase):
         """Test 2: unknown range + Do not force -> no forced tv/pc."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
-            with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="2"), \
                     contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_color_range(answers)
             self.assertEqual(answers["color_range_choice"], "unspecified")
@@ -4265,7 +4276,7 @@ class CommandGenerationTests(unittest.TestCase):
         """Test 3: unknown range + Assume PC/Full -> command has pc."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
-            with mock.patch.object(FFmWiz, "ask_raw", return_value="3"), \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="3"), \
                     contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_color_range(answers)
             self.assertEqual(answers["color_range_choice"], "pc")
@@ -4309,7 +4320,7 @@ class CommandGenerationTests(unittest.TestCase):
                 captured["prompt"] = prompt
                 return ""  # Enter keeps the default.
 
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask), \
                     contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_color_range(answers)
             self.assertIn("[3]", captured["prompt"])  # previous pc -> default option 3
@@ -4882,7 +4893,7 @@ class CommandGenerationTests(unittest.TestCase):
                 return "2"
 
             buf = io.StringIO()
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask), \
                     contextlib.redirect_stdout(buf):
                 FFmWiz.step_color_range(answers)
             out = buf.getvalue()
@@ -4901,7 +4912,7 @@ class CommandGenerationTests(unittest.TestCase):
         """Entering 0 at the color-range menu navigates back."""
         with tempfile.TemporaryDirectory() as tmp:
             answers = self._encode_answers(tmp, color_range=None)
-            with mock.patch.object(FFmWiz, "ask_raw", return_value="0"), \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"), \
                     contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(FFmWiz.Back):
                     FFmWiz.step_color_range(answers)
@@ -4923,7 +4934,7 @@ class CommandGenerationTests(unittest.TestCase):
             return "2"
 
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask), \
                 contextlib.redirect_stdout(buf):
             FFmWiz.step_folder_batch_color_range(answers)
         out = buf.getvalue()
@@ -4949,7 +4960,7 @@ class CommandGenerationTests(unittest.TestCase):
                 captured["prompt"] = prompt
                 return ""  # Enter keeps the default.
 
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=fake_ask), \
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask), \
                     contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_color_range(answers)
             self.assertIn("[2]", captured["prompt"])
@@ -4982,7 +4993,7 @@ class CommandGenerationTests(unittest.TestCase):
             fake = {"capability_source": "verified cache", "env_short": "abc123def456",
                     "status": "verified", "expected_final_range": "tv",
                     "verified_at_utc": "2026-01-01 00:00:00 UTC"}
-            with mock.patch.object(FFmWiz, "resolve_capability", return_value=fake):
+            with mock.patch.object(FFmWiz.services, "resolve_capability", return_value=fake):
                 out = self._summary_text(answers)
             self.assertIn("capability source: verified cache", out)
             self.assertIn("capability environment fingerprint: abc123def456", out)
@@ -5119,26 +5130,26 @@ class CommandGenerationTests(unittest.TestCase):
         return base
 
     def test_environment_fingerprint_stable(self):
-        with mock.patch.object(FFmWiz, "capability_environment_identity",
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity",
                                return_value=self._fake_identity()):
-            _, k1 = FFmWiz.capability_environment_key("ffmpeg", "ffprobe", "libx265")
-            _, k2 = FFmWiz.capability_environment_key("ffmpeg", "ffprobe", "libx265")
+            _, k1 = FFmWiz.services.capability_environment_key("ffmpeg", "ffprobe", "libx265")
+            _, k2 = FFmWiz.services.capability_environment_key("ffmpeg", "ffprobe", "libx265")
         self.assertEqual(k1, k2)
 
     def test_environment_fingerprint_path_invalidates(self):
         def ident(ffmpeg, ffprobe, *, include_gpu):
             return self._fake_identity(ffmpeg_path=ffmpeg)
-        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
-            _, k1 = FFmWiz.capability_environment_key("C:/a/ffmpeg.exe", "ffprobe", "libx265")
-            _, k2 = FFmWiz.capability_environment_key("C:/b/ffmpeg.exe", "ffprobe", "libx265")
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity", side_effect=ident):
+            _, k1 = FFmWiz.services.capability_environment_key("C:/a/ffmpeg.exe", "ffprobe", "libx265")
+            _, k2 = FFmWiz.services.capability_environment_key("C:/b/ffmpeg.exe", "ffprobe", "libx265")
         self.assertNotEqual(k1, k2)
 
     def test_environment_fingerprint_build_invalidates(self):
         def ident(ffmpeg, ffprobe, *, include_gpu):
             return self._fake_identity(ffmpeg_build_hash="v1" if "a" in ffmpeg else "v2")
-        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
-            _, k1 = FFmWiz.capability_environment_key("a", "ffprobe", "libx265")
-            _, k2 = FFmWiz.capability_environment_key("b", "ffprobe", "libx265")
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity", side_effect=ident):
+            _, k1 = FFmWiz.services.capability_environment_key("a", "ffprobe", "libx265")
+            _, k2 = FFmWiz.services.capability_environment_key("b", "ffprobe", "libx265")
         self.assertNotEqual(k1, k2)
 
     def test_environment_driver_invalidates_nvenc(self):
@@ -5150,9 +5161,9 @@ class CommandGenerationTests(unittest.TestCase):
                 d["gpu"] = "RTX"
                 d["nvidia_driver"] = "550" if "a" in ffmpeg else "560"
             return d
-        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
-            _, k1 = FFmWiz.capability_environment_key("a", "ffprobe", "hevc_nvenc")
-            _, k2 = FFmWiz.capability_environment_key("b", "ffprobe", "hevc_nvenc")
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity", side_effect=ident):
+            _, k1 = FFmWiz.services.capability_environment_key("a", "ffprobe", "hevc_nvenc")
+            _, k2 = FFmWiz.services.capability_environment_key("b", "ffprobe", "hevc_nvenc")
         self.assertTrue(calls["gpu"])
         self.assertNotEqual(k1, k2)
 
@@ -5161,8 +5172,8 @@ class CommandGenerationTests(unittest.TestCase):
         def ident(ffmpeg, ffprobe, *, include_gpu):
             captured["include_gpu"] = include_gpu
             return self._fake_identity()
-        with mock.patch.object(FFmWiz, "capability_environment_identity", side_effect=ident):
-            FFmWiz.capability_environment_key("ffmpeg", "ffprobe", "libx265")
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity", side_effect=ident):
+            FFmWiz.services.capability_environment_key("ffmpeg", "ffprobe", "libx265")
         self.assertFalse(captured["include_gpu"])
 
     def test_lazy_probe_runs_once_and_caches(self):
@@ -5170,15 +5181,15 @@ class CommandGenerationTests(unittest.TestCase):
                     "probe_method": "real encode + ffprobe", "encoder": "libx265",
                     "container_family": "mkv", "sample_command_hash": "h",
                     "ffprobe_result": "tv", "verified_at_utc": "t", "error": None}
-        with mock.patch.object(FFmWiz, "capability_environment_identity",
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity",
                                return_value=self._fake_identity()), \
-                mock.patch.object(FFmWiz, "probe_color_range_capability",
+                mock.patch.object(FFmWiz.services, "probe_color_range_capability",
                                   return_value=verified) as probe:
             a = self._cap_answers()
-            r1 = FFmWiz.resolve_capability(a)
-            r2 = FFmWiz.resolve_capability(a)  # session memo -> no second probe
-            FFmWiz._CAPABILITY_SESSION_MEMO.clear()
-            r3 = FFmWiz.resolve_capability(a)  # file cache -> still no probe
+            r1 = FFmWiz.services.resolve_capability(a)
+            r2 = FFmWiz.services.resolve_capability(a)  # session memo -> no second probe
+            FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
+            r3 = FFmWiz.services.resolve_capability(a)  # file cache -> still no probe
         self.assertEqual(probe.call_count, 1)
         self.assertEqual(r1["capability_source"], "fresh probe")
         self.assertEqual(r2["capability_source"], "fresh probe")  # memoized copy
@@ -5195,11 +5206,11 @@ class CommandGenerationTests(unittest.TestCase):
                     "probe_method": "m", "encoder": "libx265", "container_family": "mkv",
                     "sample_command_hash": "h", "ffprobe_result": "tv",
                     "verified_at_utc": "t", "error": None}
-        with mock.patch.object(FFmWiz, "capability_environment_identity",
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity",
                                return_value=self._fake_identity()), \
-                mock.patch.object(FFmWiz, "probe_color_range_capability",
+                mock.patch.object(FFmWiz.services, "probe_color_range_capability",
                                   return_value=verified) as probe:
-            r = FFmWiz.resolve_capability(self._cap_answers())
+            r = FFmWiz.services.resolve_capability(self._cap_answers())
         self.assertEqual(probe.call_count, 1)  # other env not reused
         self.assertEqual(r["expected_final_range"], "tv")
 
@@ -5208,23 +5219,23 @@ class CommandGenerationTests(unittest.TestCase):
         verified = {"status": "verified", "expected_final_range": "tv", "probe_method": "m",
                     "encoder": "libx265", "container_family": "mkv", "sample_command_hash": "h",
                     "ffprobe_result": "tv", "verified_at_utc": "t", "error": None}
-        with mock.patch.object(FFmWiz, "capability_environment_identity",
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity",
                                return_value=self._fake_identity()), \
-                mock.patch.object(FFmWiz, "probe_color_range_capability",
+                mock.patch.object(FFmWiz.services, "probe_color_range_capability",
                                   return_value=verified) as probe:
             a = self._cap_answers()
             for _ in range(5):  # 5 split parts / passes / files
-                FFmWiz.resolve_capability(a)
+                FFmWiz.services.resolve_capability(a)
         self.assertEqual(probe.call_count, 1)
 
     def test_nvenc_unavailable_stores_unsupported(self):
         unsupported = {"status": "unsupported", "expected_final_range": None, "probe_method": "m",
                        "encoder": "hevc_nvenc", "container_family": "mp4", "sample_command_hash": "h",
                        "ffprobe_result": None, "verified_at_utc": "t", "error": "no nvenc"}
-        with mock.patch.object(FFmWiz, "capability_environment_identity",
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity",
                                return_value=self._fake_identity(gpu="x", nvidia_driver="1")), \
-                mock.patch.object(FFmWiz, "probe_color_range_capability", return_value=unsupported):
-            r = FFmWiz.resolve_capability(self._cap_answers(codec="H265", gpu=True, ext="mp4"))
+                mock.patch.object(FFmWiz.services, "probe_color_range_capability", return_value=unsupported):
+            r = FFmWiz.services.resolve_capability(self._cap_answers(codec="H265", gpu=True, ext="mp4"))
         self.assertEqual(r["status"], "unsupported")
         cache = FFmWiz.load_capability_cache()
         entry = next(iter(cache["environments"].values()))["capabilities"]["color_range_do_not_force"]["hevc_nvenc|mp4"]
@@ -5234,10 +5245,10 @@ class CommandGenerationTests(unittest.TestCase):
         failed = {"status": "probe_failed", "expected_final_range": None, "probe_method": "m",
                   "encoder": "libx265", "container_family": "mkv", "sample_command_hash": "h",
                   "ffprobe_result": None, "verified_at_utc": "t", "error": "boom"}
-        with mock.patch.object(FFmWiz, "capability_environment_identity",
+        with mock.patch.object(FFmWiz.services, "capability_environment_identity",
                                return_value=self._fake_identity()), \
-                mock.patch.object(FFmWiz, "probe_color_range_capability", return_value=failed):
-            r = FFmWiz.resolve_capability(self._cap_answers())
+                mock.patch.object(FFmWiz.services, "probe_color_range_capability", return_value=failed):
+            r = FFmWiz.services.resolve_capability(self._cap_answers())
         self.assertEqual(r["status"], "probe_failed")
         self.assertIsNone(r["expected_final_range"])
 
@@ -5256,7 +5267,7 @@ class CommandGenerationTests(unittest.TestCase):
         FFmWiz.save_capability_cache({"schema_version": 1, "environments": {"E": {}}})
         sibling = Path(self._cache_dir, "user_setting.json")
         sibling.write_text("{}", encoding="utf-8")
-        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz._capability_cache_clear()
         self.assertFalse(Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).exists())
@@ -5271,7 +5282,7 @@ class CommandGenerationTests(unittest.TestCase):
                                 "verified_at_utc": "t"}}}}}}
         FFmWiz.save_capability_cache(cache)
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "capability_environment_key", return_value=({}, "ENVKEY123456")), \
+        with mock.patch.object(FFmWiz.services, "capability_environment_key", return_value=({}, "ENVKEY123456")), \
                 contextlib.redirect_stdout(buf):
             FFmWiz._capability_cache_view("ffmpeg", "ffprobe")
         out = buf.getvalue()
@@ -5284,7 +5295,7 @@ class CommandGenerationTests(unittest.TestCase):
             "color_range_do_not_force": {"libx265|mkv": {"status": "verified",
                                                          "expected_final_range": "tv"}}}}}}
         FFmWiz.save_capability_cache(cache)
-        with mock.patch.object(FFmWiz, "capability_environment_key", return_value=({}, "K")):
+        with mock.patch.object(FFmWiz.services, "capability_environment_key", return_value=({}, "K")):
             FFmWiz.invalidate_capability_entry(self._cap_answers())
         data = FFmWiz.load_capability_cache()
         self.assertNotIn("libx265|mkv",
@@ -5677,7 +5688,7 @@ class CommandGenerationTests(unittest.TestCase):
         unrelated = Path(self._cache_dir, "unrelated_user_file.json")
         unrelated.write_text("{}", encoding="utf-8")
         marker = Path(self._cache_dir, cache_test_utils.TEST_CACHE_OWNER_MARKER)
-        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz._capability_cache_clear()
         self.assertFalse(Path(self._cache_dir, FFmWiz.CAPABILITY_CACHE_FILENAME).exists())
@@ -5727,7 +5738,7 @@ class CommandGenerationTests(unittest.TestCase):
         # Recreate a valid primary file as well.
         FFmWiz.save_capability_cache({"schema_version": 1, "environments": {}})
         self.assertTrue(cap.exists())
-        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz._capability_cache_clear()
         self.assertFalse(cap.exists())
@@ -5747,7 +5758,7 @@ class CommandGenerationTests(unittest.TestCase):
         ]
         for d in decoys:
             d.write_text("keep", encoding="utf-8")
-        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
                 contextlib.redirect_stdout(io.StringIO()):
             FFmWiz._capability_cache_clear()
         self.assertFalse(cap.exists())
@@ -5758,7 +5769,7 @@ class CommandGenerationTests(unittest.TestCase):
         """Clearing when no cache files exist is a safe no-op (no prompt, no error)."""
         cap = FFmWiz.capability_cache_path()
         self.assertFalse(cap.exists())
-        with mock.patch.object(FFmWiz, "ask_yes_no",
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no",
                                side_effect=AssertionError("should not prompt")), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             FFmWiz._capability_cache_clear()
@@ -5779,7 +5790,7 @@ class CommandGenerationTests(unittest.TestCase):
         unrelated = Path(self._cache_dir, "survivor.json")
         unrelated.write_text("{}", encoding="utf-8")
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
+        with mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
                 contextlib.redirect_stdout(buf):
             FFmWiz._capability_cache_clear()
         text = buf.getvalue()
@@ -5941,16 +5952,16 @@ class CommandGenerationTests(unittest.TestCase):
         self.assertEqual(r(None), "")
 
     def test_logging_file_is_utc_structured_and_redacted(self):
-        prev = (FFmWiz._LOGGER, FFmWiz._LOG_PATH, FFmWiz._SHUTDOWN_LOGGED,
-                FFmWiz._EXECUTION_ID, FFmWiz._SESSION_START_MONOTONIC)
-        FFmWiz._LOGGER = None
-        FFmWiz._LOG_PATH = None
-        FFmWiz._SHUTDOWN_LOGGED = False
+        prev = (FFmWiz.appio._LOGGER, FFmWiz.appio._LOG_PATH, FFmWiz.appio._SHUTDOWN_LOGGED,
+                FFmWiz.appio._EXECUTION_ID, FFmWiz.appio._SESSION_START_MONOTONIC)
+        FFmWiz.appio._LOGGER = None
+        FFmWiz.appio._LOG_PATH = None
+        FFmWiz.appio._SHUTDOWN_LOGGED = False
         try:
             with tempfile.TemporaryDirectory(prefix="ffmwiz_logtest_") as tmp, \
-                    mock.patch.object(FFmWiz, "_logs_dir", return_value=Path(tmp)), \
-                    mock.patch.object(FFmWiz, "_logging_enabled_from_config", return_value=True), \
-                    mock.patch.object(FFmWiz, "_log_retention_days_from_config", return_value=0):
+                    mock.patch.object(FFmWiz.appio, "_logs_dir", return_value=Path(tmp)), \
+                    mock.patch.object(FFmWiz.appio, "_logging_enabled_from_config", return_value=True), \
+                    mock.patch.object(FFmWiz.appio, "_log_retention_days_from_config", return_value=0):
                 path = FFmWiz.setup_logging()
                 self.assertIsNotNone(path)
                 self.assertTrue(path.name.startswith("ffmwiz_"))
@@ -5973,15 +5984,15 @@ class CommandGenerationTests(unittest.TestCase):
             self.assertIn("total duration=", text)
         finally:
             # Restore module logging state so other tests are unaffected.
-            if FFmWiz._LOGGER is not None:
-                for h in list(FFmWiz._LOGGER.handlers):
+            if FFmWiz.appio._LOGGER is not None:
+                for h in list(FFmWiz.appio._LOGGER.handlers):
                     try:
                         h.close()
                     except Exception:
                         pass
-                    FFmWiz._LOGGER.removeHandler(h)
-            (FFmWiz._LOGGER, FFmWiz._LOG_PATH, FFmWiz._SHUTDOWN_LOGGED,
-             FFmWiz._EXECUTION_ID, FFmWiz._SESSION_START_MONOTONIC) = prev
+                    FFmWiz.appio._LOGGER.removeHandler(h)
+            (FFmWiz.appio._LOGGER, FFmWiz.appio._LOG_PATH, FFmWiz.appio._SHUTDOWN_LOGGED,
+             FFmWiz.appio._EXECUTION_ID, FFmWiz.appio._SESSION_START_MONOTONIC) = prev
 
 
 if __name__ == "__main__":
