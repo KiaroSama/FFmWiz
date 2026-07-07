@@ -908,6 +908,9 @@ JOIN_AUDIO_PREP_FILTER = "aresample=48000:async=1:first_pts=0,aformat=channel_la
 
 FFMWIZ_RUNTIME_DIR_NAME = "runtime"
 
+# The bundled GUI (classic + QML) lives inside the package at ffmwiz/gui/.
+FFMWIZ_GUI_DIR_NAME = "gui"
+
 FFMWIZ_GUI_FILE_NAME = "ffmwiz_gui.py"
 
 REQUIREMENTS_FILE_NAME = "requirements.txt"
@@ -1183,6 +1186,7 @@ __all__ = [
     'CUDA_CUVID_DECODER_BY_CODEC',
     'JOIN_AUDIO_PREP_FILTER',
     'FFMWIZ_RUNTIME_DIR_NAME',
+    'FFMWIZ_GUI_DIR_NAME',
     'FFMWIZ_GUI_FILE_NAME',
     'REQUIREMENTS_FILE_NAME',
     'PYSIDE6_DISPLAY_NAME',

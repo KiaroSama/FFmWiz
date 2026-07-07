@@ -59,7 +59,12 @@ def mux_display_path(input_root: Path, input_file: Path) -> Path:
 
 
 def script_dir() -> Path:
-    return Path(__file__).resolve().parent
+    # The project root is where FFmWiz.py lives. This module is at
+    # <root>/ffmwiz/support/L00_paths.py, so the root is two directories up
+    # from the ffmwiz package (parents[2]). Keeping this correct is critical:
+    # config.env, requirements.txt, the bundled GUI, MediaReports and Logs are
+    # all resolved relative to it.
+    return Path(__file__).resolve().parents[2]
 
 
 def sanitize_output_stem(stem: str) -> str:
