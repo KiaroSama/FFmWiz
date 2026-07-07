@@ -49,6 +49,18 @@ the parent of the `ffmwiz` package, so `config.env`, `requirements.txt`, the
 bundled GUI, `MediaReports/`, and `Logs/` are all found relative to
 `FFmWiz.py`.
 
+The large Mode-2 `config.env` template lives in `ffmwiz/core/constants_config_template.py`
+(a leaf module holding only the `CONFIG_TEMPLATE` string) and is re-exported by
+`constants.py`, keeping the constants module scannable while the public name
+`FFmWiz.CONFIG_TEMPLATE` stays unchanged.
+
+The encode file-size estimate is a small, dependency-light feature: the pure
+math and formatting live in `ffmwiz/support/L00_naming.py`
+(`estimate_size_bytes_from_bitrate`, `format_estimated_size`), and the
+duration/orchestration lives in `ffmwiz/services.py`
+(`estimated_encode_duration_seconds`, `print_encode_size_estimate`). The video
+and audio bitrate steps and the wizard summary all call the same helpers.
+
 ## Splitting a module safely
 
 Because the test suite monkeypatches many functions via
@@ -116,6 +128,26 @@ py FFmWiz.py --preview-colors      # color/theme smoke check
 
 The GitHub Actions workflow (`.github/workflows/python-smoke.yml`) reproduces
 these checks on Windows across Python 3.10–3.13.
+
+## Test layout
+
+The unittest suite lives in `assets/tests/`. Two originally-huge test files were
+split by responsibility while preserving every test (the full suite count is the
+guardrail):
+
+- The command-generation suite shares one fixture base,
+  `command_gen_base.py::CommandGenBase` (setUp/tearDown plus every `*_answers`
+  builder and the module-level `_home_module` helper). The tests themselves are
+  grouped into `test_command_generation.py` (core), `test_command_color_and_pixel.py`,
+  `test_command_audio.py`, `test_command_cut_join_folder.py`, and
+  `test_command_hardsub_and_encode.py`, each subclassing `CommandGenBase`.
+- The Join/loudnorm classes share `join_test_helpers.py` (`video_stream`,
+  `audio_stream`, `make_item`, `_vstream`) and are grouped into
+  `test_loudnorm_join_progress.py`, `test_join_pixel_and_progress.py`, and
+  `test_trackmanager_and_audio.py`.
+
+Helper modules are named so unittest discovery (`test*.py`) skips them
+(`command_gen_base.py`, `join_test_helpers.py`, `cache_test_utils.py`).
 
 ## Porting notes
 

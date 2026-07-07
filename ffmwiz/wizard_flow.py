@@ -493,6 +493,48 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             format_cut_ranges_for_summary(cut_keep_ranges, fps, "cuts (keep ranges)"),
             Color.LIME,
         ))
+    _print_estimated_output_size(answers)
+
+
+def _print_estimated_output_size(answers: dict[str, Any]) -> None:
+    """Summary line: approximate output size from the chosen target bitrates.
+
+    Uses the TOTAL target bitrate (video + audio). Shows ``N/A`` with a reason
+    when a target bitrate is not available for the video stream (constant-quality
+    CRF/CQ mode, or stream copy), since size then cannot be estimated.
+    """
+    total_kbps = 0.0
+    na_reason = ""
+    if output_has_video(answers):
+        if str(resolve_video_encoder(answers)[0]).lower() == "copy":
+            na_reason = "video stream copy, no target bitrate"
+        elif answers.get("video_crf") is not None:
+            na_reason = "constant-quality CRF/CQ mode"
+        elif answers.get("video_bitrate_kbps"):
+            total_kbps += float(answers["video_bitrate_kbps"])
+        else:
+            na_reason = "no target video bitrate"
+    if (
+        not na_reason
+        and answers.get("audio_streams")
+        and answers.get("audio_bitrate_kbps")
+        and str(answers.get("audio_codec")) != "copy"
+    ):
+        total_kbps += float(answers["audio_bitrate_kbps"])
+    if na_reason:
+        print("  " + field_text("estimated output size", f"N/A ({na_reason})", Color.NOTE_YELLOW))
+        return
+    duration = services.estimated_encode_duration_seconds(answers)
+    size = estimate_size_bytes_from_bitrate(total_kbps, duration)
+    if size is None or total_kbps <= 0:
+        print("  " + field_text("estimated output size", "N/A (unknown source duration)", Color.NOTE_YELLOW))
+        return
+    print("  " + field_text(
+        "estimated output size",
+        f"{format_estimated_size(size)}  (total {int(total_kbps)} kbps over {format_duration(duration)})",
+        Color.LIME,
+    ))
+    appio.note(BITRATE_SIZE_ESTIMATE_NOTE)
 
 
 def graphical_hint(text: str) -> str:

@@ -632,6 +632,7 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
         answers["video_bitrate_kbps"] = number
         answers["video_bitrate_keep"] = False
         answers.pop("video_crf", None)
+        services.print_encode_size_estimate(answers, number, "video")
         return
 
 

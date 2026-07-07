@@ -85,6 +85,42 @@ def format_bytes(value: int | None) -> str:
     return f"{size / (1024 * 1024 * 1024 * 1024):.2f} TB"
 
 
+def estimate_size_bytes_from_bitrate(total_kbps: float | None, duration_seconds: float | None) -> int | None:
+    """Approximate encoded byte size from an average bitrate and a duration.
+
+    Bitrate is in kbps (1000 bits/s), so the size is
+    ``kbps * 1000 / 8 * seconds`` (= ``kbps * 125 * seconds``) bytes.
+    Returns None when either input is missing or non-positive.
+    """
+    try:
+        kbps = float(total_kbps)
+        seconds = float(duration_seconds)
+    except (TypeError, ValueError):
+        return None
+    if kbps <= 0 or seconds <= 0:
+        return None
+    return int(round(kbps * 1000.0 / 8.0 * seconds))
+
+
+def format_estimated_size(value: float | None) -> str:
+    """Human-readable size for encode estimates, scaling B -> KB -> MB -> GB -> TB.
+
+    Unlike ``format_bytes`` (which intentionally keeps media sizes in MB for the
+    per-stream size report), this formatter promotes to GB/TB so long,
+    high-bitrate estimates stay readable.
+    """
+    if value is None:
+        return "unknown"
+    size = float(value)
+    if size < 1024:
+        return f"{int(size)} B"
+    for unit in ("KB", "MB", "GB"):
+        size /= 1024.0
+        if size < 1024.0:
+            return f"{size:.1f} {unit}"
+    return f"{size / 1024.0:.2f} TB"
+
+
 def format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "unknown"
@@ -194,6 +230,8 @@ __all__ = [
     '_text_preview',
     '_format_hms_ms',
     'format_bytes',
+    'estimate_size_bytes_from_bitrate',
+    'format_estimated_size',
     'format_duration',
     'mux_format_index_list',
     'mux_text_matches_any',
