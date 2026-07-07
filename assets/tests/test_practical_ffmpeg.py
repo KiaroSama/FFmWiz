@@ -62,12 +62,12 @@ class PracticalFFmpegTests(unittest.TestCase):
     pixel-format selection (CPU and GPU/NVENC)."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
         self._run_id = uuid.uuid4().hex
         self._prev_cache = __import__("os").environ.get("FFMWIZ_CACHE_DIR")
         self._cache_dir = cache_test_utils.create_owned_temp_cache_dir(self._run_id)
         __import__("os").environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
-        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
         self._tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_practical_"))
 
     def tearDown(self):
@@ -77,7 +77,7 @@ class PracticalFFmpegTests(unittest.TestCase):
             os.environ.pop("FFMWIZ_CACHE_DIR", None)
         else:
             os.environ["FFMWIZ_CACHE_DIR"] = self._prev_cache
-        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
         cache_test_utils.safe_remove_owned_temp_dir(
             self._cache_dir, self._run_id, tempfile.gettempdir())
 

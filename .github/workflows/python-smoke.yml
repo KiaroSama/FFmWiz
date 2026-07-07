@@ -28,7 +28,9 @@ jobs:
           python -m pip install --upgrade -r requirements.txt
 
       - name: Compile Python files
-        run: python -m py_compile FFmWiz.py assets/runtime/ffmwiz_gui.py assets/runtime/MuxCls.py
+        run: |
+          python -m py_compile FFmWiz.py assets/runtime/ffmwiz_gui.py
+          python -m compileall -q ffmwiz
 
       - name: Validate config.env template
         run: python -c "import FFmWiz, pathlib; tpl=pathlib.Path('config.env.example').read_text(encoding='utf-8'); assert FFmWiz.CONFIG_TEMPLATE==tpl, 'template/example drift'; s=FFmWiz.parse_env_config(tpl)['settings']; assert s.get('video_codec') and 'use_gpu' in s and s.get('gui_engine')=='classic'; print('config.env template OK')"

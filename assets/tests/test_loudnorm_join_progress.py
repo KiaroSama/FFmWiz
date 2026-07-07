@@ -59,19 +59,19 @@ def make_item(path, duration=10.0, audio_bitrate="128000", with_audio=True, fps=
 
 class LoudnormJoinProgressTests(unittest.TestCase):
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
         self._prev_cache_env = os.environ.get("FFMWIZ_CACHE_DIR")
         self._cache_run_id = uuid.uuid4().hex
         self._cache_dir = cache_test_utils.create_owned_temp_cache_dir(self._cache_run_id)
         os.environ["FFMWIZ_CACHE_DIR"] = self._cache_dir
-        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
 
     def tearDown(self):
         if self._prev_cache_env is None:
             os.environ.pop("FFMWIZ_CACHE_DIR", None)
         else:
             os.environ["FFMWIZ_CACHE_DIR"] = self._prev_cache_env
-        FFmWiz._CAPABILITY_SESSION_MEMO.clear()
+        FFmWiz.services._CAPABILITY_SESSION_MEMO.clear()
         cache_test_utils.safe_remove_owned_temp_dir(self._cache_dir, self._cache_run_id, tempfile.gettempdir())
 
     # ---- helpers ----
@@ -188,8 +188,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             "input_path": Path("x.mkv"),
             "format": {"duration": "5"},
         }
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "-16"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "-16"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True):
             FFmWiz.step_loudnorm(answers)
         self.assertNotEqual(answers["audio_codec"], "copy")
         self.assertTrue(answers["loudnorm_enabled"])
@@ -338,33 +338,33 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     # ================= Progress de-duplication tests =================
     def _capture_progress(self, fn):
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "_stdout_supports_in_place_progress", return_value=True), \
-             mock.patch.object(FFmWiz, "_progress_terminal_width", return_value=200), \
-             mock.patch.object(FFmWiz, "_enable_windows_vt_mode"), \
+        with mock.patch.object(FFmWiz.runtime, "_stdout_supports_in_place_progress", return_value=True), \
+             mock.patch.object(FFmWiz.runtime, "_progress_terminal_width", return_value=200), \
+             mock.patch.object(FFmWiz.runtime, "_enable_windows_vt_mode"), \
              contextlib.redirect_stdout(buf):
             fn()
         return FFmWiz._strip_ansi(buf.getvalue())
 
     def test_progress_final_line_emitted_once(self):
         def run():
-            FFmWiz._begin_progress_render()
-            FFmWiz._write_progress_line("LIVE 50pct")
-            FFmWiz._finish_progress_line("FINAL 100pct")   # committed once
-            FFmWiz._write_progress_line("LATE 100pct")      # suppressed
-            FFmWiz._finish_progress_line("FINAL 100pct")    # suppressed
+            FFmWiz.runtime._begin_progress_render()
+            FFmWiz.runtime._write_progress_line("LIVE 50pct")
+            FFmWiz.runtime._finish_progress_line("FINAL 100pct")   # committed once
+            FFmWiz.runtime._write_progress_line("LATE 100pct")      # suppressed
+            FFmWiz.runtime._finish_progress_line("FINAL 100pct")    # suppressed
         out = self._capture_progress(run)
         self.assertEqual(out.count("FINAL 100pct"), 1)
         self.assertNotIn("LATE", out)
 
     def test_progress_live_then_final_for_new_run(self):
         def run():
-            FFmWiz._begin_progress_render()
-            FFmWiz._write_progress_line("A live")
-            FFmWiz._finish_progress_line("A final")
+            FFmWiz.runtime._begin_progress_render()
+            FFmWiz.runtime._write_progress_line("A live")
+            FFmWiz.runtime._finish_progress_line("A final")
             # New run resets the guard so its own final line commits.
-            FFmWiz._begin_progress_render()
-            FFmWiz._write_progress_line("B live")
-            FFmWiz._finish_progress_line("B final")
+            FFmWiz.runtime._begin_progress_render()
+            FFmWiz.runtime._write_progress_line("B live")
+            FFmWiz.runtime._finish_progress_line("B final")
         out = self._capture_progress(run)
         self.assertEqual(out.count("A final"), 1)
         self.assertEqual(out.count("B final"), 1)
@@ -392,7 +392,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             for stream in [answers["audio_streams"][0]] + [it["audio_streams"][0] for it in answers["join_input_items"]]:
                 stream.pop("bit_rate", None)
                 stream.pop("duration", None)
-            with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
                 kbps, name = FFmWiz.join_max_source_audio_bitrate(answers, 0)
             self.assertIsNone(kbps)
             self.assertIsNone(name)
@@ -407,8 +407,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
-            with mock.patch.object(FFmWiz, "source_extra_preservation_features", return_value=["metadata"]), \
-                 mock.patch.object(FFmWiz, "ask_yes_no", side_effect=fake_yes_no):
+            with mock.patch.object(FFmWiz.services, "source_extra_preservation_features", return_value=["metadata"]), \
+                 mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=fake_yes_no):
                 FFmWiz.step_source_extra_policy(answers)
             self.assertFalse(captured["default"])
             self.assertFalse(answers["keep_source_metadata"])
@@ -424,8 +424,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             "input_path": Path("x.mkv"), "output_ext": "mkv", "video_streams": [video_stream()],
             "audio_streams": [audio_stream()], "subtitle_streams": [], "data_streams": [], "attachment_streams": [],
         }
-        with mock.patch.object(FFmWiz, "source_extra_preservation_features", return_value=["metadata"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=fake_yes_no):
+        with mock.patch.object(FFmWiz.services, "source_extra_preservation_features", return_value=["metadata"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=fake_yes_no):
             FFmWiz.step_source_extra_policy(answers)
         self.assertTrue(captured["default"])
         self.assertTrue(answers["keep_source_metadata"])
@@ -434,7 +434,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_join_summary_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp, bitrates=("128000", "96000", "160000"))
-            with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
                 lines = FFmWiz.format_join_input_summary_lines(answers)
             joined = "\n".join(lines)
             self.assertIn("Join input summary", joined)
@@ -450,7 +450,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             for streams in [answers["video_streams"]] + [it["video_streams"] for it in answers["join_input_items"]]:
                 streams[0].pop("avg_frame_rate", None)
                 streams[0].pop("r_frame_rate", None)
-            with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
                 lines = FFmWiz.format_join_input_summary_lines(answers)
             self.assertIn("FPS: unavailable", "\n".join(lines))
 
@@ -467,9 +467,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
             answers["detect_duplicate_audio"] = False
-            with mock.patch.object(FFmWiz, "get_audio_volume_stats", return_value={}), \
-                 mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}), \
-                 mock.patch.object(FFmWiz, "ask_raw", return_value="0"):
+            with mock.patch.object(FFmWiz.services, "get_audio_volume_stats", return_value={}), \
+                 mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}), \
+                 mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
                 buf1 = io.StringIO()
                 with contextlib.redirect_stdout(buf1):
                     FFmWiz.step_audio_tracks(answers)
@@ -493,7 +493,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_loudnorm_menu_default_off(self):
         answers = {"audio_streams": [audio_stream()], "audio_tracks": [0], "audio_codec": "aac",
                    "output_ext": "mp4", "input_path": Path("x.mkv"), "format": {"duration": "5"}}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value=""):  # Enter -> default
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value=""):  # Enter -> default
             FFmWiz.step_loudnorm(answers)
         self.assertFalse(answers["loudnorm_enabled"])
         self.assertEqual(answers["loudnorm_mode"], "off")
@@ -502,8 +502,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         answers = {"audio_streams": [audio_stream()], "audio_tracks": [0], "audio_codec": "aac",
                    "output_ext": "mp4", "input_path": Path("x.mkv"), "format": {"duration": "5"}}
         # Single-pass now offers to measure first; decline -> straight to target.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "-16"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "-16"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=False):
             FFmWiz.step_loudnorm(answers)
         self.assertTrue(answers["loudnorm_enabled"])
         self.assertEqual(answers["loudnorm_mode"], "single")
@@ -514,10 +514,10 @@ class LoudnormJoinProgressTests(unittest.TestCase):
                    "output_ext": "mp4", "input_path": Path("x.mkv"), "format": {"duration": "5"}}
         measured = {"input_i": -22.0, "input_tp": -3.0, "input_lra": 5.0, "input_thresh": -32.0, "target_offset": -0.2}
         # Choose single (2), accept "measure first" -> measurement shown -> then target.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "-16"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-             mock.patch.object(FFmWiz, "probe_loudnorm_measurement", return_value=measured), \
-             mock.patch.object(FFmWiz, "print_loudnorm_stats") as stats:
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "-16"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+             mock.patch.object(FFmWiz.services, "probe_loudnorm_measurement", return_value=measured), \
+             mock.patch.object(FFmWiz.trackmanager, "print_loudnorm_stats") as stats:
             FFmWiz.step_loudnorm(answers)
         self.assertTrue(stats.called)  # current loudness shown BEFORE the target
         self.assertEqual(answers["loudnorm_mode"], "single")
@@ -528,10 +528,10 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
             measured = {"input_i": -18.0, "input_tp": -2.0, "input_lra": 5.0, "input_thresh": -28.0, "target_offset": -0.1}
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=["3", "-16"]), \
-                 mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-                 mock.patch.object(FFmWiz, "probe_join_loudnorm_measurement", return_value=measured), \
-                 mock.patch.object(FFmWiz, "print_loudnorm_stats"):
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["3", "-16"]), \
+                 mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+                 mock.patch.object(FFmWiz.services, "probe_join_loudnorm_measurement", return_value=measured), \
+                 mock.patch.object(FFmWiz.trackmanager, "print_loudnorm_stats"):
                 FFmWiz.step_loudnorm(answers)
             self.assertEqual(answers["loudnorm_mode"], "two_pass")
             self.assertEqual(answers["loudnorm_measured"], measured)
@@ -540,8 +540,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
             # Choose two-pass (3) but decline the measure question -> single-pass.
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=["3", "-16"]), \
-                 mock.patch.object(FFmWiz, "ask_yes_no", return_value=False):
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["3", "-16"]), \
+                 mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=False):
                 FFmWiz.step_loudnorm(answers)
             self.assertEqual(answers["loudnorm_mode"], "single")
             self.assertNotIn("loudnorm_measured", answers)
@@ -549,9 +549,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_loudnorm_two_pass_parse_failure_can_cancel(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers(tmp)
-            with mock.patch.object(FFmWiz, "ask_raw", side_effect=["3", "-16", "m"]), \
-                 mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-                 mock.patch.object(FFmWiz, "probe_join_loudnorm_measurement", return_value=None):
+            with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["3", "-16", "m"]), \
+                 mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+                 mock.patch.object(FFmWiz.services, "probe_join_loudnorm_measurement", return_value=None):
                 FFmWiz.step_loudnorm(answers)
             self.assertFalse(answers["loudnorm_enabled"])
             self.assertEqual(answers["loudnorm_mode"], "off")
@@ -568,26 +568,26 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
     # ================= Audio+Video Join (auto-detect) =================
     def test_join_load_media_item_rejects_audio_only_by_default(self):
-        with mock.patch.object(FFmWiz, "ffprobe_json", return_value={
+        with mock.patch.object(FFmWiz.services, "ffprobe_json", return_value={
             "format": {"duration": "5"},
             "streams": [{"codec_type": "audio", "codec_name": "aac"}],
         }):
             with self.assertRaises(ValueError):
-                FFmWiz.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"))
+                FFmWiz.services.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"))
 
     def test_join_load_media_item_accepts_audio_only_when_allowed(self):
-        with mock.patch.object(FFmWiz, "ffprobe_json", return_value={
+        with mock.patch.object(FFmWiz.services, "ffprobe_json", return_value={
             "format": {"duration": "5"},
             "streams": [{"codec_type": "audio", "codec_name": "aac"}],
         }):
-            item = FFmWiz.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"), allow_audio_only=True)
+            item = FFmWiz.services.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"), allow_audio_only=True)
         self.assertEqual(item["video_streams"], [])
         self.assertEqual(len(item["audio_streams"]), 1)
 
     def test_join_load_media_item_rejects_empty_when_allowed(self):
-        with mock.patch.object(FFmWiz, "ffprobe_json", return_value={"format": {}, "streams": []}):
+        with mock.patch.object(FFmWiz.services, "ffprobe_json", return_value={"format": {}, "streams": []}):
             with self.assertRaises(ValueError):
-                FFmWiz.join_load_media_item({"ffprobe": "ffprobe"}, Path("x.bin"), allow_audio_only=True)
+                FFmWiz.services.join_load_media_item({"ffprobe": "ffprobe"}, Path("x.bin"), allow_audio_only=True)
 
     def test_build_join_audio_encode_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -626,8 +626,8 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_audio_transform_menu_manual_sets_speed(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
         # _apply_manual_audio_transform: cuts? -> False, speed -> 150%, reverse -> False.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["150%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False]):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["150%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False]):
             FFmWiz._apply_manual_audio_transform(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
@@ -636,16 +636,16 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
     def test_audio_transform_manual_noop_when_unchanged(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["100%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False]):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["100%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False]):
             FFmWiz._apply_manual_audio_transform(answers)
         self.assertTrue(answers["_audio_transform_noop"])
 
     def test_audio_transform_manual_reverse_only(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
         # cuts? -> False, speed -> 100%, reverse -> True.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["100%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, True]):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["100%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, True]):
             FFmWiz._apply_manual_audio_transform(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertTrue(answers["reverse_audio"])
@@ -653,9 +653,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_audio_transform_manual_with_cuts(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
         # cuts? -> True (collect mocked), speed -> 100%, reverse -> False.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["100%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[True, False]), \
-             mock.patch.object(FFmWiz, "collect_cut_ranges_terminal", return_value=[(0.0, 4.0)]):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["100%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[True, False]), \
+             mock.patch.object(FFmWiz.services, "collect_cut_ranges_terminal", return_value=[(0.0, 4.0)]):
             FFmWiz._apply_manual_audio_transform(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertEqual(answers["audio_cut_keep_ranges"], [(0.0, 4.0)])
@@ -663,16 +663,16 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_audio_transform_manual_back_at_speed_returns_to_cuts(self):
         # Back ('0') at the speed prompt returns to the cuts question (not out).
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["0", "150%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False, False]):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["0", "150%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False, False]):
             FFmWiz._apply_manual_audio_transform(answers)
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
 
     def test_audio_transform_menu_manual_routes(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "150%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False]), \
-             mock.patch.object(FFmWiz, "_confirm_audio_transform_start") as confirm:
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "150%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False]), \
+             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start") as confirm:
             FFmWiz.step_audio_transform_editor(answers)
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
         self.assertTrue(confirm.called)
@@ -680,9 +680,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
     def test_audio_transform_gui_success(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["1"]), \
-             mock.patch.object(FFmWiz, "_confirm_audio_transform_start"), \
-             mock.patch.object(FFmWiz, "open_audio_transform_gui",
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["1"]), \
+             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start"), \
+             mock.patch.object(FFmWiz.guibridge, "open_audio_transform_gui",
                                return_value={"keep_ranges": [], "speed": 1.5, "reverse": True}):
             FFmWiz.step_audio_transform_editor(answers)
         self.assertFalse(answers["_audio_transform_noop"])
@@ -693,9 +693,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         # Confirm raises Back once -> editor re-runs the value prompts (configure),
         # not the menu; the second confirm succeeds.
         answers = {"audio_index": 0, "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "150%", "120%"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", side_effect=[False, False, False, False]), \
-             mock.patch.object(FFmWiz, "_confirm_audio_transform_start",
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "150%", "120%"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False, False, False]), \
+             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start",
                                side_effect=[FFmWiz.Back(), None]):
             FFmWiz.step_audio_transform_editor(answers)
         # The first menu choice persists; only the value prompts were repeated.
@@ -762,9 +762,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_manual_split_flow_sets_split_points(self):
         answers = {"audio_index": 0, "format": {"duration": "1800"}}
         # menu -> manual(2); "add cuts/split?" yes; layout 5; split line.
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=["2", "5", "10:00,20:00,25:00"]), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-             mock.patch.object(FFmWiz, "_confirm_audio_transform_start"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "5", "10:00,20:00,25:00"]), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start"):
             FFmWiz.step_audio_transform_editor(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertEqual(answers["_audio_transform_split_points"], [600.0, 1200.0, 1500.0])
@@ -860,7 +860,7 @@ class TrackManagerAndOutputFormatTests(unittest.TestCase):
     output-format handling (mkv default for mkv input, reject typos)."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     # ---- normalize_track_remove_specs ----
     def test_normalize_absolute_index_to_typed(self):
@@ -904,8 +904,8 @@ class TrackManagerAndOutputFormatTests(unittest.TestCase):
             "video_streams": [video_stream()] if has_video else [],
             "_question_number": 1,
         }
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=list(typed)):
-            FFmWiz.step_output_format(answers)
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=list(typed)):
+            FFmWiz.wizard.step_output_format(answers)
         return answers
 
     def test_output_default_mp4_for_non_mkv_input(self):
@@ -953,7 +953,7 @@ class PixelFormatResolverTests(unittest.TestCase):
     """Architecture-aware 10-bit/12-bit+ pixel-format selection (CPU vs NVENC)."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def _ans(self, pix_fmt, depth, use_gpu, codec="H265"):
         return {"video_streams": [_vstream(pix_fmt, depth)], "video_codec": codec, "use_gpu": use_gpu}
@@ -1048,7 +1048,7 @@ class JoinMain10CommandTests(unittest.TestCase):
     yuv420p10le, and 8-bit NVENC must stay unchanged."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def _join(self, tmp, use_gpu, depth=10, codec="H265", loudnorm=False):
         pix = "yuv420p10le" if depth >= 10 else "yuv420p"
@@ -1113,7 +1113,7 @@ class JoinSummaryEnhancementTests(unittest.TestCase):
     and audio volume extremes."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def _rows_answers(self, with_volume=True, with_duration=True):
         def item(name, vk, ak, fps, dur, mean, mx):
@@ -1141,14 +1141,14 @@ class JoinSummaryEnhancementTests(unittest.TestCase):
 
     def _capture_summary(self, answers):
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+        with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
             with contextlib.redirect_stdout(buf):
                 FFmWiz.print_join_input_summary(answers)
         return buf.getvalue()
 
     def test_plain_lines_include_duration_and_volume(self):
         answers = self._rows_answers()
-        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+        with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
             lines = FFmWiz.format_join_input_summary_lines(answers)
         joined = "\n".join(lines)
         self.assertIn("Files selected: 3", joined)
@@ -1158,7 +1158,7 @@ class JoinSummaryEnhancementTests(unittest.TestCase):
 
     def test_total_raw_duration_and_frame_count(self):
         answers = self._rows_answers()
-        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+        with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
             rows = FFmWiz.join_input_media_stats(answers)
             info = FFmWiz.join_summary_total_duration(answers, rows)
         # One file (C.mov) has unknown duration -> 600 + 700 known.
@@ -1170,7 +1170,7 @@ class JoinSummaryEnhancementTests(unittest.TestCase):
 
     def test_duration_handles_all_unknown(self):
         answers = self._rows_answers(with_duration=False)
-        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+        with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
             rows = FFmWiz.join_input_media_stats(answers)
             info = FFmWiz.join_summary_total_duration(answers, rows)
         self.assertEqual(info["known_count"], 0)
@@ -1178,17 +1178,17 @@ class JoinSummaryEnhancementTests(unittest.TestCase):
 
     def test_volume_extremes_unavailable_clean(self):
         answers = self._rows_answers(with_volume=False)
-        with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+        with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
             rows = FFmWiz.join_input_media_stats(answers)
             self.assertIsNone(FFmWiz.join_summary_volume_extremes(rows))
 
     def test_summary_colors_highest_differs_from_lowest(self):
         answers = self._rows_answers()
-        FFmWiz.USE_COLOR = True
+        FFmWiz.appio.USE_COLOR = True
         try:
             out = self._capture_summary(answers)
         finally:
-            FFmWiz.USE_COLOR = False
+            FFmWiz.appio.USE_COLOR = False
         # highest and lowest must use different color categories.
         self.assertIn(FFmWiz.Color.JOIN_HIGH, out)
         self.assertIn(FFmWiz.Color.JOIN_LOW, out)
@@ -1212,17 +1212,17 @@ class LoudnormHighlightTests(unittest.TestCase):
     """Integrated loudness must be emphasized (bold + green)."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     STATS = {"input_i": -21.4, "input_tp": -0.7, "input_lra": 8.0,
              "input_thresh": -32.0, "target_offset": -0.4}
 
     def test_integrated_loudness_label_emerald_bold_value_original(self):
-        FFmWiz.USE_COLOR = True
+        FFmWiz.appio.USE_COLOR = True
         try:
             line = FFmWiz.format_integrated_loudness_line(self.STATS)
         finally:
-            FFmWiz.USE_COLOR = False
+            FFmWiz.appio.USE_COLOR = False
         # Label: bold + a distinct (emerald) green.
         self.assertIn(FFmWiz.Color.MUX_EMERALD, line)
         self.assertIn(FFmWiz.Color.BOLD, line)
@@ -1231,14 +1231,14 @@ class LoudnormHighlightTests(unittest.TestCase):
         self.assertIn("-21.4 LUFS", line)
 
     def test_other_lines_not_emerald_bold(self):
-        FFmWiz.USE_COLOR = True
+        FFmWiz.appio.USE_COLOR = True
         try:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                FFmWiz.print_loudnorm_stats(self.STATS)
+                FFmWiz.trackmanager.print_loudnorm_stats(self.STATS)
             out = buf.getvalue()
         finally:
-            FFmWiz.USE_COLOR = False
+            FFmWiz.appio.USE_COLOR = False
         # Only the integrated-loudness label is emerald; true-peak is not.
         true_peak_line = [ln for ln in out.splitlines() if "True peak" in ln][0]
         self.assertNotIn(FFmWiz.Color.MUX_EMERALD, true_peak_line)
@@ -1248,7 +1248,7 @@ class JoinVolumeScanTests(unittest.TestCase):
     """ensure_join_volume_stats populates volume extremes via a (mocked) scan."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def _answers(self, tmp):
         v = _vstream()
@@ -1273,8 +1273,8 @@ class JoinVolumeScanTests(unittest.TestCase):
             }
             def fake_probe(ffmpeg, path, idx):
                 return fake[Path(path)]
-            with mock.patch.object(FFmWiz, "probe_audio_volume_stats", side_effect=fake_probe), \
-                 mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            with mock.patch.object(FFmWiz.services, "probe_audio_volume_stats", side_effect=fake_probe), \
+                 mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
                 FFmWiz.ensure_join_volume_stats(answers)
                 # Primary cached on answers; extras cached on their item dicts.
                 self.assertEqual(answers["audio_volume_stats"][0]["mean_volume"], "-19.8 dB")
@@ -1290,7 +1290,7 @@ class JoinVolumeScanTests(unittest.TestCase):
             answers["audio_volume_stats"] = {0: {"mean_volume": "-10 dB", "max_volume": "-1 dB"}}
             for it in answers["join_input_items"]:
                 it["audio_volume_stats"] = {0: {"mean_volume": "-10 dB", "max_volume": "-1 dB"}}
-            with mock.patch.object(FFmWiz, "probe_audio_volume_stats",
+            with mock.patch.object(FFmWiz.services, "probe_audio_volume_stats",
                                    side_effect=AssertionError("should not probe")) as probe:
                 FFmWiz.ensure_join_volume_stats(answers)
                 probe.assert_not_called()
@@ -1326,11 +1326,11 @@ class AudioTrackSelectionTests(unittest.TestCase):
     listed and chosen by the user."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def test_single_track_auto_selects_with_note(self):
         answers = {"audio_streams": [audio_stream()], "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", side_effect=AssertionError("must not prompt")) as ask:
+        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=AssertionError("must not prompt")) as ask:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 FFmWiz.step_audio_track_for_tool(answers)
@@ -1340,9 +1340,9 @@ class AudioTrackSelectionTests(unittest.TestCase):
 
     def test_multi_track_selects_chosen_one_based(self):
         answers = {"audio_streams": [audio_stream(), audio_stream()], "format": {"duration": "10"}}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="2"), \
-             mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}), \
-             mock.patch.object(FFmWiz, "get_audio_volume_stats", return_value={}):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="2"), \
+             mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}), \
+             mock.patch.object(FFmWiz.services, "get_audio_volume_stats", return_value={}):
             with contextlib.redirect_stdout(io.StringIO()):
                 FFmWiz.step_audio_track_for_tool(answers)
         self.assertEqual(answers["audio_index"], 1)  # "2" -> index 1
@@ -1352,7 +1352,7 @@ class LosslessSplitExtTests(unittest.TestCase):
     """Lossless audio split lets the user choose a copy-compatible extension."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def test_copy_ext_choices_per_codec(self):
         self.assertEqual(FFmWiz.lossless_audio_copy_ext_choices("aac")[0], "m4a")
@@ -1367,7 +1367,7 @@ class LosslessSplitExtTests(unittest.TestCase):
         answers = {"input_path": Path("clip.mp4"),
                    "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}], "audio_index": 0}
         buf = io.StringIO()
-        with mock.patch.object(FFmWiz, "ask_raw", return_value="aac"):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="aac"):
             with contextlib.redirect_stdout(buf):
                 ext = FFmWiz.ask_lossless_split_ext(answers, "aac")
         self.assertEqual(ext, "aac")
@@ -1376,7 +1376,7 @@ class LosslessSplitExtTests(unittest.TestCase):
     def test_ask_default_is_preferred_container(self):
         answers = {"input_path": Path("clip.mp4"),
                    "audio_streams": [{"codec_type": "audio", "codec_name": "aac"}], "audio_index": 0}
-        with mock.patch.object(FFmWiz, "ask_raw", return_value=""):
+        with mock.patch.object(FFmWiz.appio, "ask_raw", return_value=""):
             with contextlib.redirect_stdout(io.StringIO()):
                 ext = FFmWiz.ask_lossless_split_ext(answers, "aac")
         self.assertEqual(ext, "m4a")  # Enter -> preferred default
@@ -1397,7 +1397,7 @@ class TrackManagerBackTests(unittest.TestCase):
     of cancelling the whole mode."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def _answers(self):
         return {
@@ -1420,13 +1420,13 @@ class TrackManagerBackTests(unittest.TestCase):
             return []
 
         answers = self._answers()
-        with mock.patch.object(FFmWiz, "ask_track_manager_source", lambda a: None), \
-             mock.patch.object(FFmWiz, "print_source_info", lambda a: None), \
-             mock.patch.object(FFmWiz, "print_track_list", lambda a: None), \
-             mock.patch.object(FFmWiz, "ask_track_remove_specs", lambda a, c: []), \
-             mock.patch.object(FFmWiz, "_track_manager_collect_externals", side_effect=fake_ext), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-             mock.patch.object(FFmWiz, "_track_manager_ask_loudnorm", side_effect=fake_loud):
+        with mock.patch.object(FFmWiz.trackmanager, "ask_track_manager_source", lambda a: None), \
+             mock.patch.object(FFmWiz.trackmanager, "print_source_info", lambda a: None), \
+             mock.patch.object(FFmWiz.trackmanager, "print_track_list", lambda a: None), \
+             mock.patch.object(FFmWiz.trackmanager, "ask_track_remove_specs", lambda a, c: []), \
+             mock.patch.object(FFmWiz.trackmanager, "_track_manager_collect_externals", side_effect=fake_ext), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+             mock.patch.object(FFmWiz.trackmanager, "_track_manager_ask_loudnorm", side_effect=fake_loud):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = FFmWiz._run_track_manager_single(answers)
         # Did NOT cancel the mode (no Back propagated out); instead re-ran the
@@ -1449,13 +1449,13 @@ class TrackManagerBackTests(unittest.TestCase):
             return []
 
         answers = self._answers()
-        with mock.patch.object(FFmWiz, "ask_track_manager_source", lambda a: None), \
-             mock.patch.object(FFmWiz, "print_source_info", lambda a: None), \
-             mock.patch.object(FFmWiz, "print_track_list", lambda a: None), \
-             mock.patch.object(FFmWiz, "ask_track_remove_specs", side_effect=fake_remove), \
-             mock.patch.object(FFmWiz, "_track_manager_collect_externals", side_effect=fake_ext), \
-             mock.patch.object(FFmWiz, "ask_yes_no", return_value=True), \
-             mock.patch.object(FFmWiz, "_track_manager_ask_loudnorm", lambda a: None):
+        with mock.patch.object(FFmWiz.trackmanager, "ask_track_manager_source", lambda a: None), \
+             mock.patch.object(FFmWiz.trackmanager, "print_source_info", lambda a: None), \
+             mock.patch.object(FFmWiz.trackmanager, "print_track_list", lambda a: None), \
+             mock.patch.object(FFmWiz.trackmanager, "ask_track_remove_specs", side_effect=fake_remove), \
+             mock.patch.object(FFmWiz.trackmanager, "_track_manager_collect_externals", side_effect=fake_ext), \
+             mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
+             mock.patch.object(FFmWiz.trackmanager, "_track_manager_ask_loudnorm", lambda a: None):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = FFmWiz._run_track_manager_single(answers)
         self.assertIsNone(result)
@@ -1467,7 +1467,7 @@ class AudioSampleRateTests(unittest.TestCase):
     """Output audio sample-rate selection and uniform join resampling."""
 
     def setUp(self):
-        FFmWiz.USE_COLOR = False
+        FFmWiz.appio.USE_COLOR = False
 
     def test_resolve_explicit_and_keep(self):
         self.assertEqual(FFmWiz.resolve_audio_sample_rate({"audio_sample_rate": 44100}), 44100)
@@ -1523,7 +1523,7 @@ class AudioSampleRateTests(unittest.TestCase):
     def test_join_target_rate_is_uniform_highest(self):
         with tempfile.TemporaryDirectory() as tmp:
             answers, _ = self.join_answers_for_rate(tmp)
-            with mock.patch.object(FFmWiz, "get_packet_sizes", return_value={}):
+            with mock.patch.object(FFmWiz.services, "get_packet_sizes", return_value={}):
                 target = FFmWiz.join_target_sample_rate(answers)
         self.assertEqual(target, 96000)  # highest among inputs (44100/48000/96000)
 
