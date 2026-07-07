@@ -221,6 +221,14 @@ Mode `9` burns subtitles into the video image and therefore re-encodes video. If
 
 When you manually enter target video bitrate, output resolution, FPS, or audio bitrate, FFmWiz first compares the value against detected source metadata. If the target is higher than the real source value, FFmWiz asks for confirmation with `n` as the default. Choosing `n` returns to the same question so you can enter a different value. In Folder Encode, the warning uses the lowest detected source value in the folder, because one shared setting is applied to every file.
 
+## Output Size Estimate
+
+When you enter a numeric video or audio bitrate, FFmWiz immediately prints the approximate output size at that bitrate, then a note that the real bitrate can differ from the value you chose (2‑pass encoding brings the actual bitrate closer to the target). Sizes use automatic units (`B`, `KB`, `MB`, `GB`, ...) so short clips read in KB and long/high‑bitrate encodes read in MB or GB.
+
+The final "Selected settings summary" (shown before `Start FFmpeg now?`) adds an **estimated output size** line computed from the total target bitrate — video bitrate plus audio bitrate — over the output duration (cuts and speed changes are taken into account when known). The estimate is `N/A` when it cannot be derived from a target bitrate, i.e. constant‑quality (CRF/CQ) mode or a pure video stream copy. The audio bitrate's own per‑stream estimate is only shown right after the audio bitrate question, not repeated in the summary.
+
+The estimate is intentionally approximate: containers add muxing overhead and VBR/CRF encoders rarely hit the exact requested average, which is why the summary reports a single total rather than a guaranteed size.
+
 ## Cut Feature
 
 Both Mode 1 (re-encode) and Mode 3 (copy) support cuts. Times are entered as `h:m:s:frame` and converted to seconds automatically using the file's detected FPS (prefers `avg_frame_rate`, falls back to `r_frame_rate`). Fractional rates like `24000/1001` and `30000/1001` are handled correctly. Examples:

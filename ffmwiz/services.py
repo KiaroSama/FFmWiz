@@ -746,6 +746,73 @@ def stream_duration_seconds(stream: dict[str, Any], fmt: dict[str, Any] | None =
     return None
 
 
+BITRATE_SIZE_ESTIMATE_NOTE = (
+    "Estimated size is approximate. The real output bitrate can differ from the "
+    "value you chose; 2-pass encoding brings the actual bitrate closer to the target."
+)
+
+
+def estimated_encode_duration_seconds(answers: dict[str, Any]) -> float | None:
+    """Best-effort output duration (seconds) for file-size estimation.
+
+    Starts from the source duration, shortens it by any chosen cut keep-ranges,
+    and scales it by a chosen speed factor. Approximate by design: transforms
+    selected after this point (e.g. manual cuts asked later) are not yet known.
+    Returns None when no reliable source duration is available.
+    """
+    fmt = answers.get("format")
+    base: float | None = None
+    video_streams = answers.get("video_streams") or []
+    audio_streams = answers.get("audio_streams") or []
+    for stream in (video_streams[0] if video_streams else None,
+                   audio_streams[0] if audio_streams else None):
+        if stream:
+            base = stream_duration_seconds(stream, fmt)
+            if base:
+                break
+    if not base:
+        base = stream_duration_seconds({}, fmt)
+    if not base or base <= 0:
+        return None
+    duration = float(base)
+    keep_ranges = answers.get("cut_keep_ranges") or answers.get("audio_cut_keep_ranges") or []
+    try:
+        kept = sum(max(0.0, float(end) - float(start)) for start, end in keep_ranges)
+    except (TypeError, ValueError):
+        kept = 0.0
+    if keep_ranges and kept > 0:
+        duration = kept
+    try:
+        speed = float(answers.get("speed_factor") or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    if speed > 0:
+        duration /= speed
+    return duration if duration > 0 else None
+
+
+def print_encode_size_estimate(answers: dict[str, Any], kbps: float | None, kind: str) -> None:
+    """After a video/audio bitrate question, show the approximate output size at
+    the entered bitrate plus a note that the real bitrate can differ.
+
+    `kind` is 'video' or 'audio'. The size line is printed only when a duration
+    is available; the accuracy note is always shown so the guidance appears after
+    every bitrate answer (including folder mode, where a single size is
+    meaningless because one setting applies to many files).
+    """
+    label = "audio" if kind == "audio" else "video"
+    duration = estimated_encode_duration_seconds(answers)
+    size = estimate_size_bytes_from_bitrate(kbps, duration)
+    if size is not None:
+        line = (
+            f"Estimated {label} size at {int(kbps)} kbps: "
+            f"{format_estimated_size(size)}  (over {format_duration(duration)})"
+        )
+        print("  " + paint(line, Color.LIME))
+        log_info(line)
+    appio.note(BITRATE_SIZE_ESTIMATE_NOTE)
+
+
 def default_media_reports_dir() -> Path:
     return script_dir() / MEDIA_REPORTS_DIR_NAME
 
@@ -978,6 +1045,9 @@ __all__ = [
     'collect_cut_ranges_terminal',
     'default_media_reports_dir',
     'estimate_color_range',
+    'estimated_encode_duration_seconds',
+    'print_encode_size_estimate',
+    'BITRATE_SIZE_ESTIMATE_NOTE',
     'ffprobe_json',
     'get_audio_volume_stats',
     'get_packet_sizes',

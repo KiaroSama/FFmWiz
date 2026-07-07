@@ -302,6 +302,7 @@ def step_audio_bitrate(answers: dict[str, Any]) -> None:
             continue
         answers["audio_bitrate_kbps"] = number
         answers["audio_bitrate_keep"] = False
+        services.print_encode_size_estimate(answers, number, "audio")
         return
 
 

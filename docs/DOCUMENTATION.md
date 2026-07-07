@@ -180,7 +180,9 @@ Typical question order for a video re‑encode:
 4. **Video codec** — `H265`, `H264`, `AV1`, `VP9`, `MPEG4`, `copy`, or any encoder name.
 5. **GPU usage** — `y` uses NVENC/CUDA when supported; otherwise CPU.
 6. **Crop** — off / on with margins / inline `top,left,right,bottom`.
-7. **Video bitrate** (or **CRF/quality** if you choose quality mode).
+7. **Video bitrate** (or **CRF/quality** if you choose quality mode). After a numeric
+   bitrate is entered, FFmWiz prints an estimated output size at that bitrate plus a note
+   that the real bitrate may differ (2‑pass encoding gets it closer).
 8. **NVENC multipass** — shown only for NVENC encoders that support it (see §8).
 9. **CPU two‑pass** — shown only for CPU encoders that support it (see §8).
 10. **Resolution** — preset (`480p`/`720p`/`1080p`), `w1280`/`720h`, `WIDTHxHEIGHT`,
@@ -188,7 +190,8 @@ Typical question order for a video re‑encode:
 11. **FPS** — integer, or `n` to keep source.
 12. **Audio tracks** — which streams to keep (`0`, `0,1,2`, `all`, `d`, `e`, `de`).
 13. **Audio codec** — `aac`, `libopus`, `libmp3lame`, `flac`, `pcm_s16le`, `copy`, ...
-14. **Audio bitrate**.
+14. **Audio bitrate**. After a numeric bitrate is entered, FFmWiz prints an estimated
+    output size at that audio bitrate plus the same accuracy note.
 15. **Audio sample rate (Hz)** — e.g. `48000`; `n` keeps the source rate (see §9).
 16. **Subtitle tracks** (when keeping source metadata).
 17. **Keep source metadata / extra streams** — keep vs strip metadata, chapters, extra
@@ -882,6 +885,9 @@ Prompt:   Target average video bitrate in kbps
 Accepts:  an integer (e.g. 400, 1500, 4500) or n to keep the detected source rate
 Warning:  if you enter a value above the detected source bitrate, FFmWiz warns and
           defaults to "no" so you do not waste space upscaling bitrate.
+Estimate: after a number is entered, FFmWiz prints the approximate output size at that
+          bitrate over the output duration (units scale B/KB/MB/GB), plus a note that the
+          real bitrate can differ and that 2-pass encoding brings it closer to the target.
 Pairs with: the bitrate MODE (quality_vbr vs strict_size) from config / defaults.
 ```
 
@@ -1000,6 +1006,8 @@ Notes:    the container picks a sensible default (e.g. opus for webm). flac/pcm_
 Prompt:   Audio bitrate per stream in kbps
 Accepts:  64, 128, 192, 256, 320, ... or n to keep the source bitrate
 When:     only for lossy codecs that use a bitrate (not flac/pcm_*/copy)
+Estimate: after a number is entered, FFmWiz prints the approximate output size at that
+          audio bitrate plus the same accuracy note as the video bitrate prompt.
 ```
 
 ### A.26 Audio sample rate
@@ -1045,7 +1053,10 @@ Notes:    no pixel-value conversion is performed; this only affects range
 Prompt:   Start FFmpeg now?
 Default:  y
 Notes:    declining prints the final PowerShell command and the settings summary
-          so you can run or adapt it manually.
+          so you can run or adapt it manually. The summary includes an "estimated
+          output size" line computed from the TOTAL target bitrate (video + audio)
+          over the output duration. It shows N/A when the size cannot be derived from
+          a target bitrate — constant-quality (CRF/CQ) mode or a pure video stream copy.
 ```
 
 ---
