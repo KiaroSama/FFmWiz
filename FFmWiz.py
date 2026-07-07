@@ -188,7 +188,7 @@ for _digit in "0123456789":
 # ============================================================
 # PySide6 GUI bridge.
 #
-# The dedicated GUI lives in assets/runtime/ffmwiz_gui.py and is launched as a
+# The dedicated GUI lives in ffmwiz/gui/ffmwiz_gui.py and is launched as a
 # subprocess so the Qt and Tk worlds never share an event loop. Input
 # and output use small JSON files via two --request / --reply CLI args.
 #

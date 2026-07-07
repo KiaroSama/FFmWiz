@@ -490,11 +490,11 @@ class _PreviewScheduler:
 
 
 def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Launch assets/runtime/ffmwiz_gui.py as a subprocess, hand it the request via a
+    """Launch ffmwiz/gui/ffmwiz_gui.py as a subprocess, hand it the request via a
     temp JSON file, and return the parsed reply dict.
 
     Returns None only when the dedicated GUI is unavailable before launch
-    (missing PySide6, missing assets/runtime/ffmwiz_gui.py, etc.). Once the Qt GUI starts,
+    (missing PySide6, missing ffmwiz/gui/ffmwiz_gui.py, etc.). Once the Qt GUI starts,
     internal GUI errors are returned as {"status": "error", ...} so callers
     do not hide real bugs behind archived fallback helpers.
     """
@@ -508,7 +508,7 @@ def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
     # QML files are missing.
     if request.get("mode") == "video_unified" and _gui_engine_selected() == "qml":
         qml_script = _qml_gui_path()
-        qml_file = script_dir() / "assets" / FFMWIZ_RUNTIME_DIR_NAME / "qml" / "UnifiedEditor.qml"
+        qml_file = script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / "qml" / "UnifiedEditor.qml"
         if qml_script.exists() and qml_file.exists():
             gui_path = qml_script
             log_info("Using modern QML GUI engine for the unified video editor.")

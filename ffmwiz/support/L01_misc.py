@@ -90,7 +90,7 @@ def encode_video_speed_factor(answers: dict[str, Any]) -> float:
 
 
 def _ffmwiz_gui_path() -> Path:
-    return script_dir() / "assets" / FFMWIZ_RUNTIME_DIR_NAME / FFMWIZ_GUI_FILE_NAME
+    return script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / FFMWIZ_GUI_FILE_NAME
 
 
 def _requirements_path() -> Path:
@@ -112,7 +112,7 @@ def _config_setting_for_logging(key: str, fallback: Any) -> Any:
 
 
 def _qml_gui_path() -> Path:
-    return script_dir() / "assets" / FFMWIZ_RUNTIME_DIR_NAME / "ffmwiz_gui_qml.py"
+    return script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / "ffmwiz_gui_qml.py"
 
 
 def _visible_len(text: str) -> int:

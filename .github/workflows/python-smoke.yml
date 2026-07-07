@@ -29,7 +29,7 @@ jobs:
 
       - name: Compile Python files
         run: |
-          python -m py_compile FFmWiz.py assets/runtime/ffmwiz_gui.py
+          python -m py_compile FFmWiz.py ffmwiz/gui/ffmwiz_gui.py ffmwiz/gui/ffmwiz_gui_qml.py
           python -m compileall -q ffmwiz
 
       - name: Validate config.env template

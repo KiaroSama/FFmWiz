@@ -10,12 +10,12 @@ import sys
 import unittest
 from pathlib import Path
 
-# The QML driver lives in assets/runtime; add it so we can import the pure
+# The QML driver lives in ffmwiz/gui; add it so we can import the pure
 # waveform helpers. Importing it does NOT require PySide6 (its Qt imports are
 # inside main(); the palette import is guarded).
-_RUNTIME = Path(__file__).resolve().parent.parent / "runtime"
-if str(_RUNTIME) not in sys.path:
-    sys.path.insert(0, str(_RUNTIME))
+_GUI_DIR = Path(__file__).resolve().parents[2] / "ffmwiz" / "gui"
+if str(_GUI_DIR) not in sys.path:
+    sys.path.insert(0, str(_GUI_DIR))
 
 import ffmwiz_gui_qml as Q  # noqa: E402
 

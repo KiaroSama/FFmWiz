@@ -1,7 +1,7 @@
 """FFmWiz unified video editor — QtQuick/QML implementation (modern engine).
 
 This is the NEW, modern GUI engine. It is a SEPARATE module from the classic
-PySide6-widgets editor (assets/runtime/ffmwiz_gui.py), which is kept intact and
+PySide6-widgets editor (ffmwiz/gui/ffmwiz_gui.py), which is kept intact and
 remains the default. FFmWiz launches this module only when the QML engine is
 selected (config "gui_engine": "qml" or env FFMWIZ_GUI_ENGINE=qml), and only for
 the unified video editor mode. All other modes still use the classic engine.
@@ -451,7 +451,9 @@ def main() -> int:
     # App icon (reuse the bundled asset) so the taskbar/window match the classic UI.
     try:
         from PySide6.QtGui import QIcon
-        ico = _THIS_DIR.parent / "icons" / "ffmwiz_app.ico"
+        # Icons live in the project's shared assets dir (<project>/assets/icons);
+        # this module is at <project>/ffmwiz/gui/, so go up two levels.
+        ico = _THIS_DIR.parents[1] / "assets" / "icons" / "ffmwiz_app.ico"
         if ico.exists():
             app.setWindowIcon(QIcon(str(ico)))
     except Exception:
