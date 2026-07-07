@@ -67,7 +67,10 @@ def folder_default_output_path(input_folder: Path) -> Path:
 
 
 def asset_path(*parts: str) -> Path:
-    return script_dir().joinpath(ASSET_DIR_NAME, *parts)
+    # Assets live inside the package (<project>/ffmwiz/assets/). This module is at
+    # <project>/ffmwiz/support/, so the package directory is parents[1]; resolving
+    # relative to it keeps assets locatable regardless of the caller's CWD.
+    return Path(__file__).resolve().parents[1].joinpath(ASSET_DIR_NAME, *parts)
 
 
 def resolve_output_collision(output_path: Path, input_path: Path, collision_suffix: str) -> Path:

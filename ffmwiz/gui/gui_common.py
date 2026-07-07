@@ -58,9 +58,9 @@ for _stream in (sys.stdout, sys.stderr):
 # =====================================================================
 
 APP_ID = "FFmWiz.GUI"
-# This file lives in <project>/ffmwiz/gui/, so the project root is parents[2]
-# and the shared assets (icons) live under <project>/assets/.
-ASSETS_ROOT = Path(__file__).resolve().parents[2] / "assets"
+# This file lives in <project>/ffmwiz/gui/, so the package dir is parents[1]
+# and the bundled assets (icons) live under <project>/ffmwiz/assets/.
+ASSETS_ROOT = Path(__file__).resolve().parents[1] / "assets"
 ASSETS_DIR = ASSETS_ROOT / "icons"
 _GUI_LOG_PATH: Path | None = None
 _APP_QICON_CACHE: Any = None

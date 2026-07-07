@@ -451,9 +451,9 @@ def main() -> int:
     # App icon (reuse the bundled asset) so the taskbar/window match the classic UI.
     try:
         from PySide6.QtGui import QIcon
-        # Icons live in the project's shared assets dir (<project>/assets/icons);
-        # this module is at <project>/ffmwiz/gui/, so go up two levels.
-        ico = _THIS_DIR.parents[1] / "assets" / "icons" / "ffmwiz_app.ico"
+        # Icons live in the package's bundled assets dir (<project>/ffmwiz/assets/icons);
+        # this module is at <project>/ffmwiz/gui/, so go up one level to the package.
+        ico = _THIS_DIR.parents[0] / "assets" / "icons" / "ffmwiz_app.ico"
         if ico.exists():
             app.setWindowIcon(QIcon(str(ico)))
     except Exception:

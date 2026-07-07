@@ -81,10 +81,10 @@ ffmwiz/                # the application package (all implementation lives here)
     gui_editor_*.py    # cut / crop / speed / audio / unified editor builders
     ffmwiz_gui_qml.py  # modern QtQuick unified editor driver (opt-in)
     qml/               # QML UI files for the modern engine (UnifiedEditor.qml)
-assets/
-  icons/
-  cursors/
-  tests/               # unittest suite (test_command_generation.py, ...)
+  assets/              # bundled inside the package (icons, cursors, tests)
+    icons/
+    cursors/
+    tests/             # unittest suite (test_command_generation.py, ...)
 ```
 
 `FFmWiz.py` is a thin entry point: it re-exports the `ffmwiz` package so the
@@ -94,7 +94,7 @@ files, keeping the Qt event loop fully isolated from the CLI process. The old
 standalone Cut/Crop GUI helpers remain in code (as legacy-Tk siblings) but are
 no longer exposed by CLI prompts.
 
-Keep the `assets` folder next to `FFmWiz.py`. The local `assets/icons/ffmwiz_app.png`, `ffmwiz_app.ico`, and `ffmwiz_app.svg` files provide the application/window/taskbar icon for the Qt and Tk GUI windows.
+Keep the `assets` folder inside the `ffmwiz` package (`ffmwiz/assets/`). The local `ffmwiz/assets/icons/ffmwiz_app.png`, `ffmwiz_app.ico`, and `ffmwiz_app.svg` files provide the application/window/taskbar icon for the Qt and Tk GUI windows.
 
 For the package layering, the thin-entry re-export pattern, how the GUI
 subprocess is wired, and how modules are split while preserving the public API,
@@ -598,13 +598,13 @@ The repository is prepared for normal GitHub use:
 - `requirements.txt` pins the runtime Python dependency used by the dedicated Qt GUI.
 - `pyproject.toml` records project metadata and the same runtime dependency for modern Python tooling.
 - The core CLI uses only the Python standard library. PySide6 is the only runtime Python package and is pinned consistently in `requirements.txt`, `pyproject.toml`, and the runtime auto-install check.
-- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and the bundled GUI, compiles the whole `ffmwiz` package, validates the `config.env.example` template, runs a lightweight import/API smoke check, and runs command-generation regression tests from `assets/tests` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
+- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and the bundled GUI, compiles the whole `ffmwiz` package, validates the `config.env.example` template, runs a lightweight import/API smoke check, and runs command-generation regression tests from `ffmwiz/assets/tests` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
 - `.github/dependabot.yml` checks for Python dependency and GitHub Actions updates weekly.
 - `.gitattributes` normalizes text line endings and marks image/icon assets as binary.
 - `.editorconfig` keeps indentation, UTF-8, and final-newline rules consistent across editors.
 - `.gitignore` excludes runtime logs, generated media info reports, Python caches, generated command shims, virtual environments, build outputs, and the local `ffmwiz-ffmpeg-reference.txt` capability snapshot.
 
-Keep `config.env.example`, `assets/`, `FFmWiz.py`, `run.ps1`, `install-command.ps1`, `requirements.txt`, `pyproject.toml`, `.github/`, `.gitattributes`, `.gitignore`, and `.editorconfig` in the repository. Your personal `config.env` stays local (git-ignored).
+Keep `config.env.example`, `ffmwiz/` (including the bundled `ffmwiz/assets/`), `FFmWiz.py`, `run.ps1`, `install-command.ps1`, `requirements.txt`, `pyproject.toml`, `.github/`, `.gitattributes`, `.gitignore`, and `.editorconfig` in the repository. Your personal `config.env` stays local (git-ignored).
 
 ## Logs
 
@@ -663,7 +663,7 @@ The crop preview tries GPU refresh when GPU mode is enabled. If that fails once,
 
 ### Icons Or Cursor Missing
 
-Keep the `assets` folder next to the script. The GUI app icon is loaded from `assets/icons/ffmwiz_app.ico`, `.png`, or `.svg`; toolbar/cursor icons are loaded from `assets/icons/` and `assets/cursors/`. Missing icon assets are logged but do not stop the GUI from opening.
+Keep the `assets` folder inside the `ffmwiz` package. The GUI app icon is loaded from `ffmwiz/assets/icons/ffmwiz_app.ico`, `.png`, or `.svg`; toolbar/cursor icons are loaded from `ffmwiz/assets/icons/` and `ffmwiz/assets/cursors/`. Missing icon assets are logged but do not stop the GUI from opening.
 
 ## Safety
 
