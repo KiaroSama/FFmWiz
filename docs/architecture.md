@@ -122,7 +122,7 @@ menu). `ffmwiz/support/ext00.py::run_mux_cleanup_mode` calls
 py FFmWiz.py                       # run the wizard
 py -m py_compile FFmWiz.py         # syntax check the entry
 py -m compileall -q ffmwiz         # compile the whole package
-py -m unittest discover -s ffmwiz/assets/tests   # full test suite
+py -m unittest discover -s tests   # full test suite
 py FFmWiz.py --preview-colors      # color/theme smoke check
 ```
 
@@ -150,8 +150,9 @@ and `guibridge_cut_tk.py`.
 
 ## Test layout
 
-The unittest suite lives in `ffmwiz/assets/tests/` (the `assets/` folder is
-bundled inside the package). The two originally-huge test files were split by
+The unittest suite lives in `tests/` at the project root (the conventional
+location); only the runtime resources `ffmwiz/assets/{icons,cursors}` are bundled
+inside the package. The two originally-huge test files were split by
 responsibility, then further split so no test file exceeds 800 lines, while
 preserving every test (the full suite count is the guardrail):
 
