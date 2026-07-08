@@ -129,22 +129,41 @@ py FFmWiz.py --preview-colors      # color/theme smoke check
 The GitHub Actions workflow (`.github/workflows/python-smoke.yml`) reproduces
 these checks on Windows across Python 3.10–3.13.
 
+## Module size policy
+
+Every module is kept under ~800 lines. Oversized modules are split with the
+sibling pattern: the source keeps the smaller half, a `<name>_b`/`<name>c`
+sibling holds the rest, does `from ffmwiz.<source> import *` (back-import) plus
+`from ffmwiz import <source>`, and the source re-exports the sibling at its end
+(`from ffmwiz.<sibling> import *`; `__all__ += <sibling>.__all__`). For a
+monkeypatched facade (services, wizard, guibridge, modes, runtime), bare calls
+in the sibling to patched names are rewritten to `<facade>.<name>` so
+`mock.patch` targets still resolve (method الف). The pure-data modules
+`core/constants_config_template.py` and `core/constants_tables.py` are leaf
+siblings of `constants.py`.
+
+The only files intentionally left above 800 lines are single-function GUI
+builders that cannot be split without visual/runtime verification of the Qt/Tk
+window: `gui/gui_editor_unified.py`, `gui/gui_editor_cut.py`,
+`gui/gui_editor_speed.py`, `gui/gui_editor_crop.py`, `guibridge_crop_tk.py`,
+and `guibridge_cut_tk.py`.
+
 ## Test layout
 
 The unittest suite lives in `ffmwiz/assets/tests/` (the `assets/` folder is
-bundled inside the package). Two originally-huge test files were split by
-responsibility while preserving every test (the full suite count is the
-guardrail):
+bundled inside the package). The two originally-huge test files were split by
+responsibility, then further split so no test file exceeds 800 lines, while
+preserving every test (the full suite count is the guardrail):
 
 - The command-generation suite shares one fixture base,
   `command_gen_base.py::CommandGenBase` (setUp/tearDown plus every `*_answers`
-  builder and the module-level `_home_module` helper). The tests themselves are
-  grouped into `test_command_generation.py` (core), `test_command_color_and_pixel.py`,
-  `test_command_audio.py`, `test_command_cut_join_folder.py`, and
-  `test_command_hardsub_and_encode.py`, each subclassing `CommandGenBase`.
+  builder and the module-level `_home_module` helper). The tests subclass it in
+  `test_command_generation*.py`, `test_command_color_and_pixel*.py`,
+  `test_command_audio.py`, `test_command_cut_join_folder*.py`, and
+  `test_command_hardsub_and_encode*.py`.
 - The Join/loudnorm classes share `join_test_helpers.py` (`video_stream`,
-  `audio_stream`, `make_item`, `_vstream`) and are grouped into
-  `test_loudnorm_join_progress.py`, `test_join_pixel_and_progress.py`, and
+  `audio_stream`, `make_item`, `_vstream`) and live in
+  `test_loudnorm_join_progress*.py`, `test_join_pixel_and_progress.py`, and
   `test_trackmanager_and_audio.py`.
 
 Helper modules are named so unittest discovery (`test*.py`) skips them
