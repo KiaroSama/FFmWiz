@@ -81,10 +81,10 @@ ffmwiz/                # the application package (all implementation lives here)
     gui_editor_*.py    # cut / crop / speed / audio / unified editor builders
     ffmwiz_gui_qml.py  # modern QtQuick unified editor driver (opt-in)
     qml/               # QML UI files for the modern engine (UnifiedEditor.qml)
-  assets/              # bundled inside the package (icons, cursors, tests)
+  assets/              # runtime resources bundled inside the package
     icons/
     cursors/
-    tests/             # unittest suite (test_command_generation.py, ...)
+tests/                 # unittest suite at the project root (test_command_generation.py, ...)
 ```
 
 `FFmWiz.py` is a thin entry point: it re-exports the `ffmwiz` package so the
@@ -598,7 +598,7 @@ The repository is prepared for normal GitHub use:
 - `requirements.txt` pins the runtime Python dependency used by the dedicated Qt GUI.
 - `pyproject.toml` records project metadata and the same runtime dependency for modern Python tooling.
 - The core CLI uses only the Python standard library. PySide6 is the only runtime Python package and is pinned consistently in `requirements.txt`, `pyproject.toml`, and the runtime auto-install check.
-- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and the bundled GUI, compiles the whole `ffmwiz` package, validates the `config.env.example` template, runs a lightweight import/API smoke check, and runs command-generation regression tests from `ffmwiz/assets/tests` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
+- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and the bundled GUI, compiles the whole `ffmwiz` package, validates the `config.env.example` template, runs a lightweight import/API smoke check, and runs command-generation regression tests from `tests/` on Windows with Python 3.10, 3.11, 3.12, and 3.13.
 - `.github/dependabot.yml` checks for Python dependency and GitHub Actions updates weekly.
 - `.gitattributes` normalizes text line endings and marks image/icon assets as binary.
 - `.editorconfig` keeps indentation, UTF-8, and final-newline rules consistent across editors.

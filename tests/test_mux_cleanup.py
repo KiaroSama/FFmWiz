@@ -17,7 +17,7 @@ from pathlib import Path
 
 # Make the project root importable so ``import ffmwiz...`` works regardless of
 # the current working directory of the test runner.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ffmwiz.muxcleanup.constants import (
     AUDIO_ALL,
