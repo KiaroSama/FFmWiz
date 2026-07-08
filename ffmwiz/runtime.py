@@ -208,173 +208,6 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
     return False
 
 
-def _progress_terminal_width() -> int:
-    try:
-        return max(60, shutil.get_terminal_size((100, 20)).columns)
-    except Exception:
-        return 100
-
-
-def _join_progress_segments(
-    segments: list[tuple[str, str]],
-    colorize: bool,
-    separator: str = "  •  ",
-) -> str:
-    sep = _progress_colorize(separator, PROGRESS_COLORS["separator"], colorize)
-    return sep.join(text if not color else _progress_colorize(text, color, colorize) for text, color in segments)
-
-
-def _render_progress_line(state: dict[str, str], total_duration: float | None,
-                          started_at: float, max_width: int | None = None) -> str:
-    """Format a single FFmpeg progress status line."""
-    current_s = _progress_seconds_from_state(state)
-    if state.get("progress") == "end" and total_duration and total_duration > 0:
-        current_s = max(current_s, float(total_duration))
-
-    def q_value() -> str:
-        for key in ("stream_0_0_q", "q"):
-            value = state.get(key)
-            if value:
-                return value
-        for key, value in state.items():
-            if key.endswith("_q") and value:
-                return value
-        return "N/A"
-
-    def visible_value(value: Any) -> str:
-        return str(value or "").strip()
-
-    def has_real_value(value: Any) -> bool:
-        text = visible_value(value)
-        return bool(text) and text.upper() not in {"N/A", "NA", "NONE", "NULL", "-", "-1", "-1.0"}
-
-    def output_size() -> str:
-        override = state.get("_ffmwiz_size_text")
-        if override:
-            return override
-        value = state.get("total_size", "")
-        if value.isdigit():
-            return (
-                _human_size(max(0, int(value)))
-                .replace("KiB", "KB")
-                .replace("MiB", "MB")
-                .replace("GiB", "GB")
-                .replace("TiB", "TB")
-            )
-        return "N/A"
-
-    def bitrate_value() -> str:
-        value = state.get("bitrate", "N/A") or "N/A"
-        if state.get("_ffmwiz_bitrate_text") and (
-            state.get("_ffmwiz_prefer_elapsed_speed") or state.get("_ffmwiz_size_source") == "file"
-        ):
-            return str(state["_ffmwiz_bitrate_text"])
-        if value == "N/A" and state.get("_ffmwiz_bitrate_text"):
-            return str(state["_ffmwiz_bitrate_text"])
-        return value
-
-    def fps_value() -> str:
-        value = state.get("fps", "N/A") or "N/A"
-        return "N/A" if value in {"0", "0.0", "0.00"} else value
-
-    def speed_value() -> str:
-        override = state.get("_ffmwiz_speed_text")
-        if override:
-            return override
-        return state.get("speed", "N/A") or "N/A"
-
-    elapsed = max(0.0, time.perf_counter() - started_at)
-    # Refresh the ETA only when the media position actually advances (a real
-    # FFmpeg progress tick). Between ticks the loop re-renders every ~0.25s to
-    # keep the line live; recomputing the ETA from the ever-growing wall-clock
-    # 'elapsed' on those heartbeats made it drift/refresh faster than the
-    # percent/time/size fields. Caching it against current_s keeps every field
-    # updating in lock-step.
-    eta_anchor = f"{current_s:.3f}"
-    if state.get("_ffmwiz_eta_anchor") == eta_anchor and "_ffmwiz_eta_seconds" in state:
-        cached_eta = state.get("_ffmwiz_eta_seconds")
-        eta_s = None if cached_eta in (None, "", "none") else float(cached_eta)
-    else:
-        if total_duration and total_duration > 0 and current_s >= total_duration * 0.995:
-            eta_s = 0.0
-        elif total_duration and current_s > 0.5 and elapsed > 0.5:
-            # Use a smoothed rate (the overall average) instead of FFmpeg's jumpy
-            # per-tick speed, so the ETA is steady and reliable.
-            speed_ratio = _smoothed_eta_rate(state, current_s, elapsed) or (current_s / elapsed)
-            eta_s = max(0.0, (total_duration - current_s) / speed_ratio) if speed_ratio and speed_ratio > 0.01 else None
-        else:
-            eta_s = None
-        state["_ffmwiz_eta_anchor"] = eta_anchor
-        state["_ffmwiz_eta_seconds"] = "none" if eta_s is None else f"{eta_s:.3f}"
-
-    colorize = USE_COLOR
-    if total_duration and total_duration > 0:
-        pct = min(100.0, 100.0 * current_s / total_duration)
-        pct_text = f"{pct:.1f}%"
-    else:
-        pct_text = "progress"
-
-    current_text = format_progress_clock(current_s)
-    total_text = format_progress_clock(total_duration) if total_duration and total_duration > 0 else "unknown"
-    elapsed_text = format_progress_elapsed_dot(elapsed)
-    eta_text = format_progress_duration(eta_s) if eta_s is not None else "calculating"
-    time_total_text = (
-        f"{_progress_colorize(f'time {current_text}', PROGRESS_COLORS['time'], colorize)} "
-        f"{_progress_colorize(f'/ {total_text}', PROGRESS_COLORS['total'], colorize)}"
-    )
-    eta_segment = (
-        f"{_progress_colorize('ETA', PROGRESS_COLORS['eta_label'], colorize)} "
-        f"{_progress_colorize(eta_text, PROGRESS_COLORS['eta_value'], colorize)}"
-    )
-
-    verbose_segments = [
-        (pct_text, PROGRESS_COLORS["percent"]),
-    ]
-    # Show active split part indicator if available.
-    part_label = state.get("_ffmwiz_split_part_label")
-    if part_label:
-        verbose_segments.append((part_label, Color.LIGHT_BLUE))
-    verbose_segments.append((time_total_text, ""))
-    fps_text = fps_value()
-    if has_real_value(fps_text):
-        verbose_segments.append((f"fps {fps_text}", PROGRESS_COLORS["fps"]))
-    q_text = q_value()
-    if has_real_value(q_text):
-        verbose_segments.append((f"q {q_text}", PROGRESS_COLORS["q"]))
-    speed_text = speed_value()
-    if has_real_value(speed_text):
-        verbose_segments.append((f"speed {speed_text}", PROGRESS_COLORS["speed"]))
-    size_text = output_size()
-    if has_real_value(size_text):
-        verbose_segments.append((f"size {size_text}", PROGRESS_COLORS["size"]))
-    bitrate_text = bitrate_value()
-    if has_real_value(bitrate_text):
-        verbose_segments.append((f"bitrate {bitrate_text}", PROGRESS_COLORS["bitrate"]))
-    verbose_segments.extend([
-        (f"elapsed {elapsed_text}", PROGRESS_COLORS["elapsed"]),
-        (eta_segment, ""),
-    ])
-    return _join_progress_segments(verbose_segments, colorize)
-
-
-_VT_MODE_ATTEMPTED = False
-
-
-_PROGRESS_LAST_LEN = 0
-
-
-_PROGRESS_LAST_ROWS = 0
-
-
-_PROGRESS_FINALIZED = False
-
-
-_WINDOWS_CONSOLE_CHECKED = False
-
-
-_WINDOWS_CONSOLE_OK = False
-
-
 def _enable_windows_vt_mode() -> None:
     global _VT_MODE_ATTEMPTED
     if _VT_MODE_ATTEMPTED or os.name != "nt":
@@ -828,12 +661,15 @@ __all__ = [
     '_begin_progress_render',
     '_enable_windows_vt_mode',
     '_finish_progress_line',
-    '_join_progress_segments',
-    '_progress_terminal_width',
     '_pyside6_available',
     '_render_initial_progress_line',
-    '_render_progress_line',
     '_stdout_supports_in_place_progress',
     '_write_progress_line',
     'PROGRESS_COLORS',
 ]
+
+
+# Progress-line rendering helpers live in a sibling module (split for file size).
+from ffmwiz import runtime_render as _runtime_render  # noqa: E402
+from ffmwiz.runtime_render import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_runtime_render.__all__)
