@@ -23,6 +23,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gui_common
+import gui_style
+import gui_geometry
 import gui_editor_cut
 import gui_editor_crop
 import gui_editor_speed
@@ -31,6 +33,8 @@ import gui_editor_unified
 
 _MODULES = [
     gui_common,
+    gui_style,
+    gui_geometry,
     gui_editor_cut,
     gui_editor_crop,
     gui_editor_speed,
