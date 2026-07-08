@@ -662,167 +662,25 @@ def _run_add_files_to_video_mode_impl(base_answers: dict[str, Any]) -> tuple[int
     )
 
 
-def run_extract_stream_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    steps = [
-        Step("input_path", lambda a: True, step_extract_stream_input),
-        Step("extract_stream_index", lambda a: True, step_extract_stream_index),
-        Step("extract_format", lambda a: True, step_extract_stream_format),
-        Step("start_now", lambda a: True, step_extract_stream_start_now),
-    ]
-    try:
-        run_mode_steps(answers, steps)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The plan above is ready to run manually.")
-        return None
-    jobs = answers["_extract_jobs"]
-    ffmpeg = answers["ffmpeg"]
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    total_rc = 0
-    ok = 0
-    started_at = time.perf_counter()
-    for i, job in enumerate(jobs, start=1):
-        out = Path(job["output_path"])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        cmd = build_extract_stream_command(ffmpeg, Path(job["path"]), job["stream"], out)
-        idx = stream_global_index(job["stream"])
-        appio.note(f"[{i}/{len(jobs)}] {Path(job['path']).name} #{idx} -> {out.name}")
-        log_info(f"Extract Stream job {i}/{len(jobs)}: input={job['path']}; index={idx}; output={out}")
-        duration = services.stream_duration_seconds(job["stream"], job.get("fmt"))
-        rc, _elapsed = run_ffmpeg_with_progress(
-            cmd,
-            total_duration=(duration if duration and duration > 0 else None),
-            label="Extract Stream",
-        )
-        if rc == 0:
-            ok += 1
-        else:
-            total_rc = rc
-            appio.error(f"Extraction failed (exit {rc}) for {Path(job['path']).name} #{idx}.")
-    elapsed = time.perf_counter() - started_at
-    appio.note(f"Extract Stream done: {ok}/{len(jobs)} stream(s) extracted.")
-    log_info(f"Extract Stream finished: ok={ok}/{len(jobs)}; elapsed={elapsed:.2f}s")
-    return total_rc, elapsed
-
-
-def ask_hardsub_source_video(answers: dict[str, Any]) -> None:
-    while True:
-        video_example = example_text(r"E:\Input\video.mkv")
-        value = appio.ask_required(
-            appio.question_prompt(
-                answers,
-                "Enter source video file path",
-                f"drag and drop a video file here or paste a path; example: {video_example}",
-            )
-        )
-        input_path = terminal_path(value)
-        if not input_path.exists() or not input_path.is_file():
-            appio.error("File not found. Enter the full file path again.")
-            continue
-        try:
-            load_input_metadata(answers, input_path)
-        except FFprobeError as exc:
-            appio.error(str(exc))
-            continue
-        except Exception:
-            log_exception(f"ffprobe metadata load failed for Hard Sub source video: {input_path}")
-            appio.error(f"ffprobe could not read the file. See log file: {_log_file_text()}")
-            continue
-        if not answers.get("video_streams"):
-            appio.error("The input must contain a video stream.")
-            continue
-        answers["hardsub_hdr_info"] = video_hdr_dolby_info(answers["video_streams"][0])
-        trackmanager.print_source_info(answers)
-        return
-
-
-def run_hardsub_encode_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    try:
-        return _run_hardsub_encode_mode_impl(base_answers)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-
-
-def _run_hardsub_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    steps = [
-        Step("input_path", lambda a: True, ask_hardsub_source_video),
-        Step("output_location", lambda a: True, step_hardsub_output_location),
-        Step("output_format", lambda a: True, step_hardsub_output_format),
-        Step("hardsub_subtitle", lambda a: True, step_hardsub_subtitle_source),
-        Step("hardsub_fontsdir", lambda a: True, step_hardsub_fontsdir),
-        Step("video_codec", lambda a: True, step_hardsub_video_codec),
-        Step("use_gpu", lambda a: True, step_hardsub_use_gpu),
-        Step(
-            "nvenc_multipass",
-            lambda a: nvenc_multipass_prompt_applicable(a),
-            lambda a: ask_nvenc_multipass_if_applicable(a, workflow_name="HardSub", quality_oriented=True),
-        ),
-        Step("hardsub_quality", lambda a: True, step_hardsub_quality),
-        Step("hardsub_hdr", lambda a: True, step_hardsub_hdr_handling),
-        Step("hardsub_audio", lambda a: True, step_hardsub_audio_mode),
-        Step("hardsub_audio_container", lambda a: True, step_hardsub_audio_container_policy),
-        Step("color_range", color_range_prompt_applicable, step_color_range),
-        Step("start_now", lambda a: True, step_hardsub_start_now),
-    ]
-
-    idx = 0
-    while idx < len(steps):
-        try:
-            answers["_question_number"] = idx + 1
-            steps[idx].run(answers)
-            idx += 1
-        except Back:
-            if idx == 0:
-                raise
-            idx -= 1
-            while idx > 0 and step_is_auto_back_skip(steps[idx], answers):
-                idx -= 1
-
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
-    log_info(
-        f"Hard Sub Encode starting: input={answers['input_path']}; "
-        f"output={answers.get('output_path')}; subtitle_source={answers.get('hardsub_subtitle_source')}"
-    )
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(duration if duration > 0 else None),
-        label="Hard Sub Encode",
-    )
-
-
 __all__ = [
     'ask_add_files_source_video',
     'ask_continue_default_yes',
     'ask_cut_method',
-    'ask_hardsub_source_video',
     'print_cut_summary',
     'run_add_files_to_video_mode',
     'run_capability_cache_menu',
     'run_copy_cut_mode',
-    'run_extract_stream_mode',
     'run_folder_encode_mode',
     'run_folder_settings_wizard',
-    'run_hardsub_encode_mode',
     'run_mode_steps',
     '_capability_cache_clear',
     '_capability_cache_reprobe',
     '_run_add_files_to_video_mode_impl',
     '_run_copy_cut_mode_impl',
     '_run_folder_encode_mode_impl',
-    '_run_hardsub_encode_mode_impl',
     'MEDIA_INFO_VALUE_COLORS',
 ]
+
 
 
 # Speed/reverse/cut transform mode runners live in a sibling module; re-export
@@ -830,3 +688,9 @@ __all__ = [
 from ffmwiz import modes_transform  # noqa: E402
 from ffmwiz.modes_transform import *  # noqa: E402,F401,F403
 __all__ += modes_transform.__all__
+
+
+# modes_b holds an overflow slice of this module (split for file size).
+from ffmwiz import modes_b as _modes_b  # noqa: E402
+from ffmwiz.modes_b import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_modes_b.__all__)
