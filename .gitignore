@@ -74,5 +74,10 @@ reference.md
 # Local-only project working-memory / lessons log; never commit.
 lesson.md
 
+# Portable AI context memory (.ai/) and CLAUDE.md; local-only, never commit.
+/.ai/
+**/.ai/
+/CLAUDE.md
+
 # Local-only temporary/scratch files and personal preview launchers; never commit.
 _tmp*
