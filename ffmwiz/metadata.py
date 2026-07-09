@@ -424,6 +424,7 @@ def run_video_bitstream_metadata_tools(answers: dict[str, Any]) -> None:
                     answers["ffmpeg"],
                     use_cuda_decode=use_cuda_decode,
                     bit_depth=source_bit_depth,
+                    duration_seconds=services.stream_duration_seconds(stream, probe.get("format")),
                 )
                 print()
                 print(paint("Color range estimate", Color.BOLD + Color.LIGHT_BLUE))
