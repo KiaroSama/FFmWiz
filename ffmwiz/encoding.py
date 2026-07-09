@@ -214,13 +214,22 @@ def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
     if len(segments) <= 1:
         return []
     source_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
+    # Reuse the exact per-part output paths already computed by
+    # build_ffmpeg_command (and shown in the summary), so the per-part encode
+    # writes the same files. Align them to the KEPT parts in order.
+    prebuilt_paths = [Path(p) for p in (answers.get("split_output_paths") or [])]
     specs: list[dict[str, Any]] = []
+    kept = 0
     for index, segment in enumerate(segments, start=1):
         keep_ranges = intersect_keep_ranges_with_segment(source_keep_ranges, segment, duration)
         if not keep_ranges:
             log_info(f"Split part {index} skipped because cuts remove the whole part: {segment}")
             continue
-        output_path = separator_output_path(answers, index)
+        if kept < len(prebuilt_paths):
+            output_path = prebuilt_paths[kept]
+        else:
+            output_path = separator_output_path(answers, index)
+        kept += 1
         job_answers = dict(answers)
         job_answers["output_location"] = output_path.parent
         job_answers["output_name_stem"] = output_path.stem
@@ -265,9 +274,12 @@ def run_separator_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
         if reverse_video_needs_segmented_main_encode(job_answers):
             rc, _ = run_segmented_reverse_main_encode(job_answers)
         else:
+            part_source_seconds = total_keep_duration(job_answers.get("cut_keep_ranges") or [])
+            part_speed = encode_video_speed_factor(job_answers) if video_speed_transform_enabled(job_answers) else 1.0
+            part_output_seconds = part_source_seconds / max(0.01, float(part_speed or 1.0))
             rc, _ = run_ffmpeg_with_progress(
                 spec["cmd"],
-                total_duration=max(0.001, total_keep_duration(job_answers.get("cut_keep_ranges") or [])),
+                total_duration=max(0.001, part_output_seconds),
                 label=f"Split part {position}/{len(specs)}",
             )
         if rc == 0:

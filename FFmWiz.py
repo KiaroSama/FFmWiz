@@ -445,6 +445,16 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
 
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
+    # Split points (Split mode): encode each part as its OWN FFmpeg run so every
+    # part shows an accurate, clean 0->100% progress line. A single multi-output
+    # command reports ambiguous -progress counters across parts, which made the
+    # Part-1 percent a wrong byte/bitrate-based guess.
+    if answers.get("separator_points"):
+        try:
+            return run_separator_main_encode(answers)
+        finally:
+            cleanup_join_concat_list(answers)
+            cleanup_encode_chapter_metadata(answers)
     # Estimate total duration so the progress bar can compute percent / ETA.
     source_duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     if answers.get("join_input_items"):
