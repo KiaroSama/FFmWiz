@@ -194,6 +194,7 @@ def estimate_color_range(
     ffmpeg: str,
     use_cuda_decode: bool = False,
     bit_depth: int | None = 8,
+    duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     # FFmpeg's signalstats reports YMIN/YMAX in the source pixel format's native
     # bit-depth range (0..2**bits-1), NOT a fixed 0..255. A 10-bit limited-range
@@ -204,18 +205,27 @@ def estimate_color_range(
     output_path = services.metadata_report_output_path(input_path, f"_color_range_signalstats_stream{video_stream_index}", ".txt")
     args = build_signalstats_command(input_path, video_stream_index, sampling_mode, ffmpeg, output_path, use_cuda_decode)
     log_info("Metadata Editor signalstats command: " + command_to_powershell(args))
-    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
-    if result.returncode != 0 and use_cuda_decode:
-        log_error("Color range signalstats CUDA decode failed; retrying with CPU decode:\n" + (result.stderr or result.stdout or ""))
+    # The signalstats metadata is written to a file, so ffmpeg's stdout is free
+    # for -progress: run through the shared progress renderer so this analysis
+    # shows the same live percent / time / ETA line as every other FFmpeg run
+    # (out_time advances across the source timeline even though frames are
+    # sub-sampled). total_duration enables the percentage/ETA; without it the
+    # line still shows elapsed time and speed.
+    print()
+    print(paint("Analyzing decoded pixel statistics for color-range estimation...", Color.LIGHT_BLUE))
+    returncode, _elapsed = run_ffmpeg_with_progress(args, total_duration=duration_seconds, label="Color range analysis")
+    if returncode != 0 and use_cuda_decode:
+        log_error("Color range signalstats CUDA decode failed; retrying with CPU decode.")
         try:
             output_path.unlink(missing_ok=True)
         except OSError:
             pass
+        appio.note("GPU decode failed for this analysis; retrying with CPU decode...")
         args = build_signalstats_command(input_path, video_stream_index, sampling_mode, ffmpeg, output_path, False)
         log_info("Metadata Editor signalstats CPU fallback command: " + command_to_powershell(args))
-        result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", check=False)
-    if result.returncode != 0:
-        log_error("Color range signalstats failed:\n" + (result.stderr or result.stdout or ""))
+        returncode, _elapsed = run_ffmpeg_with_progress(args, total_duration=duration_seconds, label="Color range analysis (CPU)")
+    if returncode != 0:
+        log_error("Color range signalstats failed (see the captured FFmpeg stderr in the log).")
         raise RuntimeError("Color range estimation failed. See log file.")
     values: dict[str, list[float]] = {"YMIN": [], "YLOW": [], "YAVG": [], "YHIGH": [], "YMAX": []}
     if output_path.exists():
