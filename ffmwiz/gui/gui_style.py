@@ -694,7 +694,7 @@ QScrollBar::add-line, QScrollBar::sub-line {{ background: transparent; border: n
 # panels so the toolbars take far less vertical room and the video preview
 # (inside the splitter) keeps the freed space. Production QSS is untouched.
 # =====================================================================
-PREVIEW_COMPACT_QSS = f"""
-QPushButton {{ padding: 4px 9px; min-height: 18px; }}
-QLabel#tip {{ padding: 4px 7px; }}
+PREVIEW_COMPACT_QSS = """
+QPushButton { padding: 4px 9px; min-height: 18px; }
+QLabel#tip { padding: 4px 7px; }
 """

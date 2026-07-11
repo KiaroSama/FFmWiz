@@ -180,68 +180,55 @@ def step_start_now(answers: dict[str, Any]) -> None:
             },
             *list(answers.get("join_input_items") or []),
         ]
-    separator_specs = []
-    if separator_specs:
-        cmd = separator_specs[0]["cmd"]
-        answers["separator_jobs"] = [
-            {
-                "index": spec["index"],
-                "segment": spec["segment"],
-                "output_path": spec["output_path"],
-            }
-            for spec in separator_specs
-        ]
-        answers["output_path"] = separator_specs[0]["output_path"]
-    else:
-        answers.pop("separator_jobs", None)
-        if join_items:
-            output_path = services.build_output_path(answers)
-            answers["output_path"] = output_path
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            copy_compatible, reasons = join_copy_compatibility(join_items)
-            # VFR join whose inputs match on everything except frame rate can use
-            # the concat demuxer (stream copy) to keep each segment's own rate.
-            if (
-                answers.get("join_vfr")
-                and not copy_compatible
-                and any(item.get("video_streams") for item in join_items)
-                and join_copy_compatible_except_fps(join_items)
-            ):
-                copy_compatible = True
-                reasons = []
-                appio.note("VFR join: using stream copy (concat) to preserve each file's frame rate.")
-            can_copy = (
-                copy_compatible
-                and str(answers.get("video_codec", "")).lower() == "copy"
-                and str(answers.get("audio_codec", "")).lower() == "copy"
-                and answers.get("audio_tracks") in (None, "all")
-                and source_metadata_keep_enabled(answers)
-                and source_chapters_keep_enabled(answers)
-                and source_subtitles_keep_enabled(answers)
-                and not video_filters_required(answers)
-                and not answers.get("cut_keep_ranges")
-                and not loudnorm_transform_enabled(answers)
-            )
-            print_join_summary(join_items, copy_compatible, reasons)
-            audio_only_join = all(not item.get("video_streams") for item in join_items)
-            if audio_only_join:
-                # Interactive-wizard audio join: stream-copy when compatible,
-                # otherwise concatenate and re-encode the joined audio.
-                if copy_compatible and str(answers.get("audio_codec", "")).lower() == "copy":
-                    cmd = build_join_copy_command(answers, join_items, output_path)
-                else:
-                    appio.note("Joining audio inputs (concatenate and re-encode).")
-                    cmd = build_join_audio_encode_command(answers, join_items, output_path)
-            elif can_copy:
+    answers.pop("separator_jobs", None)
+    if join_items:
+        output_path = services.build_output_path(answers)
+        answers["output_path"] = output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        copy_compatible, reasons = join_copy_compatibility(join_items)
+        # VFR join whose inputs match on everything except frame rate can use
+        # the concat demuxer (stream copy) to keep each segment's own rate.
+        if (
+            answers.get("join_vfr")
+            and not copy_compatible
+            and any(item.get("video_streams") for item in join_items)
+            and join_copy_compatible_except_fps(join_items)
+        ):
+            copy_compatible = True
+            reasons = []
+            appio.note("VFR join: using stream copy (concat) to preserve each file's frame rate.")
+        can_copy = (
+            copy_compatible
+            and str(answers.get("video_codec", "")).lower() == "copy"
+            and str(answers.get("audio_codec", "")).lower() == "copy"
+            and answers.get("audio_tracks") in (None, "all")
+            and source_metadata_keep_enabled(answers)
+            and source_chapters_keep_enabled(answers)
+            and source_subtitles_keep_enabled(answers)
+            and not video_filters_required(answers)
+            and not answers.get("cut_keep_ranges")
+            and not loudnorm_transform_enabled(answers)
+        )
+        print_join_summary(join_items, copy_compatible, reasons)
+        audio_only_join = all(not item.get("video_streams") for item in join_items)
+        if audio_only_join:
+            # Interactive-wizard audio join: stream-copy when compatible,
+            # otherwise concatenate and re-encode the joined audio.
+            if copy_compatible and str(answers.get("audio_codec", "")).lower() == "copy":
                 cmd = build_join_copy_command(answers, join_items, output_path)
             else:
-                if copy_compatible:
-                    appio.note("Join inputs are stream-copy compatible, but selected encode settings require re-encoding.")
-                else:
-                    appio.note("Join inputs are not stream-copy compatible. Re-encoding is required.")
-                cmd = build_join_encode_command(answers, join_items, output_path)
+                appio.note("Joining audio inputs (concatenate and re-encode).")
+                cmd = build_join_audio_encode_command(answers, join_items, output_path)
+        elif can_copy:
+            cmd = build_join_copy_command(answers, join_items, output_path)
         else:
-            cmd = build_ffmpeg_command(answers)
+            if copy_compatible:
+                appio.note("Join inputs are stream-copy compatible, but selected encode settings require re-encoding.")
+            else:
+                appio.note("Join inputs are not stream-copy compatible. Re-encoding is required.")
+            cmd = build_join_encode_command(answers, join_items, output_path)
+    else:
+        cmd = build_ffmpeg_command(answers)
     answers["cmd"] = cmd
     ensure_color_range_resolved(answers, workflow="Main Wizard")
     log_crop_normalization_summary(answers)
