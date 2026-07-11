@@ -326,6 +326,26 @@ def configure_rules_advanced(
     copy_non_video_files = initial.copy_non_video_files if initial else True
     overwrite = initial.overwrite if initial else False
 
+    def make_rules() -> SelectionRules:
+        # Reads the current step-machine locals at call time.
+        return SelectionRules(
+            audio_mode=audio_mode,
+            audio_languages=audio_languages,
+            audio_titles=audio_titles,
+            audio_indexes=audio_indexes,
+            subtitle_mode=subtitle_mode,
+            subtitle_languages=subtitle_languages,
+            subtitle_titles=subtitle_titles,
+            subtitle_indexes=subtitle_indexes,
+            keep_attachments=keep_attachments,
+            keep_metadata=keep_metadata,
+            keep_chapters=keep_chapters,
+            overwrite=overwrite,
+            copy_non_video_files=copy_non_video_files,
+            selection_style="advanced",
+            metadata_edits=metadata_edits,
+        )
+
     if initial is None and skip_audio_selection:
         if audio_language_options:
             audio_mode = AUDIO_BY_LANGUAGE
@@ -494,24 +514,7 @@ def configure_rules_advanced(
                 continue
 
             if step == 6:
-                metadata_context_rules = SelectionRules(
-                    audio_mode=audio_mode,
-                    audio_languages=audio_languages,
-                    audio_titles=audio_titles,
-                    audio_indexes=audio_indexes,
-                    subtitle_mode=subtitle_mode,
-                    subtitle_languages=subtitle_languages,
-                    subtitle_titles=subtitle_titles,
-                    subtitle_indexes=subtitle_indexes,
-                    keep_attachments=keep_attachments,
-                    keep_metadata=keep_metadata,
-                    keep_chapters=keep_chapters,
-                    overwrite=overwrite,
-                    copy_non_video_files=copy_non_video_files,
-                    selection_style="advanced",
-                    metadata_edits=metadata_edits,
-                )
-                metadata_edits = ask_metadata_edits(media_files, metadata_edits, metadata_context_rules)
+                metadata_edits = ask_metadata_edits(media_files, metadata_edits, make_rules())
                 step = 7
                 continue
 
@@ -527,23 +530,7 @@ def configure_rules_advanced(
 
             if step == 9:
                 overwrite = ask_yes_no("Overwrite existing output files?", False)
-                return SelectionRules(
-                    audio_mode=audio_mode,
-                    audio_languages=audio_languages,
-                    audio_titles=audio_titles,
-                    audio_indexes=audio_indexes,
-                    subtitle_mode=subtitle_mode,
-                    subtitle_languages=subtitle_languages,
-                    subtitle_titles=subtitle_titles,
-                    subtitle_indexes=subtitle_indexes,
-                    keep_attachments=keep_attachments,
-                    keep_metadata=keep_metadata,
-                    keep_chapters=keep_chapters,
-                    overwrite=overwrite,
-                    copy_non_video_files=copy_non_video_files,
-                    selection_style="advanced",
-                    metadata_edits=metadata_edits,
-                )
+                return make_rules()
         except MenuBack:
             if step == 0:
                 raise
@@ -575,6 +562,26 @@ def configure_rules_exact(
     keep_chapters = initial.keep_chapters if initial else True
     copy_non_video_files = initial.copy_non_video_files if initial else True
     overwrite = initial.overwrite if initial else False
+
+    def make_rules() -> SelectionRules:
+        # Reads the current step-machine locals at call time.
+        return SelectionRules(
+            audio_mode=audio_mode,
+            audio_languages=[],
+            audio_titles=[],
+            audio_indexes=audio_indexes,
+            subtitle_mode=subtitle_mode,
+            subtitle_languages=[],
+            subtitle_titles=[],
+            subtitle_indexes=subtitle_indexes,
+            keep_attachments=keep_attachments,
+            keep_metadata=keep_metadata,
+            keep_chapters=keep_chapters,
+            overwrite=overwrite,
+            copy_non_video_files=copy_non_video_files,
+            selection_style="exact",
+            metadata_edits=metadata_edits,
+        )
 
     while True:
         try:
@@ -617,24 +624,7 @@ def configure_rules_exact(
                 continue
 
             if step == 4:
-                metadata_context_rules = SelectionRules(
-                    audio_mode=audio_mode,
-                    audio_languages=[],
-                    audio_titles=[],
-                    audio_indexes=audio_indexes,
-                    subtitle_mode=subtitle_mode,
-                    subtitle_languages=[],
-                    subtitle_titles=[],
-                    subtitle_indexes=subtitle_indexes,
-                    keep_attachments=keep_attachments,
-                    keep_metadata=keep_metadata,
-                    keep_chapters=keep_chapters,
-                    overwrite=overwrite,
-                    copy_non_video_files=copy_non_video_files,
-                    selection_style="exact",
-                    metadata_edits=metadata_edits,
-                )
-                metadata_edits = ask_metadata_edits(media_files, metadata_edits, metadata_context_rules)
+                metadata_edits = ask_metadata_edits(media_files, metadata_edits, make_rules())
                 step = 5
                 continue
 
@@ -650,23 +640,7 @@ def configure_rules_exact(
 
             if step == 7:
                 overwrite = ask_yes_no("Overwrite existing output files?", False)
-                return SelectionRules(
-                    audio_mode=audio_mode,
-                    audio_languages=[],
-                    audio_titles=[],
-                    audio_indexes=audio_indexes,
-                    subtitle_mode=subtitle_mode,
-                    subtitle_languages=[],
-                    subtitle_titles=[],
-                    subtitle_indexes=subtitle_indexes,
-                    keep_attachments=keep_attachments,
-                    keep_metadata=keep_metadata,
-                    keep_chapters=keep_chapters,
-                    overwrite=overwrite,
-                    copy_non_video_files=copy_non_video_files,
-                    selection_style="exact",
-                    metadata_edits=metadata_edits,
-                )
+                return make_rules()
         except MenuBack:
             if step == 0:
                 raise

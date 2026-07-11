@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
-from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, AUDIO_NONE, FFMPEG_BIN, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE, SUBTITLE_NONE
+from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, FFMPEG_BIN, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE, SUBTITLE_NONE
 from .models import MediaFile, SelectionRules, StreamInfo, StreamMetadataEdit
 from .textutil import normalize_language_code
 
@@ -28,9 +28,6 @@ def selected_audio_streams(media: MediaFile, rules: SelectionRules) -> List[Stre
 
     if rules.audio_mode == AUDIO_ALL:
         return audio
-
-    if rules.audio_mode == AUDIO_NONE:
-        return []
 
     return []
 
