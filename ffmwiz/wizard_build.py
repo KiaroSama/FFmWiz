@@ -581,7 +581,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                     log_info(f"NVENC constant quality: -rc constqp -cq{stream_spec} {int(round(crf_value))}")
                 else:
                     # CPU encoder: -crf
-                    cmd.extend([f"-crf", f"{crf_value:g}"])
+                    cmd.extend(["-crf", f"{crf_value:g}"])
                     log_info(f"CPU encoder constant quality: -crf {crf_value:g}")
 
             cmd.extend(color_range_output_args(answers, ":v:0", workflow="build_ffmpeg_command"))

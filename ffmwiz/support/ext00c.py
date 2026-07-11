@@ -274,7 +274,7 @@ def _run_dependency_install(cmd: list[str], label: str) -> bool:
     log_info(f"Dependency install command for {label}: {cmd}")
     try:
         result = subprocess.run(cmd, check=False)
-    except Exception as exc:
+    except Exception:
         log_exception(f"Could not start dependency installer for {label}")
         appio.error(f"Could not start {label} installer. See log file: {_log_file_text()}")
         return False

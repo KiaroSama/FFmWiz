@@ -133,7 +133,7 @@ def step_input_path(answers: dict[str, Any]) -> None:
         except FFprobeError as exc:
             appio.error(str(exc))
             continue
-        except Exception as exc:
+        except Exception:
             log_exception(f"ffprobe metadata load failed for input path: {input_path}")
             appio.error(f"ffprobe could not read the file. See log file: {_log_file_text()}")
             continue
