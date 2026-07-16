@@ -208,6 +208,14 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
     return False
 
 
+_VT_MODE_ATTEMPTED = False
+_PROGRESS_LAST_LEN = 0
+_PROGRESS_LAST_ROWS = 0
+_PROGRESS_FINALIZED = False
+_WINDOWS_CONSOLE_CHECKED = False
+_WINDOWS_CONSOLE_OK = False
+
+
 def _enable_windows_vt_mode() -> None:
     global _VT_MODE_ATTEMPTED
     if _VT_MODE_ATTEMPTED or os.name != "nt":

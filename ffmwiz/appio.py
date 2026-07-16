@@ -434,6 +434,7 @@ __all__ = [
     'log_environment',
     'log_error',
     'log_exception',
+    '_log_file_text',
     'log_info',
     'log_path',
     'log_warn',
