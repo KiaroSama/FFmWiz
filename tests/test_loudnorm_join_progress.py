@@ -291,6 +291,25 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             self.assertLess(fc.index("concat=n=31"), fc.index("loudnorm"))
 
     # ================= Progress de-duplication tests =================
+    def test_runtime_owns_progress_console_state(self):
+        state_names = (
+            "_VT_MODE_ATTEMPTED",
+            "_PROGRESS_LAST_LEN",
+            "_PROGRESS_LAST_ROWS",
+            "_PROGRESS_FINALIZED",
+            "_WINDOWS_CONSOLE_CHECKED",
+            "_WINDOWS_CONSOLE_OK",
+        )
+        self.assertTrue(all(hasattr(FFmWiz.runtime, name) for name in state_names))
+        with mock.patch.object(FFmWiz.runtime.sys.stdout, "isatty", return_value=True), \
+                mock.patch.object(FFmWiz.runtime, "_WINDOWS_CONSOLE_CHECKED", False), \
+                mock.patch.object(FFmWiz.runtime, "_WINDOWS_CONSOLE_OK", False):
+            self.assertIsInstance(FFmWiz.runtime._stdout_supports_in_place_progress(), bool)
+
+    def test_log_file_text_is_available_through_facade(self):
+        self.assertTrue(hasattr(FFmWiz, "_log_file_text"))
+        self.assertIs(FFmWiz._log_file_text, FFmWiz.appio._log_file_text)
+
     def _capture_progress(self, fn):
         buf = io.StringIO()
         with mock.patch.object(FFmWiz.runtime, "_stdout_supports_in_place_progress", return_value=True), \

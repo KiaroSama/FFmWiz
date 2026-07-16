@@ -221,24 +221,6 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
     return _join_progress_segments(verbose_segments, colorize)
 
 
-_VT_MODE_ATTEMPTED = False
-
-
-_PROGRESS_LAST_LEN = 0
-
-
-_PROGRESS_LAST_ROWS = 0
-
-
-_PROGRESS_FINALIZED = False
-
-
-_WINDOWS_CONSOLE_CHECKED = False
-
-
-_WINDOWS_CONSOLE_OK = False
-
-
 __all__ = [
     '_progress_terminal_width',
     '_join_progress_segments',
