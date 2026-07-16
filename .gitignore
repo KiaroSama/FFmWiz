@@ -81,3 +81,22 @@ lesson.md
 
 # Local-only temporary/scratch files and personal preview launchers; never commit.
 _tmp*
+
+# Hook Maker: local/private files (auto-managed)
+/.env
+/.env.*
+!/.env.dist
+!/.env.example
+!/.env.sample
+!/.env.template
+/.agents/
+/.claude/
+/.cline/
+/.codex/
+/.cursor/
+/.kiro/
+/AGENTS.md
+/explain-AI.md
+/graphify-out/
+/reference.md
+/SKILL.md
