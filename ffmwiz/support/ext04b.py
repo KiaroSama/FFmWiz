@@ -245,7 +245,12 @@ def build_audio_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
         "-filter:a",
         build_audio_speed_filter(speed, reverse),
     ]
-    cmd.extend(audio_tool_encode_options(answers["output_ext"], sample_rate=resolve_audio_sample_rate(answers)))
+    cmd.extend(audio_tool_encode_options(
+        answers["output_ext"],
+        bitrate_kbps=resolve_audio_tool_bitrate_kbps(answers),
+        sample_rate=resolve_audio_sample_rate(answers),
+        channels=resolve_audio_tool_channels(answers),
+    ))
     cmd.append(str(output_path))
     log_info(
         f"Audio speed/reverse command built: audio_index={audio_index}; "
@@ -298,7 +303,12 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
         parts.append(f"{''.join(labels)}concat=n={len(keep_ranges)}:v=0:a=1[a]")
         cmd.extend(["-filter_complex", ";".join(parts), "-map", "[a]", "-vn", "-sn", "-dn"])
 
-    cmd.extend(audio_tool_encode_options(answers["output_ext"], sample_rate=resolve_audio_sample_rate(answers)))
+    cmd.extend(audio_tool_encode_options(
+        answers["output_ext"],
+        bitrate_kbps=resolve_audio_tool_bitrate_kbps(answers),
+        sample_rate=resolve_audio_sample_rate(answers),
+        channels=resolve_audio_tool_channels(answers),
+    ))
     cmd.append(str(output_path))
     log_info(
         f"Audio cut command built: audio_index={audio_index}; ranges={keep_ranges}; output={output_path}"

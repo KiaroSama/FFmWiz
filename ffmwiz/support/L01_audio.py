@@ -146,11 +146,69 @@ def lossless_audio_copy_ext(codec_name: str, input_suffix: str = "") -> str:
     return lossless_audio_copy_ext_choices(codec_name, input_suffix)[0]
 
 
+def _selected_audio_tool_stream(answers: dict[str, Any]) -> dict[str, Any] | None:
+    streams = answers.get("audio_streams") or []
+    try:
+        index = int(answers.get("audio_index", 0) or 0)
+    except (TypeError, ValueError):
+        index = 0
+    if 0 <= index < len(streams):
+        return streams[index]
+    return streams[0] if streams else None
+
+
+def resolve_audio_tool_bitrate_kbps(answers: dict[str, Any]) -> int:
+    """Output bitrate (kbps) for the Audio Cut / Speed / Reverse tools.
+
+    Those tools always re-encode. They used to call audio_tool_encode_options()
+    without a bitrate, so EVERY output was pinned to
+    DEFAULT_SPEED_AUDIO_BITRATE_KBPS (128) regardless of the source -- a 320 kbps
+    track came back at 128. Prefer an explicit user answer, then the source
+    stream's declared bitrate, then a codec/channel estimate.
+
+    The result is clamped to AUDIO_TOOL_MAX_BITRATE_KBPS because the estimate for
+    a lossless source (1411 kbps for CD PCM) is meaningless as a target for a
+    lossy encoder.
+    """
+    explicit = answers.get("audio_bitrate_kbps")
+    if explicit not in (None, "", "n", "keep"):
+        try:
+            value = int(explicit)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+
+    stream = _selected_audio_tool_stream(answers)
+    if stream:
+        source = int_metadata_value(stream, "bit_rate")
+        kbps = round(source / 1000) if source and source > 0 else audio_bitrate_estimate_kbps(stream)
+        if kbps:
+            return max(AUDIO_TOOL_MIN_BITRATE_KBPS, min(int(kbps), AUDIO_TOOL_MAX_BITRATE_KBPS))
+    return DEFAULT_SPEED_AUDIO_BITRATE_KBPS
+
+
+def resolve_audio_tool_channels(answers: dict[str, Any]) -> int | None:
+    """Output channel count for the audio tools, or None to keep the source.
+
+    AUDIO_CHANNELS forced every audio-tool output to stereo, so cutting a 5.1
+    track silently downmixed it. Keep the source layout when the encoder can
+    carry it.
+    """
+    stream = _selected_audio_tool_stream(answers)
+    channels = int_metadata_value(stream, "channels") if stream else None
+    if channels and 1 <= channels <= MAX_PRESERVED_AUDIO_CHANNELS:
+        return channels
+    return int(AUDIO_CHANNELS) if AUDIO_CHANNELS else None
+
+
 __all__ = [
     'source_audio_sample_rate',
     'loudnorm_mode',
     '_loudnorm_output_sample_rate',
     'resolve_audio_tool_output_ext',
+    'resolve_audio_tool_bitrate_kbps',
+    'resolve_audio_tool_channels',
     'audio_mean_max_volume_field',
     'audio_bitrate_estimate_kbps',
     'audio_codec_uses_bitrate',
