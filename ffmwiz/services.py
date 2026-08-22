@@ -403,15 +403,18 @@ def probe_packet_sizes(ffprobe: str, input_path: Path) -> dict[int, int]:
         log_warn(f"probe_packet_sizes: ffprobe unavailable: {exc}")
         return {}
     assert process.stdout is not None
-    for line in process.stdout:
-        numbers = re.findall(r"\d+", line)
-        if len(numbers) < 2:
-            continue
-        stream_index = int(numbers[0])
-        packet_size = int(numbers[1])
-        sizes[stream_index] = sizes.get(stream_index, 0) + packet_size
-    stderr = process.stderr.read() if process.stderr else ""
-    return_code = process.wait()
+    try:
+        for line in process.stdout:
+            numbers = re.findall(r"\d+", line)
+            if len(numbers) < 2:
+                continue
+            stream_index = int(numbers[0])
+            packet_size = int(numbers[1])
+            sizes[stream_index] = sizes.get(stream_index, 0) + packet_size
+        stderr = process.stderr.read() if process.stderr else ""
+    finally:
+        runtime.reap_subprocess(process, label="ffprobe packet probe")
+    return_code = process.returncode
     if return_code != 0:
         appio.note(f"Could not calculate exact stream sizes with ffprobe packets: {stderr.strip()}")
         return {}
@@ -442,6 +445,8 @@ def _run_loudnorm_analysis(
     )
     last_render = ""
     progress_events = 0
+    process = None
+    stderr_thread = None
     try:
         process = subprocess.Popen(
             args,
@@ -490,8 +495,7 @@ def _run_loudnorm_analysis(
             if value.strip() == "end":
                 runtime._finish_progress_line(rendered)
                 last_render = ""
-        process.wait()
-        stderr_thread.join()
+        runtime.reap_subprocess(process, (stderr_thread,), label="LoudNorm measurement")
         if last_render:
             runtime._finish_progress_line(last_render)
         combined = "\n".join(stderr_lines + stdout_lines)
@@ -508,6 +512,10 @@ def _run_loudnorm_analysis(
     except Exception:
         log_exception(f"LoudNorm measurement failed: {context}")
         return None
+    finally:
+        # Runs after the normal reap too; reaping an already-reaped process is a
+        # no-op, and this is the only path that covers a mid-loop exception.
+        runtime.reap_subprocess(process, (stderr_thread,), label="LoudNorm measurement")
 
 
 def probe_loudnorm_measurement(

@@ -322,6 +322,45 @@ def _render_initial_progress_line(label: str, detail: str, started_at: float) ->
     return _join_progress_segments(segments, USE_COLOR)
 
 
+def reap_subprocess(process, threads=(), *, wait_timeout: float = 60.0,
+                    join_timeout: float = 5.0, label: str = "process") -> None:
+    """Reap a child process deterministically: bounded wait, bounded reader-thread
+    join, then close the PIPE handles.
+
+    Every `Popen(..., stdout=PIPE, stderr=PIPE)` in FFmWiz must end here. Leaving
+    the pipes to the garbage collector is what produced `ResourceWarning: unclosed
+    file`, and an unbounded `wait()`/`join()` would let one wedged child hang the
+    whole wizard with no way out. The pipes are closed only AFTER the reader
+    threads are joined, so a reader never races a closed handle.
+    """
+    if process is None:
+        return
+    try:
+        process.wait(timeout=wait_timeout)
+    except subprocess.TimeoutExpired:
+        log_warn(f"{label} did not exit within {wait_timeout:.0f}s; terminating it.")
+        for stop in (process.terminate, process.kill):
+            try:
+                stop()
+                process.wait(timeout=5.0)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+            except OSError:
+                break
+    except OSError:
+        pass
+    for thread in threads:
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=join_timeout)
+    for pipe in (process.stdout, process.stderr, process.stdin):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+
+
 def run_ffmpeg_with_progress(
     cmd: list[str],
     total_duration: float | None = None,
@@ -637,10 +676,9 @@ def run_ffmpeg_with_progress(
                 break
     except Exception:
         log_exception(f"{label} progress reader crashed")
+    finally:
+        reap_subprocess(process, (stdout_thread, stderr_thread), label=label)
 
-    process.wait()
-    stdout_thread.join(timeout=2.0)
-    stderr_thread.join()
     elapsed = time.perf_counter() - started_at
 
     if not final_emitted:
@@ -653,8 +691,12 @@ def run_ffmpeg_with_progress(
         tail = "\n".join(stderr_lines[-12:])
         if tail:
             log_error(f"{label} stderr tail:\n{tail}")
-        if _LOG_PATH is not None:
-            appio.error(f"{label} failed. Full FFmpeg output is in: {_LOG_PATH}")
+        # Ask appio for the live path. `_LOG_PATH` is a private module global of
+        # appio that `import *` never exports, so the bare name raised NameError
+        # here and every FFmpeg failure crashed instead of reporting itself.
+        log_file = appio.log_path()
+        if log_file is not None:
+            appio.error(f"{label} failed. Full FFmpeg output is in: {log_file}")
         else:
             appio.error(f"{label} failed.")
     else:
@@ -665,6 +707,7 @@ def run_ffmpeg_with_progress(
 
 __all__ = [
     'ensure_pyside6_installed',
+    'reap_subprocess',
     'run_ffmpeg_with_progress',
     '_begin_progress_render',
     '_enable_windows_vt_mode',
