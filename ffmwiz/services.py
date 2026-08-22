@@ -298,6 +298,15 @@ def resolve_capability(answers: dict[str, Any], *, allow_probe: bool = True,
     return dict(result)
 
 
+# Read budgets for the two ffprobe passes. Unbounded reads are what let one
+# wedged probe (network path, stalled mount, pathological file) hang the whole
+# wizard with no output and no way out but Ctrl+C. The header probe only reads
+# container metadata; the packet probe walks the entire file, so it gets far
+# more room.
+_FFPROBE_JSON_TIMEOUT = 60.0
+_FFPROBE_PACKETS_TIMEOUT = 600.0
+
+
 def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
     args = [
         ffprobe,
@@ -319,6 +328,7 @@ def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=_FFPROBE_JSON_TIMEOUT,
         )
         stdout_text, stdout_encoding = decode_subprocess_bytes(result.stdout, "utf-8-sig")
         stderr_text, stderr_encoding = decode_subprocess_bytes(result.stderr, "utf-8")
@@ -387,37 +397,42 @@ def probe_packet_sizes(ffprobe: str, input_path: Path) -> dict[int, int]:
         str(input_path),
     ]
     sizes: dict[int, int] = {}
+    # Buffered, not streamed: the whole CSV is folded into `sizes` anyway, so
+    # streaming bought nothing -- and `for line in process.stdout` only returns
+    # at EOF, which a wedged ffprobe never delivers. Bounding the reap was not
+    # enough because the reap was only reached after that loop; subprocess.run's
+    # timeout bounds the READ, which is where the hang actually was.
     try:
-        process = subprocess.Popen(
+        result = subprocess.run(
             args,
             text=True,
             encoding="utf-8",
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            check=False,
+            timeout=_FFPROBE_PACKETS_TIMEOUT,
         )
+    except subprocess.TimeoutExpired:
+        appio.note("ffprobe did not finish the exact stream-size probe in time; treating sizes as unknown.")
+        log_warn(f"probe_packet_sizes: timed out after {_FFPROBE_PACKETS_TIMEOUT:.0f}s for {input_path}")
+        return {}
     except (FileNotFoundError, OSError) as exc:
         # ffprobe is unavailable on this machine; degrade gracefully to "no
         # packet sizes" instead of crashing. Callers treat {} as unknown size.
         appio.note(f"Could not run ffprobe for exact stream sizes ({exc}); treating sizes as unknown.")
         log_warn(f"probe_packet_sizes: ffprobe unavailable: {exc}")
         return {}
-    assert process.stdout is not None
-    try:
-        for line in process.stdout:
-            numbers = re.findall(r"\d+", line)
-            if len(numbers) < 2:
-                continue
-            stream_index = int(numbers[0])
-            packet_size = int(numbers[1])
-            sizes[stream_index] = sizes.get(stream_index, 0) + packet_size
-        stderr = process.stderr.read() if process.stderr else ""
-    finally:
-        runtime.reap_subprocess(process, label="ffprobe packet probe")
-    return_code = process.returncode
-    if return_code != 0:
-        appio.note(f"Could not calculate exact stream sizes with ffprobe packets: {stderr.strip()}")
+    if result.returncode != 0:
+        appio.note(f"Could not calculate exact stream sizes with ffprobe packets: {(result.stderr or '').strip()}")
         return {}
+    for line in (result.stdout or "").splitlines():
+        numbers = re.findall(r"\d+", line)
+        if len(numbers) < 2:
+            continue
+        stream_index = int(numbers[0])
+        packet_size = int(numbers[1])
+        sizes[stream_index] = sizes.get(stream_index, 0) + packet_size
     return sizes
 
 

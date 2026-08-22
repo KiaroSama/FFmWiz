@@ -109,26 +109,19 @@ class TerminalPaletteTests(unittest.TestCase):
     """USER-12-4: the same NAME must not be a different COLOUR in the wizard's
     palette and the Stream Cleanup palette."""
 
-    # Every name below is a real collision: the SAME name is a DIFFERENT colour
-    # in the two palettes. This set is a ratchet, not an approval - it must only
-    # ever shrink. It cannot shrink from this lane because:
-    #   * ffmwiz/core/colors.py holds the other half of every pair, and
-    #   * ffmwiz/muxcleanup/ is a pinned verbatim vendored copy of upstream
-    #     (tests/test_mux_cleanup_port.py), so retinting C needs a LOCAL_EDITS
-    #     entry there.
-    # Extra constraint for whoever does: Color.BLUE is 38;5;117, which C already
-    # uses for SKY, so aligning BLUE alone makes two entries of LANGUAGE_COLORS
-    # identical and two languages indistinguishable.
-    KNOWN_DIFFERENT = {"AQUA", "BLUE", "CYAN", "GRAY", "LIME", "MAGENTA",
-                       "ORANGE", "PINK", "PROGRESS_ELAPSED", "PROGRESS_ETA_LABEL",
-                       "PROGRESS_ETA_VALUE", "PROGRESS_PERCENT", "PROGRESS_SIZE"}
+    # A name shared by both palettes must carry the same colour in both, so
+    # entering Stream Cleanup (menu 8) does not change the scheme mid-session.
+    # This set is a ratchet: it is empty and must stay empty. C is a pinned
+    # vendored copy of upstream, so any retint there also needs a LOCAL_EDITS
+    # entry in tests/test_mux_cleanup_port.py.
+    KNOWN_DIFFERENT: set[str] = set()
 
     def _classes(self):
         from ffmwiz.core.colors import Color
         from ffmwiz.muxcleanup.colors import C
         return Color, C
 
-    def test_no_new_name_collisions_appear(self):
+    def test_no_name_means_two_colours(self):
         Color, C = self._classes()
         shared = [n for n in dir(Color) if not n.startswith("_") and hasattr(C, n)]
         self.assertTrue(shared)

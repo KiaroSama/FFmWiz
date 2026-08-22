@@ -8,8 +8,11 @@ was always the first thing destroyed on a narrow terminal -- the user saw
 The renderer now drops the OPTIONAL fields by rank until the line fits, so
 percent, time/total, elapsed and ETA survive every width.
 """
+import io
+import os
 import time
 import unittest
+from unittest import mock
 
 import FFmWiz
 from ffmwiz import runtime_render
@@ -92,7 +95,6 @@ class ProgressLineWidth(unittest.TestCase):
         # The real user-visible bug: _write_progress_line clamps the rendered
         # line with _truncate_ansi_visible(rendered, width - 1), which appends
         # "..." and destroyed the trailing ETA. Reproduce that exact pipeline.
-        # 60 is the floor _progress_terminal_width() enforces.
         for width in (120, 100, 88, 76, 64, 60):
             rendered = self._render(width - 1)
             clamped = FFmWiz._truncate_ansi_visible(rendered, width - 1)
@@ -105,6 +107,66 @@ class ProgressLineWidth(unittest.TestCase):
         line = runtime_render._render_progress_line(_state(), 3600.0, self._started)
         for field in ("fps ", "q ", "speed ", "size ", "bitrate ", "elapsed ", "ETA"):
             self.assertIn(field, line)
+
+
+class NarrowTerminalWidth(unittest.TestCase):
+    """USER-13-3: the one-row guarantee only holds if the reported width is the
+    REAL width. A 60-column floor on a 40-column terminal makes the renderer
+    emit 59 visible characters, which wraps to two rows -- and the carriage
+    return + clear-line then clears only the last one, leaving orphans."""
+
+    ERASE = "\r" + chr(27) + "[2K"
+
+    def setUp(self):
+        FFmWiz.appio.USE_COLOR = False
+
+    @staticmethod
+    def _fake_size(columns):
+        return mock.patch("shutil.get_terminal_size",
+                          return_value=os.terminal_size((columns, 20)))
+
+    def test_a_narrow_terminal_is_reported_honestly(self):
+        with self._fake_size(40):
+            self.assertEqual(runtime_render._progress_terminal_width(), 40)
+
+    def test_a_wide_terminal_is_still_reported_as_is(self):
+        with self._fake_size(160):
+            self.assertEqual(runtime_render._progress_terminal_width(), 160)
+
+    def test_written_line_fits_a_narrow_terminal(self):
+        started = time.perf_counter() - 300.0
+        rendered = runtime_render._render_progress_line(_state(), 3600.0, started)
+        buffer = io.StringIO()
+        with self._fake_size(40), \
+                mock.patch.object(FFmWiz.runtime, "_stdout_supports_in_place_progress",
+                                  return_value=True), \
+                mock.patch.object(FFmWiz.runtime, "_enable_windows_vt_mode"), \
+                mock.patch.object(FFmWiz.runtime.sys, "stdout", buffer):
+            FFmWiz.runtime._write_progress_line(rendered)
+        payload = buffer.getvalue().replace(self.ERASE, "")
+        self.assertLessEqual(
+            FFmWiz._visible_len(payload), 39,
+            "the status line must fit one row of a 40-column terminal",
+        )
+
+
+class ColourSamplePreview(unittest.TestCase):
+    """USER-13-4: the colour-sample screen advertises a '100-column preview'.
+    It passed max_width=100 to a renderer that ignored the parameter, so the
+    preview came out byte-identical to the full line printed above it."""
+
+    def setUp(self):
+        FFmWiz.appio.USE_COLOR = False
+
+    def test_the_hundred_column_preview_is_actually_narrower(self):
+        started = time.perf_counter() - 300.0
+        full = runtime_render._render_progress_line(_state(), 3600.0, started)
+        preview = runtime_render._render_progress_line(_state(), 3600.0, started, max_width=100)
+        self.assertGreater(FFmWiz._visible_len(full), 100)
+        self.assertNotEqual(preview, full, "the preview must not repeat the full line")
+        self.assertLessEqual(FFmWiz._visible_len(preview), 100)
+
+
 
 
 if __name__ == "__main__":
