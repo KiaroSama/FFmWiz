@@ -100,3 +100,10 @@ _tmp*
 /graphify-out/
 /reference.md
 /SKILL.md
+
+!/.env.example
+!/.env.sample
+!/.env.template
+!/.env.dist
+
+/skills-lock.json
