@@ -15,6 +15,70 @@ contributors and at anyone who wants to understand, extend, or port the project.
   (roughly ≤ 1000 lines each, excluding single large functions and data tables).
 - Preserve 100% of behavior and keep the full unittest suite green.
 
+## Project layout
+
+```text
+FFmWiz.py              # thin entry point: re-exports the ffmwiz package + main()
+config.env             # personal Mode-2 defaults (git-ignored; created on first run)
+config.env.example     # committed sample config (copy to config.env and edit)
+requirements.txt
+pyproject.toml
+run.ps1                # canonical local launcher
+install-command.ps1
+docs/
+  DOCUMENTATION.md     # the authoritative usage/configuration reference
+  architecture.md      # this document
+  FFMPEG-REFERENCE.md  # build-specific FFmpeg capability reference
+MediaReports/          # generated media info reports (git-ignored)
+Logs/                  # per-run UTC logs (git-ignored)
+.github/
+  workflows/
+ffmwiz/                # the application package (all implementation lives here)
+  core/                # constants, colors, exceptions, timeline (dependency layer 0)
+  support/             # pure/low-level helpers (L00_*/L01_*/L02..L07 + ext tiers)
+  appio.py             # interactive I/O + logging foundation
+  runtime*.py          # progress rendering, console/VT, PySide detection
+  services*.py         # ffprobe/capability/output-path/loudnorm services
+  wizard*.py           # main wizard (wizard, wizard_build, wizard_steps, wizard_flow)
+  modes*.py            # per-mode runners (modes, modes_b, modes_mediainfo,
+                       #   modes_join, modes_transform)
+  guibridge*.py        # GUI subprocess bridge (+ legacy-Tk crop/cut siblings)
+  metadata.py, trackmanager.py, runner.py, encoding.py
+  mux.py, mux_rules.py # in-tree stream-cleanup helpers (test coverage)
+  muxcleanup/          # Stream Cleanup Remux subsystem (Mode 8, in-process)
+  gui/                 # the bundled PySide6 / QtQuick GUI (subprocess)
+    ffmwiz_gui.py      # classic GUI entry point (imports the modules below)
+    gui_common.py      # palette/QSS, logging, icons, helpers, main() dispatcher
+    gui_editor_*.py    # cut / crop / speed / audio / unified editor builders
+    ffmwiz_gui_qml.py  # modern QtQuick unified editor driver (opt-in)
+    qml/               # QML UI files for the modern engine (UnifiedEditor.qml)
+  assets/              # runtime resources bundled inside the package
+    icons/             # includes ffmwiz_app.ico / ffmwiz_app.png (window/taskbar icon)
+    cursors/
+tests/                 # unittest suite at the project root
+```
+
+Keep the `assets` folder inside the `ffmwiz` package (`ffmwiz/assets/`). The GUI
+app icon is loaded from `ffmwiz/assets/icons/ffmwiz_app.ico` or `.png`; toolbar
+and cursor icons come from `ffmwiz/assets/icons/` and `ffmwiz/assets/cursors/`.
+Missing icon assets are logged but never stop the GUI from opening.
+
+## Repository conventions
+
+- `requirements.txt` and `pyproject.toml` both pin PySide6, the only runtime
+  Python dependency. The core CLI itself uses only the standard library.
+- `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and the bundled GUI,
+  compiles the whole `ffmwiz` package, validates `config.env.example`, runs an
+  import/API smoke check, and runs the command-generation regression tests on
+  Windows with Python 3.10-3.13.
+- `.github/dependabot.yml` checks Python and GitHub Actions updates weekly.
+- `.gitattributes` normalizes text line endings and marks image assets binary;
+  `.editorconfig` keeps indentation, UTF-8, and final-newline rules consistent.
+- `.gitignore` excludes runtime logs, generated media info reports, Python
+  caches, generated command shims, virtual environments, build outputs, and the
+  local `ffmwiz-ffmpeg-reference.txt` capability snapshot.
+- Your personal `config.env` stays local; only `config.env.example` is committed.
+
 ## Thin entry point + re-export shim
 
 `FFmWiz.py` is a thin entry point. It does three things:
@@ -30,15 +94,21 @@ All real implementation lives in the `ffmwiz/` package.
 
 ## Dependency layers
 
-Modules import only from lower layers, which keeps the import graph acyclic:
+Modules import only from lower layers, so the *layer* graph is acyclic:
+
+> The one deliberate exception is the `<name>` / `<name>_b` sibling pair described
+> under [Module size policy](#module-size-policy): a sibling back-imports from its
+> source and the source re-exports the sibling at its end. That cycle is intentional
+> and lives *inside* one logical module, not between layers.
 
 ```
 core/            constants, colors, exceptions, timeline        (layer 0)
 support/         L00_* / L01_* pure helpers, ext00..ext12 tiers  (low level)
 appio.py         interactive I/O + logging foundation
-runtime.py       progress rendering, console/VT, PySide detection
-services.py      ffprobe / capability / output-path / loudnorm
-runner.py, guibridge.py, metadata.py, trackmanager.py
+runtime*.py      progress rendering (runtime, runtime_render), console/VT,
+                 PySide detection
+services*.py     ffprobe / capability / output-path / loudnorm
+runner.py, guibridge*.py, metadata.py, trackmanager.py
 wizard*.py, modes*.py, mux*.py, encoding.py                      (subsystems)
 muxcleanup/      Stream Cleanup Remux (Mode 8), self-contained
 gui/             PySide6 / QtQuick GUI, run as a subprocess
@@ -113,7 +183,7 @@ editor; every other GUI mode uses the classic engine.
 Mode 8 (Stream Cleanup Remux) runs in-process from the self-contained
 `ffmwiz.muxcleanup` package (constants, colors, logging, models, prompts, media
 probing, mux logic, output paths, reporting, selection, processing, and the app
-menu). `ffmwiz/support/ext00.py::run_mux_cleanup_mode` calls
+menu). `ffmwiz/support/ext00b.py::run_mux_cleanup_mode` calls
 `ffmwiz.muxcleanup.app.main_menu()` directly.
 
 ## Running and testing
@@ -138,7 +208,7 @@ sibling holds the rest, does `from ffmwiz.<source> import *` (back-import) plus
 (`from ffmwiz.<sibling> import *`; `__all__ += <sibling>.__all__`). For a
 monkeypatched facade (services, wizard, guibridge, modes, runtime), bare calls
 in the sibling to patched names are rewritten to `<facade>.<name>` so
-`mock.patch` targets still resolve (method الف). The pure-data modules
+`mock.patch` targets still resolve. The pure-data modules
 `core/constants_config_template.py` and `core/constants_tables.py` are leaf
 siblings of `constants.py`.
 

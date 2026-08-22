@@ -18,16 +18,16 @@ runs, and you can cancel.
 1. [Requirements](#1-requirements)
 2. [Installation](#2-installation)
 3. [Running FFmWiz](#3-running-ffmwiz)
-4. [The startup menu (modes 1–13)](#4-the-startup-menu-modes-113)
+4. [The startup menu (modes 1–15)](#4-the-startup-menu-modes-115)
 5. [Mode 1 — Interactive wizard](#5-mode-1--interactive-wizard)
-6. [Mode 2 — Load config and ask crop only](#6-mode-2--load-config-and-ask-crop-only)
+6. [Mode 2 — Wizard from config (ask only what is blank)](#6-mode-2--wizard-from-config-ask-only-what-is-blank)
 7. [The `config.env` file (full reference)](#7-the-configenv-file-full-reference)
 8. [Video encoding reference](#8-video-encoding-reference)
 9. [Audio reference](#9-audio-reference)
 10. [Cutting, splitting, and joining](#10-cutting-splitting-and-joining)
 11. [Speed and reverse](#11-speed-and-reverse)
 12. [The graphical editors (classic and QML)](#12-the-graphical-editors-classic-and-qml)
-13. [Modes 3–13 in detail](#13-modes-313-in-detail)
+13. [Modes 3–15 in detail](#13-modes-315-in-detail)
 14. [Source‑value warnings](#14-source-value-warnings)
 15. [Progress display](#15-progress-display)
 16. [Logging](#16-logging)
@@ -132,17 +132,19 @@ command without reopening the script.
 - `--preview-colors` — print the ANSI color palette used by prompts/progress and exit.
 - `--refresh-ffmpeg-reference` — regenerate `ffmwiz-ffmpeg-reference.txt` from your installed ffmpeg, then continue.
 - See **Appendix J** for the full flag list and **Appendix K** for all environment variables.
+- See **[FFMPEG-REFERENCE.md](FFMPEG-REFERENCE.md)** for the build-specific capability
+  snapshot, the capability cache, and how to inspect your own `ffmpeg.exe`.
 - Common environment variables:
   - `FFMWIZ_GUI_ENGINE=classic|qml` — choose the unified‑editor engine (overrides `config.env`).
   - `FFMWIZ_DEBUG=1` — print full tracebacks if a GUI reports an internal error.
 
 ---
 
-## 4. The startup menu (modes 1–13)
+## 4. The startup menu (modes 1–15)
 
 ```text
 1  = Interactive wizard
-2  = Load config and ask crop only
+2  = Wizard from config (ask only what is blank)
 3  = Cut video only with copy
 4  = Folder Encode
 5  = Add files to video
@@ -152,11 +154,14 @@ command without reopening the script.
 9  = Hard Sub Encode
 10 = Video Speed / Reverse
 11 = Audio Cut / Speed / Reverse
-12 = Join Videos
+12 = Join Audios and Videos
 13 = Metadata Editor
+14 = FFmpeg capability cache (diagnostics)
+15 = Track Manager (remove / add / replace tracks, normalize loudness)
 ```
 
-Mode 1 is the default (press Enter). The sections below explain each mode.
+Mode 1 is the default (press Enter); any other value is rejected with
+"Enter a menu number from 1 to 15." The sections below explain each mode.
 
 ---
 
@@ -203,12 +208,27 @@ H.265 when a filter is required.
 
 ---
 
-## 6. Mode 2 — Load config and ask crop only
+## 6. Mode 2 — Wizard from config (ask only what is blank)
 
-Mode 2 reads default answers from **`config.env`** (see §7), then asks **only** the crop
-question. Use it when your encode recipe is fixed and only the crop changes per file. If
-`config.env` is missing, it is created from the template on first run. `input_path` is
-required in `config.env` for this mode.
+Mode 2 runs the **full** Mode 1 wizard, but every question whose value is set in
+**`config.env`** (see §7) is auto-applied and skipped. Only the questions you leave blank
+are asked. It is not a "crop only" mode: leave three keys blank and you are asked three
+questions. If `config.env` is missing, it is created from the template on first run.
+
+Two questions are **never** auto-skipped, however complete your config is:
+
+- the **unified graphical editor** offer (and the crop/cut/split work you do inside it), and
+- the final **"Start FFmpeg now?"** confirmation.
+
+The join-inputs, cuts, and audio-cut questions are likewise always asked, because they have
+no `config.env` equivalent.
+
+`input_path` is **not** required. If it is set, the file is loaded and validated before the
+first question (a path that does not exist stops the run with a clear error); if it is blank,
+Mode 2 simply asks for the input file like Mode 1 does.
+
+A question backed by several keys is skipped only when **all** of them are filled — for
+example the video speed/reverse question needs both `video_speed` and `reverse_video`.
 
 Beyond the core video/audio settings, Mode 2 also reads the optional recipe keys for audio
 sample rate, single‑pass loudnorm, NVENC multipass, CPU two‑pass, color range, and global
@@ -233,17 +253,24 @@ default answers Mode 2 loads.
 - Booleans accept `y/yes/true/1/on` or `n/no/false/0/off`.
 
 `config.env` is git‑ignored (personal); the committed template is `config.env.example`.
+To start from the template by hand:
+
+```powershell
+Copy-Item config.env.example config.env
+```
+
+Every key is also documented inline in `config.env.example`.
 
 ### Settings
 
 | Key | Values | Default | Meaning |
 |-----|--------|---------|---------|
-| `input_path` | absolute path | (empty) | Source file. **Required** for Mode 2. |
+| `input_path` | absolute path | (empty) | Source file. Optional: if blank, Mode 2 asks for it. |
 | `output_path` | folder / file / base name | (empty) | Output destination. Empty = input folder. |
 | `output_format` | mp4, mkv, mov, webm, mp3, m4a, opus, flac, ... or `n` | `n` | Output container; `n` inherits input. |
 | `video_codec` | H265, H264, AV1, VP9, MPEG4, copy, or encoder name | `H265` | Video encoder (aliases map to CPU/NVENC). |
 | `use_gpu` | y/n | `y` | Use NVENC/CUDA when supported. |
-| `crop` | n / y / `top,left,right,bottom` | `n` | Crop margins (pixels removed). Mode 2 always asks crop interactively. |
+| `crop` | n / y / `top,left,right,bottom` | `n` | Crop margins (pixels removed). Set it and Mode 2 skips the crop question; leave it blank to be asked. |
 | `crop_top`/`crop_left`/`crop_right`/`crop_bottom` | integer ≥ 0 | `0` | Per‑side crop when `crop=y`. |
 | `video_bitrate_kbps` | integer or `n` | `n` | Target average video bitrate (kbps). |
 | `video_bitrate_mode` | quality_vbr / strict_size | `quality_vbr` | VBR shape (see §8). |
@@ -377,6 +404,26 @@ You may also type any encoder name from `ffmpeg -encoders` directly.
   - `strict_size` → `-b:v X -maxrate:v X -bufsize:v 2X` (tighter size control).
 - **Quality/CRF mode** targets a perceptual quality level. On NVENC this maps to `constqp`
   with `-cq:v`; on CPU encoders it uses `-crf`.
+
+### GPU processing paths
+
+Answering `y` to GPU usage does not force one fixed pipeline. FFmWiz prints the path it chose
+just above the command as **processing path**, and logs the reasoning:
+
+| Path | When | What happens |
+|------|------|--------------|
+| CUDA fast path | a simple graph (crop/scale only) | NVDEC/CUDA decode -> CUDA filters (`scale_cuda`) -> NVENC encode, with frames kept on the GPU |
+| Hybrid GPU path | a `-filter_complex` graph is unavoidable | CUDA/NVDEC decode -> CPU filter graph (crop/fps/scale/pad/concat/trim/speed/split/audio) -> NVENC encode |
+| NVENC encode path | no filter graph and no CUDA frames | CPU decode/filter -> NVENC encode |
+| CPU filter graph / standard | GPU off or unsupported | everything on the CPU |
+
+Multi-range frame-accurate cuts, splits, joins, and speed/reverse need the CPU filter graph,
+so they land on the hybrid path: NVENC still encodes, but the frames make a GPU->CPU->GPU trip.
+A single continuous cut range is expressed with input/output timing instead of a filter, so it
+keeps the CUDA fast path.
+
+Video `copy` cannot be combined with filters. If crop, fps, scale, SAR, or color-metadata
+filters are required, FFmWiz promotes the stream copy to an encoder.
 
 ### NVENC settings
 
@@ -516,17 +563,40 @@ handled. Examples:
 - Stream copy is **keyframe‑bound**; cut points snap to nearby keyframes. Use Mode 1 for
   frame‑accurate cuts (re‑encode).
 
+After the ranges are entered, both the re‑encode and the copy path confirm with:
+
+```text
+Continue? [Y/n] {0=back, quit=exit}:
+```
+
+Enter continues, `n` cancels, `0` returns to the previous step, `quit` leaves FFmWiz.
+
 ### Split points
 
 Add split points to cut one timeline into multiple output parts (`_Part01`, `_Part02`, ...).
 Splitting is performed in a single FFmpeg command with a filter graph; progress is
 reconstructed per part (see §15).
 
-### Join (Mode 12)
+### Join (Mode 12 — "Join Audios and Videos")
 
-Join multiple videos. FFmWiz stream‑copies when the inputs are compatible, otherwise
-re‑encodes. The join input summary reports per‑input colors, total raw duration and frame
-count, and mean/max volume extremes. Audio is resampled to one uniform sample rate.
+Join multiple inputs into one file. FFmWiz stream‑copies when the inputs are compatible,
+otherwise re‑encodes. The join input summary reports per‑input colors, total raw duration and
+frame count, and mean/max volume extremes. Audio is resampled to one uniform sample rate.
+
+**Video join or audio-only join is auto-detected.** If none of the selected inputs has a video
+stream, FFmWiz reports *"Detected audio-only inputs: performing an audio join."* and joins the
+audio; the frame-rate questions below are skipped, because they do not apply.
+
+**Mixing the two is rejected.** If you select a video file and an audio-only file in the same
+join, FFmWiz names the offending files and returns to the menu:
+
+```text
+Cannot mix audio-only and video inputs in one join. Audio-only: <files>.
+Select all video files, or all audio files.
+```
+
+Join every video first, then join the audio separately, or add the audio to the video with
+Mode 5 (Add files to video) instead.
 
 #### Mixed frame rates (constant vs variable)
 
@@ -621,12 +691,68 @@ Enter            Confirm and return to the CLI
 Esc              Cancel
 ```
 
+Mouse controls in the preview and on the timeline:
+
+```text
+Wheel on the preview canvas     Zoom around the cursor
+Wheel on the playback timeline  Seek backward / forward
+Wheel on the volume slider      Volume down / up
+Ctrl + drag inside the crop box Move the crop box without resizing it
+Right-click (Hand / Zoom tool)  Play / Pause
+```
+
+The Zoom tool zooms **in** by default; hold `Alt` to zoom out (the cursor and button icon
+switch between plus and minus as you press and release `Alt`). Dragging mostly upward zooms in
+smoothly, mostly downward zooms out, always focused around the drag origin. Crop edges have a
+hit area larger than the visible handle, so a precise edge grab does not need pixel-perfect
+mouse placement.
+
 Live reverse preview (when **Reverse** is on) renders short reversed proxy windows on demand
 and plays them back while the CTI moves forward.
 
+### Archived legacy Tk editors
+
+The standalone Tk **Cut Editor** and **Crop Editor** that predate the unified editor are still
+in the repository for archive/debug reference, but no CLI prompt exposes them any more: there
+is no `g=Show Graphical Cut Editor` or `g=Show Graphical Crop Editor` answer, Mode 3's
+stream-copy cut is manual-only, and declining the unified editor in Mode 1 keeps crop, cuts,
+and speed/reverse in the terminal. Use the Unified Video Editor for all graphical work.
+
+Two behaviours of the archived crop tool are worth recording because nothing replaced them:
+its undo history tracked only crop-rectangle changes (move, resize, reset) and never view
+state such as tool selection, zoom, or pan; and its audio preview required `ffplay` in PATH —
+without it the crop preview still worked, only the audio scrubbing was disabled. The active Qt
+editors play audio through Qt Multimedia and need no `ffplay`.
+
+<details>
+<summary>Archived crop-tool controls (kept for reference only)</summary>
+
+```text
+H              Switch to Hand Tool (pan)
+Z              Switch to Zoom Tool (click = zoom in, Alt+click = zoom out,
+               drag up = zoom in, drag down = zoom out)
+Ctrl + R       Reset crop margins
+Ctrl + 0       Reset zoom to 100%
+Ctrl + (+)     Zoom in around the preview cursor
+Ctrl + (-)     Zoom out around the preview cursor
+Ctrl + Z       Undo last crop edit
+Ctrl + Y       Redo last undone crop edit  (Ctrl+Shift+Z also works)
+Home / End     Jump to start / end of the audio-preview timeline
+Shift + arrow  Skip -10s / +10s
+Enter          Apply crop and return to terminal
+Esc            Cancel and discard the selection
+```
+
+Mouse: drag crop edges or corners, drag inside the image with the Hand Tool to pan a zoomed
+preview, wheel over the playback timeline to seek, `Ctrl` + wheel to zoom the canvas, `Reset
+Crop` to restore the full frame. Zoom presets were reachable from the arrow inside the zoom
+percentage field.
+
+</details>
+
 ---
 
-## 13. Modes 3–13 in detail
+## 13. Modes 3–15 in detail
 
 ### Mode 3 — Cut video only with copy
 Dedicated stream‑copy cut tool (no re‑encode; very fast, lossless, keyframe‑bound). Uses the
@@ -685,7 +811,7 @@ remove (Mark In/Out/Add Cut); output keeps everything outside the marked ranges.
 waveform zoom, time ticks, invert cuts, undo/redo. Also available for audio‑only outputs in
 Mode 1/4.
 
-### Mode 12 — Join Videos
+### Mode 12 — Join Audios and Videos
 See §10. Stream‑copy when compatible, otherwise re‑encode; uniform audio sample rate; rich
 join input summary. When source frame rates differ, FFmWiz asks whether to unify them to one
 constant rate (default) or keep a variable frame rate (VFR) output.
@@ -695,6 +821,62 @@ Inspects streams/chapters/tags/dispositions/attached pictures/bitstream metadata
 then applies targeted stream‑copy changes with `-map 0 -c copy`. Edits per‑stream
 title/language/custom tags, dispositions, chapter metadata, attached pictures, H.264/HEVC
 bitstream color/SAR metadata, and metadata reports. (No global file‑level metadata editor.)
+
+### Mode 14 — FFmpeg capability cache (diagnostics)
+A small diagnostics sub-menu for the cached results of FFmWiz's live encoder/container probes.
+It never changes your settings, logs, or media:
+
+```text
+1 = View cached capability results
+2 = Re-probe current encoder/container capabilities
+3 = Clear capability cache
+0 = Back
+```
+
+**Re-probe** re-tests `libx264`, `libx265`, `h264_nvenc`, and `hevc_nvenc` against `mp4` and
+`mkv` and stores the fresh verdicts. **Clear** deletes only the two files FFmWiz owns
+(`ffmpeg_capabilities.json` and its `.corrupt` recovery backup) and leaves the enclosing
+`.cache` directory and every unrelated file untouched. Clearing costs a few seconds on the
+next encode — an empty cache just means FFmWiz probes again.
+
+Use this after upgrading FFmpeg or switching GPU drivers, when a capability-dependent question
+(color range, NVENC multipass) looks wrong. The cache location and the `FFMWIZ_CACHE_DIR`
+override are described in **[FFMPEG-REFERENCE.md](FFMPEG-REFERENCE.md)**.
+
+### Mode 15 — Track Manager
+Remove, add, or replace tracks in an existing file and optionally normalize its loudness — all
+as a stream-copy remux where possible, so nothing is re-encoded unless loudnorm requires it.
+First choose the scope:
+
+```text
+1 = Single file
+2 = Folder (apply the same change to every media file)
+```
+
+Then, for the single-file flow, each step in turn (`0` goes back exactly one step):
+
+1. **Source** — the file to edit; its streams are listed with indexes.
+2. **Remove** — comma-separated stream specs. `a:1`, `s:0` (type + index) or a bare absolute
+   ffprobe index. Enter removes nothing.
+3. **Add external tracks** — optionally pull audio/subtitle tracks in from other files, the
+   same picker Mode 5 uses.
+4. **Loudness** — the standard Off / single-pass / two-pass EBU R128 choice (see §9).
+   Skipped silently when the file has no audio.
+5. **Metadata** — keep container tags, chapters, and stream titles/languages, or strip them
+   all for a clean output.
+6. **Summary and confirmation** — the final command is shown before anything runs.
+
+The output is written next to the source as `<name>_TrackEdit<same extension>`; the input is
+never modified. If you remove nothing, add nothing, and leave loudnorm off, FFmWiz reports
+"No track was removed or added; nothing to do." and returns to the menu.
+
+**Folder scope** applies one recipe to every media file in the folder, so removals must use
+`type:index` specs (`a:1`) — absolute indexes are rejected, because they differ per file. The
+optional two-pass loudness measurement is taken from the first file and reused for the rest,
+which makes single-pass the safer choice when the files differ in loudness. Recognized
+extensions are the common video and audio containers (`.mkv`, `.mp4`, `.mov`, `.m4v`, `.webm`,
+`.avi`, `.ts`, `.mpg`, `.mpeg`, `.wmv`, `.flv`, `.m4a`, `.mka`, `.mp3`, `.aac`, `.flac`,
+`.wav`, `.opus`, `.ogg`, `.ac3`, `.eac3`, `.dts`).
 
 ---
 
@@ -756,7 +938,20 @@ errors with context. Attach the relevant log when reporting a problem.
   (detected from `ffmpeg -h encoder=...` for multipass; a verified set for CPU two‑pass).
 - **Inspect your FFmpeg capabilities** → FFmWiz writes `ffmwiz-ffmpeg-reference.txt` next to the
   script (delete it to regenerate). It captures `-formats/-encoders/-decoders/-filters/...`
-  from your installed `ffmpeg.exe`.
+  from your installed `ffmpeg.exe`. See **[FFMPEG-REFERENCE.md](FFMPEG-REFERENCE.md)**.
+- **FFmpeg or ffprobe not found** → FFmWiz offers to install the full FFmpeg package for you,
+  trying `winget` first and then Chocolatey. If PATH changes during the install, restart
+  PowerShell so the new `ffmpeg`/`ffprobe` commands become visible.
+- **`FFmWiz` command not found** → run `install-command.ps1` once, then open a **new** terminal
+  window so the updated PATH is picked up.
+- **ffprobe cannot read a file** → Unicode and Persian paths are supported; the console prints
+  a short message plus the log path. The log holds the input path, the normalized path, the
+  ffprobe executable, the arguments, the return code, stdout/stderr previews, the decoding
+  mode, and any traceback.
+- **Icons or cursors missing in the GUI** → keep the `assets` folder inside the package
+  (`ffmwiz/assets/`). The app icon loads from `ffmwiz/assets/icons/ffmwiz_app.ico` or `.png`;
+  toolbar and cursor art from `ffmwiz/assets/icons/` and `ffmwiz/assets/cursors/`. Missing
+  assets are logged but never stop the GUI from opening.
 
 ---
 
@@ -876,6 +1071,8 @@ A.12 Crop BOTTOM pixels         integer >= 0
 Notes: Values are PIXELS REMOVED from each side (not x/y offsets). FFmWiz snaps
        the resulting width/height to even numbers for chroma-safe output. You can
        also paste an inline "top,left,right,bottom" to answer in one line.
+       At a single per-side question "0" means BACK, so type "00" when you really
+       want zero pixels removed from that side. Inline "100,0,200,0" is unaffected.
 ```
 
 ### A.13 Video bitrate
@@ -1025,6 +1222,11 @@ Prompt:   Keep source metadata, chapters, subtitles, attachments, extra streams?
 Effect:   y preserves container/stream metadata, chapters, subtitle selection,
           data streams, extra video streams, and (optionally) MKV attachments. n
           strips them from the encode.
+Emits:    y -> "-map_metadata 0"; chapters are mapped from the source when the
+          timeline is untouched, or remapped onto the processed timeline when
+          cuts/splits/speed changed it (and dropped if remapping is impossible).
+          n -> "-map_metadata -1 -map_chapters -1", and extra source video, data,
+          and subtitle streams are not mapped at all.
 ```
 
 ### A.28 Subtitle tracks
@@ -1573,12 +1775,12 @@ Final PowerShell command:
 [#####.....] 41%  fps=...  speed=...  ETA 02:31
 ```
 
-### H.2 Mode 2 — fixed recipe, vary only crop
+### H.2 Mode 2 — fixed recipe, only `crop` left blank in config.env
 
 ```text
 > .\run.ps1
 ... Prerequisite check ...
-Main menu: 2          # Load config and ask crop only
+Main menu: 2          # Wizard from config; only blank keys are asked
 Loaded config.env (input_path=..., video_codec=H265, loudnorm=on, ...)
 [1] Crop? top,left,right,bottom or n [n]: 0,140,140,0
 Final PowerShell command: ffmpeg -i ... -vf "crop=..." -c:v hevc_nvenc ...
@@ -1693,8 +1895,24 @@ These environment variables tune behavior. Set them in the shell before launchin
 | `FFMWIZ_NO_AUTO_INSTALL` | set / unset | Skip the PySide6 install prompt entirely; GUI editors stay unavailable until you install it yourself. |
 | `FFMWIZ_AUTO_INSTALL` / `FFMWIZ_AUTO_INSTALL_PYSIDE` | set / unset | Install PySide6 without asking (good for unattended/CI). |
 | `FFMWIZ_AUTO_INSTALL_FFMPEG` | set / unset | Allow the FFmpeg auto-install fallback to proceed without asking. |
+| `FFMWIZ_CACHE_DIR` | directory path | Relocate the FFmpeg capability cache (default `ffmwiz/support/.cache/`). Useful for an isolated or throwaway run; the test suite uses it for isolation. |
+| `FFMWIZ_ALLOW_ESTIMATED_STREAM_SIZES` | set / unset | When a stream's real size cannot be measured from packets or trusted tags, fall back to `bitrate x duration` instead of reporting it as unknown. Changes reported sizes, so it is off by default. |
 | `NO_COLOR` | set / unset | Standard "no color" convention; disables ANSI coloring of console output. |
 | `QT_QPA_PLATFORM` | e.g. `offscreen` | Standard Qt platform selector; `offscreen` runs the GUI headless (used for tests). |
+
+### Diagnostics
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `FFMWIZ_DEBUG_GUI` | set / unset | Same effect as `FFMWIZ_DEBUG` for the GUI subprocess: forces GUI debug logging on its own. |
+| `FFMWIZ_DEBUG_PROGRESS` | set / unset | Log every rendered progress line (stripped of ANSI) to the run log. Very verbose; use it only when diagnosing the progress display. |
+| `FFMWIZ_DEBUG_COORDS` | set / unset | Log crop-editor zoom/pan coordinate math (focus point, zoom factor, scroll offset) while dragging. |
+| `FFMWIZ_QML_SELFTEST` | `1` | Run the QML unified editor headlessly and exit — a smoke check for the QtQuick engine. Pair it with `QT_QPA_PLATFORM=offscreen`. |
+
+Names such as `FFMWIZ_GUI_DIR_NAME`, `FFMWIZ_GUI_FILE_NAME`, and `FFMWIZ_RUNTIME_DIR_NAME`
+appear in the source but are **internal Python constants**, not environment variables — setting
+them in your shell has no effect. The tables above list every variable FFmWiz actually reads
+from the environment.
 
 ### Performance tuning (advanced)
 
