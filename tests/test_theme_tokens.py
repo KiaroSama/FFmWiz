@@ -20,6 +20,14 @@ import gui_style  # noqa: E402
 
 _QML = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
 
+# The classic unified editor spans several modules (the builder plus its
+# extracted canvas/timeline widgets). Glob them so these token assertions follow
+# the code instead of pinning it to one filename -- and so the "no hard-coded
+# hex" half covers every file the editor draws from.
+_CLASSIC_UNIFIED = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in sorted(_GUI_DIR.glob("gui_editor_unified*.py")))
+
 
 class BrandAnchorTests(unittest.TestCase):
     """USER-12-5: the app used GitHub's dark palette; the logo is neon
@@ -86,14 +94,14 @@ class CrossEngineColourTests(unittest.TestCase):
     """USER-12-3: the same element must not be a different colour per engine."""
 
     def test_waveform_trace_is_one_token(self):
-        classic = (_GUI_DIR / "gui_editor_unified.py").read_text(encoding="utf-8")
+        classic = _CLASSIC_UNIFIED
         self.assertIn('QtGui.QColor(PALETTE["waveform"])', classic)
         self.assertNotIn("#3a8bff", classic)
         self.assertNotIn("0xFF3A8BFF", classic)
         self.assertIn('colA("waveform"', _QML)
 
     def test_selected_split_marker_is_one_token(self):
-        classic = (_GUI_DIR / "gui_editor_unified.py").read_text(encoding="utf-8")
+        classic = _CLASSIC_UNIFIED
         self.assertIn('PALETTE["split_marker_sel" if selected else "split_marker"]', classic)
         self.assertIn('col("split_marker_sel"', _QML)
         # QML used to draw the selected marker white while classic used #7dd3fc.

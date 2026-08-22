@@ -82,32 +82,12 @@ jobs:
 
       - name: Run test suite
         shell: bash
-        run: |
-          python - <<'PY'
-          import re, sys, unittest, warnings
-
-          # Unclosed subprocess pipes are a real, previously shipped bug class.
-          warnings.simplefilter("error", ResourceWarning)
-
-          result = unittest.TextTestRunner(verbosity=1).run(
-              unittest.defaultTestLoader.discover("tests"))
-          for test, why in result.skipped:
-              print(f"skipped: {test.id()}: {why}")
-
-          # A skip is legitimate only when the runner genuinely cannot provide the
-          # thing (no NVIDIA GPU, no symlink privilege). A skip for something this
-          # job installs means CI stopped installing it and the suite silently
-          # shrank - the false green this guard exists to prevent.
-          missing = [f"{test.id()}: {why}" for test, why in result.skipped
-                     if re.search(r"ffmpeg|ffprobe|numpy|powershell", why, re.I)
-                     and "nvenc" not in why.lower()]
-          if missing:
-              print("suite shrank - capability missing on the runner:")
-              for item in missing:
-                  print("  " + item)
-              sys.exit(1)
-          sys.exit(not result.wasSuccessful())
-          PY
+        # tests/run_suite.py runs one module per worker process (stdlib only -
+        # this project keeps zero test dependencies). The suite is dominated by
+        # real ffmpeg child processes, so parallelism cut it 48s -> ~16s on a
+        # 16-core machine; a 2-core runner still gains. --strict-skips keeps the
+        # suite-shrink guard: a skip for a capability THIS job installs fails.
+        run: python tests/run_suite.py --strict-skips
 
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
   # module still fails CI now that the other jobs install nothing.

@@ -19,6 +19,17 @@ for _p in (str(_ROOT), str(_GUI_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+
+def _classic_unified_source() -> str:
+    """The classic unified editor's whole source set.
+
+    It spans several modules (builder plus extracted canvas/timeline widgets),
+    so glob them: an assertion pinned to one filename silently stops covering
+    code the moment it moves.
+    """
+    return "\n".join(path.read_text(encoding="utf-8")
+                     for path in sorted(_GUI_DIR.glob("gui_editor_unified*.py")))
+
 import gui_geometry  # noqa: E402
 import ffmwiz_gui_qml as Q  # noqa: E402
 
@@ -76,7 +87,7 @@ class StdlibPcmHelperTests(unittest.TestCase):
         self.assertEqual(gui_geometry.pcm_minmax(_pcm_bytes([700]) + b"\x01"), (700, 700))
 
     def test_no_audioop_import_remains_in_the_classic_editor(self):
-        src = (_GUI_DIR / "gui_editor_unified.py").read_text(encoding="utf-8")
+        src = _classic_unified_source()
         self.assertNotIn("import audioop", src)
 
 
@@ -274,7 +285,7 @@ class JoinWaveformGraphTests(unittest.TestCase):
         self.assertIn("a.mkv", Q.build_wave_decode_args(req, "o.pcm"))
 
     def test_classic_engine_has_the_same_silence_branch(self):
-        src = (_GUI_DIR / "gui_editor_unified.py").read_text(encoding="utf-8")
+        src = _classic_unified_source()
         self.assertIn("anullsrc=channel_layout=mono:sample_rate=4000", src)
         self.assertIn('segment.get("has_audio", True)', src)
 

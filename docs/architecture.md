@@ -49,6 +49,7 @@ ffmwiz/                # the application package (all implementation lives here)
     ffmwiz_gui.py      # classic GUI entry point (imports the modules below)
     gui_common.py      # palette/QSS, logging, icons, helpers, main() dispatcher
     gui_editor_*.py    # cut / crop / speed / audio / unified editor builders
+                       # (unified also has _canvas / _timeline widget modules)
     ffmwiz_gui_qml.py  # modern QtQuick unified editor driver (opt-in)
     qml/               # QML UI files for the modern engine (UnifiedEditor.qml)
   assets/              # runtime resources bundled inside the package
@@ -169,9 +170,16 @@ The classic GUI is split under `ffmwiz/gui/`:
   shared state, and the `main()` dispatcher.
 - `gui_editor_cut.py`, `gui_editor_crop.py`, `gui_editor_speed.py`,
   `gui_editor_audio.py`, `gui_editor_unified.py` — one module per editor
-  builder. The unified/cut/crop/speed builders are each a single large Qt
-  function; they cannot be split further without refactoring their internals,
-  which would need visual/runtime verification.
+  builder.
+- `gui_editor_unified_canvas.py` (preview canvas + frame-extract worker) and
+  `gui_editor_unified_timeline.py` (timeline strip) — extracted from
+  `gui_editor_unified.py`, which was a single 3993-line function. Each holds a
+  factory that defines and returns its widget class, so PySide6 is still
+  imported on demand. The classes captured no state from the builder, only Qt
+  symbols, which is what made the move safe; it was verified by comparing the
+  built window's whole widget tree and public API before and after.
+  The remaining builders are each one large Qt function whose nested pieces do
+  close over builder state, so they cannot be moved the same way.
 
 The modern engine (`ffmwiz_gui_qml.py` + `qml/UnifiedEditor.qml`) is opt-in via
 `gui_engine=qml` (or `FFMWIZ_GUI_ENGINE=qml`) and only handles the unified video
