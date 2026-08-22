@@ -177,6 +177,7 @@ def run_mux_cleanup_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
     # Stream Cleanup Remux runs in-process from the ffmwiz.muxcleanup subsystem.
     from ffmwiz.muxcleanup.app import main_menu as mux_main_menu
     from ffmwiz.muxcleanup.prompts import MenuBack as MuxMenuBack, MenuExit as MuxMenuExit
+    from ffmwiz.muxcleanup.textutil import set_block_owns_screen as mux_release_screen
 
     started_at = time.perf_counter()
     old_argv = list(sys.argv)
@@ -185,23 +186,52 @@ def run_mux_cleanup_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
         # input path. Clear FFmWiz's own argv so it always prompts interactively.
         sys.argv = ["MuxCls"]
         log_info("Starting Stream Cleanup Remux.")
-        mux_main_menu()
-        return None
+        # allow_back turns the tool's first prompt into a way back to the FFmWiz
+        # main menu; standalone MuxCls leaves it off because it has nowhere to go.
+        summary = mux_main_menu(allow_back=True)
+        if summary is None:
+            # Cancelled or backed out before anything ran: nothing to report.
+            return None
+        failed = summary.failed + summary.extra_failed
+        log_info(
+            f"Stream Cleanup Remux finished: {summary.succeeded} succeeded, {failed} failed."
+        )
+        return (1 if failed else 0), time.perf_counter() - started_at
     except MuxMenuExit:
-        raise ExitWizard()
-    except MuxMenuBack:
+        # Inside the wizard "exit this tool" means the tool, not the wizard.
+        appio.note("Leaving Stream Cleanup Remux.")
+        return None
+    except (MuxMenuBack, Back):
         appio.note("Returning to main menu.")
         return None
     except SystemExit as exc:
-        code = int(exc.code or 0) if isinstance(exc.code, int) else 1
-        if code == 0:
-            return None
-        return code, time.perf_counter() - started_at
-    except Back:
-        appio.note("Returning to main menu.")
+        # The subsystem exits the process on its own error paths (no video files
+        # found, no file could be scanned). No FFmpeg ran, so reporting an FFmpeg
+        # return code here would be a lie: stop the tool, keep the wizard.
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code:
+            log_warn(f"Stream Cleanup Remux stopped with exit code {code}.")
+            appio.note("Stream Cleanup Remux stopped. Returning to main menu.")
         return None
+    except KeyboardInterrupt:
+        appio.note("Stream Cleanup Remux cancelled. Returning to main menu.")
+        return None
+    except Exception as exc:
+        # main_menu() is called directly rather than through the subsystem's
+        # main(), which is where it keeps this safety net; without it any
+        # unhandled error would take the whole wizard down.
+        log_exception(f"Stream Cleanup Remux failed: {exc}")
+        appio.error(f"Stream Cleanup Remux failed: {exc}")
+        return 1, time.perf_counter() - started_at
     finally:
         sys.argv = old_argv
+        # The live progress block hides the cursor and claims the screen for the
+        # length of a run. Standalone that is released by the process exiting;
+        # here the wizard carries on, so it has to be released explicitly.
+        mux_release_screen(False)
+        if sys.stdout.isatty():
+            sys.stdout.write("\x1b[?25h")
+            sys.stdout.flush()
 
 
 def detect_nvidia_gpu_available(ffmpeg: str, video_encoders: list[str] | None = None) -> bool:

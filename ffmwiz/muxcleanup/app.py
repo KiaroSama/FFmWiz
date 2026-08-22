@@ -15,9 +15,13 @@ from .media import find_non_video_extensions, find_video_files, require_tool, sc
 from .output import resolve_output_root
 from .reporting import print_header, print_scan_report, print_setting, print_unique_summary
 from .selection import configure_rules, revisit_last_rule_step
-from .processing import print_ready_for_next_task, process_files
+from .processing import ProcessSummary, print_ready_for_next_task, process_files, verify_output
 
-def main_menu() -> None:
+def main_menu(allow_back: bool = False) -> Optional[ProcessSummary]:
+    # allow_back is the embedding switch: standalone MuxCls has nowhere to go
+    # back to, but inside FFmWiz the input prompt is a way out to the wizard
+    # menu. The last run's summary travels back with it so the caller can
+    # report the outcome instead of guessing at it.
     enable_windows_ansi()
     log_path = setup_logging()
     print_header("MuxCls", leading_blank=False)
@@ -44,6 +48,7 @@ def main_menu() -> None:
         sys.exit(1)
 
     input_from_args = input_path_from_args(sys.argv[1:])
+    last_summary: Optional[ProcessSummary] = None
 
     while True:
         input_root = input_from_args
@@ -51,18 +56,22 @@ def main_menu() -> None:
 
         if input_root is not None:
             print(info(f"Input from launcher/drag-drop: {input_root}"))
-            LOGGER.info("Input from args: %s", input_root)
+            LOGGER.debug("Input from args: %s", input_root)
             if not input_root.exists():
                 LOGGER.warning("Input path from args does not exist: %s", input_root)
                 print(err(f"Path does not exist: {input_root}"))
                 input_root = None
 
         if input_root is None:
-            input_root = ask_path(
-                "Input file or folder path (drag/drop here, then press Enter)",
-                must_exist=True,
-                allow_back=False,
-            )
+            try:
+                input_root = ask_path(
+                    "Input file or folder path (drag/drop here, then press Enter)",
+                    must_exist=True,
+                    allow_back=allow_back,
+                )
+            except MenuBack:
+                LOGGER.info("Back requested at the input path; leaving the menu")
+                return last_summary
         LOGGER.info("Input root: %s", input_root)
         print()
 
@@ -81,20 +90,40 @@ def main_menu() -> None:
         print(ok(f"Found {len(files)} video file(s)."))
         LOGGER.info("Found %s video file(s)", len(files))
 
-        media_files = scan_files(files)
+        scan = scan_files(files)
+        media_files = scan.files
         if not media_files:
             print(err("No files could be scanned successfully."))
             sys.exit(1)
 
+        if scan.failures:
+            # Never continue silently: a file that could not be probed would
+            # otherwise vanish from every count and from the final summary.
+            print(err(f"{len(scan.failures)} file(s) could not be read by ffprobe:"))
+            for path in scan.failures:
+                print(err(f"  {path}"))
+            if not ask_yes_no(
+                f"Continue with the {len(media_files)} file(s) that scanned successfully?",
+                False,
+                allow_back=False,
+            ):
+                LOGGER.warning("User stopped after %s probe failure(s)", len(scan.failures))
+                print(warn("Stopped. Fix or remove those files and run MuxCls again."))
+                sys.exit(1)
+
         print_scan_report(media_files, input_root)
         print_unique_summary(media_files)
+
+        # A single dropped file has no siblings to copy, so the non-video copy
+        # question has no answer worth asking for.
+        single_file_input = input_root.is_file()
 
         restart_input = False
         rules: Optional[SelectionRules] = None
         while True:
             if rules is None:
                 try:
-                    rules = configure_rules(media_files)
+                    rules = configure_rules(media_files, single_file_input=single_file_input)
                 except MenuBack:
                     LOGGER.info("Back requested; returning to input path")
                     print(warn("Back. Returning to input path."))
@@ -108,15 +137,24 @@ def main_menu() -> None:
                 except MenuBack:
                     LOGGER.info("Back requested at output folder; returning to previous rule step")
                     print(warn("Back. Returning to previous step."))
+                    # The enclosing loop configures the rules before the output
+                    # prompt is ever reached, so this is never None here. The
+                    # check is what makes that invariant visible instead of
+                    # assumed - and it is a guard, not an assertion, so it
+                    # survives `python -O`.
+                    if rules is None:
+                        break
                     try:
-                        rules = revisit_last_rule_step(media_files, rules)
+                        rules = revisit_last_rule_step(media_files, rules, single_file_input=single_file_input)
                     except MenuBack:
                         LOGGER.info("Back requested from first revisited rule step; returning to stream selection")
                         print(warn("Back. Returning to stream selection."))
                         rules = None
                         break
 
-            if output_base is None:
+            # Both are set unless Back unwound the loop above, in which case the
+            # outer loop starts over at the step the user went back to.
+            if output_base is None or rules is None:
                 continue
 
             try:
@@ -142,10 +180,13 @@ def main_menu() -> None:
             print_setting("Subtitle titles", rules.subtitle_titles)
             print_setting("Subtitle indexes", rules.subtitle_indexes)
             print_setting("Metadata edits", rules.metadata_edits)
+            print_setting("Audio output order", rules.audio_order)
+            print_setting("Subtitle output order", rules.subtitle_order)
             print_setting("Keep attachments", rules.keep_attachments)
             print_setting("Keep metadata", rules.keep_metadata)
             print_setting("Keep chapters", rules.keep_chapters)
-            print_setting("Copy non-video files", rules.copy_non_video_files)
+            if not single_file_input:
+                print_setting("Copy non-video files", rules.copy_non_video_files)
             print_setting("Overwrite", rules.overwrite)
             LOGGER.info("Confirmed rules: %s", rules)
 
@@ -159,15 +200,25 @@ def main_menu() -> None:
             if not start_processing:
                 LOGGER.info("User cancelled before processing")
                 print(warn("Cancelled."))
-                return
+                return last_summary
 
-            process_files(media_files, input_root, output_root, rules)
+            summary = process_files(media_files, input_root, output_root, rules, scan.failures)
+            last_summary = summary
+
+            # Reading the finished files back is the only check that the output
+            # carries the streams that were asked for. It costs one ffprobe per
+            # file, so it is offered rather than always run, and defaults to no.
+            if summary.succeeded and ask_yes_no("Verify the output folder now?", False, allow_back=False):
+                verify_output(output_root, rules)
+
             print_ready_for_next_task()
             restart_input = True
             break
 
         if not restart_input:
             break
+
+    return last_summary
 
 
 def main() -> None:

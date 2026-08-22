@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import re
+import sys
 
 ENABLE_COLORS = True
 
@@ -69,6 +71,21 @@ class C:
     SUMMARY_EXTRA_FAILED = "\033[38;2;255;95;120m"
     SUMMARY_SIZE_DIFF = "\033[38;2;0;170;125m"
     SUMMARY_ELAPSED = "\033[38;2;205;122;42m"
+    # Progress-view palette, taken value-for-value from EVdlc's shared console
+    # palette so the block reads the same in both tools. The unfilled track is
+    # deliberately crimson rather than grey - that contrast is what makes the
+    # filled portion readable at a glance.
+    BAR_FILL = "\033[38;2;0;191;185m"
+    BAR_TRACK = "\033[38;2;214;0;68m"
+    BAR_FAIL = "\033[38;2;255;79;109m"
+    PROGRESS_PERCENT = "\033[38;2;48;209;88m"
+    PROGRESS_SIZE = "\033[38;2;142;238;255m"
+    PROGRESS_DONE_WORD = "\033[38;2;57;255;106m"
+    PROGRESS_ETA_LABEL = "\033[38;2;255;194;71m"
+    PROGRESS_ETA_VALUE = "\033[38;2;255;154;47m"
+    PROGRESS_ELAPSED = "\033[38;2;217;145;69m"
+    PROGRESS_MUTED = "\033[38;2;138;143;163m"
+    PROGRESS_OVERALL = "\033[38;2;66;232;255m"
 
 
 LANGUAGE_COLORS = (
@@ -167,6 +184,22 @@ SETTING_TRUE_COLOR = C.BOLD + C.SETTING_TRUE
 SETTING_FALSE_COLOR = C.BOLD + C.SETTING_FALSE
 
 
+# Every escape sequence the console output can carry, not just colour: the log
+# has to strip cursor moves and clears too, or a progress frame would arrive as
+# unreadable control codes.
+ANSI_PATTERN = re.compile(r"\[[0-9;?]*[A-Za-z]")
+
+
+def plain(text: object) -> str:
+    """The same text with every escape sequence removed.
+
+    Console output is formatted once and then written twice - to the terminal
+    with colour, to the log without. Stripping here rather than formatting
+    twice is what keeps the two from drifting apart.
+    """
+    return ANSI_PATTERN.sub("", str(text))
+
+
 def color(text: object, code: str) -> str:
     if not ENABLE_COLORS:
         return str(text)
@@ -194,7 +227,11 @@ def dim(text: object) -> str:
 
 
 def enable_windows_ansi() -> None:
-    if os.name != "nt":
+    # sys.platform rather than os.name, deliberately: a type checker narrows on
+    # sys.platform, so everything below is understood as Windows-only code and
+    # `ctypes.windll` - which does not exist elsewhere - stops being an error
+    # when the project is checked on Linux. Same runtime meaning either way.
+    if sys.platform != "win32":
         return
 
     try:

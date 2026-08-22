@@ -1,167 +1,16 @@
 # Part of the FFmWiz Stream Cleanup Remux subsystem.
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, AUDIO_NONE, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE, SUBTITLE_NONE
-from .colors import C, color, dim, info, ok, warn
+from .colors import C, color, info, warn
 from .logsetup import LOGGER
-from .models import MediaFile, SelectionRules, StreamInfo, StreamMetadataEdit
-from .textutil import format_index_list, format_prompt_label, format_text_list, is_unknown_language, normalize_language_code, parse_csv_int
-from .prompts import MenuBack, ask_csv_int_required, ask_csv_text_required, ask_language_code, ask_language_codes_required, ask_numbered_menu, ask_text, ask_yes_no, print_metadata_note
-from .muxlogic import selected_audio_streams, selected_subtitle_streams
-from .reporting import format_metadata_edit, format_metadata_edits, max_stream_count_for, print_selection_preview, print_stream_choices, stream_indexes_for, stream_languages_for, streams_for_type
-
-def kept_streams_for_metadata(
-    media_files: List[MediaFile],
-    codec_type: str,
-    current_rules: Optional[SelectionRules],
-) -> List[StreamInfo]:
-    if current_rules is None:
-        return [
-            stream
-            for media in media_files
-            for stream in media.streams
-            if stream.codec_type == codec_type
-        ]
-
-    kept: List[StreamInfo] = []
-    for media in media_files:
-        if codec_type == "audio":
-            kept.extend(selected_audio_streams(media, current_rules))
-        elif codec_type == "subtitle":
-            kept.extend(selected_subtitle_streams(media, current_rules))
-    return kept
-
-
-def kept_languages_for_metadata(
-    media_files: List[MediaFile],
-    codec_type: str,
-    current_rules: Optional[SelectionRules],
-) -> List[str]:
-    return sorted({
-        normalize_language_code(stream.language)
-        for stream in kept_streams_for_metadata(media_files, codec_type, current_rules)
-    })
-
-
-def kept_indexes_for_metadata(
-    media_files: List[MediaFile],
-    codec_type: str,
-    current_rules: Optional[SelectionRules],
-) -> List[int]:
-    return sorted({
-        stream.index
-        for stream in kept_streams_for_metadata(media_files, codec_type, current_rules)
-    })
-
-
-def ask_metadata_edits(
-    media_files: List[MediaFile],
-    initial_edits: Optional[Sequence[StreamMetadataEdit]] = None,
-    current_rules: Optional[SelectionRules] = None,
-) -> List[StreamMetadataEdit]:
-    current_edits = list(initial_edits or [])
-    audio_languages_available = kept_languages_for_metadata(media_files, "audio", current_rules)
-    subtitle_languages_available = kept_languages_for_metadata(media_files, "subtitle", current_rules)
-    unknown_audio_found = any(is_unknown_language(value) for value in audio_languages_available)
-    unknown_subtitle_found = any(is_unknown_language(value) for value in subtitle_languages_available)
-    default_action = "1" if unknown_audio_found else "2" if unknown_subtitle_found else "8"
-
-    while True:
-        print()
-        print("Edit Output Metadata:")
-        print(dim("  Edits apply only to output audio/subtitle streams that are kept. Input files are not changed."))
-        if current_edits:
-            print(info(f"  Current edits: {format_metadata_edits(current_edits)}"))
-
-        edit_enabled = ask_yes_no("Edit output stream metadata?", bool(current_edits))
-        if not edit_enabled:
-            return []
-
-        while True:
-            if current_edits:
-                print(info(f"Current metadata edits: {format_metadata_edits(current_edits)}"))
-
-            try:
-                action = ask_numbered_menu(
-                    "Metadata edit actions",
-                    (
-                        ("1", "set audio language by current language"),
-                        ("2", "set subtitle language by current language"),
-                        ("3", "set audio language by exact stream indexes"),
-                        ("4", "set subtitle language by exact stream indexes"),
-                        ("5", "set audio title by exact stream indexes"),
-                        ("6", "set subtitle title by exact stream indexes"),
-                        ("7", "clear metadata edits"),
-                        ("8", "done"),
-                    ),
-                    default_action if not current_edits else "8",
-                    "Choose metadata edit",
-                    leading_blank=True,
-                )
-            except MenuBack:
-                print(warn("Back. Returning to metadata edit question."))
-                break
-
-            if action == "8":
-                return current_edits
-
-            if action == "7":
-                current_edits = []
-                print(warn("Metadata edits cleared."))
-                continue
-
-            try:
-                if action in {"1", "2"}:
-                    codec_type = "audio" if action == "1" else "subtitle"
-                    available_languages = audio_languages_available if codec_type == "audio" else subtitle_languages_available
-                    if not available_languages:
-                        print(warn(f"No kept {codec_type} streams are available for metadata editing."))
-                        continue
-                    print(format_prompt_label(f"Current {codec_type} languages found: {format_text_list(available_languages)}"))
-                    current_languages = ask_language_codes_required(
-                        f"Current {codec_type} language code(s) to edit from the list above, (example: *uknown,jpn)"
-                    )
-                    new_language = ask_language_code(f"New {codec_type} language code, (example: jpn)")
-                    current_edits.append(StreamMetadataEdit(
-                        codec_type=codec_type,
-                        match_languages=current_languages,
-                        language=new_language,
-                    ))
-                    print(ok(f"Added metadata edit: {format_metadata_edit(current_edits[-1])}"))
-                    continue
-
-                codec_type = "audio" if action in {"3", "5"} else "subtitle"
-                available_indexes = kept_indexes_for_metadata(media_files, codec_type, current_rules)
-                if not available_indexes:
-                    print(warn(f"No kept {codec_type} streams are available for metadata editing."))
-                    continue
-                print(format_prompt_label(f"Current {codec_type} indexes found: {format_index_list(available_indexes)}"))
-                indexes = ask_csv_int_required(
-                    f"{codec_type.capitalize()} stream indexes to edit from the list above, (example: 2,3)",
-                    available_indexes,
-                )
-
-                if action in {"3", "4"}:
-                    new_language = ask_language_code(f"New {codec_type} language code, (example: jpn)")
-                    current_edits.append(StreamMetadataEdit(
-                        codec_type=codec_type,
-                        match_indexes=indexes,
-                        language=new_language,
-                    ))
-                else:
-                    new_title = ask_text(f"New {codec_type} title")
-                    current_edits.append(StreamMetadataEdit(
-                        codec_type=codec_type,
-                        match_indexes=indexes,
-                        title=new_title,
-                    ))
-
-                print(ok(f"Added metadata edit: {format_metadata_edit(current_edits[-1])}"))
-            except MenuBack:
-                print(warn("Back. Returning to metadata edit actions."))
-
+from .models import MediaFile, SelectionRules
+from .textutil import format_index_list, format_prompt_label, format_text_list, parse_csv_int
+from .prompts import MenuBack, ask_csv_int_required, ask_csv_text_required, ask_language_codes_required, ask_numbered_menu, ask_text, ask_yes_no, print_metadata_note
+from .metadata_edits import ask_metadata_edits
+from .reporting import max_stream_count_for, print_selection_preview, print_stream_choices, stream_indexes_for, stream_languages_for, streams_for_type
 
 def ask_keep_indexes(
     label: str,
@@ -228,6 +77,7 @@ def previous_advanced_step(
     subtitle_mode: str,
     skip_audio_selection: bool = False,
     skip_subtitle_selection: bool = False,
+    skip_copy_non_video: bool = False,
 ) -> int:
     if step == 1:
         return 0
@@ -262,11 +112,12 @@ def previous_advanced_step(
     if step == 8:
         return 7
     if step == 9:
-        return 8
+        # Step 8 is not asked for a single-file input, so Back must not land there.
+        return 7 if skip_copy_non_video else 8
     return 0
 
 
-def previous_exact_step(step: int, subtitle_mode: str) -> int:
+def previous_exact_step(step: int, subtitle_mode: str, skip_copy_non_video: bool = False) -> int:
     if step == 1:
         return 0
     if step == 2:
@@ -280,22 +131,28 @@ def previous_exact_step(step: int, subtitle_mode: str) -> int:
     if step == 6:
         return 5
     if step == 7:
-        return 6
+        # Step 6 is not asked for a single-file input, so Back must not land there.
+        return 5 if skip_copy_non_video else 6
     return 0
+
+
+def should_skip_audio_selection(media_files: List[MediaFile]) -> bool:
+    """Only a set with no audio at all can skip the audio menu. Even a single
+    track is a real choice: the user may want to drop it (AUDIO_NONE), and that
+    option only exists inside the menu."""
+    return max_stream_count_for(media_files, "audio") == 0
 
 
 def configure_rules_advanced(
     media_files: List[MediaFile],
     initial: Optional[SelectionRules] = None,
     start_step: int = 0,
+    single_file_input: bool = False,
 ) -> SelectionRules:
     audio_language_options = stream_languages_for(media_files, "audio")
     subtitle_language_options = stream_languages_for(media_files, "subtitle")
-    # Skip audio selection only when no file has more than one audio track.
-    # A single language across multiple tracks is not enough to skip: the user
-    # may still want to choose which of those tracks to keep.
     max_audio_tracks = max_stream_count_for(media_files, "audio")
-    skip_audio_selection = max_audio_tracks <= 1
+    skip_audio_selection = should_skip_audio_selection(media_files)
     skip_subtitle_selection = not subtitle_language_options
     LOGGER.info(
         "Advanced rules setup: audio_languages=%s max_audio_tracks=%d skip_audio_selection=%s "
@@ -322,6 +179,8 @@ def configure_rules_advanced(
     keep_attachments = initial.keep_attachments if initial else True
     keep_metadata = initial.keep_metadata if initial else True
     metadata_edits = list(initial.metadata_edits) if initial else []
+    audio_order = list(initial.audio_order) if initial else []
+    subtitle_order = list(initial.subtitle_order) if initial else []
     keep_chapters = initial.keep_chapters if initial else True
     copy_non_video_files = initial.copy_non_video_files if initial else True
     overwrite = initial.overwrite if initial else False
@@ -344,14 +203,13 @@ def configure_rules_advanced(
             copy_non_video_files=copy_non_video_files,
             selection_style="advanced",
             metadata_edits=metadata_edits,
+            audio_order=audio_order,
+            subtitle_order=subtitle_order,
         )
 
     if initial is None and skip_audio_selection:
-        if audio_language_options:
-            audio_mode = AUDIO_BY_LANGUAGE
-            audio_languages = list(audio_language_options)
-        else:
-            audio_mode = AUDIO_NONE
+        # Nothing in the scan has audio, so there is nothing to choose from.
+        audio_mode = AUDIO_NONE
     if initial is None and skip_subtitle_selection:
         subtitle_mode = SUBTITLE_NONE
         keep_attachments = False
@@ -359,11 +217,7 @@ def configure_rules_advanced(
     if initial is None and skip_audio_selection:
         print()
         print("Configure Output Rules:")
-        if audio_language_options:
-            print(format_prompt_label(f"Audio languages found: {format_text_list(audio_language_options)}"))
-            print(info("Only one audio track found; keeping all audio."))
-        else:
-            print(warn("No audio streams found; selecting no audio."))
+        print(warn("No audio streams found; selecting no audio."))
         if skip_subtitle_selection:
             print(warn("No subtitle streams found; skipping subtitle selection."))
 
@@ -514,7 +368,10 @@ def configure_rules_advanced(
                 continue
 
             if step == 6:
-                metadata_edits = ask_metadata_edits(media_files, metadata_edits, make_rules())
+                edits = ask_metadata_edits(media_files, metadata_edits, make_rules())
+                metadata_edits = edits.metadata_edits
+                audio_order = edits.audio_order
+                subtitle_order = edits.subtitle_order
                 step = 7
                 continue
 
@@ -524,6 +381,11 @@ def configure_rules_advanced(
                 continue
 
             if step == 8:
+                if single_file_input:
+                    # One file in, one file out: there is no sibling to copy.
+                    copy_non_video_files = False
+                    step = 9
+                    continue
                 copy_non_video_files = ask_yes_no("Copy non-video files to output folder?", True)
                 step = 9
                 continue
@@ -540,6 +402,7 @@ def configure_rules_advanced(
                 subtitle_mode,
                 skip_audio_selection=skip_audio_selection,
                 skip_subtitle_selection=skip_subtitle_selection,
+                skip_copy_non_video=single_file_input,
             )
             if step < 0:
                 raise
@@ -550,6 +413,7 @@ def configure_rules_exact(
     media_files: List[MediaFile],
     initial: Optional[SelectionRules] = None,
     start_step: int = 0,
+    single_file_input: bool = False,
 ) -> SelectionRules:
     step = start_step
     audio_mode = initial.audio_mode if initial else AUDIO_BY_INDEX
@@ -559,6 +423,8 @@ def configure_rules_exact(
     keep_attachments = initial.keep_attachments if initial else True
     keep_metadata = initial.keep_metadata if initial else True
     metadata_edits = list(initial.metadata_edits) if initial else []
+    audio_order = list(initial.audio_order) if initial else []
+    subtitle_order = list(initial.subtitle_order) if initial else []
     keep_chapters = initial.keep_chapters if initial else True
     copy_non_video_files = initial.copy_non_video_files if initial else True
     overwrite = initial.overwrite if initial else False
@@ -581,6 +447,8 @@ def configure_rules_exact(
             copy_non_video_files=copy_non_video_files,
             selection_style="exact",
             metadata_edits=metadata_edits,
+            audio_order=audio_order,
+            subtitle_order=subtitle_order,
         )
 
     while True:
@@ -624,7 +492,10 @@ def configure_rules_exact(
                 continue
 
             if step == 4:
-                metadata_edits = ask_metadata_edits(media_files, metadata_edits, make_rules())
+                edits = ask_metadata_edits(media_files, metadata_edits, make_rules())
+                metadata_edits = edits.metadata_edits
+                audio_order = edits.audio_order
+                subtitle_order = edits.subtitle_order
                 step = 5
                 continue
 
@@ -634,6 +505,11 @@ def configure_rules_exact(
                 continue
 
             if step == 6:
+                if single_file_input:
+                    # One file in, one file out: there is no sibling to copy.
+                    copy_non_video_files = False
+                    step = 7
+                    continue
                 copy_non_video_files = ask_yes_no("Copy non-video files to output folder?", True)
                 step = 7
                 continue
@@ -644,14 +520,14 @@ def configure_rules_exact(
         except MenuBack:
             if step == 0:
                 raise
-            step = previous_exact_step(step, subtitle_mode)
+            step = previous_exact_step(step, subtitle_mode, skip_copy_non_video=single_file_input)
             print(warn("Back. Returning to previous step."))
 
 
-def configure_rules(media_files: List[MediaFile]) -> SelectionRules:
+def configure_rules(media_files: List[MediaFile], single_file_input: bool = False) -> SelectionRules:
     if len(stream_languages_for(media_files, "audio")) <= 1:
         LOGGER.info("Selection style skipped: one or zero audio languages found")
-        return configure_rules_advanced(media_files)
+        return configure_rules_advanced(media_files, single_file_input=single_file_input)
 
     while True:
         selection_style = ask_numbered_menu(
@@ -668,16 +544,20 @@ def configure_rules(media_files: List[MediaFile]) -> SelectionRules:
         try:
             if selection_style == "1":
                 LOGGER.info("Selection style: advanced")
-                return configure_rules_advanced(media_files)
+                return configure_rules_advanced(media_files, single_file_input=single_file_input)
 
             LOGGER.info("Selection style: exact stream indexes")
-            return configure_rules_exact(media_files)
+            return configure_rules_exact(media_files, single_file_input=single_file_input)
         except MenuBack:
             LOGGER.info("Back requested inside stream selection; returning to selection style")
             print(warn("Back. Returning to selection style."))
 
 
-def revisit_last_rule_step(media_files: List[MediaFile], rules: SelectionRules) -> SelectionRules:
+def revisit_last_rule_step(
+    media_files: List[MediaFile],
+    rules: SelectionRules,
+    single_file_input: bool = False,
+) -> SelectionRules:
     if rules.selection_style == "exact":
-        return configure_rules_exact(media_files, initial=rules, start_step=7)
-    return configure_rules_advanced(media_files, initial=rules, start_step=9)
+        return configure_rules_exact(media_files, initial=rules, start_step=7, single_file_input=single_file_input)
+    return configure_rules_advanced(media_files, initial=rules, start_step=9, single_file_input=single_file_input)

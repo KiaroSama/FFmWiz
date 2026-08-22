@@ -244,8 +244,10 @@ class ProcessingEndToEndTests(unittest.TestCase):
             self._make_mkv(indir / "E02.mkv", srt)
             (indir / "readme.txt").write_text("not a video", encoding="utf-8")
 
-            media_files = mux_media.scan_files(sorted(indir.glob("*.mkv")))
-            self.assertEqual(len(media_files), 2)
+            scan = mux_media.scan_files(sorted(indir.glob("*.mkv")))
+            self.assertEqual(len(scan.files), 2)
+            self.assertEqual(list(scan.failures), [])
+            media_files = scan.files
 
             rules = _rules(audio_mode=AUDIO_BY_LANGUAGE, audio_languages=["jpn"], overwrite=True)
             out_root = mux_output.resolve_output_root(indir, root / "OutA", rules)
