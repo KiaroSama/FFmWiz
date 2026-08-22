@@ -44,7 +44,6 @@ ffmwiz/                # the application package (all implementation lives here)
                        #   modes_join, modes_transform)
   guibridge*.py        # GUI subprocess bridge (+ legacy-Tk crop/cut siblings)
   metadata.py, trackmanager.py, runner.py, encoding.py
-  mux.py, mux_rules.py # in-tree stream-cleanup helpers (test coverage)
   muxcleanup/          # Stream Cleanup Remux subsystem (Mode 8, in-process)
   gui/                 # the bundled PySide6 / QtQuick GUI (subprocess)
     ffmwiz_gui.py      # classic GUI entry point (imports the modules below)
@@ -109,7 +108,7 @@ runtime*.py      progress rendering (runtime, runtime_render), console/VT,
                  PySide detection
 services*.py     ffprobe / capability / output-path / loudnorm
 runner.py, guibridge*.py, metadata.py, trackmanager.py
-wizard*.py, modes*.py, mux*.py, encoding.py                      (subsystems)
+wizard*.py, modes*.py, encoding.py                               (subsystems)
 muxcleanup/      Stream Cleanup Remux (Mode 8), self-contained
 gui/             PySide6 / QtQuick GUI, run as a subprocess
 ```
