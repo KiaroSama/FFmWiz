@@ -227,7 +227,12 @@ def build_audio_transform_command(answers: dict[str, Any]) -> list[str]:
         "-sn",
         "-dn",
     ]
-    cmd.extend(audio_tool_encode_options(answers["output_ext"], sample_rate=resolve_audio_sample_rate(answers)))
+    cmd.extend(audio_tool_encode_options(
+        answers["output_ext"],
+        bitrate_kbps=resolve_audio_tool_bitrate_kbps(answers),
+        sample_rate=resolve_audio_sample_rate(answers),
+        channels=resolve_audio_tool_channels(answers),
+    ))
     cmd.append(str(output_path))
     log_info(
         f"Audio transform command built: audio_index={audio_index}; "

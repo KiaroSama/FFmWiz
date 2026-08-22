@@ -87,6 +87,17 @@ MAX_SPEED_FACTOR = 8.0
 DEFAULT_SPEED_AUDIO_BITRATE_KBPS = DEFAULT_AUDIO_BITRATE_KBPS
 REVERSE_SEGMENT_SECONDS = 60.0
 
+# The Audio Cut / Speed / Reverse tools always re-encode, so they derive their
+# target bitrate from the SOURCE instead of pinning every output to 128 kbps.
+# The bounds keep a lossless source (PCM estimates ~1411 kbps) from becoming a
+# nonsensical target for a lossy encoder, and keep a very low-rate source from
+# being re-encoded into mush.
+AUDIO_TOOL_MIN_BITRATE_KBPS = 64
+AUDIO_TOOL_MAX_BITRATE_KBPS = 320
+# Channel counts above this fall back to AUDIO_CHANNELS rather than being
+# preserved, because not every target encoder handles exotic layouts.
+MAX_PRESERVED_AUDIO_CHANNELS = 8
+
 # Video defaults:
 # DEFAULT_VIDEO_CODEC aliases supported by this script: H265,H264,AV1,VP9,MPEG4,copy
 DEFAULT_VIDEO_CODEC = "H265"
@@ -631,6 +642,9 @@ __all__ = [
     'MIN_SPEED_FACTOR',
     'MAX_SPEED_FACTOR',
     'DEFAULT_SPEED_AUDIO_BITRATE_KBPS',
+    'AUDIO_TOOL_MIN_BITRATE_KBPS',
+    'AUDIO_TOOL_MAX_BITRATE_KBPS',
+    'MAX_PRESERVED_AUDIO_CHANNELS',
     'REVERSE_SEGMENT_SECONDS',
     'DEFAULT_VIDEO_CODEC',
     'DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS',

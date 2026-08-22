@@ -95,7 +95,14 @@ def default_audio_output_ext(input_path: Path) -> str:
 
 
 def audio_tool_encode_options(output_ext: str, bitrate_kbps: int = DEFAULT_SPEED_AUDIO_BITRATE_KBPS,
-                              sample_rate: int | None = None) -> list[str]:
+                              sample_rate: int | None = None,
+                              channels: int | None = -1) -> list[str]:
+    """Encoder options for the Audio Cut / Speed / Reverse tools.
+
+    `channels` defaults to the sentinel -1 meaning "use the AUDIO_CHANNELS
+    module default"; pass an explicit count to preserve the source layout, or
+    None to let FFmpeg keep whatever the source has.
+    """
     ext = str(output_ext or "").lower().lstrip(".")
     if ext == "mp3":
         options = ["-c:a", "libmp3lame", "-b:a", f"{int(bitrate_kbps)}k"]
@@ -107,8 +114,10 @@ def audio_tool_encode_options(output_ext: str, bitrate_kbps: int = DEFAULT_SPEED
         options = ["-c:a", "flac"]
     else:
         options = ["-c:a", DEFAULT_AUDIO_CODEC, "-b:a", f"{int(bitrate_kbps)}k"]
-    if AUDIO_CHANNELS:
-        options.extend(["-ac", str(AUDIO_CHANNELS)])
+    if channels == -1:
+        channels = AUDIO_CHANNELS
+    if channels:
+        options.extend(["-ac", str(int(channels))])
     if sample_rate:
         options.extend(["-ar", str(int(sample_rate))])
     return options
