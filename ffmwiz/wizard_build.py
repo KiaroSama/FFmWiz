@@ -53,6 +53,7 @@ from ffmwiz.support.L01_naming import *  # noqa: F401,F403
 from ffmwiz.support.L01_paths import *  # noqa: F401,F403
 from ffmwiz.support.L01_split import *  # noqa: F401,F403
 from ffmwiz.support.L01_streams import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import *  # noqa: F401,F403
 from ffmwiz.support.L01_text import *  # noqa: F401,F403
 from ffmwiz.support.L02 import *  # noqa: F401,F403
 from ffmwiz.support.L03 import *  # noqa: F401,F403

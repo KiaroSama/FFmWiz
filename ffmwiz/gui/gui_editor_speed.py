@@ -138,7 +138,10 @@ def build_speed_editor(request: dict[str, Any], media_kind: str):
             self._history = None
             self._speed_value = 1.0
             self.setWindowTitle("FFmWiz Video Speed / Reverse" if kind == "video" else "FFmWiz Audio Speed / Reverse")
-            _apply_window_icon(self, self._icon)
+            # An embedded editor is reparented into a tab, so it must not be
+            # given a native window handle it will never use.
+            _apply_window_icon(self, self._icon,
+                               native=not bool(self.request.get("_embedded")))
             self.setMinimumSize(940, 620 if kind == "video" else 500)
             self.resize(1160, 760 if kind == "video" else 560)
             self._build_ui()
