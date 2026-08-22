@@ -489,7 +489,7 @@ def _run_loudnorm_analysis(
             current_s = _progress_raw_seconds_from_state(state)
             previous_s = float(state.get("_ffmwiz_current_s", "0") or 0.0)
             state["_ffmwiz_current_s"] = str(max(previous_s, current_s))
-            rendered = _render_progress_line(state, total_duration, started_at)
+            rendered = _render_progress_line(state, total_duration, started_at, max_width=max(1, _progress_terminal_width() - 1))
             runtime._write_progress_line(rendered)
             last_render = rendered
             if value.strip() == "end":
