@@ -107,7 +107,7 @@ def _open_legacy_cut_gui_tk(
     """
     try:
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import messagebox, ttk
     except Exception as exc:
         appio.error(f"Tkinter is not available, so the cut GUI cannot be opened: {exc}")
         return None
@@ -544,7 +544,26 @@ def _open_legacy_cut_gui_tk(
                 except Exception as exc:
                     appio.error(f"Could not start ffplay audio preview: {exc}")
 
+            # One pending playback tick at a time. Pause+Play inside a single
+            # tick interval used to leave the old chain pending while
+            # toggle_playback scheduled a new one, so two chains each advanced
+            # the timestamp 1 s per second -> a 2x playhead (NEW-GUI5).
+            playback_tick_handle: dict[str, Any] = {"id": None}
+
+            def cancel_playback_tick() -> None:
+                if playback_tick_handle["id"] is not None:
+                    try:
+                        root.after_cancel(playback_tick_handle["id"])
+                    except Exception:
+                        pass
+                    playback_tick_handle["id"] = None
+
+            def schedule_playback_tick() -> None:
+                cancel_playback_tick()
+                playback_tick_handle["id"] = root.after(1000, playback_tick)
+
             def playback_tick() -> None:
+                playback_tick_handle["id"] = None
                 if not state["playing"]:
                     return
                 state["timestamp"] = min(duration, state["timestamp"] + 1.0)
@@ -556,7 +575,7 @@ def _open_legacy_cut_gui_tk(
                     play_button.configure(text="▶ Play (Space)")
                     stop_audio()
                     return
-                root.after(1000, playback_tick)
+                schedule_playback_tick()
 
             def toggle_playback(_event: Any = None) -> None:
                 # Bug fix: if playback is at or near the end and the user
@@ -569,8 +588,9 @@ def _open_legacy_cut_gui_tk(
                 play_button.configure(text=("⏸ Pause (Space)" if state["playing"] else "▶ Play (Space)"))
                 if state["playing"]:
                     start_audio()
-                    root.after(1000, playback_tick)
+                    schedule_playback_tick()
                 else:
+                    cancel_playback_tick()
                     stop_audio()
 
             def set_time(value: float) -> None:
@@ -622,6 +642,15 @@ def _open_legacy_cut_gui_tk(
 
             def confirm(_event: Any = None) -> None:
                 keep = invert_cut_ranges_to_keep_ranges(state["cut_ranges"], duration)
+                if state["cut_ranges"] and not keep:
+                    # Every frame is cut. An empty keep list is indistinguishable
+                    # from "no cuts" downstream, which would silently export the
+                    # untouched source, so refuse here instead (D13).
+                    messagebox.showwarning(
+                        "FFmWiz",
+                        "Every frame is cut — nothing would remain. Adjust the cuts.",
+                    )
+                    return
                 if not state["cut_ranges"]:
                     start = min(state["in_marker"], state["out_marker"])
                     end = max(state["in_marker"], state["out_marker"])
@@ -631,6 +660,7 @@ def _open_legacy_cut_gui_tk(
                         keep = [(0.0, duration)]
                 result["keep_ranges"] = keep
                 state["playing"] = False
+                cancel_playback_tick()
                 stop_audio()
                 scheduler.cancel()
                 root.destroy()
@@ -638,6 +668,7 @@ def _open_legacy_cut_gui_tk(
             def cancel(_event: Any = None) -> None:
                 result["keep_ranges"] = None
                 state["playing"] = False
+                cancel_playback_tick()
                 stop_audio()
                 scheduler.cancel()
                 root.destroy()

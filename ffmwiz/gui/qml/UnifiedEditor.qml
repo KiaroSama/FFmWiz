@@ -66,6 +66,7 @@ ApplicationWindow {
     property real revWinStart: 0
     property real revWinEnd: 0
     readonly property real revWindow: 15.0
+    property string notice: ""     // transient warning shown in the header
 
     // ---- Phase 5: timeline zoom/pan + interactive crop ----
     property real zoom: 1.0        // 1 = whole clip visible; higher = zoomed in
@@ -180,29 +181,45 @@ ApplicationWindow {
     }
 
     function col(key, fallback) { return (theme && theme[key]) ? theme[key] : fallback }
-    color: col("bg", "#0d1117")
+    // Canvas wants a CSS colour string; palette tokens are #rrggbb. Keeps the
+    // translucent timeline fills on the shared tokens instead of hand-written
+    // rgba() literals that silently drift from the classic editor (USER-12-3).
+    function colA(key, fallback, a) {
+        var c = String(col(key, fallback))
+        return "rgba(" + parseInt(c.substr(1, 2), 16) + "," + parseInt(c.substr(3, 2), 16)
+               + "," + parseInt(c.substr(5, 2), 16) + "," + a + ")"
+    }
+    color: col("bg", "#0a0f2e")
 
-    palette.window: col("bg", "#0d1117")
-    palette.windowText: col("text", "#e6edf3")
-    palette.base: col("panel_alt", "#1a1f2a")
-    palette.text: col("text", "#e6edf3")
-    palette.button: col("surface", "#21262d")
-    palette.buttonText: col("text", "#e6edf3")
-    palette.highlight: col("accent", "#1f6feb")
+    palette.window: col("bg", "#0a0f2e")
+    palette.windowText: col("text", "#e8edfb")
+    palette.base: col("panel_alt", "#16204f")
+    palette.text: col("text", "#e8edfb")
+    palette.button: col("surface", "#1b2760")
+    palette.buttonText: col("text", "#e8edfb")
+    palette.highlight: col("accent", "#3b82f6")
     palette.highlightedText: "#ffffff"
-    palette.mid: col("border", "#30363d")
+    palette.mid: col("border", "#2a3566")
 
     // ---------- Reusable styled components ----------
     component Card: Rectangle {
         radius: 10
-        color: win.col("panel", "#161b22")
-        border.color: win.col("border", "#30363d")
+        color: win.col("panel", "#121a44")
+        border.color: win.col("border", "#2a3566")
     }
 
     component PadButton: Button {
         id: pb
-        property color baseColor: win.col("surface", "#21262d")
-        property color textColor: win.col("text", "#e6edf3")
+        property color baseColor: win.col("surface", "#1b2760")
+        // Tokenised interaction states. Computing them with Qt.lighter/darker
+        // produced different hexes from the Qt QSS for the same role, so the two
+        // engines hovered differently (USER-12-2). The computed values remain the
+        // default for buttons whose base colour has no hover/pressed token.
+        property color hoverColor: (pb.baseColor == win.col("surface", "#1b2760"))
+                                   ? win.col("surface_hover", "#24327a") : Qt.lighter(pb.baseColor, 1.18)
+        property color pressedColor: (pb.baseColor == win.col("surface", "#1b2760"))
+                                     ? win.col("surface_pressed", "#16204f") : Qt.darker(pb.baseColor, 1.25)
+        property color textColor: win.col("text", "#e8edfb")
         property url iconSource: ""
         implicitHeight: 34
         padding: 8
@@ -211,9 +228,8 @@ ApplicationWindow {
         HoverHandler { cursorShape: Qt.PointingHandCursor }
         background: Rectangle {
             radius: 7
-            color: pb.down ? Qt.darker(pb.baseColor, 1.25)
-                           : (pb.hovered ? Qt.lighter(pb.baseColor, 1.18) : pb.baseColor)
-            border.color: win.col("border_strong", "#3a4150")
+            color: pb.down ? pb.pressedColor : (pb.hovered ? pb.hoverColor : pb.baseColor)
+            border.color: win.col("border_strong", "#3a4a85")
             border.width: 1
         }
         contentItem: RowLayout {
@@ -231,7 +247,7 @@ ApplicationWindow {
             Label {
                 Layout.fillWidth: true
                 text: pb.text
-                color: pb.enabled ? pb.textColor : win.col("text_mute", "#7d8590")
+                color: pb.enabled ? pb.textColor : win.col("text_mute", "#8891b4")
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
                 font.pixelSize: 13
@@ -241,7 +257,7 @@ ApplicationWindow {
     }
 
     component SectionLabel: Label {
-        color: win.col("accent_text", "#79b4ff")
+        color: win.col("accent_text", "#7db3ff")
         font.bold: true
         font.pixelSize: 12
     }
@@ -252,7 +268,7 @@ ApplicationWindow {
         property int v: 0
         signal edited(int value)
         spacing: 6
-        Label { text: parent.label; color: win.col("text_mute", "#7d8590"); Layout.preferredWidth: 14 }
+        Label { text: parent.label; color: win.col("text_mute", "#8891b4"); Layout.preferredWidth: 14 }
         SpinBox {
             from: 0; to: parent.maxv; value: parent.v; editable: true
             Layout.fillWidth: true
@@ -299,16 +315,19 @@ ApplicationWindow {
         var chs = req.chapters || []
         var clist = []
         for (var ci = 0; ci < chs.length; ++ci) {
-            var ct = Number(chs[ci].start !== undefined ? chs[ci].start : chs[ci].t)
+            // The bridge ships {start, end, title} already in SECONDS; ffprobe's
+            // own `start` is in time_base ticks and its title lives under
+            // tags.title, which is why raw dicts drew wrong or nothing (D14).
+            var ct = Number(chs[ci].start)
             if (!isNaN(ct) && ct >= 0 && ct <= totalDuration)
-                clist.push({ t: ct, title: String(chs[ci].title || chs[ci].name || ("Chapter " + (ci + 1))) })
+                clist.push({ t: ct, title: String(chs[ci].title || ("Chapter " + (ci + 1))) })
         }
         chapters = clist
         var keep = req.initial_keep_ranges || []
         if (keep.length > 0) { markIn = Number(keep[0][0]) || 0; markOut = Number(keep[keep.length - 1][1]) || totalDuration }
         else { markIn = 0; markOut = totalDuration }
         // Reconstruct removed (cut) ranges from the kept ranges carried over.
-        cuts = invertRanges(keep.map(function (r) { return [Number(r[0]), Number(r[1])] }), totalDuration)
+        cuts = cutsFromInitialKeep(keep)
 
         ready = true
         histCurrent = snapshot()   // baseline state for undo/redo
@@ -392,7 +411,17 @@ ApplicationWindow {
     Connections {
         target: bridge
         function onReverseReady(gen, path) {
-            if (gen !== revGen || !revActive || path === "") return
+            if (gen !== revGen || !revActive) return
+            if (path === "") {
+                // The proxy did not render (bad range, unreadable source, ...).
+                // Leave reverse playback instead of waiting forever for a chunk
+                // that will never arrive (D17).
+                revActive = false; wantPlaying = false
+                actP().pause(); actP().playbackRate = 1.0
+                win.notice = "Reverse preview couldn't render here (the exported file is still reversed)."
+                return
+            }
+            win.notice = ""
             actP().source = "file:///" + String(path).replace(/\\/g, "/")
             actP().position = 0
             actP().playbackRate = Math.max(0.25, Math.min(4.0, speed))
@@ -437,6 +466,7 @@ ApplicationWindow {
         if (reverse) {
             // Re-anchor reverse playback: stop the proxy, show the mirrored frame.
             revActive = false; actP().playbackRate = 1.0
+            bridge.cancelReverse()
             cti = Math.max(0, Math.min(totalDuration, t))
             var sr = segmentForTime(srcTime(cti))
             if (sr.index === curSeg) actP().position = Math.round(sr.local * 1000)
@@ -472,11 +502,16 @@ ApplicationWindow {
         renderReverseChunk(winStart, winEnd)
     }
     function renderReverseChunk(winStart, winEnd) {
-        revWinStart = winStart; revWinEnd = winEnd
         revGen += 1
         var s = segmentForTime(Math.max(0, winEnd - 1e-3))   // map window to its segment (joins)
-        var ss = Math.max(0, winStart - segs[s.index].start)
-        var dur = Math.max(0.05, winEnd - winStart)
+        // Clip the window to that ONE segment rather than clamping the offset to
+        // zero: a window straddling a join boundary used to be sourced entirely
+        // from the end segment, skipping the tail of the previous one (D16).
+        // Shortening it here makes advanceReverse resume exactly at the boundary.
+        var eff = Math.max(winStart, segs[s.index].start)
+        revWinStart = eff; revWinEnd = winEnd
+        var ss = eff - segs[s.index].start
+        var dur = Math.max(0.05, winEnd - eff)
         var w = Math.max(320, Math.min(1280, Math.round(previewArea.width)))
         bridge.renderReverse(JSON.stringify({ gen: revGen, src: segs[s.index].path, ss: ss, dur: dur, width: w }))
     }
@@ -526,6 +561,18 @@ ApplicationWindow {
     function keepFromCuts() {
         var k = invertRanges(cuts, totalDuration)
         return k.length ? k : [[0, totalDuration]]
+    }
+    // A fresh edit carries an EMPTY keep list; inverting it marks the whole
+    // timeline as one cut, so guard the inversion (D12).
+    function cutsFromInitialKeep(keep) {
+        if (!keep || !keep.length) return []
+        return invertRanges(keep.map(function (r) { return [Number(r[0]), Number(r[1])] }), totalDuration)
+    }
+    // The reply carries the TRUE keep list — empty when every frame is cut.
+    // `cuts_applied` is what tells the caller "empty" apart from "no cuts at
+    // all", which keepFromCuts() (a display helper) cannot express (D13).
+    function keepRangesForResult() {
+        return cuts.length ? invertRanges(cuts, totalDuration) : []
     }
     function keepTotal() {
         var k = keepFromCuts(), t = 0
@@ -615,7 +662,8 @@ ApplicationWindow {
     function buildResult() {
         var m = evenMargins(cropTop, cropLeft, cropRight, cropBottom)
         return JSON.stringify({ status: "ok", margins: m,
-            keep_ranges: keepFromCuts(), separator_points: separatorPoints,
+            keep_ranges: keepRangesForResult(), cuts_applied: cuts.length > 0,
+            separator_points: separatorPoints,
             speed: speed, reverse: reverse, include_audio: includeAudio })
     }
 
@@ -631,12 +679,13 @@ ApplicationWindow {
             Layout.preferredHeight: 46
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
-                Label { text: "FFmWiz  •  Unified Video Editor"; color: win.col("accent_text", "#79b4ff"); font.pixelSize: 15; font.bold: true }
-                Label { text: segs.length > 1 ? (segs.length + " joined videos") : "1 video"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 12 }
+                Label { text: "FFmWiz  •  Unified Video Editor"; color: win.col("accent_text", "#7db3ff"); font.pixelSize: 15; font.bold: true }
+                Label { text: segs.length > 1 ? (segs.length + " joined videos") : "1 video"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 12 }
+                Label { text: win.notice; visible: win.notice !== ""; color: win.col("danger_text", "#ff7b72"); font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 520 }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "↶ Undo"; implicitWidth: 92; enabled: histUndo.length > 0; onClicked: doUndo() }
                 PadButton { text: "↷ Redo"; implicitWidth: 92; enabled: histRedo.length > 0; onClicked: doRedo() }
-                Label { text: "MODERN (QML)"; color: win.col("chapter_text", "#d9bdff"); font.pixelSize: 11; font.bold: true }
+                Label { text: "MODERN (QML)"; color: win.col("chapter_text", "#e9a8f2"); font.pixelSize: 11; font.bold: true }
             }
         }
 
@@ -680,18 +729,18 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
-                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#1f6feb") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
+                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface", "#1b2760"); onClicked: win.tool = "hand" }
+                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface", "#1b2760"); onClicked: win.tool = "zoom" }
                             PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
                         }
-                        Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
+                        Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#8891b4"); font.pixelSize: 11 }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#2a3566") }
 
                         SectionLabel { text: "SPEED & AUDIO" }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            Label { text: "Speed"; color: win.col("text", "#e6edf3") }
+                            Label { text: "Speed"; color: win.col("text", "#e8edfb") }
                             ComboBox {
                                 id: speedBox
                                 Layout.fillWidth: true
@@ -720,11 +769,11 @@ ApplicationWindow {
                         }
                         Switch { text: "Reverse video"; checked: reverse; onToggled: {
                                 reverse = checked; commit()
-                                if (!checked) { revActive = false; actP().playbackRate = 1.0; var s = segmentForTime(cti); loadSegment(s.index, s.local, false) }
+                                if (!checked) { revActive = false; bridge.cancelReverse(); actP().playbackRate = 1.0; var s = segmentForTime(cti); loadSegment(s.index, s.local, false) }
                             } }
                         Switch { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: { includeAudio = checked; commit() } }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#2a3566") }
 
                         SectionLabel { text: "CUTS & SPLIT" }
                         Switch { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
@@ -732,7 +781,7 @@ ApplicationWindow {
                             Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
                             PadButton { Layout.fillWidth: true; text: "Mark In (I)"; onClicked: setMarkIn() }
                             PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; onClicked: setMarkOut() }
-                            PadButton { Layout.fillWidth: true; text: "Cut Selection"; baseColor: win.col("danger_cut", "#7f123f"); textColor: "#ffffff"; onClicked: cutSelection() }
+                            PadButton { Layout.fillWidth: true; text: "Cut Selection"; baseColor: win.col("danger_cut", "#7f123f"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: cutSelection() }
                             PadButton { Layout.fillWidth: true; text: "Delete Cut"; onClicked: deleteCutAtCti() }
                             PadButton { Layout.fillWidth: true; text: "Add Split"; onClicked: addSplit() }
                             PadButton { Layout.fillWidth: true; text: "Del Split"; onClicked: deleteSplitAtCti() }
@@ -778,8 +827,8 @@ ApplicationWindow {
                 Card {
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: 220
-                    color: win.col("timeline_bg", "#0a0d12")
-                    border.color: win.col("border_strong", "#3a4150")
+                    color: win.col("timeline_bg", "#070b22")
+                    border.color: win.col("border_strong", "#3a4a85")
                     clip: true
                     // previewArea hosts both video outputs and the crop overlay in
                     // ONE coordinate space, so contentRect maps 1:1 to overlay pixels.
@@ -824,7 +873,7 @@ ApplicationWindow {
                             property real ry: cr.y + cr.height * (cropTop / Math.max(1, sourceH))
                             property real rw: cr.width * Math.max(0, (sourceW - cropLeft - cropRight)) / Math.max(1, sourceW)
                             property real rh: cr.height * Math.max(0, (sourceH - cropTop - cropBottom)) / Math.max(1, sourceH)
-                            property color handleCol: win.col("accent", "#1f6feb")
+                            property color handleCol: win.col("accent", "#3b82f6")
 
                             // Dim the area OUTSIDE the crop rectangle (4 panels) so the
                             // kept region stands out, like a professional crop tool.
@@ -1007,7 +1056,7 @@ ApplicationWindow {
                         Label {
                             anchors.centerIn: parent
                             visible: actP().mediaStatus === MediaPlayer.NoMedia || actP().mediaStatus === MediaPlayer.LoadingMedia
-                            text: "Loading preview…"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 14
+                            text: "Loading preview…"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 14
                         }
                     }
                 }
@@ -1015,8 +1064,8 @@ ApplicationWindow {
                 Card {
                     SplitView.preferredHeight: 140
                     SplitView.minimumHeight: 72
-                    color: win.col("timeline_bg", "#0a0d12")
-                    border.color: win.col("border_strong", "#3a4150")
+                    color: win.col("timeline_bg", "#070b22")
+                    border.color: win.col("border_strong", "#3a4a85")
                     Canvas {
                         id: tl
                         anchors.fill: parent; anchors.margins: 8
@@ -1028,7 +1077,7 @@ ApplicationWindow {
                         onPaint: {
                             var ctx = getContext("2d"); ctx.reset()
                             var midY = height * 0.52
-                            ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
+                            ctx.strokeStyle = win.col("timeline_track", "#141c46"); ctx.lineWidth = 1
                             ctx.beginPath(); ctx.moveTo(pad, midY); ctx.lineTo(width - pad, midY); ctx.stroke()
                             // Time ruler: gridlines + absolute timecode labels for the
                             // visible window, at a "nice" step so labels never overlap
@@ -1044,12 +1093,12 @@ ApplicationWindow {
                             for (var tr = t0r; tr <= win.viewStart + span + 1e-6; tr += rstep) {
                                 var trx = t2x(tr)
                                 if (trx < pad - 1 || trx > width - pad + 1) continue
-                                ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
+                                ctx.strokeStyle = win.col("timeline_track", "#141c46"); ctx.lineWidth = 1
                                 ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(trx, 12); ctx.lineTo(trx, height - 4); ctx.stroke(); ctx.globalAlpha = 1.0
-                                ctx.fillStyle = win.col("tick_lo", "#7d8590"); ctx.fillText(win.fmtShort(tr), trx + 2, 9)
+                                ctx.fillStyle = win.col("tick_lo", "#8891b4"); ctx.fillText(win.fmtShort(tr), trx + 2, 9)
                             }
                             var xi = t2x(markIn), xo = t2x(markOut)
-                            ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1f3a66")
+                            ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1b3468")
                             ctx.fillRect(xi, 6, Math.max(0, xo - xi), height - 12); ctx.globalAlpha = 1.0
                             // Audio waveform: per-column min/max for the CURRENT
                             // viewport (fetched from the backend on viewport change).
@@ -1060,7 +1109,7 @@ ApplicationWindow {
                                 var halfMax = Math.min(midY - 4, height - 4 - midY)
                                 var inner = width - 2 * pad
                                 var nb = wv.length
-                                ctx.strokeStyle = "rgba(47,129,247,0.9)"; ctx.lineWidth = 1
+                                ctx.strokeStyle = win.colA("waveform", "#22d3ee", 0.9); ctx.lineWidth = 1
                                 for (var w = 0; w < nb; ++w) {
                                     var wx = pad + (w + 0.5) / nb * inner
                                     var mn = wv[w][0], mx = wv[w][1]
@@ -1070,39 +1119,39 @@ ApplicationWindow {
                                     ctx.beginPath(); ctx.moveTo(wx, yTop); ctx.lineTo(wx, yBot); ctx.stroke()
                                 }
                             } else if (win.hasAudio) {
-                                ctx.fillStyle = win.col("text_subtle", "#484f58"); ctx.font = "10px 'Segoe UI'"; ctx.textAlign = "center"
+                                ctx.fillStyle = win.col("text_subtle", "#4e5680"); ctx.font = "10px 'Segoe UI'"; ctx.textAlign = "center"
                                 ctx.fillText("decoding waveform…", width / 2, midY - 2)
                             }
                             // Cut (removed) ranges: translucent red over the waveform.
                             var cz = win.cuts
                             for (var c1 = 0; c1 < cz.length; ++c1) {
                                 var cx0 = t2x(cz[c1][0]), cx1 = t2x(cz[c1][1])
-                                ctx.fillStyle = "rgba(248,81,73,0.32)"
+                                ctx.fillStyle = win.colA("cut_red", "#f85149", 0.32)
                                 ctx.fillRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
-                                ctx.strokeStyle = (c1 === win.selCut) ? "rgba(255,255,255,0.95)" : "rgba(248,81,73,0.9)"; ctx.lineWidth = (c1 === win.selCut) ? 2 : 1
+                                ctx.strokeStyle = (c1 === win.selCut) ? "rgba(255,255,255,0.95)" : win.colA("cut_red", "#f85149", 0.9); ctx.lineWidth = (c1 === win.selCut) ? 2 : 1
                                 ctx.strokeRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
                             }
                             ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "center"
                             for (var i = 1; i < segs.length; ++i) {
                                 var bx = t2x(segs[i].start)
-                                ctx.strokeStyle = "rgba(232,178,120,0.78)"; ctx.lineWidth = 1; ctx.setLineDash([2, 3])
+                                ctx.strokeStyle = win.colA("segment_boundary", "#e8b278", 0.78); ctx.lineWidth = 1; ctx.setLineDash([2, 3])
                                 ctx.beginPath(); ctx.moveTo(bx, 4); ctx.lineTo(bx, height - 4); ctx.stroke(); ctx.setLineDash([])
-                                ctx.fillStyle = "rgba(240,200,150,0.92)"; ctx.fillText(segs[i].name, bx, 13)
+                                ctx.fillStyle = win.colA("segment_boundary", "#e8b278", 0.92); ctx.fillText(segs[i].name, bx, 13)
                             }
                             // Chapters: dashed purple markers with titles (parity with classic).
                             for (var ch = 0; ch < chapters.length; ++ch) {
                                 var chx = t2x(Number(chapters[ch].t))
                                 if (chx < pad - 1 || chx > width - pad + 1) continue
-                                ctx.strokeStyle = win.col("chapter_text", "#d9bdff"); ctx.lineWidth = 1; ctx.setLineDash([2, 3])
+                                ctx.strokeStyle = win.col("chapter_text", "#e9a8f2"); ctx.lineWidth = 1; ctx.setLineDash([2, 3])
                                 ctx.beginPath(); ctx.moveTo(chx, height - 16); ctx.lineTo(chx, height - 4); ctx.stroke(); ctx.setLineDash([])
-                                ctx.fillStyle = win.col("chapter_text", "#d9bdff"); ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "left"
+                                ctx.fillStyle = win.col("chapter_text", "#e9a8f2"); ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "left"
                                 ctx.fillText(chapters[ch].title, chx + 3, height - 6)
                             }
                             function vbar(x, c) { ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke() }
                             vbar(xi, win.col("marker_in", "#2ddc7f")); vbar(xo, win.col("marker_out", "#d29922"))
                             for (var k = 0; k < separatorPoints.length; ++k) {
                                 var sx = t2x(Number(separatorPoints[k]))
-                                ctx.strokeStyle = (k === win.selSplit) ? "#ffffff" : "#38bdf8"; ctx.lineWidth = (k === win.selSplit) ? 3 : 2
+                                ctx.strokeStyle = (k === win.selSplit) ? win.col("split_marker_sel", "#7dd3fc") : win.col("split_marker", "#38bdf8"); ctx.lineWidth = (k === win.selSplit) ? 3 : 2
                                 ctx.beginPath(); ctx.moveTo(sx, 6); ctx.lineTo(sx, height - 6); ctx.stroke()
                             }
                             // NOTE: the CTI/playhead is drawn as a separate overlay
@@ -1179,16 +1228,16 @@ ApplicationWindow {
                             property real hx: -1
                             Rectangle {
                                 visible: hov.hx >= 0; width: 1; x: hov.hx; y: 0; height: tl.height
-                                color: win.col("tick_lo", "#7d8590"); opacity: 0.7
+                                color: win.col("tick_lo", "#8891b4"); opacity: 0.7
                             }
                             Rectangle {
                                 visible: hov.hx >= 0
-                                color: win.col("surface", "#21262d"); border.color: win.col("border_strong", "#3a4150")
+                                color: win.col("surface", "#1b2760"); border.color: win.col("border_strong", "#3a4a85")
                                 radius: 4; height: 16; width: hovLbl.implicitWidth + 10
                                 x: Math.max(0, Math.min(tl.width - width, hov.hx - width / 2)); y: 2
                                 Label {
                                     id: hovLbl; anchors.centerIn: parent
-                                    color: win.col("text", "#e6edf3"); font.pixelSize: 10; font.family: "Consolas"
+                                    color: win.col("text", "#e8edfb"); font.pixelSize: 10; font.family: "Consolas"
                                     text: fmt(tl.x2t(hov.hx))
                                 }
                             }
@@ -1237,8 +1286,8 @@ ApplicationWindow {
                     PadButton { Layout.preferredWidth: 36; text: "\u23ed"; onClicked: seekTo(totalDuration) }            // End
                     PadButton { Layout.preferredWidth: 32; text: "\u27dd"; onClicked: seekCutEdge(-1) }                  // prev cut edge
                     PadButton { Layout.preferredWidth: 32; text: "\u27de"; onClicked: seekCutEdge(1) }                   // next cut edge
-                    Label { text: fmt(cti) + " / " + fmt(totalDuration); color: win.col("text", "#e6edf3"); font.pixelSize: 12; font.family: "Consolas" }
-                    Label { text: "f " + curFrame() + "/" + totalFrames(); color: win.col("text_mute", "#7d8590"); font.pixelSize: 10; font.family: "Consolas" }
+                    Label { text: fmt(cti) + " / " + fmt(totalDuration); color: win.col("text", "#e8edfb"); font.pixelSize: 12; font.family: "Consolas" }
+                    Label { text: "f " + curFrame() + "/" + totalFrames(); color: win.col("text_mute", "#8891b4"); font.pixelSize: 10; font.family: "Consolas" }
                     Item { Layout.fillWidth: true }
                     PadButton { Layout.preferredWidth: 74; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
                     Slider { Layout.preferredWidth: 88; from: 0; to: 1; value: win.volume; onMoved: { win.volume = value; win.muted = false } }
@@ -1252,7 +1301,7 @@ ApplicationWindow {
                             var sp = win.viewSpan(); win.viewStart = win.cti - sp / 2; win.clampView(); tl.requestPaint()
                         }
                     }
-                    Label { text: (Math.round(win.zoom * 100) / 100) + "\u00d7"; color: win.col("text_mute", "#7d8590"); font.pixelSize: 11 }
+                    Label { text: (Math.round(win.zoom * 100) / 100) + "\u00d7"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 11 }
                     PadButton { Layout.preferredWidth: 34; text: "+"; onClicked: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
                     PadButton { Layout.preferredWidth: 46; text: "Fit"; onClicked: { win.fitZoom(); tl.requestPaint() } }
                 }
@@ -1269,8 +1318,8 @@ ApplicationWindow {
                     onClicked: { cropTop = cropLeft = cropRight = cropBottom = 0; speed = 1.0; reverse = false; includeAudio = hasAudio; markIn = 0; markOut = totalDuration; cuts = []; separatorPoints = []; speedBox.currentIndex = 3; zoom = 1.0; viewStart = 0; cropEdit = false; cropOverlayOn = true; muted = false; selMarker = ""; selSplit = -1; selCut = -1; tl.requestPaint(); commit() } }
                 PadButton { text: "Reset Panels"; implicitWidth: 130; onClicked: leftPanel.SplitView.preferredWidth = 340 }
                 Item { Layout.fillWidth: true }
-                PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); textColor: "#ffffff"; onClicked: bridge.cancel() }
-                PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); textColor: "#ffffff"; onClicked: bridge.submit(buildResult()) }
+                PadButton { text: "Cancel (Esc)"; implicitWidth: 150; implicitHeight: 40; baseColor: win.col("danger", "#a40e26"); hoverColor: win.col("danger_hover", "#c9303f"); pressedColor: win.col("danger_pressed", "#7d0a1c"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: bridge.cancel() }
+                PadButton { text: "Confirm (Enter)"; implicitWidth: 180; implicitHeight: 40; baseColor: win.col("green", "#238636"); hoverColor: win.col("green_hover", "#2ea043"); pressedColor: win.col("green_pressed", "#196c2e"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: bridge.submit(buildResult()) }
             }
         }
     }

@@ -548,11 +548,9 @@ def build_unified_video_editor(request: dict[str, Any]):
                         self._env_min = block.min(axis=1)
                 except Exception:
                     self._pcm_np = None
-                    try:
-                        import audioop
-                        self._pcm_gmax = max(1, audioop.max(self._pcm, 2))
-                    except Exception:
-                        self._pcm_gmax = 32768
+                    # numpy is only an accelerator: fall back to the shared
+                    # stdlib peak (audioop is gone in 3.13 — D09).
+                    self._pcm_gmax = max(1, pcm_peak(self._pcm))
             self.update()
 
         def _render_wave_pixmap(self, start_t, span, width_px, wh):
@@ -593,7 +591,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             # same height regardless of its real loudness. The value is clamped so
             # amplitude above the ceiling reference caps at full height.
             gmax = WAVEFORM_CEILING_PEAK
-            col = QtGui.QColor("#3a8bff")
+            col = QtGui.QColor(PALETTE["waveform"])
 
             if self._pcm_np is not None:
                 try:
@@ -673,18 +671,18 @@ def build_unified_video_editor(request: dict[str, Any]):
                     rows = _np.arange(wh, dtype=_np.int32)[:, None]
                     mask = (rows >= y_lo[None, :]) & (rows <= y_hi[None, :])
                     buf = _np.zeros((wh, width_px), dtype=_np.uint32)
-                    buf[mask] = 0xFF3A8BFF        # ARGB (little-endian / Windows) = #3a8bff
+                    # ARGB (little-endian / Windows) from the shared waveform token.
+                    buf[mask] = 0xFF000000 | (QtGui.QColor(PALETTE["waveform"]).rgb() & 0xFFFFFF)
                     img = QtGui.QImage(buf.tobytes(), width_px, wh, width_px * 4,
                                        QtGui.QImage.Format_ARGB32).copy()
                     return _out(img)
                 except Exception:
-                    pass  # fall through to the audioop path on any numpy mishap
+                    pass  # fall through to the stdlib path on any numpy mishap
 
-            # No numpy -> audioop fallback (rare): cheap vertical bars via drawLines.
+            # No numpy -> stdlib fallback (rare): cheap vertical bars via drawLines.
             img = QtGui.QImage(width_px, wh, QtGui.QImage.Format_ARGB32)
             img.fill(0)
             try:
-                import audioop
                 lines = []
                 for px in range(width_px):
                     t0 = start_t + (px / width_px) * span
@@ -692,10 +690,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                     s0 = max(0, min(total - 1, int(t0 * rate))) if total else 0
                     s1 = max(s0 + 1, min(total, int(t1 * rate)))
                     frag = self._pcm[s0 * 2:s1 * 2]
-                    if frag:
-                        mn, mx = audioop.minmax(frag, 2)
-                    else:
-                        mn = mx = 0
+                    mn, mx = pcm_minmax(frag) if frag else (0, 0)
                     mxv = max(-1.0, min(1.0, mx / gmax))
                     mnv = max(-1.0, min(1.0, mn / gmax))
                     lines.append(QtCore.QLineF(px + 0.5, cyl - mxv * half,
@@ -1123,7 +1118,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                     continue
                 x = self._time_to_x(value)
                 selected = idx == self.selected_separator
-                sep_color = QtGui.QColor("#7dd3fc" if selected else "#38bdf8")
+                sep_color = QtGui.QColor(PALETTE["split_marker_sel" if selected else "split_marker"])
                 stroke = QtGui.QColor(PALETTE["playhead_halo"])
                 stroke.setAlpha(150 if selected else 95)
                 line_top = ruler.bottom() + (14 if selected else 12)
@@ -3068,18 +3063,25 @@ def build_unified_video_editor(request: dict[str, Any]):
         def _render_reverse_proxy(self, win_start, win_end):
             win_start = max(0.0, float(win_start))
             win_end = max(win_start + 0.05, float(win_end))
-            chunk = win_end - win_start
             speed = self._speed()
             self._rev_gen += 1
             gen = self._rev_gen
             out = Path(self._wave_temp.name) / f"rev_proxy_{gen}.mp4"
             if self.join_segments:
-                seg_index, _ = self._segment_for_time(max(0.0, win_end - 1e-3))
+                # Clip the window to ONE segment instead of clamping the offset
+                # to zero: a window straddling a join boundary was sourced
+                # entirely from the END segment, skipping the tail of the
+                # previous one and showing material past the window (D16).
+                # Shortening it makes the next chunk resume at the boundary.
+                segments = [(float(seg["start"]), float(seg["duration"]))
+                            for seg in self.join_segments]
+                seg_index, ss, chunk, win_start = reverse_chunk_spec(segments, win_start, win_end)
+                chunk = max(0.05, chunk)
                 src = self._segment_path(seg_index)
-                ss = max(0.0, win_start - self._segment_start(seg_index))
             else:
                 src = self.input_path
                 ss = win_start
+                chunk = win_end - win_start
             tw = self._rev_target_width()
             vf = f"scale={tw}:-2,reverse,setpts=(PTS-STARTPTS)/{_ffmpeg_float(speed)}"
             want_audio = bool(self.request.get("has_audio"))
@@ -3801,7 +3803,10 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.timeline.update()
 
         def _start_waveform(self):
-            if not bool(self.request.get("has_audio")):
+            # A join whose FIRST input is silent still has audio to draw: the
+            # global has_audio flag is derived from input 0 alone (D07).
+            any_segment_audio = any(seg.get("has_audio") for seg in (self.join_segments or []))
+            if not bool(self.request.get("has_audio")) and not any_segment_audio:
                 if hasattr(self, "status"):
                     self.status.setText("No audio stream is available for waveform preview.")
                 return
@@ -3811,7 +3816,15 @@ def build_unified_video_editor(request: dict[str, Any]):
             if self.join_segments:
                 labels = []
                 for idx, segment in enumerate(self.join_segments):
-                    args.extend(["-i", str(segment["path"])])
+                    if segment.get("has_audio", True):
+                        args.extend(["-i", str(segment["path"])])
+                    else:
+                        # [idx:a:0] matching nothing makes ffmpeg refuse the WHOLE
+                        # filtergraph, so one silent segment killed the waveform
+                        # for the entire join. Feed matching silence instead (D07).
+                        seg_duration = max(0.001, float(segment.get("duration") or 0.0))
+                        args.extend(["-f", "lavfi", "-t", f"{seg_duration:.3f}",
+                                     "-i", "anullsrc=channel_layout=mono:sample_rate=4000"])
                     labels.append(f"[a{idx}]")
                 filters = []
                 for idx, _segment in enumerate(self.join_segments):
@@ -3937,6 +3950,9 @@ def build_unified_video_editor(request: dict[str, Any]):
                 "status": "ok",
                 "margins": margins,
                 "keep_ranges": keep_ranges,
+                # Tells the caller that an EMPTY keep list means "every frame is
+                # cut", not "nothing was cut" (D13).
+                "cuts_applied": bool(cuts),
                 "separator_points": [float(v) for v in self._separator_points],
                 "speed": speed,
                 "reverse": reverse,

@@ -82,33 +82,54 @@ from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 
 
+def _gui_palette() -> dict[str, str]:
+    """The canonical colour tokens from ffmwiz/gui/gui_style.py.
+
+    That directory is a script dir (the GUI runs as a subprocess), not a
+    package, so it is imported the same way the GUI subprocess imports it."""
+    gui_dir = str(Path(__file__).resolve().parent / FFMWIZ_GUI_DIR_NAME)
+    if gui_dir not in sys.path:
+        sys.path.insert(0, gui_dir)
+    from gui_style import PALETTE  # type: ignore
+    return PALETTE
+
+
 class _UIPalette:
-    BG = "#0e1217"             # main app background
-    PANEL = "#161a22"          # toolbar / header band
-    PANEL_HI = "#1b2030"
-    SURFACE = "#1d232d"        # button / widget surface
-    SURFACE_HOVER = "#252c39"
-    SURFACE_PRESSED = "#2e3a52"
-    SURFACE_DIS = "#161a22"
-    BORDER = "#2e3a4f"
-    BORDER_SOFT = "#1f2937"
-    TIMELINE_BG = "#0f1422"
-    TIMELINE_TRACK = "#1c2336"
-    TIMELINE_TICK = "#5b6f91"
-    TIMELINE_TICK_HI = "#c2cbe1"
-    ACCENT = "#5b9eff"         # primary action accent
-    ACCENT_STRONG = "#7ab0ff"
-    ACCENT_DARK = "#1f3a66"
-    ACCENT_RED = "#ff6f6f"
-    ACCENT_RED_DK = "#c44a4a"
-    ACCENT_GREEN = "#7be07b"
-    ACCENT_YELLOW = "#f5d66a"
-    ACCENT_ORANGE = "#f5b341"
-    PLAYHEAD = "#ffffff"
-    TEXT = "#f5f7fb"
-    TEXT_DIM = "#c2cbe1"
-    TEXT_MUTE = "#7c8aa6"
-    TEXT_ON_ACCENT = "#0e1217"
+    """Tk-editor view over the canonical GUI tokens.
+
+    These used to be 26 independently chosen hex values that drifted from the Qt
+    palette on every shared role - background, panel, surface, border, timeline,
+    accent and all three text weights - which is why the Tk crop/cut editors
+    looked like a different application (USER-12-1). The attribute names are
+    kept because the editors reference them."""
+
+    _P = _gui_palette()
+    BG = _P["bg"]                      # main app background
+    PANEL = _P["panel"]                # toolbar / header band
+    PANEL_HI = _P["panel_alt"]
+    SURFACE = _P["surface"]            # button / widget surface
+    SURFACE_HOVER = _P["surface_hover"]
+    SURFACE_PRESSED = _P["surface_pressed"]
+    SURFACE_DIS = _P["surface_disabled"]
+    BORDER = _P["border"]
+    BORDER_SOFT = _P["border_soft"]
+    TIMELINE_BG = _P["timeline_bg"]
+    TIMELINE_TRACK = _P["timeline_track"]
+    TIMELINE_TICK = _P["tick_lo"]
+    TIMELINE_TICK_HI = _P["tick_hi"]
+    ACCENT = _P["accent"]              # primary action accent
+    ACCENT_STRONG = _P["accent_hover"]
+    ACCENT_DARK = _P["accent_dim"]
+    ACCENT_RED = _P["cut_red"]
+    ACCENT_RED_DK = _P["cut_red_dim"]
+    ACCENT_GREEN = _P["green_text"]
+    ACCENT_YELLOW = _P["warn"]
+    ACCENT_ORANGE = _P["danger_alt_text"]
+    PLAYHEAD = _P["playhead"]
+    TEXT = _P["text"]
+    TEXT_DIM = _P["text_dim"]
+    TEXT_MUTE = _P["text_mute"]
+    TEXT_ON_ACCENT = _P["text_on_accent"]
 
 
 def _apply_app_ttk_theme(root: Any) -> None:

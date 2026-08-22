@@ -1773,7 +1773,10 @@ def build_cut_editor(request: dict[str, Any]):
             cuts = self._cuts()
             keep = invert_cuts_to_keep(cuts, self.duration) if cuts else [(0.0, self.duration)]
             self.result = {"status": "ok",
-                           "keep_ranges": [[s, e] for s, e in keep]}
+                           "keep_ranges": [[s, e] for s, e in keep],
+                           # Empty keep + cuts_applied means "everything is cut"
+                           # rather than "no cuts" (D13).
+                           "cuts_applied": bool(cuts)}
             if hasattr(self, "player"):
                 self.player.stop()
             self.close()

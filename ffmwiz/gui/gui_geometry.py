@@ -7,6 +7,7 @@ ffmwiz_gui.py so cross-module references resolve at runtime.
 from __future__ import annotations
 
 import argparse
+import array
 import copy
 import json
 import math
@@ -191,6 +192,81 @@ def normalize_chapters(chapters, duration: float) -> list[dict[str, Any]]:
         normalized.append({"start": start, "end": end, "title": title})
     normalized.sort(key=lambda item: item["start"])
     return normalized
+
+
+# =====================================================================
+# PCM waveform helpers (stdlib only).
+#
+# NumPy is an optional accelerator for the waveform, never a requirement: it is
+# not a declared dependency of FFmWiz, and the old `audioop` fallback these
+# replace was removed in Python 3.13 (PEP 594), so on a numpy-less 3.13 both
+# editors used to render an empty waveform with no error. These helpers are the
+# shared floor both engines fall back to. (D08/D09)
+# =====================================================================
+
+def pcm_samples(data) -> "array.array":
+    """Little-endian signed 16-bit samples of raw PCM `data` as a stdlib array.
+
+    Trailing odd byte is dropped; the result is byte-swapped on big-endian hosts
+    because `array('h')` uses native order while the PCM stream is LE."""
+    samples = array.array("h")
+    if not data:
+        return samples
+    view = memoryview(data).cast("B")
+    samples.frombytes(bytes(view[: len(view) - (len(view) % 2)]))
+    if sys.byteorder == "big":  # pragma: no cover - FFmWiz targets LE hosts
+        samples.byteswap()
+    return samples
+
+
+def pcm_peak(data) -> int:
+    """Largest ABSOLUTE int16 amplitude in `data` (0 when empty).
+
+    Replaces audioop.max(data, 2)."""
+    samples = pcm_samples(data)
+    if not samples:
+        return 0
+    # int() before negating: -(-32768) is fine for Python ints but not int16.
+    return max(int(max(samples)), -int(min(samples)))
+
+
+def pcm_minmax(data) -> tuple[int, int]:
+    """(min, max) int16 amplitude of `data`, (0, 0) when empty.
+
+    Replaces audioop.minmax(data, 2)."""
+    samples = pcm_samples(data)
+    if not samples:
+        return 0, 0
+    return int(min(samples)), int(max(samples))
+
+
+def reverse_chunk_spec(segments, win_start, win_end):
+    """Map a reverse-preview window onto ONE source segment of a joined timeline.
+
+    `segments` is [(start, duration), ...] on the joined timeline; a single
+    input is just one entry. Returns (index, ss, dur, eff_start).
+
+    A window that straddles a join boundary is SHORTENED to the segment that
+    contains its end (eff_start > win_start) instead of keeping the full length
+    with a clamped offset, which silently sourced the wrong content: the tail of
+    the earlier segment was skipped and material past the window was shown
+    (D16). The caller resumes the next chunk at `eff_start`.
+    """
+    win_start = max(0.0, float(win_start))
+    win_end = max(win_start, float(win_end))
+    if not segments:
+        return 0, win_start, max(0.0, win_end - win_start), win_start
+    # Probe just inside the window end so a window ending exactly on a boundary
+    # still belongs to the segment before it.
+    probe = max(0.0, win_end - 1e-3)
+    index = len(segments) - 1
+    for i, (start, duration) in enumerate(segments):
+        if probe < float(start) + float(duration) - 1e-6:
+            index = i
+            break
+    seg_start = float(segments[index][0])
+    eff = max(win_start, seg_start)
+    return index, eff - seg_start, max(0.0, win_end - eff), eff
 
 
 def short_gui_label(value: Any, max_chars: int = 24) -> str:

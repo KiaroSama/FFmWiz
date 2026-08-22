@@ -1,7 +1,21 @@
 """FFmWiz GUI palette + QSS stylesheets, split from gui_common for file size.
 
-Self-contained constants (PALETTE + the QSS f-strings). Injected into every
-GUI module by ffmwiz_gui.py, so runtime references resolve as before.
+PALETTE below is the CANONICAL colour token layer for every FFmWiz surface:
+the Qt QSS and the classic editors read it directly, the QML editor imports it
+(ffmwiz/gui/ffmwiz_gui_qml.py) and the Tk editors read it through
+guibridge._UIPalette. Nothing else may declare its own hex values — change a
+colour here and every GUI section moves together.
+
+Values are the app-logo brand ramp measured from
+ffmwiz/assets/icons/ffmwiz_app.png: neon cyan / blue / violet / magenta on a
+deep navy field. State colours (ok / warn / danger / cut / playhead) stay
+OUTSIDE that ramp on purpose so a warning never reads as decoration.
+
+NOTE: the terminal palettes (ffmwiz/core/colors.Color and
+ffmwiz/muxcleanup/colors.C) still carry their own ANSI values; they cannot
+import this module because ffmwiz/gui is a script directory, not a package.
+Moving these tokens to a Qt-free ffmwiz/core/tokens.py is what would finally
+let the terminal derive from them too.
 """
 from __future__ import annotations
 
@@ -14,34 +28,41 @@ ASSETS_DIR = ASSETS_ROOT / "icons"
 
 
 PALETTE: dict[str, str] = {
-    "bg":              "#0d1117",
-    "panel":           "#161b22",
-    "panel_alt":       "#1a1f2a",
-    "surface":         "#21262d",
-    "surface_hover":   "#2e353d",
-    "surface_pressed": "#1c2128",
-    "surface_disabled":"#161b22",
-    "border":          "#30363d",
-    "border_strong":   "#3a4150",
-    "border_soft":     "#21262d",
-    "timeline_bg":     "#0a0d12",
-    "timeline_track":  "#1c2128",
-    "tick_hi":         "#e6edf3",
-    "tick_lo":         "#7d8590",
-    "accent":          "#1f6feb",
-    "accent_hover":    "#388bfd",
-    "accent_pressed":  "#1158c7",
-    "accent_dim":      "#1f3a66",
-    "accent_text":     "#79b4ff",
+    # --- surfaces: the deep-navy field from the logo, lightest last ---
+    "bg":              "#0a0f2e",
+    "panel":           "#121a44",
+    "panel_alt":       "#16204f",
+    "surface":         "#1b2760",
+    "surface_hover":   "#24327a",
+    "surface_pressed": "#16204f",
+    "surface_disabled":"#121a44",
+    "border":          "#2a3566",
+    "border_strong":   "#3a4a85",
+    "border_soft":     "#1b2760",
+    "timeline_bg":     "#070b22",
+    "timeline_track":  "#141c46",
+    "tick_hi":         "#e8edfb",
+    "tick_lo":         "#8891b4",
+    # --- brand accents: logo blue / violet / magenta / cyan ---
+    "accent":          "#3b82f6",
+    "accent_hover":    "#5b9bff",
+    "accent_pressed":  "#2563eb",
+    "accent_dim":      "#1b3468",
+    "accent_text":     "#7db3ff",
+    "purple":          "#7c3aed",
+    "purple_hover":    "#8b5cf6",
+    "purple_pressed":  "#6d28d9",
+    "chapter":         "#c026d3",
+    "chapter_text":    "#e9a8f2",
+    "waveform":        "#22d3ee",
+    "split_marker":    "#38bdf8",
+    "split_marker_sel":"#7dd3fc",
+    "segment_boundary":"#e8b278",
+    # --- state: deliberately off the brand ramp ---
     "green":           "#238636",
     "green_hover":     "#2ea043",
     "green_pressed":   "#196c2e",
     "green_text":      "#56d364",
-    "purple":          "#4b2a7f",
-    "purple_hover":    "#5f35a3",
-    "purple_pressed":  "#3a2064",
-    "chapter":         "#b77dff",
-    "chapter_text":    "#d9bdff",
     "danger":          "#a40e26",
     "danger_hover":    "#c9303f",
     "danger_pressed":  "#7d0a1c",
@@ -59,11 +80,12 @@ PALETTE: dict[str, str] = {
     "cut_red":         "#f85149",
     "cut_red_dim":     "#a92927",
     "playhead":        "#ff4d55",
-    "playhead_halo":   "#2f81f7",
-    "text":            "#e6edf3",
-    "text_dim":        "#c9d1d9",
-    "text_mute":       "#7d8590",
-    "text_subtle":     "#484f58",
+    "playhead_halo":   "#3b82f6",
+    # --- text ---
+    "text":            "#e8edfb",
+    "text_dim":        "#c3cbea",
+    "text_mute":       "#8891b4",
+    "text_subtle":     "#4e5680",
     "text_on_accent":  "#ffffff",
 }
 
