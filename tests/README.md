@@ -2,10 +2,27 @@
 
 From the repo root:
 
-    python -m unittest discover -s tests          # whole suite
+    python tests/run_suite.py                     # whole suite, in parallel
+    python tests/run_suite.py -k practical        # only matching modules
+    python tests/run_suite.py -j 1                # serial, same reporting
+
+    python -m unittest discover -s tests          # whole suite, stdlib runner
     python -m unittest discover -s tests -p test_practical_ffmpeg.py   # one module
 
-Always `discover`, always from the repo root. Two reasons:
+`run_suite.py` is what CI runs. It gives each test module its own worker process
+and pulls the next module off the queue as a worker frees up, which takes the
+suite from ~48 s to ~13 s on a 16-core machine — the suite is dominated by real
+ffmpeg child processes, not CPU. It adds no dependency; the project keeps a
+zero-test-dependency policy, so it is `unittest` plus `concurrent.futures`.
+Module-per-process is also what keeps it safe: several suites monkeypatch module
+globals such as `appio.note`, which is only sound while one module owns its
+interpreter.
+
+`--strict-skips` (used by CI) fails the run when a suite skipped for a capability
+CI installs, so the suite cannot silently shrink.
+
+The stdlib `discover` form still works and is the fallback. Always `discover`,
+always from the repo root. Two reasons:
 
 - **The dotted form does not work.** `python -m unittest tests.test_command_audio`
   fails with `ModuleNotFoundError: No module named 'command_gen_base'`. The test

@@ -10,6 +10,8 @@ The GUI implementation is split across sibling modules for file size:
   gui_editor_speed    - build_speed_editor (video/audio speed + reverse)
   gui_editor_audio    - build_audio_cut_editor, build_audio_transform_editor
   gui_editor_unified  - build_unified_video_editor
+  gui_editor_unified_canvas   - preview canvas + frame-extract worker
+  gui_editor_unified_timeline - timeline strip
 
 This file only wires the modules together and launches main(). Because the
 modules call each other freely at runtime, the fully assembled namespace is
@@ -30,6 +32,8 @@ import gui_editor_crop
 import gui_editor_speed
 import gui_editor_audio
 import gui_editor_unified
+import gui_editor_unified_canvas
+import gui_editor_unified_timeline
 
 _MODULES = [
     gui_common,
@@ -40,6 +44,8 @@ _MODULES = [
     gui_editor_speed,
     gui_editor_audio,
     gui_editor_unified,
+    gui_editor_unified_canvas,
+    gui_editor_unified_timeline,
 ]
 
 # Assemble the full namespace, then inject it into every module so that a

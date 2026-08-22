@@ -598,6 +598,29 @@ Select all video files, or all audio files.
 Join every video first, then join the audio separately, or add the audio to the video with
 Mode 5 (Add files to video) instead.
 
+#### Subtitles on a joined timeline
+
+FFmpeg's `concat` filter cannot carry subtitle streams, so when a join is re‑encoded FFmWiz
+builds **one** subtitle track for the joined timeline: each input's text subtitle is extracted,
+its cues are shifted by the total duration of the inputs before it, cues running past their own
+input are clipped, and the result is muxed back in. An input with no subtitle still advances the
+offset, so later cues stay aligned.
+
+It is refused, with the reason printed before you confirm, when:
+
+- the timeline is edited — **cuts, a split, a speed change or reverse** all move the joined
+  clock, so shifted cues would drift out of sync with the picture;
+- the inputs carry only **bitmap** subtitles (PGS, VobSub, DVB) — these are pictures with no cue
+  text to shift.
+
+#### Audio when some inputs are silent
+
+Audio is planned per input, not from the first file. If a selected track is missing from an
+input, FFmWiz synthesises silence for exactly that input's duration and says so; if the *first*
+input is silent but later ones have audio, it joins track 0 of the others rather than dropping
+audio entirely. Tracks beyond the number the track question could offer are reported as not
+included, instead of disappearing without a word.
+
 #### Mixed frame rates (constant vs variable)
 
 When you join two or more videos whose source frame rates differ, FFmWiz asks
