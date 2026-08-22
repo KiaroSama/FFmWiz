@@ -323,7 +323,15 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
         print_join_order_list([answers["input_path"], *[it["path"] for it in items]])
 
 
-def step_output_format(answers: dict[str, Any]) -> None:
+def step_output_format(answers: dict[str, Any], allowed: list[str] | None = None) -> None:
+    """Ask for the output container.
+
+    `allowed` restricts BOTH the displayed list and what is accepted. A mode
+    whose builder can only produce certain containers must pass it -- Video
+    Speed/Reverse offered .mp3 and .webm from the generic list while its
+    builder hardcoded H.264 + AAC and always mapped a video stream, so the
+    command it printed could never mux.
+    """
     # Join mode: show the compact source summary (min/max video bitrate, audio
     # bitrate, fps, file count) right before the format prompt.
     if answers.get("join_input_items"):
@@ -334,7 +342,10 @@ def step_output_format(answers: dict[str, Any]) -> None:
         default_ext = "mkv" if input_ext.lower() == "mkv" else "mp4"
     else:
         default_ext = "mp3"
-    common_formats = COMMON_VIDEO_FORMATS + COMMON_AUDIO_FORMATS
+    allowed_formats = [str(item).lower().lstrip(".") for item in (allowed or [])]
+    common_formats = allowed_formats or (COMMON_VIDEO_FORMATS + COMMON_AUDIO_FORMATS)
+    if allowed_formats and default_ext not in allowed_formats:
+        default_ext = allowed_formats[0]
     while True:
         value = appio.ask_raw(
             appio.question_prompt(
@@ -356,6 +367,12 @@ def step_output_format(answers: dict[str, Any]) -> None:
             continue
         # Reject unknown output formats (likely typos) with a suggestion, and
         # ask for a different format instead of building a command FFmpeg fails.
+        if allowed_formats and ext not in allowed_formats:
+            appio.error(
+                f"This mode cannot produce .{ext}. Choose one of: "
+                + ", ".join(allowed_formats)
+            )
+            continue
         if not answers["output_format_keep_input"] and ext not in KNOWN_OUTPUT_FORMATS:
             import difflib
             close = difflib.get_close_matches(ext, sorted(KNOWN_OUTPUT_FORMATS), n=1)

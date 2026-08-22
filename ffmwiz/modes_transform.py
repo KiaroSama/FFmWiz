@@ -113,7 +113,10 @@ def _run_video_speed_reverse_mode_impl(base_answers: dict[str, Any]) -> tuple[in
         Step("input_path", lambda a: True, wizard.step_input_path),
         Step("speed_reverse", lambda a: True, step_video_speed_reverse_options),
         Step("output_location", lambda a: not a.get("_speed_reverse_noop"), wizard.step_output_location),
-        Step("output_format", lambda a: not a.get("_speed_reverse_noop"), wizard.step_output_format),
+        # This mode always maps a video stream, so audio-only containers are not
+        # producible; webm is excluded because the builder emits H.264 + AAC.
+        Step("output_format", lambda a: not a.get("_speed_reverse_noop"),
+             lambda a: wizard.step_output_format(a, allowed=VIDEO_SPEED_REVERSE_FORMATS)),
         Step("start_now", lambda a: not a.get("_speed_reverse_noop"), step_video_speed_start_now),
     ]
     while True:

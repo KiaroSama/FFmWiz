@@ -120,7 +120,9 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     target_h = int(first_video.get("height") or 720)
     target_fps = rational_to_float(first_video.get("avg_frame_rate")) or rational_to_float(first_video.get("r_frame_rate")) or 30.0
     available_video_encoders = {str(name).lower() for name in answers.get("video_encoders") or []}
-    use_nvenc_encode = "h264_nvenc" in available_video_encoders and target_depth <= 10
+    use_nvenc_encode = H264_NVENC_ENCODER in available_video_encoders and target_depth <= 8
+    # h264_nvenc has no 10-bit mode; a >8-bit join falls through to the
+    # software encoders below rather than failing at encoder init.
     use_cuda_decode_complex = bool(answers.get("use_gpu") and use_nvenc_encode)
     cmd: list[str] = [answers["ffmpeg"], "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n"]
     for item in items:
@@ -176,7 +178,11 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     else:
         cmd.extend(["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", output_pix_fmt])
     if any_audio:
-        cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2"])
+        near_quality_audio, near_quality_note = container_audio_encode_args(
+            output_path.suffix, "aac", 192, channels=2)
+        if near_quality_note:
+            appio.note(near_quality_note)
+        cmd.extend(near_quality_audio)
     if vfr_join:
         # Preserve variable timing across segments instead of resampling to CFR.
         cmd.extend(["-fps_mode", "vfr"])
@@ -335,7 +341,7 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
         format_answers["video_streams"] = [first_video]
         target_depth = output_video_bit_depth(format_answers)
         available_video_encoders = {str(name).lower() for name in answers.get("video_encoders") or []}
-        if "h264_nvenc" in available_video_encoders and target_depth <= 10:
+        if H264_NVENC_ENCODER in available_video_encoders and target_depth <= 8:
             ask_nvenc_multipass_if_applicable(
                 answers,
                 video_encoder="h264_nvenc",

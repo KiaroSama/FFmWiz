@@ -720,8 +720,15 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
         "-map", "[a]",
         "-vn", "-sn", "-dn",
         "-map_metadata", "-1", "-map_chapters", "-1",
-        "-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2", "-ar", str(join_target_sample_rate(answers)),
     ])
+    # The output extension comes from input 0, so a hardcoded `-c:a aac` sent
+    # AAC into .flac / .ogg / .opus and the muxer refused the header.
+    join_audio_args, join_audio_note = container_audio_encode_args(
+        output_path.suffix, "aac", bitrate,
+        channels=AUDIO_CHANNELS, sample_rate=join_target_sample_rate(answers))
+    if join_audio_note:
+        appio.note(join_audio_note)
+    cmd.extend(join_audio_args)
     if output_path.suffix.lower() in {".mp4", ".m4a", ".mov"}:
         cmd.extend(["-movflags", "+faststart"])
     cmd.append(str(output_path))

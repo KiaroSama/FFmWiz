@@ -133,9 +133,15 @@ def filter_graph_path_label(answers: dict[str, Any], video_encoder: str | None =
 
 
 def high_bit_depth_requires_cpu_encoder(answers: dict[str, Any], video_encoder: str) -> bool:
-    # With delivery capped at 10-bit, NVENC (Main10) handles all high-bit-depth
-    # sources, so no forced CPU fallback is needed. Kept for safety/compat.
-    return output_video_bit_depth(answers) > 10 and str(video_encoder).endswith("_nvenc")
+    # Bit-depth support is per-ENCODER, not per-family. hevc_nvenc and av1_nvenc
+    # do Main10, but h264_nvenc has NO 10-bit mode at all: feeding it p010le
+    # fails at encoder init with "Provided device doesn't support required NVENC
+    # features", so anything above 8-bit must leave the H.264 NVENC path.
+    encoder = str(video_encoder)
+    depth = output_video_bit_depth(answers)
+    if encoder == H264_NVENC_ENCODER:
+        return depth > 8
+    return depth > 10 and encoder.endswith("_nvenc")
 
 
 def audio_speed_reverse_filter_parts(answers: dict[str, Any]) -> list[str]:

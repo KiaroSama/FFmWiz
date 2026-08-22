@@ -410,9 +410,6 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             cmd.extend(["-ss", f"{start:.6f}"])
 
     cmd.extend(["-i", str(input_path)])
-    if single_cut:
-        start, end = cut_keep_ranges[0]
-        cmd.extend(["-t", f"{max(0.0, end - start):.6f}"])
 
     # Chapter remapping: if timeline is modified and source has chapters,
     # generate a metadata file and add it as a second input so -map_chapters
@@ -432,6 +429,15 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             cmd.extend(["-i", str(metadata_path)])
             answers["_chapter_metadata_input_index"] = 1
             log_info(f"Chapters: injected metadata input at index 1 ({metadata_path})")
+
+    # -t must come after EVERY -i, otherwise it is parsed as an input option for
+    # whichever input follows it. Emitted before the chapter-metadata input it
+    # bound the duration to that ffmetadata file instead of the output, and the
+    # cut silently ran to the end of the source. `-ss` stays before the source
+    # -i on purpose: there it is the fast demuxer seek.
+    if single_cut:
+        start, end = cut_keep_ranges[0]
+        cmd.extend(["-t", f"{max(0.0, end - start):.6f}"])
 
     # Determine audio mapping. When multi-range cuts are active, only one audio
     # output stream is produced by the filter_complex concat. Pick the first
@@ -514,17 +520,23 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     if multi_cut and subtitle_indices:
         appio.note("Cuts active: subtitle streams are not mapped through filter_complex and were skipped.")
         subtitle_indices = []
-    if subtitle_indices and answers["output_ext"].lower() in MP4_LIKE_EXTS:
+    if subtitle_indices:
+        # A subtitle the target container cannot carry must not be MAPPED either:
+        # dropping only `-c:s` still leaves `-map 0:s:N`, and the muxer then
+        # refuses to write the header (AVI rejects every subtitle codec).
         allowed_subtitles: list[int] = []
         skipped_subtitles: list[int] = []
         for subtitle_index in subtitle_indices:
             codec = str(answers["subtitle_streams"][subtitle_index].get("codec_name", "")).lower()
-            if codec in TEXT_SUBTITLE_CODECS:
-                allowed_subtitles.append(subtitle_index)
-            else:
+            if subtitle_codec_for_container(answers["output_ext"], codec) is None:
                 skipped_subtitles.append(subtitle_index)
+            else:
+                allowed_subtitles.append(subtitle_index)
         if skipped_subtitles:
-            appio.note(f"Skipped non-text subtitle tracks for MP4/MOV output: {skipped_subtitles}")
+            appio.note(
+                f"Skipped subtitle tracks that .{str(answers['output_ext']).lstrip('.')} "
+                f"cannot store: {skipped_subtitles}"
+            )
         subtitle_indices = allowed_subtitles
     for subtitle_index in subtitle_indices:
         cmd.extend(["-map", f"0:s:{subtitle_index}"])
@@ -610,9 +622,17 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             audio_codec = DEFAULT_AUDIO_CODEC
             answers["audio_codec"] = audio_codec
             audio_codec_for_stats = audio_codec
-        if answers.get("output_ext", "").lower() == "webm" and audio_codec not in {"copy", "libopus", "libvorbis"}:
-            appio.note("WebM audio was changed to libopus for container compatibility.")
-            audio_codec = "libopus"
+        # Every constrained container, not just WebM: aac into .flac/.ogg/.opus
+        # was emitted happily and then rejected by the muxer.
+        container_ext = str(answers.get("output_ext", "")).lower().lstrip(".")
+        allowed_audio = AUDIO_CODECS_BY_FORMAT.get(container_ext)
+        if allowed_audio and audio_codec not in allowed_audio:
+            replacement = default_audio_codec_for_ext(container_ext)
+            appio.note(
+                f".{container_ext} cannot store {audio_codec} audio; "
+                f"{replacement} was selected for container compatibility."
+            )
+            audio_codec = replacement
             answers["audio_codec"] = audio_codec
             audio_codec_for_stats = audio_codec
         if audio_codec == "copy":
@@ -652,10 +672,21 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         )
 
     if subtitle_indices:
-        if answers["output_ext"].lower() in MP4_LIKE_EXTS:
-            cmd.extend(["-c:s", "mov_text"])
-        else:
-            cmd.extend(["-c:s", "copy"])
+        # Ask the container what it can carry instead of assuming "copy works
+        # everywhere except MP4". mov_text into mkv, subrip into webm and any
+        # subtitle into avi are all rejected by the muxer at header-write time.
+        source_subtitles = answers.get("subtitle_streams") or []
+        source_codecs = [
+            str((source_subtitles[index] if index < len(source_subtitles) else {}).get("codec_name") or "")
+            for index in subtitle_indices
+        ]
+        subtitle_args, subtitle_problems = subtitle_codec_args_for_container(
+            answers["output_ext"], source_codecs
+        )
+        for problem in subtitle_problems:
+            log_warn(f"Subtitle/container: {problem}")
+        if subtitle_args:
+            cmd.extend(subtitle_args)
     if attachments_mapped:
         append_embedded_attachment_codec_options(cmd, answers)
     if data_mapped:
