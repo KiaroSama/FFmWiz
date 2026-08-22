@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import time
 from typing import Iterable, List, Optional, Sequence
 
 from .constants import UNKNOWN_LANGUAGE_DISPLAY, UNKNOWN_LANGUAGE_INPUTS
-from .colors import C, EXAMPLE_TEXT_COLOR, FOUND_DETAIL_VALUE_COLOR, FOUND_LABEL_COLOR, FOUND_VALUE_COLOR, HEADER_SEPARATOR_COLOR, LANGUAGE_COLORS, SCAN_SEPARATOR_COLOR, UNKNOWN_LANGUAGE_COLOR, color, warn
+from .colors import C, EXAMPLE_TEXT_COLOR, FOUND_DETAIL_VALUE_COLOR, FOUND_LABEL_COLOR, FOUND_VALUE_COLOR, HEADER_SEPARATOR_COLOR, LANGUAGE_COLORS, PROMPT_DEFAULT_COLOR, UNKNOWN_LANGUAGE_COLOR, color, warn
 from .logsetup import LOGGER
 from .models import StreamInfo
 
@@ -93,8 +95,27 @@ def color_example_text(text: str) -> str:
     return text[:start] + color(text[start:end], EXAMPLE_TEXT_COLOR) + text[end:]
 
 
+def color_enter_hint_text(text: str) -> str:
+    """Paint a `[Enter=...]` hint the same green as `[Y]` and `[n]`.
+
+    It is a default value like any other - it just spells out what pressing
+    Enter does instead of showing the value itself - so it reads as one of the
+    navigation hints rather than part of the question.
+    """
+    start = text.find("[Enter=")
+    if start == -1:
+        return text
+    end = text.find("]", start)
+    if end == -1:
+        return text
+    end += 1
+    return text[:start] + color(text[start:end], PROMPT_DEFAULT_COLOR) + text[end:]
+
+
 def format_prompt_label(prompt: str) -> str:
-    return color_example_text(color_found_detail_text(color_found_text(prompt_label(prompt))))
+    return color_enter_hint_text(
+        color_example_text(color_found_detail_text(color_found_text(prompt_label(prompt))))
+    )
 
 
 def parse_csv_text(raw: str) -> List[str]:
@@ -121,6 +142,66 @@ def format_elapsed_time(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+
+# Exactly one thing can own the cursor. The live progress block takes it for the
+# length of a run; the per-command timer below has to stay quiet while it does.
+# A line printed underneath the block scrolls the terminal by one, and the
+# block's next repaint - which moves up by the number of lines it drew last
+# time - then lands one line short and strands its top row on screen.
+_BLOCK_OWNS_SCREEN = False
+
+
+def set_block_owns_screen(owned: bool) -> None:
+    global _BLOCK_OWNS_SCREEN
+    _BLOCK_OWNS_SCREEN = owned
+
+
+def block_owns_screen() -> bool:
+    return _BLOCK_OWNS_SCREEN
+
+
+class ProgressPrinter:
+    """One rewritable console line showing how long the current file has been
+    running, next to how long the whole run has been going. Each file gets its
+    own printer, so its timer starts at zero and stops when the file is done."""
+
+    def __init__(self, total_started_at: Optional[float] = None) -> None:
+        self.started_at = time.perf_counter()
+        self.total_started_at = total_started_at
+        self._last_second = -1
+        self._line_open = False
+        # Redirected output has no cursor to rewrite, so \r would pile every
+        # tick into the file instead of replacing the previous one.
+        self._enabled = sys.stdout.isatty()
+
+    def tick(self, force: bool = False) -> None:
+        if not self._enabled or block_owns_screen():
+            return
+        elapsed = int(time.perf_counter() - self.started_at)
+        if elapsed == self._last_second and not force:
+            return
+        self._last_second = elapsed
+
+        text = f"          Elapsed {format_elapsed_time(elapsed)}"
+        if self.total_started_at is not None:
+            total = time.perf_counter() - self.total_started_at
+            text += f" | Total {format_elapsed_time(total)}"
+
+        if not self._line_open:
+            sys.stdout.write("\n")
+            self._line_open = True
+        sys.stdout.write("\r" + color(text, C.BOLD + C.SUMMARY_ELAPSED))
+        sys.stdout.flush()
+
+    def close(self) -> None:
+        """Erase the progress line. Safe to call more than once."""
+        if not self._enabled or block_owns_screen():
+            return
+        blank = "\r" + (" " * terminal_width()) + "\r"
+        sys.stdout.write(blank + "\n" if self._line_open else blank)
+        sys.stdout.flush()
+        self._line_open = False
 
 
 def format_stream_size(size_bytes: Optional[int]) -> str:
@@ -187,10 +268,6 @@ def language_color(language: str) -> str:
     if normalized == "und":
         return UNKNOWN_LANGUAGE_COLOR
     return LANGUAGE_COLORS[sum(ord(ch) for ch in normalized) % len(LANGUAGE_COLORS)]
-
-
-def terminal_separator() -> str:
-    return separator_line(SCAN_SEPARATOR_COLOR)
 
 
 def format_index_list(indexes: List[int]) -> str:

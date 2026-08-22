@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from .constants import EXIT_TOKENS, VIDEO_EXTENSIONS
-from .colors import C, PROMPT_DEFAULT_COLOR, YES_NO_HINT_COLOR, color, dim, err, info, warn
+from .logsetup import LOGGER
+from .colors import C, PROMPT_DEFAULT_COLOR, YES_NO_HINT_COLOR, color, dim, err, info, plain, warn
 from .textutil import color_example_text, color_found_text, format_index_list, format_prompt_label, normalize_language_code, parse_csv_int, parse_csv_text
+from .output import output_base_conflict
 
 class MenuExit(Exception):
     pass
@@ -14,20 +16,6 @@ class MenuExit(Exception):
 
 class MenuBack(Exception):
     pass
-
-
-def option_suffix(default: Optional[str], allow_back: bool, show_default: bool = True) -> str:
-    parts: List[str] = []
-    if default and show_default:
-        parts.append(f"[{default}]")
-
-    nav_parts: List[str] = []
-    nav_parts.append("quit=exit")
-    if allow_back:
-        nav_parts.append("back=0")
-    parts.append(f"{{{', '.join(nav_parts)}}}")
-
-    return " ".join(parts)
 
 
 def colored_option_suffix(default: Optional[str], allow_back: bool, show_default: bool = True) -> str:
@@ -50,22 +38,34 @@ def prompt_text(prompt: str, default: Optional[str], allow_back: bool, show_defa
 
 
 def read_rendered_input(rendered_prompt: str, default: Optional[str], allow_back: bool) -> str:
+    """Ask, and record both the question and the answer.
+
+    A log that shows only the outcome cannot explain how a run reached it. Every
+    prompt the user saw and every key they pressed goes in, so a log from another
+    machine reads as the session that actually happened.
+    """
+    label = plain(rendered_prompt).strip().rstrip(":").strip()
     while True:
         raw = input(rendered_prompt).strip()
         lowered = raw.lower()
 
         if lowered in EXIT_TOKENS:
+            LOGGER.info("Prompt: %s -> quit", label)
             raise MenuExit
 
         if raw == "0":
             if allow_back:
+                LOGGER.info("Prompt: %s -> back", label)
                 raise MenuBack
+            LOGGER.warning("Prompt: %s -> 0 refused (back is not available here)", label)
             print(warn("Back is not available here."))
             continue
 
         if not raw and default is not None:
+            LOGGER.info("Prompt: %s -> (empty, default %r)", label, default)
             return default
 
+        LOGGER.info("Prompt: %s -> %r", label, raw)
         return raw
 
 
@@ -103,7 +103,24 @@ def ask_path(prompt: str, must_exist: bool = False, allow_back: bool = True) -> 
 
 
 def normalize_path_text(raw: str) -> Path:
-    return Path(raw.strip().strip('"').strip("'")).expanduser()
+    """Turn what the user typed into an absolute path.
+
+    Anchoring is not cosmetic. Every path here ends up as an argument to
+    ffprobe, ffmpeg or robocopy, and a relative one can collapse into a token
+    those tools read as an option instead of a file: with `.` as the input
+    root, `Path('.') / '-name.mkv'` is just `-name.mkv`, and ffprobe answers
+    "Unrecognized option". A perfectly readable file then gets reported as one
+    it could not read.
+    """
+    path = Path(raw.strip().strip('"').strip("'")).expanduser()
+    if path.is_absolute():
+        return path
+    try:
+        return path.resolve()
+    except OSError:
+        # resolve() can fail on an unreachable drive; anchoring to the working
+        # directory is still better than handing on a bare relative name.
+        return (Path.cwd() / path).absolute()
 
 
 def absolute_path_for_display(path: Path) -> Path:
@@ -142,6 +159,12 @@ def ask_output_base_path(input_root: Path) -> Path:
         path = normalize_path_text(raw)
         if path.exists() and not path.is_dir():
             print(err(f"Output path exists but is not a folder: {path}"))
+            continue
+
+        conflict = output_base_conflict(input_root, path)
+        if conflict:
+            print(err(conflict))
+            print(warn("Otherwise this run's output becomes the next run's input."))
             continue
 
         if path.suffix.lower() in VIDEO_EXTENSIONS:
@@ -200,15 +223,6 @@ def print_metadata_note() -> None:
     print(dim("  Keeping metadata preserves supported titles, language tags, chapters, and stream labels."))
 
 
-def ask_choice(prompt: str, valid: Iterable[str], default: str, allow_back: bool = True) -> str:
-    valid_set = {v.lower() for v in valid}
-    while True:
-        raw = read_menu_input(prompt, default=default, allow_back=allow_back).lower()
-        if raw in valid_set:
-            return raw
-        print(warn(f"Invalid choice. Valid options: {', '.join(sorted(valid_set))}"))
-
-
 def numbered_option(value: str, text: str, is_default: bool) -> str:
     suffix = f" {color('(default)', PROMPT_DEFAULT_COLOR)}" if is_default else ""
     return f"{color(value + '.', C.BOLD + C.GREEN)} {color_example_text(color_found_text(text))}{suffix}"
@@ -236,10 +250,13 @@ def ask_numbered_menu(
     if leading_blank:
         print()
     print(f"{title}:")
+    LOGGER.info("Menu: %s (default %s)", title, default)
     for note in notes or ():
         print(format_prompt_label(note))
+        LOGGER.info("  %s", plain(note))
     for value, text in options:
         print(numbered_option(value, text, value == default))
+        LOGGER.info("  %s. %s%s", value, text, " (default)" if value == default else "")
 
     rendered_prompt = numbered_choice_prompt(prompt, allow_back, colon_after_prompt)
     while True:

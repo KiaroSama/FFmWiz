@@ -5,11 +5,28 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE
-from .colors import C, FILE_LINE_COLOR, HEADER_COLOR, SETTING_AUDIO_COLOR, SETTING_FALSE_COLOR, SETTING_INPUT_PATH_COLOR, SETTING_LABEL_COLOR, SETTING_MODE_COLOR, SETTING_OUTPUT_BASE_COLOR, SETTING_OUTPUT_ROOT_COLOR, SETTING_SUBTITLE_COLOR, SETTING_TRUE_COLOR, SETTING_VALUE_COLOR, color, dim, info, warn
+from .colors import C, plain, FILE_LINE_COLOR, SCAN_SEPARATOR_COLOR, HEADER_COLOR, SETTING_AUDIO_COLOR, SETTING_FALSE_COLOR, SETTING_INPUT_PATH_COLOR, SETTING_LABEL_COLOR, SETTING_MODE_COLOR, SETTING_OUTPUT_BASE_COLOR, SETTING_OUTPUT_ROOT_COLOR, SETTING_SUBTITLE_COLOR, SETTING_TRUE_COLOR, SETTING_VALUE_COLOR, color, dim, info, warn
+from .logsetup import LOGGER
 from .models import MediaFile, StreamInfo, StreamMetadataEdit
-from .textutil import center_for_terminal, display_language, format_language_list, format_stream, is_unknown_language, language_color, normalize_language_code, separator_line, terminal_separator
+from .textutil import center_for_terminal, display_language, format_language_list, format_stream, language_color, normalize_language_code, separator_line
 from .muxlogic import text_matches_any
 from .output import display_path
+
+def echo(text: str = "") -> None:
+    """Write one line to the console and the same line, uncoloured, to the log.
+
+    The scan report, the stream summaries and the selection preview are the most
+    useful things a run produces when something later goes wrong - and until this
+    existed they were on the terminal only, so a log collected from another
+    machine could not answer what the files actually contained. Formatting once
+    and stripping colour for the log is what keeps the two identical.
+    """
+    print(text)
+    stripped = plain(text).rstrip()
+    # A rule of "=" is console furniture; in a log it is 80 characters of noise.
+    if stripped and stripped.strip("=- "):
+        LOGGER.info("%s", stripped.strip() if stripped.startswith("    ") else stripped)
+
 
 def header_color(text: str) -> str:
     normalized = text.strip().upper()
@@ -32,19 +49,19 @@ def print_header(text: str, leading_blank: bool = True) -> None:
     if leading_blank:
         print()
     code = header_color(text)
-    print(color(center_for_terminal(text), code))
-    print(separator_line(code))
+    echo(color(center_for_terminal(text), code))
+    echo(separator_line(code))
 
 
 def print_setting(label: str, value: object) -> None:
     normalized = label.lower()
 
     if normalized == "metadata edits" and isinstance(value, list):
-        print(f"{color(label + ':', SETTING_LABEL_COLOR)} {color(format_metadata_edits(value), SETTING_VALUE_COLOR)}")
+        echo(f"{color(label + ':', SETTING_LABEL_COLOR)} {color(format_metadata_edits(value), SETTING_VALUE_COLOR)}")
         return
 
     if normalized in {"audio languages", "subtitle languages"} and isinstance(value, list):
-        print(f"{color(label + ':', SETTING_LABEL_COLOR)} {format_language_list(value, SETTING_AUDIO_COLOR if normalized.startswith('audio') else SETTING_SUBTITLE_COLOR)}")
+        echo(f"{color(label + ':', SETTING_LABEL_COLOR)} {format_language_list(value, SETTING_AUDIO_COLOR if normalized.startswith('audio') else SETTING_SUBTITLE_COLOR)}")
         return
 
     if isinstance(value, bool):
@@ -66,7 +83,7 @@ def print_setting(label: str, value: object) -> None:
     else:
         value_color = SETTING_VALUE_COLOR
 
-    print(f"{color(label + ':', SETTING_LABEL_COLOR)} {color(value, value_color)}")
+    echo(f"{color(label + ':', SETTING_LABEL_COLOR)} {color(value, value_color)}")
 
 
 def print_scan_report(media_files: List[MediaFile], root: Path) -> None:
@@ -77,25 +94,25 @@ def print_scan_report(media_files: List[MediaFile], root: Path) -> None:
 
         print()
         if i > 1:
-            print(terminal_separator())
-        print(color(f"File: {rel}", FILE_LINE_COLOR))
+            echo(separator_line(SCAN_SEPARATOR_COLOR))
+        echo(color(f"File: {rel}", FILE_LINE_COLOR))
 
         audio = media.audio_streams
         subtitles = media.subtitle_streams
 
         if audio:
-            print(color("  Audio:", C.BOLD + C.AZURE))
+            echo(color("  Audio:", C.BOLD + C.AZURE))
             for s in audio:
-                print(f"    {format_stream(s)}")
+                echo(f"    {format_stream(s)}")
         else:
-            print(dim("  Audio: none"))
+            echo(dim("  Audio: none"))
 
         if subtitles:
-            print(color("  Subtitles:", C.BOLD + C.VIOLET))
+            echo(color("  Subtitles:", C.BOLD + C.VIOLET))
             for s in subtitles:
-                print(f"    {format_stream(s)}")
+                echo(f"    {format_stream(s)}")
         else:
-            print(dim("  Subtitles: none"))
+            echo(dim("  Subtitles: none"))
 
 
 def add_stream_summary(
@@ -165,27 +182,30 @@ def streams_for_type(media_files: List[MediaFile], codec_type: str) -> List[Stre
 
 def print_stream_choices(label: str, streams: List[StreamInfo], include_index: bool) -> None:
     heading = f"{label} {'indexes' if include_index else 'titles'} found:"
-    print(color(heading, C.BOLD + (C.AZURE if label.lower() == "audio" else C.VIOLET)))
+    echo(color(heading, C.BOLD + (C.AZURE if label.lower() == "audio" else C.VIOLET)))
 
     if not streams:
-        print(dim("  none"))
+        echo(dim("  none"))
         return
 
     if include_index:
         index_summary: Dict[Tuple[int, str, str, str], Tuple[int, int, str, str, str]] = {}
         for stream in streams:
             add_stream_index_summary(index_summary, stream)
-        for key in sorted(index_summary):
-            count, index, lang, title, codec = index_summary[key]
-            print(f"  {format_stream_index_summary_row(count, index, lang, title, codec)}")
+        # Distinct loop variables: the two summaries are keyed differently, and
+        # reusing one name for both makes the second loop look like it indexes
+        # the first summary's keys.
+        for index_key in sorted(index_summary):
+            count, index, lang, title, codec = index_summary[index_key]
+            echo(f"  {format_stream_index_summary_row(count, index, lang, title, codec)}")
         return
 
     title_summary: Dict[Tuple[str, str, str], Tuple[int, str, str, str]] = {}
     for stream in streams:
         add_stream_summary(title_summary, stream)
-    for key in sorted(title_summary):
-        count, lang, title, codec = title_summary[key]
-        print(f"  {format_stream_summary_row(count, lang, title, codec)}")
+    for title_key in sorted(title_summary):
+        count, lang, title, codec = title_summary[title_key]
+        echo(f"  {format_stream_summary_row(count, lang, title, codec)}")
 
 
 def matching_streams_for_selection(
@@ -226,17 +246,6 @@ def matching_streams_for_selection(
     return []
 
 
-def matching_streams_for_media(
-    media: MediaFile,
-    codec_type: str,
-    mode: str,
-    languages: Optional[List[str]] = None,
-    titles: Optional[List[str]] = None,
-    indexes: Optional[List[int]] = None,
-) -> List[StreamInfo]:
-    return matching_streams_for_selection([media], codec_type, mode, languages, titles, indexes)
-
-
 def print_selection_preview(
     label: str,
     media_files: List[MediaFile],
@@ -247,17 +256,17 @@ def print_selection_preview(
     indexes: Optional[List[int]] = None,
 ) -> None:
     selected_by_file = [
-        (media, matching_streams_for_media(media, codec_type, mode, languages, titles, indexes))
+        (media, matching_streams_for_selection([media], codec_type, mode, languages, titles, indexes))
         for media in media_files
     ]
     streams = [stream for _, matches in selected_by_file for stream in matches]
     matched_files = sum(1 for _, matches in selected_by_file if matches)
     unmatched_files = [media for media, matches in selected_by_file if not matches]
 
-    print(color(f"Selected {label.lower()} streams:", C.BOLD + (C.AZURE if label.lower() == "audio" else C.VIOLET)))
-    print(info(f"  files matched={matched_files}/{len(media_files)} | streams selected={len(streams)} | no match={len(unmatched_files)}"))
+    echo(color(f"Selected {label.lower()} streams:", C.BOLD + (C.AZURE if label.lower() == "audio" else C.VIOLET)))
+    echo(info(f"  files matched={matched_files}/{len(media_files)} | streams selected={len(streams)} | no match={len(unmatched_files)}"))
     if not streams:
-        print(warn("  none matched"))
+        echo(warn("  none matched"))
         return
 
     index_summary: Dict[Tuple[int, str, str, str], Tuple[int, int, str, str, str]] = {}
@@ -265,14 +274,14 @@ def print_selection_preview(
         add_stream_index_summary(index_summary, stream)
     for key in sorted(index_summary):
         count, index, lang, title, codec = index_summary[key]
-        print(f"  {format_stream_index_summary_row(count, index, lang, title, codec)}")
+        echo(f"  {format_stream_index_summary_row(count, index, lang, title, codec)}")
 
     if unmatched_files:
-        print(warn(f"  files with no selected {label.lower()}: {len(unmatched_files)}"))
+        echo(warn(f"  files with no selected {label.lower()}: {len(unmatched_files)}"))
         for media in unmatched_files[:8]:
-            print(warn(f"    {media.path.name}"))
+            echo(warn(f"    {media.path.name}"))
         if len(unmatched_files) > 8:
-            print(warn(f"    ... {len(unmatched_files) - 8} more"))
+            echo(warn(f"    ... {len(unmatched_files) - 8} more"))
 
 
 def print_unique_summary(media_files: List[MediaFile]) -> None:
@@ -288,22 +297,22 @@ def print_unique_summary(media_files: List[MediaFile]) -> None:
 
     print_header("Unique Stream Summary")
 
-    print(color("Audio streams found:", C.BOLD + C.AZURE))
+    echo(color("Audio streams found:", C.BOLD + C.AZURE))
     if audio_summary:
         for key in sorted(audio_summary):
             count, lang, title, codec = audio_summary[key]
-            print(f"  {format_stream_summary_row(count, lang, title, codec)}")
+            echo(f"  {format_stream_summary_row(count, lang, title, codec)}")
     else:
-        print(dim("  none"))
+        echo(dim("  none"))
 
     print()
-    print(color("Subtitle streams found:", C.BOLD + C.VIOLET))
+    echo(color("Subtitle streams found:", C.BOLD + C.VIOLET))
     if subtitle_summary:
         for key in sorted(subtitle_summary):
             count, lang, title, codec = subtitle_summary[key]
-            print(f"  {format_stream_summary_row(count, lang, title, codec)}")
+            echo(f"  {format_stream_summary_row(count, lang, title, codec)}")
     else:
-        print(dim("  none"))
+        echo(dim("  none"))
 
 
 def stream_indexes_for(media_files: List[MediaFile], codec_type: str) -> List[int]:
@@ -333,15 +342,6 @@ def max_stream_count_for(media_files: List[MediaFile], codec_type: str) -> int:
         for media in media_files
     ]
     return max(counts) if counts else 0
-
-
-def has_unknown_language(media_files: List[MediaFile], codec_type: Optional[str] = None) -> bool:
-    return any(
-        (codec_type is None or stream.codec_type == codec_type)
-        and is_unknown_language(stream.language)
-        for media in media_files
-        for stream in media.streams
-    )
 
 
 def metadata_edit_match_text(edit: StreamMetadataEdit) -> str:

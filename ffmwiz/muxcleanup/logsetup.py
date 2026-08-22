@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
+import shutil
 import subprocess
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
-from .constants import APP_VERSION
+from .constants import APP_VERSION, OPERATION_TIMEOUT_ENV_VAR
 from .colors import warn
 
 LOGGER = logging.getLogger("MuxCls")
@@ -18,8 +21,43 @@ LOGGER = logging.getLogger("MuxCls")
 LOG_FILE: Optional[Path] = None
 
 
+# Set MUXCLS_DEBUG=1 to record command lines and captured output for every
+# command. The default INFO level keeps a run of a few hundred files readable.
+DEBUG_ENV_VAR = "MUXCLS_DEBUG"
+
+
+# Captured stdout/stderr is only useful up to a point; a full FFmpeg dump can be
+# thousands of lines and buries the entries that matter.
+MAX_CAPTURED_OUTPUT_CHARS = 2000
+
+
+def debug_enabled() -> bool:
+    return os.environ.get(DEBUG_ENV_VAR, "").strip().lower() not in {"", "0", "false", "no"}
+
+
 def command_to_text(args: Sequence[object]) -> str:
     return subprocess.list2cmdline([str(arg) for arg in args])
+
+
+def truncate_output(text: str, limit: int = MAX_CAPTURED_OUTPUT_CHARS) -> str:
+    stripped = (text or "").strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit] + f"... [{len(stripped) - limit} more characters]"
+
+
+def log_command_output(label: str, returncode: int, stdout: str, stderr: str) -> None:
+    """Record captured output only when it can explain something: a failure, or
+    an explicit debug run. Successful commands stay a single line."""
+    failed = returncode != 0
+    if not failed and not debug_enabled():
+        return
+
+    level = logging.ERROR if failed else logging.DEBUG
+    if stdout.strip():
+        LOGGER.log(level, "%s stdout: %s", label, truncate_output(stdout))
+    if stderr.strip():
+        LOGGER.log(level, "%s stderr: %s", label, truncate_output(stderr))
 
 
 def setup_logging() -> Optional[Path]:
@@ -30,25 +68,51 @@ def setup_logging() -> Optional[Path]:
         # Logs folder belongs) is two directories up from the package.
         log_root = Path(__file__).resolve().parents[2] / "Logs"
         log_root.mkdir(parents=True, exist_ok=True)
-        LOG_FILE = log_root / f"muxcls_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+        LOG_FILE = log_root / f"muxcls_{started}_UTC.log"
 
-        LOGGER.setLevel(logging.DEBUG)
+        level = logging.DEBUG if debug_enabled() else logging.INFO
+        LOGGER.setLevel(level)
         LOGGER.handlers.clear()
         LOGGER.propagate = False
 
-        handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(message)s",
+        formatter = logging.Formatter(
+            "[%(asctime)s UTC] [%(levelname)s] [%(module)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
-        ))
+        )
+        formatter.converter = time.gmtime
+        handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        handler.setLevel(level)
+        handler.setFormatter(formatter)
         LOGGER.addHandler(handler)
-        LOGGER.info("MuxCls started")
-        LOGGER.info("MuxCls version: %s", APP_VERSION)
-        LOGGER.info("Python: %s", sys.version.replace("\n", " "))
-        LOGGER.info("OS: %s", platform.platform())
-        LOGGER.info("Log file: %s", LOG_FILE)
+
+        LOGGER.info(
+            "MuxCls %s started | python=%s | os=%s | log=%s",
+            APP_VERSION,
+            sys.version.split()[0],
+            platform.platform(),
+            LOG_FILE,
+        )
+        # The environment a run happened in is not reconstructable afterwards,
+        # and it is what most "it behaved differently on my machine" reports turn
+        # out to be about.
         LOGGER.info("Command line: %s", command_to_text(sys.argv))
+        LOGGER.info("Working directory: %s", Path.cwd())
+        LOGGER.info(
+            "Console: tty=%s encoding=%s size=%sx%s | filesystem encoding=%s",
+            getattr(sys.stdout, "isatty", lambda: False)(),
+            getattr(sys.stdout, "encoding", "?"),
+            shutil.get_terminal_size((80, 24)).columns,
+            shutil.get_terminal_size((80, 24)).lines,
+            sys.getfilesystemencoding(),
+        )
+        LOGGER.info(
+            "Settings: %s=%s | %s=%s",
+            DEBUG_ENV_VAR,
+            os.environ.get(DEBUG_ENV_VAR, "(unset)"),
+            OPERATION_TIMEOUT_ENV_VAR,
+            os.environ.get(OPERATION_TIMEOUT_ENV_VAR, "(unset, default 3h)"),
+        )
         return LOG_FILE
     except OSError as exc:
         print(warn(f"Logging disabled: {exc}"))
