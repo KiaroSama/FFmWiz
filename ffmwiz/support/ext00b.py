@@ -568,5 +568,9 @@ __all__ = [
 
 # ext00d holds an overflow slice of this module (split for file size).
 from ffmwiz.support import ext00d as _ext00d  # noqa: E402
-from ffmwiz.support.ext00d import *  # noqa: E402,F401,F403
-__all__ = list(__all__) + list(_ext00d.__all__)
+# Guard the direct-import case: importing this overflow module FIRST
+# re-enters the parent while the child has no __all__ yet.
+_ext00d_names = list(getattr(_ext00d, "__all__", []))
+if _ext00d_names:
+    from ffmwiz.support.ext00d import *  # noqa: E402,F401,F403
+    __all__ = list(__all__) + _ext00d_names
