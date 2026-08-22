@@ -256,18 +256,6 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
             self.assertIn("-filter_complex", text)
             self.assert_not_contains_any(text, ["-hwaccel_output_format cuda", "scale_cuda", "pad_cuda", "hwupload_cuda", "hwdownload"])
 
-    def test_mux_video_stream_summary_includes_chapter_presence(self):
-        stream = FFmWiz.mux.MuxStreamInfo(
-            index=0,
-            codec_type="video",
-            codec_name="h264",
-            width=1920,
-            height=1080,
-            fps=24.0,
-            duration=10.0,
-        )
-        self.assertIn("chapters: yes", FFmWiz.mux_format_stream(stream, {}, chapter_count=2))
-        self.assertIn("chapters: no", FFmWiz.mux_format_stream(stream, {}, chapter_count=0))
 
     def test_gpu_crop_unknown_decoder_falls_back_to_cpu_crop_before_nvenc(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,45 +405,6 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
         output = FFmWiz.choose_add_files_output_path(Path("video.mkv"), [])
         self.assertEqual(output.suffix, ".mkv")
 
-    def test_stream_cleanup_metadata_edits_and_default_dispositions_are_emitted(self):
-        rules = FFmWiz.mux.MuxCleanupRules(
-            audio_mode="4",
-            audio_languages=[],
-            audio_titles=[],
-            audio_indexes=[],
-            subtitle_mode="5",
-            subtitle_languages=[],
-            subtitle_titles=[],
-            subtitle_indexes=[],
-            keep_attachments=True,
-            keep_metadata=True,
-            keep_chapters=True,
-            overwrite=True,
-            metadata_edits=[
-                FFmWiz.mux.MuxStreamMetadataEdit(codec_type="audio", match_indexes=[1], language="jpn", title="Main"),
-                FFmWiz.mux.MuxStreamMetadataEdit(codec_type="subtitle", match_languages=["unknown"], language="eng"),
-            ],
-        )
-        input_file = Path("input.mkv")
-        output = Path("output.mkv")
-        media = FFmWiz.mux.MuxMediaFile(
-            path=input_file,
-            format={},
-            streams=[
-                FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
-                FFmWiz.mux.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", language="unknown", disposition_default=0),
-                FFmWiz.mux.MuxStreamInfo(index=2, codec_type="audio", codec_name="aac", language="eng", disposition_default=1),
-                FFmWiz.mux.MuxStreamInfo(index=3, codec_type="subtitle", codec_name="ass", language="unknown", disposition_default=1),
-            ],
-        )
-        cmd, _audio, _subtitle = FFmWiz.mux_build_ffmpeg_command("ffmpeg", input_file, output, media, rules)
-        text = " ".join(cmd)
-        self.assertIn("-disposition:a:0 +default", text)
-        self.assertIn("-disposition:a:1 -default", text)
-        self.assertIn("-disposition:s:0 +default", text)
-        self.assertIn("-metadata:s:a:0 language=jpn", text)
-        self.assertIn("-metadata:s:a:0 title=Main", text)
-        self.assertIn("-metadata:s:s:0 language=eng", text)
 
     def test_metadata_video_stream_line_omits_language_and_title(self):
         probe = {

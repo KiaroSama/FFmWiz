@@ -33,17 +33,6 @@ from ffmwiz.core.timeline import *  # noqa: F401,F403
 from ffmwiz.support.L00_misc import *  # sibling helpers  # noqa: F401,F403
 
 
-def mux_find_video_files(input_path: Path) -> list[Path]:
-    if input_path.is_file():
-        return [input_path] if input_path.suffix.lower() in MUX_CLEANUP_VIDEO_EXTS else []
-    if not input_path.is_dir():
-        return []
-    return sorted(
-        (path for path in input_path.rglob("*") if path.is_file() and path.suffix.lower() in MUX_CLEANUP_VIDEO_EXTS),
-        key=lambda path: str(path.relative_to(input_path)).lower(),
-    )
-
-
 def mux_normalize_language(value: str) -> str:
     text = str(value or "").strip().lower()
     return "unknown" if text in {"", "und", "undefined"} else text
@@ -646,7 +635,6 @@ def join_item_answers(base_answers: dict[str, Any], item: dict[str, Any]) -> dic
 
 
 __all__ = [
-    'mux_find_video_files',
     'mux_normalize_language',
     'mux_terminal_width',
     'mux_assign_prompt_number',

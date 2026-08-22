@@ -260,7 +260,6 @@ __all__ = [
     'COVER_ART_UNSUPPORTED_REASONS',
     'COVER_ART_COMMENT',
     'COVER_ART_METHOD_DESCRIPTIONS',
-    'cover_art_mime_type',
     'cover_art_method',
     'cover_art_rejection_reason',
     'metadata_block_picture_value',
