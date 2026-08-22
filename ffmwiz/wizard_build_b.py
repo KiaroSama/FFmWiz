@@ -57,6 +57,7 @@ from ffmwiz.support.L01_naming import *  # noqa: F401,F403
 from ffmwiz.support.L01_paths import *  # noqa: F401,F403
 from ffmwiz.support.L01_split import *  # noqa: F401,F403
 from ffmwiz.support.L01_streams import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import *  # noqa: F401,F403
 from ffmwiz.support.L01_text import *  # noqa: F401,F403
 from ffmwiz.support.L02 import *  # noqa: F401,F403
 from ffmwiz.support.L03 import *  # noqa: F401,F403
@@ -331,8 +332,82 @@ def join_extras_outcome_notes(answers: dict[str, Any], items: list[dict[str, Any
     if source_extra_video_keep_enabled(answers) and additional_source_video_streams(answers):
         lines.append("Join extras -- Extra video streams: dropped; the join graph produces one video stream.")
     if answers.get("subtitle_tracks") or (source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")):
-        lines.append("Join extras -- Subtitles: dropped; the joined re-encode maps no subtitle stream (-sn).")
+        plan = join_subtitle_plan(answers, items)
+        if plan.get("supported"):
+            carried = sum(1 for _i, stream, _d in plan["segments"] if stream is not None)
+            lines.append(
+                f"Join extras -- Subtitles: one merged text track from {carried} of "
+                f"{len(plan['segments'])} input(s), shifted onto the joined timeline.")
+        else:
+            lines.append(f"Join extras -- Subtitles: dropped - {plan.get('reason') or 'unavailable'}.")
     return lines
+
+
+def build_joined_subtitle_file(answers: dict[str, Any], items: list[dict[str, Any]]) -> Path | None:
+    """Extract, shift and merge each input's text subtitle into one SRT.
+
+    Returns the merged file, or None when the join cannot carry subtitles -- in
+    which case the reason is logged and shown, because the wizard asked the user
+    about subtitles and owes them an answer either way.
+
+    The temp directory is recorded on `answers` so the existing cleanup path
+    removes it with the rest of the join scratch files.
+    """
+    plan = join_subtitle_plan(answers, items)
+    if not plan.get("supported"):
+        reason = plan.get("reason") or "unavailable"
+        if reason != "no subtitle track was selected":
+            appio.note(f"Joined subtitles: not assembled - {reason}.")
+            log_info(f"Joined subtitles skipped: {reason}")
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="ffmwiz_join_subs_"))
+    answers["_join_subtitle_temp_dir"] = str(temp_dir)
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    segments: list[tuple[str, float]] = []
+    extracted = 0
+    for index, (item, stream, duration) in enumerate(plan["segments"]):
+        text = ""
+        if stream is not None:
+            relative = 0
+            for candidate in item.get("subtitle_streams") or []:
+                if candidate is stream:
+                    break
+                relative += 1
+            part = temp_dir / f"part{index:02d}.srt"
+            command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                       "-i", str(item["path"]), "-map", f"0:s:{relative}",
+                       "-c:s", "srt", str(part)]
+            try:
+                result = subprocess.run(command, capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=300)
+                if result.returncode == 0 and part.exists():
+                    text = part.read_text(encoding="utf-8", errors="replace")
+                    extracted += 1
+                else:
+                    log_warn(
+                        f"Joined subtitles: could not extract from {Path(item['path']).name} "
+                        f"(exit {result.returncode})")
+            except (OSError, subprocess.SubprocessError) as exc:
+                log_warn(f"Joined subtitles: extraction failed for {Path(item['path']).name}: {exc}")
+        segments.append((text, duration))
+
+    if not extracted:
+        appio.note("Joined subtitles: no cues could be extracted; the output has no subtitle track.")
+        return None
+    merged_text = merge_joined_srt(segments)
+    if not merged_text.strip():
+        appio.note("Joined subtitles: the selected tracks contained no cues.")
+        return None
+    merged = temp_dir / "joined.srt"
+    merged.write_text(merged_text, encoding="utf-8", newline="\n")
+    log_info(
+        f"Joined subtitles: merged {extracted}/{len(plan['segments'])} input track(s) "
+        f"into {merged}")
+    appio.note(
+        f"Joined subtitles: assembled one track from {extracted} input(s) "
+        "with each input's cues shifted onto the joined timeline.")
+    return merged
 
 
 def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
@@ -366,6 +441,15 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         if use_cuda_decode_complex:
             append_cuda_decode_args_for_input(cmd, join_answers)
         cmd.extend(["-i", str(item["path"])])
+
+    # The concat FILTER cannot carry subtitles, so a joined subtitle track has
+    # to be assembled separately: each input's cues shifted by that input's
+    # start offset, merged, and fed back as one extra input.
+    joined_subtitle_path = build_joined_subtitle_file(join_answers, items)
+    joined_subtitle_input = None
+    if joined_subtitle_path is not None:
+        joined_subtitle_input = len(items)
+        cmd.extend(["-i", str(joined_subtitle_path)])
 
     selected_audio = selected_audio_streams(join_answers) if join_answers.get("audio_streams") else []
     if not selected_audio and any(item.get("audio_streams") for item in items):
@@ -514,10 +598,21 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         cmd.extend(["-map", f"[{video_outputs[part_idx]}]"])
         for audio_label in audio_outputs_by_part[part_idx]:
             cmd.extend(["-map", f"[{audio_label}]"])
+        subtitle_args: list[str] = []
+        if joined_subtitle_input is not None:
+            target, problems = subtitle_codec_args_for_container(
+                str(output_path.suffix), ["subrip"])
+            for problem in problems:
+                log_warn(f"Joined subtitles: {problem}")
+            if target:
+                cmd.extend(["-map", f"{joined_subtitle_input}:s:0"])
+                subtitle_args = target
         attachments_mapped = append_embedded_attachment_maps(cmd, join_answers)
         data_mapped = append_source_data_maps(cmd, join_answers)
         append_source_metadata_chapter_options(cmd, join_answers)
-        append_negative_stream_options(cmd, join_answers, True, [], data_mapped)
+        append_negative_stream_options(
+            cmd, join_answers, True, [0] if subtitle_args else [], data_mapped)
+        cmd.extend(subtitle_args)
         wizard.append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
         if vfr_join and video_encoder != "copy":
             # Preserve variable timing across the joined segments instead of

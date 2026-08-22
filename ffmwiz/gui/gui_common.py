@@ -343,7 +343,15 @@ def _set_qt_application_icon(app) -> None:
         _gui_log_debug(f"Could not set QApplication icon: {exc}", force=True)
 
 
-def _apply_window_icon(window, icon_loader) -> None:
+def _apply_window_icon(window, icon_loader, native: bool = True) -> None:
+    """Set the window icon. `native=False` skips the HWND stamp.
+
+    The native stamp calls window.winId(), which FORCES Qt to create a real
+    Windows window handle. For an editor that is about to be reparented into a
+    tab that handle is pure waste, and reparenting an already-realized native
+    widget tree is expensive: measured at 5.07 s for the Audio Cut editor alone.
+    An embedded editor never appears in the taskbar, so it has no use for it.
+    """
     try:
         icon = _qt_app_icon()
         if icon is None or icon.isNull():
@@ -352,7 +360,8 @@ def _apply_window_icon(window, icon_loader) -> None:
             _gui_log_debug(f"Window icon is null for {window.windowTitle()}", force=True)
             return
         window.setWindowIcon(icon)
-        _apply_native_windows_icon(window)
+        if native:
+            _apply_native_windows_icon(window)
         _gui_log_debug(f"Set window icon for {window.windowTitle()}", force=True)
     except Exception as exc:
         _gui_log_debug(f"Could not set window icon for {window.windowTitle()}: {exc}", force=True)

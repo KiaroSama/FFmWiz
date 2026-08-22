@@ -247,7 +247,10 @@ def build_audio_cut_editor(request: dict[str, Any]):
             self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_waveform_")
             self._wave_path = Path(self._wave_temp.name) / "waveform.png"
             self.setWindowTitle("FFmWiz Audio Cut Editor")
-            _apply_window_icon(self, self._icon)
+            # An embedded editor is reparented into a tab, so it must not be
+            # given a native window handle it will never use.
+            _apply_window_icon(self, self._icon,
+                               native=not bool(self.request.get("_embedded")))
             self.setMinimumSize(1080, 620)
             self.resize(1240, 720)
             self._build_ui()
@@ -705,6 +708,7 @@ def build_audio_transform_editor(request: dict[str, Any]):
         def _child_request(self, mode: str) -> dict[str, Any]:
             child = dict(self.request)
             child["mode"] = mode
+            child["_embedded"] = True
             return child
 
         def _embed_editor(self, title: str, editor: Any) -> QWidget:
@@ -717,6 +721,28 @@ def build_audio_transform_editor(request: dict[str, Any]):
             widget.setParent(self)
             _hide_embedded_editor_actions(widget)
             return widget
+
+        def _ensure_speed_editor(self, index: int = -1) -> Any:
+            """Build the Speed / Reverse editor on first use.
+
+            Called from the tab-change signal, so a user who opens the tab gets the
+            real editor; confirm() keeps the defaults when it was never opened.
+            """
+            if self.speed_editor is not None:
+                return self.speed_editor
+            if index != -1 and index != self._speed_tab_index:
+                return None
+            self.speed_editor = build_speed_editor(self._child_request("audio_speed"), "audio")
+            placeholder = self.tabs.widget(self._speed_tab_index)
+            self.tabs.removeTab(self._speed_tab_index)
+            self.tabs.insertTab(
+                self._speed_tab_index,
+                self._embed_editor("Speed / Reverse", self.speed_editor),
+                "Speed / Reverse")
+            self.tabs.setCurrentIndex(self._speed_tab_index)
+            if placeholder is not None:
+                placeholder.deleteLater()
+            return self.speed_editor
 
         def _build_ui(self):
             central = QWidget()
@@ -738,9 +764,15 @@ def build_audio_transform_editor(request: dict[str, Any]):
 
             self.tabs = QTabWidget()
             self.cut_editor = build_audio_cut_editor(self._child_request("audio_cut"))
-            self.speed_editor = build_speed_editor(self._child_request("audio_speed"), "audio")
             self.tabs.addTab(self._embed_editor("Audio Cut", self.cut_editor), "Audio Cut")
-            self.tabs.addTab(self._embed_editor("Speed / Reverse", self.speed_editor), "Speed / Reverse")
+            # The Speed / Reverse editor costs ~2.5 s to construct (its own
+            # QMediaPlayer loads the media), and its tab is not visible at
+            # startup, so building it here is pure wait for the user. Add a
+            # placeholder and swap in the real editor the first time the tab is
+            # opened -- or on confirm, if it was never opened.
+            self.speed_editor = None
+            self._speed_tab_index = self.tabs.addTab(QWidget(), "Speed / Reverse")
+            self.tabs.currentChanged.connect(self._ensure_speed_editor)
             root.addWidget(self.tabs, 1)
 
             footer = QHBoxLayout()
@@ -770,8 +802,11 @@ def build_audio_transform_editor(request: dict[str, Any]):
             speed = 1.0
             reverse = False
             try:
-                speed = float(self.speed_editor._speed())
-                reverse = bool(self.speed_editor.reverse_box.isChecked())
+                # Never opened the tab -> never edited speed/reverse, so the
+                # defaults above are already correct; do not pay to build it.
+                if self.speed_editor is not None:
+                    speed = float(self.speed_editor._speed())
+                    reverse = bool(self.speed_editor.reverse_box.isChecked())
             except Exception:
                 pass
             self.result = {

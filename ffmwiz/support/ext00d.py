@@ -462,6 +462,17 @@ def step_hardsub_audio_container_policy(answers: dict[str, Any]) -> None:
 
 
 def cleanup_join_concat_list(answers: dict[str, Any]) -> None:
+    # The merged joined-subtitle file lives in its own temp directory; it is
+    # created during command build, so it has to be cleaned on the same paths
+    # that clean the concat list -- success, cancel and failure alike.
+    subtitle_dir = answers.pop("_join_subtitle_temp_dir", None)
+    if subtitle_dir:
+        try:
+            shutil.rmtree(subtitle_dir, ignore_errors=True)
+            log_debug(f"Removed temporary joined-subtitle directory: {subtitle_dir}")
+        except Exception:
+            log_exception("Could not remove temporary joined-subtitle directory")
+
     list_path = answers.pop("_join_concat_list", None)
     if not list_path:
         return
