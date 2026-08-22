@@ -531,14 +531,20 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             self.assertEqual(answers["loudnorm_mode"], "off")
 
     # ================= Missing-audio handling =================
-    def test_join_missing_audio_raises_listing_files(self):
+    def test_join_missing_audio_gets_silence_and_names_the_file(self):
+        # This join used to be refused outright while the standalone join path
+        # accepted the identical files by synthesising silence.
         with tempfile.TemporaryDirectory() as tmp:
             answers, items = self.join_answers(tmp)
             # Remove audio from the middle joined input.
             items[1]["audio_streams"] = []
-            with self.assertRaises(RuntimeError) as ctx:
-                FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4")
-            self.assertIn("B.mov", str(ctx.exception))
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                cmd = FFmWiz.build_join_encode_command(answers, items, Path(tmp) / "out.mp4")
+            fc = next(cmd[i + 1] for i, a in enumerate(cmd) if a == "-filter_complex")
+            self.assertIn("anullsrc=channel_layout=stereo:sample_rate=", fc)
+            self.assertIn("concat=n=3:v=1:a=1", fc)
+            self.assertIn("B.mov", buffer.getvalue())
 
     # ================= Audio+Video Join (auto-detect) =================
     def test_join_load_media_item_rejects_audio_only_by_default(self):

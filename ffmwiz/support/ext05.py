@@ -223,7 +223,7 @@ def build_audio_transform_command(answers: dict[str, Any]) -> list[str]:
         filter_complex,
         "-map",
         f"[{labels[0]}]",
-        "-vn",
+        *audio_tool_picture_args(answers, answers["output_ext"]),
         "-sn",
         "-dn",
     ]
@@ -270,6 +270,17 @@ def step_audio_speed_start_now(answers: dict[str, Any]) -> None:
 def step_audio_cut_start_now(answers: dict[str, Any]) -> None:
     if answers.get("_audio_cut_noop"):
         return
+    answers["output_ext"] = resolve_audio_tool_output_ext(answers)
+    if audio_cut_stream_copy_available(answers):
+        answers["audio_cut_stream_copy"] = appio.ask_yes_no(
+            appio.question_prompt(
+                answers,
+                "Trim without re-encoding (lossless)?",
+                "y/n; the cut snaps to the nearest audio packet (a few ms); n re-encodes for an exact cut",
+                "y",
+            ),
+            True,
+        )
     cmd = build_audio_cut_command(answers)
     answers["cmd"] = cmd
     print_transform_summary(answers, cmd, "Audio Cut")
