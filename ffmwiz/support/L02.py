@@ -671,7 +671,10 @@ def join_copy_compatibility(items: list[dict[str, Any]]) -> tuple[bool, list[str
             reasons.append("input containers/extensions differ")
             break
         if join_stream_signature(item) != first_sig:
-            reasons.append("stream layout, codec, resolution, fps, pixel format, or audio layout differs")
+            reasons.append(
+                "stream layout, codec, resolution, fps, pixel format, aspect ratio, "
+                "codec profile/level, or audio layout differs"
+            )
             break
     return not reasons, reasons
 
@@ -695,7 +698,8 @@ def join_signature_without_fps(item: dict[str, Any]) -> list[tuple[Any, ...]]:
     result: list[tuple[Any, ...]] = []
     for entry in join_stream_signature(item):
         if entry and entry[0] == "video":
-            # video tuple: ("video", codec, width, height, fps, pix_fmt)
+            # video tuple: ("video", codec, w, h, fps, pix_fmt, sar, profile,
+            # level, field_order) -- drop only the fps element at index 4.
             result.append(entry[:4] + entry[5:])
         else:
             result.append(entry)
