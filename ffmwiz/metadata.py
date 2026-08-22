@@ -324,24 +324,42 @@ def run_cover_picture_editor(answers: dict[str, Any]) -> None:
                     print("  " + metadata_stream_line(probe, stream))
                 continue
             if choice in {"1", "2"}:
-                cover = terminal_path(appio.ask_required(metadata_prompt(answers, "Enter cover image path", "jpg, jpeg, png, or webp")))
-                if not cover.exists() or not cover.is_file():
-                    appio.error("Cover image was not found.")
+                cover = terminal_path(appio.ask_required(metadata_prompt(answers, "Enter cover image path", "jpg, jpeg, or png")))
+                container_ext = input_path.suffix.lstrip(".").lower()
+                # One validation for image type, missing file AND container. The
+                # old code applied the MP4 attached_pic recipe to every
+                # container: Matroska needs an -attach, Opus/Ogg need a base64
+                # METADATA_BLOCK_PICTURE tag, and .mov accepts the command but
+                # writes no picture at all.
+                reason = cover_art_rejection_reason(container_ext, cover)
+                if reason:
+                    appio.error(reason)
                     continue
-                if cover.suffix.lower().lstrip(".") not in {"jpg", "jpeg", "png", "webp"}:
-                    appio.error("Unsupported cover image extension. Use jpg, jpeg, png, or webp.")
-                    continue
-                if input_path.suffix.lower() in {".mp4", ".m4a", ".m4v", ".mov"} and cover.suffix.lower() not in {".jpg", ".jpeg"}:
-                    appio.note("MP4-like containers usually expect JPEG cover art.")
                 output_path = metadata_output_path(input_path, "_cover_replaced" if choice == "2" else "_cover_added")
-                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path), "-i", str(cover), "-map", "0"]
+                cmd = [answers["ffmpeg"], "-hide_banner", "-y", "-i", str(input_path)]
+                cmd.extend(cover_art_input_args(container_ext, cover))
+                cmd.append("-map")
+                cmd.append("0")
                 if choice == "2":
                     for stream in attached:
                         cmd.extend(["-map", f"-0:v:{metadata_stream_relative_index(probe, stream)}"])
-                video_count_after_removal = len([s for s in probe.get("streams") or [] if metadata_stream_type(s) == "video"]) - (len(attached) if choice == "2" else 0)
-                attached_idx = max(0, video_count_after_removal)
-                cmd.extend(["-map", "1", "-c", "copy", f"-c:v:{attached_idx}", "mjpeg", f"-disposition:v:{attached_idx}", "attached_pic", str(output_path)])
-                appio.note("Attached picture support varies by container. This operation uses stream copy and only converts the added image stream when FFmpeg requires MJPEG.")
+                real_video_streams = len([
+                    s for s in probe.get("streams") or []
+                    if metadata_stream_type(s) == "video"
+                ]) - len(attached)
+                cmd.extend(["-map_metadata", "0", "-c", "copy"])
+                cmd.extend(cover_art_output_args(
+                    container_ext, cover,
+                    cover_input_index=1,
+                    mapped_video_streams=max(0, real_video_streams),
+                    existing_attachments=len(metadata_attachment_streams(probe)),
+                ))
+                cmd.append(str(output_path))
+                appio.note(
+                    f"Cover art for .{container_ext} is written as "
+                    f"{COVER_ART_METHOD_DESCRIPTIONS[cover_art_method(container_ext)]}; "
+                    "the media streams are copied unchanged."
+                )
                 if runner.confirm_and_run_ffmpeg(answers, cmd, "Cover / Attached Picture Editor", output_path):
                     metadata_set_current_input(answers, output_path)
             elif choice == "3":
