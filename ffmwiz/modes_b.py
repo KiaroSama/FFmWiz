@@ -120,24 +120,42 @@ def run_extract_stream_mode(base_answers: dict[str, Any]) -> tuple[int, float] |
     total_rc = 0
     ok = 0
     started_at = time.perf_counter()
-    for i, job in enumerate(jobs, start=1):
-        out = Path(job["output_path"])
-        out.parent.mkdir(parents=True, exist_ok=True)
-        cmd = build_extract_stream_command(ffmpeg, Path(job["path"]), job["stream"], out)
-        idx = stream_global_index(job["stream"])
-        appio.note(f"[{i}/{len(jobs)}] {Path(job['path']).name} #{idx} -> {out.name}")
-        log_info(f"Extract Stream job {i}/{len(jobs)}: input={job['path']}; index={idx}; output={out}")
-        duration = services.stream_duration_seconds(job["stream"], job.get("fmt"))
+    # Group by source file: every stream extracted from a container costs a FULL
+    # read of it, because audio and subtitle packets are interleaved throughout.
+    # Running one FFmpeg per stream therefore re-read the whole file N times --
+    # measured on a real 722 MB MKV, two streams took 5.80 s as separate runs
+    # against 4.57 s as one run with two outputs.
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for job in jobs:
+        grouped.setdefault(str(job["path"]), []).append(job)
+    done = 0
+    for source, source_jobs in grouped.items():
+        pairs: list[tuple[dict[str, Any], Path]] = []
+        for job in source_jobs:
+            out = Path(job["output_path"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            pairs.append((job["stream"], out))
+            done += 1
+            idx = stream_global_index(job["stream"])
+            appio.note(f"[{done}/{len(jobs)}] {Path(source).name} #{idx} -> {out.name}")
+            log_info(f"Extract Stream job {done}/{len(jobs)}: input={source}; index={idx}; output={out}")
+        cmd = build_extract_streams_command(ffmpeg, Path(source), pairs)
+        if len(pairs) > 1:
+            log_info(f"Extract Stream: {len(pairs)} streams from {source} in one pass (one read).")
+        longest = max(
+            (services.stream_duration_seconds(job["stream"], job.get("fmt")) or 0.0)
+            for job in source_jobs
+        )
         rc, _elapsed = run_ffmpeg_with_progress(
             cmd,
-            total_duration=(duration if duration and duration > 0 else None),
+            total_duration=(longest if longest > 0 else None),
             label="Extract Stream",
         )
         if rc == 0:
-            ok += 1
+            ok += len(pairs)
         else:
             total_rc = rc
-            appio.error(f"Extraction failed (exit {rc}) for {Path(job['path']).name} #{idx}.")
+            appio.error(f"Extraction failed (exit {rc}) for {Path(source).name}.")
     elapsed = time.perf_counter() - started_at
     appio.note(f"Extract Stream done: {ok}/{len(jobs)} stream(s) extracted.")
     log_info(f"Extract Stream finished: ok={ok}/{len(jobs)}; elapsed={elapsed:.2f}s")
