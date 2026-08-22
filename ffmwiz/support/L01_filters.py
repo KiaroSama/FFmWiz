@@ -93,18 +93,20 @@ def crop_margins_validation_message(
     right: int,
     bottom: int,
 ) -> str | None:
-    source_w, source_h = first_video_size(answers)
+    # Every joined input receives the SAME crop string, so the limit is the
+    # smallest input, not the first one.
+    source_w, source_h = smallest_video_size(answers)
     if min(top, left, right, bottom) < 0:
         return "Invalid crop margins: crop values must be zero or positive."
     if left + right >= source_w:
         return (
             f"Invalid crop margins: left + right ({left + right} px) must be "
-            f"smaller than source width ({source_w} px)."
+            f"smaller than the smallest input width ({source_w} px)."
         )
     if top + bottom >= source_h:
         return (
             f"Invalid crop margins: top + bottom ({top + bottom} px) must be "
-            f"smaller than source height ({source_h} px)."
+            f"smaller than the smallest input height ({source_h} px)."
         )
     return None
 

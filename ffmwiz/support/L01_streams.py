@@ -148,6 +148,16 @@ def build_extract_stream_command(ffmpeg: str, input_path: Path, stream: dict[str
     return cmd
 
 
+def normalized_sar_text(value: Any) -> str:
+    """Comparable SAR text. "", "0:1", "1:1" and None all mean square pixels, so
+    they must normalise to the same string or files that simply omit the field
+    would be treated as incompatible."""
+    text = str(value or "").strip().lower()
+    if text in {"", "0:1", "1:1", "n/a", "0/1", "1/1"}:
+        return "1:1"
+    return text.replace("/", ":")
+
+
 def join_stream_signature(item: dict[str, Any]) -> list[tuple[Any, ...]]:
     signature: list[tuple[Any, ...]] = []
     for stream in item.get("streams") or []:
@@ -155,6 +165,12 @@ def join_stream_signature(item: dict[str, Any]) -> list[tuple[Any, ...]]:
         if codec_type not in {"video", "audio", "subtitle"}:
             continue
         if codec_type == "video":
+            # SAR, profile, level and field order belong in the signature: the
+            # concat demuxer labels the WHOLE output with input 0's values, so
+            # two 320x240 clips with SAR 1:1 and SAR 2:1 were declared
+            # copy-compatible and the second one played squashed for its entire
+            # half of the runtime. An unset value normalises to "" so files that
+            # simply do not declare a SAR still compare equal.
             signature.append(
                 (
                     "video",
@@ -163,6 +179,10 @@ def join_stream_signature(item: dict[str, Any]) -> list[tuple[Any, ...]]:
                     int(stream.get("height") or 0),
                     round(rational_to_float(stream.get("avg_frame_rate")) or rational_to_float(stream.get("r_frame_rate")) or 0.0, 3),
                     str(stream.get("pix_fmt") or "").lower(),
+                    normalized_sar_text(stream.get("sample_aspect_ratio")),
+                    str(stream.get("profile") or "").lower(),
+                    str(stream.get("level") if stream.get("level") is not None else ""),
+                    str(stream.get("field_order") or "").lower(),
                 )
             )
         elif codec_type == "audio":
@@ -189,4 +209,5 @@ __all__ = [
     'extract_stream_candidates',
     'build_extract_stream_command',
     'join_stream_signature',
+    'normalized_sar_text',
 ]
