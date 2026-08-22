@@ -30,9 +30,16 @@ from urllib.parse import unquote, urlparse
 
 for _stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(errors="replace")
+        # encoding, not just errors: reconfiguring errors alone left the stream
+        # on the console code page, so the progress separator and any non-ASCII
+        # path printed as '?' or mojibake under cp437/cp850/cp1252.
+        # Windows 10+ consoles render UTF-8 regardless of the active code page.
+        _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
-        pass
+        try:
+            _stream.reconfigure(errors="replace")
+        except Exception:
+            pass
 
 
 # Search tag for the large in-code FFmpeg reference:
@@ -70,6 +77,7 @@ from ffmwiz.support.L00_split import *  # noqa: F401,F403  (extracted helper lay
 from ffmwiz.support.L00_streams import *  # noqa: F401,F403  (extracted helper layer)
 from ffmwiz.support.L00_text import *  # noqa: F401,F403  (extracted helper layer)
 from ffmwiz.support.L01_audio import *  # noqa: F401,F403  (extracted helper layer)
+from ffmwiz.support.L01_cover import *  # noqa: F401,F403
 from ffmwiz.support.L01_color_range import *  # noqa: F401,F403  (extracted helper layer)
 from ffmwiz.support.L01_encode_opts import *  # noqa: F401,F403  (extracted helper layer)
 from ffmwiz.support.L01_filters import *  # noqa: F401,F403  (extracted helper layer)

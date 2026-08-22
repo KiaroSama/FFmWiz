@@ -89,6 +89,19 @@ def metadata_attached_picture_streams(probe: dict[str, Any]) -> list[dict[str, A
     ]
 
 
+def metadata_attachment_streams(probe: dict[str, Any]) -> list[dict[str, Any]]:
+    """Real Matroska attachments (fonts, covers), not attached_pic video streams.
+
+    The count matters because `-metadata:s:t mimetype=...` without an index
+    retags EVERY attachment, which relabels an existing subtitle font as an
+    image.
+    """
+    return [
+        stream for stream in (probe.get("streams") or [])
+        if metadata_stream_type(stream) == "attachment"
+    ]
+
+
 def write_copy_cut_chapter_metadata(plan: dict[str, Any], temp_dir: Path) -> Path:
     metadata_path = temp_dir / "chapters.ffmetadata"
     lines = [";FFMETADATA1", ""]
@@ -114,5 +127,6 @@ __all__ = [
     'write_encode_chapter_metadata',
     'metadata_stream_spec',
     'metadata_attached_picture_streams',
+    'metadata_attachment_streams',
     'write_copy_cut_chapter_metadata',
 ]
