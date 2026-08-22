@@ -18,8 +18,22 @@ dependencies = [
     "PySide6==6.11.1",
 ]
 
-[tool.setuptools]
-py-modules = ["FFmWiz"]
+[project.scripts]
+ffmwiz = "FFmWiz:main"
 
-[tool.py_compile_check]
-files = ["FFmWiz.py", "ffmwiz/gui/ffmwiz_gui.py", "ffmwiz/gui/ffmwiz_gui_qml.py"]
+[tool.setuptools]
+# The top-level launcher is only the thin entry point; without the package and
+# its runtime assets an installed wheel cannot even `import FFmWiz`.
+py-modules = ["FFmWiz"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["ffmwiz*"]
+# Keep namespace discovery on: ffmwiz/gui and ffmwiz/gui/qml have no
+# __init__.py, so an explicit `packages = [...]` list would silently drop them.
+namespaces = true
+
+[tool.setuptools.package-data]
+# Icons, cursors and the QML scene are loaded at runtime from inside the
+# package, so they have to ship with it.
+"ffmwiz" = ["assets/**/*", "gui/qml/*.qml"]
