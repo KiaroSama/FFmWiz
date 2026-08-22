@@ -294,8 +294,6 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_runtime_owns_progress_console_state(self):
         state_names = (
             "_VT_MODE_ATTEMPTED",
-            "_PROGRESS_LAST_LEN",
-            "_PROGRESS_LAST_ROWS",
             "_PROGRESS_FINALIZED",
             "_WINDOWS_CONSOLE_CHECKED",
             "_WINDOWS_CONSOLE_OK",

@@ -144,13 +144,16 @@ def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
             tb = traceback.format_exc()
             log_exception(f"Qt GUI subprocess failed: {exc}")
             return {"status": "error", "message": f"Qt GUI subprocess failed: {exc}", "traceback": tb}
-        if result.stdout:
-            log_debug("Qt GUI stdout: " + result.stdout.rstrip())
-        if result.stderr:
-            if result.returncode == 0:
-                log_debug("Qt GUI stderr: " + result.stderr.rstrip())
-            else:
-                log_error("Qt GUI stderr: " + result.stderr.rstrip())
+        # One log record PER LINE. Writing the whole capture as a single record
+        # left every line after the first without a timestamp or level, which is
+        # most of a real GUI session's log.
+        for line in (result.stdout or "").splitlines():
+            if line.strip():
+                log_debug("Qt GUI stdout: " + line.rstrip())
+        emit = log_debug if result.returncode == 0 else log_error
+        for line in (result.stderr or "").splitlines():
+            if line.strip():
+                emit("Qt GUI stderr: " + line.rstrip())
         if result.returncode != 0:
             try:
                 payload = json.loads(rep_path.read_text(encoding="utf-8"))

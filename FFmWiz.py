@@ -631,8 +631,9 @@ def main() -> int:
             continue
         return_code, elapsed = result
         print()
+        # appio.note() already writes its own INFO record; logging it again
+        # put every "Total time elapsed" line in the log twice.
         appio.note(f"Total time elapsed: {format_elapsed(elapsed)}")
-        log_info(f"Total time elapsed: {format_elapsed(elapsed)}")
         if return_code == 0:
             appio.note("FFmpeg finished successfully. Returning to the first question.")
             log_info("FFmpeg finished successfully.")

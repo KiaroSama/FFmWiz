@@ -214,8 +214,6 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
 # added, this state belongs on a renderer object created per run -- two
 # concurrent runs would otherwise interleave and steal each other's final line.
 _VT_MODE_ATTEMPTED = False
-_PROGRESS_LAST_LEN = 0
-_PROGRESS_LAST_ROWS = 0
 _PROGRESS_FINALIZED = False
 _WINDOWS_CONSOLE_CHECKED = False
 _WINDOWS_CONSOLE_OK = False
@@ -264,14 +262,11 @@ def _stdout_supports_in_place_progress() -> bool:
 def _begin_progress_render() -> None:
     """Reset the per-run progress finalize guard. Call once before a run's first
     progress line so a fresh final line can be committed for this run."""
-    global _PROGRESS_FINALIZED, _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS
+    global _PROGRESS_FINALIZED
     _PROGRESS_FINALIZED = False
-    _PROGRESS_LAST_LEN = 0
-    _PROGRESS_LAST_ROWS = 0
 
 
 def _write_progress_line(rendered: str) -> None:
-    global _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS
     # The run's final line was already committed; ignore late repaints so the
     # completed 100% line is not duplicated by post-end queue-drain ticks.
     if _PROGRESS_FINALIZED:
@@ -288,12 +283,10 @@ def _write_progress_line(rendered: str) -> None:
     rendered = _truncate_ansi_visible(rendered, max(1, width - 1))
     sys.stdout.write("\r\033[2K" + rendered)
     sys.stdout.flush()
-    _PROGRESS_LAST_LEN = _visible_len(rendered)
-    _PROGRESS_LAST_ROWS = 1
 
 
 def _finish_progress_line(rendered: str | None) -> None:
-    global _PROGRESS_LAST_LEN, _PROGRESS_LAST_ROWS, _PROGRESS_FINALIZED
+    global _PROGRESS_FINALIZED
     # Only the first finalize for a run commits the final line; subsequent
     # finalize calls (post-loop fallback, late ticks) are ignored.
     if _PROGRESS_FINALIZED:
@@ -303,8 +296,6 @@ def _finish_progress_line(rendered: str | None) -> None:
         if not _stdout_supports_in_place_progress():
             sys.stdout.write(rendered + "\n")
             sys.stdout.flush()
-            _PROGRESS_LAST_LEN = 0
-            _PROGRESS_LAST_ROWS = 0
             return
         _enable_windows_vt_mode()
         width = _progress_terminal_width()
@@ -313,8 +304,6 @@ def _finish_progress_line(rendered: str | None) -> None:
     else:
         sys.stdout.write("")
     sys.stdout.flush()
-    _PROGRESS_LAST_LEN = 0
-    _PROGRESS_LAST_ROWS = 0
 
 
 def _render_initial_progress_line(label: str, detail: str, started_at: float) -> str:

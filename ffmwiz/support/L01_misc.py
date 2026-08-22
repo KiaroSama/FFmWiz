@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import re
+import unicodedata
 import math
 import json
 import time
@@ -116,7 +117,18 @@ def _qml_gui_path() -> Path:
 
 
 def _visible_len(text: str) -> int:
-    return len(_strip_ansi(text))
+    """Terminal COLUMNS the text occupies, not codepoints.
+
+    A CJK or emoji filename in a progress label is double-width, so counting
+    codepoints under-measured the line and the one-row clamp let it wrap.
+    """
+    plain = _strip_ansi(text)
+    width = 0
+    for char in plain:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
 
 
 def _progress_seconds_from_state(state: dict[str, str]) -> float:
