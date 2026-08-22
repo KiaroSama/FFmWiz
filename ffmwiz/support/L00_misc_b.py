@@ -136,7 +136,10 @@ def choose_folder_representative(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def launcher_content() -> str:
-    script_name = Path(__file__).name
+    # NOT Path(__file__).name: this module used to BE FFmWiz.py, so after the
+    # package split the template started pointing every fresh launcher at
+    # 'L00_misc_b.py' and every clean install got a run.ps1 that cannot start.
+    script_name = MAIN_SCRIPT_FILE_NAME
     return f"""param(
     [Parameter(ValueFromRemainingArguments = $true)]
     $ScriptArgs
@@ -333,6 +336,31 @@ def first_video_size(answers: dict[str, Any]) -> tuple[int, int]:
     if width <= 0 or height <= 0:
         raise ValueError("Could not detect source video dimensions.")
     return width, height
+
+
+def smallest_video_size(answers: dict[str, Any]) -> tuple[int, int]:
+    """Smallest width/height across the primary input AND every joined input.
+
+    Crop margins are validated once and then applied to every input of a join,
+    so validating them against input 0 alone let a margin that is legal for a
+    1920x1080 first clip produce `crop=iw-800-800` on a 640x480 later clip --
+    a negative width that FFmpeg rejects with "Invalid too big or non positive
+    size for width '-960'".
+    """
+    widths: list[int] = []
+    heights: list[int] = []
+    streams = list(answers.get("video_streams") or [])
+    for item in answers.get("join_input_items") or []:
+        streams.extend(list(item.get("video_streams") or [])[:1])
+    for stream in streams:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+        if width > 0 and height > 0:
+            widths.append(width)
+            heights.append(height)
+    if not widths:
+        return first_video_size(answers)
+    return min(widths), min(heights)
 
 
 def preview_size(source_width: int, source_height: int) -> tuple[int, int]:
@@ -628,6 +656,7 @@ __all__ = [
     'parse_selection_config',
     'is_back_value',
     'first_video_size',
+    'smallest_video_size',
     'preview_size',
     'video_codec_is_copy',
     '_folder_validation_items',
