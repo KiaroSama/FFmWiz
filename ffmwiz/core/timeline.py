@@ -84,9 +84,19 @@ def seconds_to_hmsf(seconds: float, fps: float) -> str:
     if fps <= 0:
         fps = 25.0
     fps_int = max(1, round(fps))
-    total_frames = int(round(float(seconds) * fps))
-    frame = total_frames % fps_int
-    whole_seconds = total_frames // fps_int
+    # Split whole seconds and frames from the SAME clock. The old code counted
+    # total frames at the TRUE rate (23.976) and then divided by the ROUNDED one
+    # (24), losing (fps_int - fps) / fps_int per second -- 3.58 s per hour at
+    # 23.976/29.97/59.94. That also made this the non-inverse of
+    # parse_hmsf_time, so a value read off the editor and typed back landed
+    # several seconds away. Wall-clock h:m:s is now exact at every rate and
+    # `whole_seconds + frame / fps` reproduces the input.
+    seconds = float(seconds)
+    whole_seconds = int(seconds)
+    frame = int(round((seconds - whole_seconds) * fps))
+    if frame >= fps_int:
+        frame = 0
+        whole_seconds += 1
     hours, remainder = divmod(whole_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}:{frame:02d}"
