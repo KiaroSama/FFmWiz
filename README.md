@@ -1,4 +1,8 @@
-# FFmWiz
+<p align="center">
+  <img src="docs/assets/ffmwiz-logo.png" alt="FFmWiz logo" width="160">
+</p>
+
+<h1 align="center">FFmWiz</h1>
 
 FFmWiz is a Windows-focused interactive FFmpeg command builder. It inspects a source file, asks practical encode questions, builds a PowerShell-safe command, shows a final summary, and can run FFmpeg immediately.
 
