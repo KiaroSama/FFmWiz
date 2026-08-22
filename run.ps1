@@ -47,14 +47,25 @@ function Test-FFmWizPython {
         [string]$Exe,
         [string[]]$Args = @()
     )
+    # Probe the VERSION, not just runnability. `import sys` succeeds on Python
+    # 3.9 too, so the launcher used to pick an interpreter FFmWiz cannot run on
+    # and then fail deep inside the app instead of trying the next candidate.
     $oldErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & $Exe @Args -c "import sys" > $null 2>&1
-        return $LASTEXITCODE -eq 0
+        $reported = & $Exe @Args -c "import sys; sys.stdout.write('.'.join(map(str, sys.version_info[:3])))" 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $reported) { return $false }
+        $parts = ([string]$reported).Trim().Split('.')
+        $major = 0; $minor = 0
+        [void][int]::TryParse($parts[0], [ref]$major)
+        if ($parts.Length -gt 1) { [void][int]::TryParse($parts[1], [ref]$minor) }
+        if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 10)) { return $true }
+        Write-Host "Skipping $Exe $Args - Python $reported is older than the required 3.10." -ForegroundColor DarkYellow
+        return $false
     } catch {
         return $false
     } finally {
+        $oldErrorActionPreference | Out-Null
         $ErrorActionPreference = $oldErrorActionPreference
     }
 }

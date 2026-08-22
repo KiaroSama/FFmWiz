@@ -108,11 +108,13 @@ class SubprocessLifecycle(unittest.TestCase):
         FFmWiz.reap_subprocess(None)  # must not raise
 
     def test_reap_kills_a_child_that_outlives_the_wait_budget(self):
-        # A child that sleeps far past the budget must be terminated, and the
-        # call must return promptly instead of blocking on an unbounded wait().
+        # The child blocks reading a stdin pipe nobody ever writes to -- a
+        # genuinely unbounded wait, with no timer to tune and nothing left
+        # running for minutes if cleanup ever fails. reap_subprocess must
+        # terminate it and return promptly instead of blocking on wait().
         process = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(120)"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         started = time.perf_counter()
         FFmWiz.reap_subprocess(process, wait_timeout=0.5, label="unit")
@@ -141,8 +143,14 @@ class SubprocessLifecycle(unittest.TestCase):
         """NEW-RT4: the reap bounded wait(), but it was only reached after the
         stdout loop hit EOF -- which a wedged ffprobe never delivers. This runs
         a REAL child that emits one line and then sleeps far past the budget."""
+        # Emits one line and then stalls: output starts, EOF never arrives,
+        # which is exactly the shape of a wedged ffprobe. It cannot block on
+        # stdin here because subprocess.run closes stdin when no input is given,
+        # so the child needs its own delay -- 10 s, i.e. 5x the 2 s budget the
+        # test installs below, and short enough that a leaked child cannot
+        # outlive the suite.
         child = [sys.executable, "-c",
-                 "import sys,time; sys.stdout.write('0,1500\\n'); sys.stdout.flush(); time.sleep(60)"]
+                 "import sys,time; sys.stdout.write('0,1500\\n'); sys.stdout.flush(); time.sleep(10)"]
         real_run = subprocess.run
 
         def _fake_run(args, **kwargs):
