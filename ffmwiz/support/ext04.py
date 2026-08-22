@@ -602,5 +602,9 @@ __all__ = [
 # ext04b holds the second half of this tier (split for file size). Re-export its
 # names so consumers of `from ffmwiz.support.ext04 import *` see the full tier.
 from ffmwiz.support import ext04b as _ext04b  # noqa: E402
-from ffmwiz.support.ext04b import *  # noqa: E402,F401,F403
-__all__ = list(__all__) + list(_ext04b.__all__)
+# Guard the direct-import case: importing this overflow module FIRST
+# re-enters the parent while the child has no __all__ yet.
+_ext04b_names = list(getattr(_ext04b, "__all__", []))
+if _ext04b_names:
+    from ffmwiz.support.ext04b import *  # noqa: E402,F401,F403
+    __all__ = list(__all__) + _ext04b_names

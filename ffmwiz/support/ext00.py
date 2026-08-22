@@ -539,11 +539,22 @@ __all__ = [
 # seeing the full tier. ext00b imports ext00 at its top; this import runs after
 # ext00's own defs and __all__, so the cycle resolves cleanly.
 from ffmwiz.support import ext00b as _ext00b  # noqa: E402
-from ffmwiz.support.ext00b import *  # noqa: E402,F401,F403
-__all__ = list(__all__) + list(_ext00b.__all__)
+# When ext00b is imported FIRST (`import ffmwiz.support.ext00b`) it re-enters
+# here while it is still only partially initialised, so it has no __all__ yet
+# and the star-import below would raise AttributeError. Importing the parent
+# first is the normal path and is unaffected; this guard just makes the direct
+# import work too, and ext00b re-exports the tier itself in that case.
+_ext00b_names = list(getattr(_ext00b, "__all__", []))
+if _ext00b_names:
+    from ffmwiz.support.ext00b import *  # noqa: E402,F401,F403
+    __all__ = list(__all__) + _ext00b_names
 
 
 # ext00c holds an overflow slice of this module (split for file size).
 from ffmwiz.support import ext00c as _ext00c  # noqa: E402
-from ffmwiz.support.ext00c import *  # noqa: E402,F401,F403
-__all__ = list(__all__) + list(_ext00c.__all__)
+# Guard the direct-import case: importing this overflow module FIRST
+# re-enters the parent while the child has no __all__ yet.
+_ext00c_names = list(getattr(_ext00c, "__all__", []))
+if _ext00c_names:
+    from ffmwiz.support.ext00c import *  # noqa: E402,F401,F403
+    __all__ = list(__all__) + _ext00c_names
