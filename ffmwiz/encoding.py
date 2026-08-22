@@ -209,6 +209,13 @@ def build_cpu_fallback_from_cuda_filter(answers: dict[str, Any]) -> str | None:
 
 
 def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    if answers.get("join_input_items"):
+        # Every part here is rebuilt with the SINGLE-input builder, which reads
+        # only answers["input_path"]. Producing specs for a join would silently
+        # encode input 0 alone, so refuse and let the caller use the join
+        # command's own multi-output split graph.
+        log_info("Split job specs skipped: this is a join; the join command owns its own split graph.")
+        return []
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     segments = separator_ranges(answers.get("separator_points"), duration)
     if len(segments) <= 1:
