@@ -771,7 +771,26 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                 except Exception as exc:
                     appio.error(f"Could not start ffplay audio preview: {exc}")
 
+            # One pending playback tick at a time. Pause+Play inside a single
+            # tick interval used to leave the old chain pending while
+            # toggle_playback scheduled a new one, so two chains each advanced
+            # the timestamp 1 s per second -> a 2x playhead (NEW-GUI5).
+            playback_tick_handle: dict[str, Any] = {"id": None}
+
+            def cancel_playback_tick() -> None:
+                if playback_tick_handle["id"] is not None:
+                    try:
+                        root.after_cancel(playback_tick_handle["id"])
+                    except Exception:
+                        pass
+                    playback_tick_handle["id"] = None
+
+            def schedule_playback_tick() -> None:
+                cancel_playback_tick()
+                playback_tick_handle["id"] = root.after(1000, playback_tick)
+
             def playback_tick() -> None:
+                playback_tick_handle["id"] = None
                 if not state["playing"]:
                     return
                 next_time = float(state["timestamp"]) + 1.0
@@ -786,7 +805,7 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                 state["timestamp"] = next_time
                 state["photo_key"] = None
                 redraw()
-                root.after(1000, playback_tick)
+                schedule_playback_tick()
 
             def toggle_playback() -> None:
                 # Bug fix: if playback reached the end and the user presses
@@ -801,8 +820,9 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                     play_button.set_text("⏸ Pause (Space)" if state["playing"] else "▶ Play (Space)")  # type: ignore[attr-defined]
                 if state["playing"]:
                     start_audio()
-                    root.after(1000, playback_tick)
+                    schedule_playback_tick()
                 else:
+                    cancel_playback_tick()
                     stop_audio()
 
             def update_audio_settings(_event: Any | None = None, restart: bool = False) -> None:
@@ -918,6 +938,7 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
             def apply_crop() -> None:
                 result["margins"] = current_margins()
                 state["playing"] = False
+                cancel_playback_tick()
                 stop_audio()
                 try:
                     crop_scheduler.cancel()
@@ -928,6 +949,7 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
             def cancel_crop() -> None:
                 result["margins"] = None
                 state["playing"] = False
+                cancel_playback_tick()
                 stop_audio()
                 try:
                     crop_scheduler.cancel()

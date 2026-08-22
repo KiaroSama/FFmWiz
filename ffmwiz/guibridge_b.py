@@ -261,6 +261,9 @@ def open_cut_gui(
                     continue
                 if e > s:
                     normalized.append((s, e))
+            if reply.get("cuts_applied") and not normalized:
+                appio.error("Every frame is cut - nothing would remain. Adjust the cuts.")
+                return None
             return normalized
         if reply.get("status") == "error":
             answers["_last_gui_error"] = "cut"
@@ -316,6 +319,10 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
             "name": Path(answers["input_path"]).name,
             "duration": float(duration),
             "chapters": (answers.get("probe") or {}).get("chapters") or [],
+            # Per-segment, because the request-level has_audio is input 0 only:
+            # the editors need to know which inputs actually carry audio before
+            # they build a concat filtergraph over all of them (D07).
+            "has_audio": bool(answers.get("audio_streams")),
         }
         join_segments.append(first_segment)
         for item in answers.get("join_input_items") or []:
@@ -325,6 +332,7 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
                     "name": Path(item.get("path")).name,
                     "duration": float(item.get("duration") or 0.0),
                     "chapters": (item.get("probe") or {}).get("chapters") or [],
+                    "has_audio": bool(item.get("audio_streams")),
                 }
             )
         if join_segments:
@@ -407,6 +415,13 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
                 s, e = float(entry[0]), float(entry[1])
                 if e > s:
                     keep_ranges.append((s, e))
+            # An empty keep list is ambiguous on its own: it means "no cuts" for
+            # a normal edit and "every frame is cut" when the editor reports
+            # cuts_applied. Refuse the second instead of silently exporting the
+            # untouched source (D13).
+            if reply.get("cuts_applied") and not keep_ranges:
+                appio.error("Every frame is cut - nothing would remain. Adjust the cuts.")
+                return None
             separators = normalize_separator_points(reply.get("separator_points") or [], duration)
             return {
                 "margins": (top, left, right, bottom),

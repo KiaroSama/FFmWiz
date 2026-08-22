@@ -127,5 +127,38 @@ class WaveformWindowTests(unittest.TestCase):
         self.assertEqual(Q.waveform_window(None, None, None, self.RATE, 0.0, 1.0, 50), [])
 
 
+class QmlPaletteAndLoggingTests(unittest.TestCase):
+    """D23: the QML engine must reuse the classic palette/log writer, not a
+    hand-copied fallback dict."""
+
+    def test_palette_comes_from_gui_style_not_fallback(self):
+        import gui_style
+        self.assertEqual(set(Q._PALETTE), set(gui_style.PALETTE))
+        self.assertEqual(Q._PALETTE["cut_red"], gui_style.PALETTE["cut_red"])
+
+    def test_classic_log_writer_is_wired(self):
+        self.assertIsNotNone(Q._classic_write_log)
+
+    def test_qml_palette_covers_every_col_key(self):
+        """USER-12-2: every col("key") used by the QML must exist in the palette."""
+        import re
+        qml = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+        keys = set(re.findall(r'col\("([a-z_0-9]+)"', qml))
+        self.assertTrue(keys)
+        missing = sorted(k for k in keys if k not in Q._PALETTE)
+        self.assertEqual(missing, [])
+
+    def test_qml_col_literals_match_palette(self):
+        """The inline fallback literal must not drift from the palette value."""
+        import re
+        qml = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+        drift = []
+        for key, literal in re.findall(r'col\("([a-z_0-9]+)",\s*"(#[0-9a-fA-F]{6})"\)', qml):
+            want = Q._PALETTE.get(key)
+            if want and want.lower() != literal.lower():
+                drift.append((key, literal, want))
+        self.assertEqual(drift, [])
+
+
 if __name__ == "__main__":
     unittest.main()
