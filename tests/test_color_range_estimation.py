@@ -39,7 +39,10 @@ def _make_clip(path: Path, luma_expr: str, pix_fmt: str) -> None:
         "-i", "color=c=gray:s=160x120:d=2:r=10",
         "-vf", vf, "-pix_fmt", pix_fmt, "-c:v", "ffv1", str(path),
     ]
-    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Bounded like tests/test_practical_ffmpeg.py: a wedged encode must fail the
+    # test, not hang the suite (and, in CI, the job) with no ceiling.
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, timeout=120)
     assert r.returncode == 0, r.stderr[-800:]
 
 
@@ -82,6 +85,27 @@ class ColorRangeEstimationTests(unittest.TestCase):
             _make_clip(clip, "64+(X/(W-1))*876", "yuv420p10le")  # 64..940
             res = self._estimate(clip, 8)
             self.assertNotIn("limited", res["conclusion"].lower(), res)
+
+
+class MakeClipBoundsTests(unittest.TestCase):
+    """`_make_clip` must bound the ffmpeg child it spawns.
+
+    An unbounded `subprocess.run` has no wall ceiling, so a single wedged encode
+    hangs the whole suite -- and in CI the whole job, up to the runner's 6h
+    default. Runs everywhere: the child is mocked, never spawned.
+    """
+
+    def test_make_clip_bounds_its_ffmpeg_child(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(subprocess, "run", fake_run):
+            _make_clip(Path("unused.mkv"), "16", "yuv420p")
+        self.assertIsInstance(seen.get("timeout"), (int, float))
+        self.assertGreater(seen["timeout"], 0)
 
 
 if __name__ == "__main__":

@@ -14,10 +14,10 @@ Design:
 - The FFmpeg capability cache is isolated to an owned temp dir, and all
   generated media is removed after each test.
 
-Run just this file locally:
-    python -m unittest assets.tests.test_practical_ffmpeg -v
-or, from the assets/tests directory:
-    python -m unittest test_practical_ffmpeg -v
+Run just this file locally, from the repo root:
+    python -m unittest discover -s tests -p test_practical_ffmpeg.py -v
+The dotted form (python -m unittest tests.test_practical_ffmpeg) does NOT work
+in this repo; tests/README.md explains why.
 """
 from __future__ import annotations
 
