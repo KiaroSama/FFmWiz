@@ -191,34 +191,59 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
         f"{_progress_colorize(eta_text, PROGRESS_COLORS['eta_value'], colorize)}"
     )
 
-    verbose_segments = [
-        (pct_text, PROGRESS_COLORS["percent"]),
+    # Each segment carries a DROP RANK. The line is clamped to one terminal row,
+    # and the old code did that by chopping the tail with "..." -- which ate the
+    # ETA first, because ETA is last. Now the optional fields are dropped by
+    # rank (highest first) until the line fits, so percent, time/total, elapsed
+    # and ETA (rank 0) always survive on a narrow terminal.
+    KEEP = 0
+    verbose_segments: list[tuple[str, str, int]] = [
+        (pct_text, PROGRESS_COLORS["percent"], KEEP),
     ]
     # Show active split part indicator if available.
     part_label = state.get("_ffmwiz_split_part_label")
     if part_label:
-        verbose_segments.append((part_label, Color.LIGHT_BLUE))
-    verbose_segments.append((time_total_text, ""))
+        verbose_segments.append((part_label, Color.LIGHT_BLUE, KEEP))
+    verbose_segments.append((time_total_text, "", KEEP))
     fps_text = fps_value()
     if has_real_value(fps_text):
-        verbose_segments.append((f"fps {fps_text}", PROGRESS_COLORS["fps"]))
+        verbose_segments.append((f"fps {fps_text}", PROGRESS_COLORS["fps"], 5))
     q_text = q_value()
     if has_real_value(q_text):
-        verbose_segments.append((f"q {q_text}", PROGRESS_COLORS["q"]))
+        verbose_segments.append((f"q {q_text}", PROGRESS_COLORS["q"], 6))
     speed_text = speed_value()
     if has_real_value(speed_text):
-        verbose_segments.append((f"speed {speed_text}", PROGRESS_COLORS["speed"]))
+        verbose_segments.append((f"speed {speed_text}", PROGRESS_COLORS["speed"], 2))
     size_text = output_size()
     if has_real_value(size_text):
-        verbose_segments.append((f"size {size_text}", PROGRESS_COLORS["size"]))
+        verbose_segments.append((f"size {size_text}", PROGRESS_COLORS["size"], 3))
     bitrate_text = bitrate_value()
     if has_real_value(bitrate_text):
-        verbose_segments.append((f"bitrate {bitrate_text}", PROGRESS_COLORS["bitrate"]))
+        verbose_segments.append((f"bitrate {bitrate_text}", PROGRESS_COLORS["bitrate"], 4))
     verbose_segments.extend([
-        (f"elapsed {elapsed_text}", PROGRESS_COLORS["elapsed"]),
-        (eta_segment, ""),
+        # Elapsed is the last optional to go: on a very narrow terminal the
+        # remaining time matters more than the time already spent.
+        (f"elapsed {elapsed_text}", PROGRESS_COLORS["elapsed"], 1),
+        (eta_segment, "", KEEP),
     ])
-    return _join_progress_segments(verbose_segments, colorize)
+
+    def _render(segments: list[tuple[str, str, int]]) -> str:
+        return _join_progress_segments([(text, color) for text, color, _ in segments], colorize)
+
+    rendered = _render(verbose_segments)
+    if max_width is None:
+        # No budget requested: return the complete line. Only the display path
+        # (runtime._write_progress_line) knows the real terminal width, so only
+        # it asks for a budget.
+        return rendered
+    while _visible_len(rendered) > max_width:
+        droppable = [rank for _, _, rank in verbose_segments if rank != KEEP]
+        if not droppable:
+            break
+        worst = max(droppable)
+        verbose_segments = [seg for seg in verbose_segments if seg[2] != worst]
+        rendered = _render(verbose_segments)
+    return rendered
 
 
 __all__ = [

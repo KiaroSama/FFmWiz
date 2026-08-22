@@ -502,7 +502,7 @@ def run_ffmpeg_with_progress(
                         )
                         if estimated_s > 0.5:
                             state["_ffmwiz_bitrate_text"] = f"{part1_size * 8.0 / 1000.0 / estimated_s:.1f}kbits/s"
-                        rendered = _render_progress_line(state, total_duration, started_at)
+                        rendered = _render_progress_line(state, total_duration, started_at, max_width=max(1, _progress_terminal_width() - 1))
                         _write_progress_line(rendered)
                         last_render = rendered
                     else:
@@ -663,7 +663,7 @@ def run_ffmpeg_with_progress(
             previous_s = float(state.get("_ffmwiz_current_s", "0") or 0.0)
             state["_ffmwiz_current_s"] = str(max(previous_s, current_s))
             _apply_output_file_size_progress(state, output_paths, max(previous_s, current_s))
-            rendered = _render_progress_line(state, total_duration, started_at)
+            rendered = _render_progress_line(state, total_duration, started_at, max_width=max(1, _progress_terminal_width() - 1))
             _write_progress_line(rendered)
             last_render = rendered
             if os.environ.get("FFMWIZ_DEBUG_PROGRESS"):
