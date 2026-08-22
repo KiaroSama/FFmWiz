@@ -272,6 +272,61 @@ def describe_additional_track_file_colored(item: dict[str, Any]) -> str:
     return f" {paint('|', Color.GRAY)} ".join(parts) if parts else paint("no addable streams", Color.RED)
 
 
+def track_manager_source_stream_counts(
+    streams: list[dict[str, Any]], remove_specs: list[str]
+) -> tuple[int, int]:
+    """(audio, subtitle) source streams that survive `remove_specs`.
+
+    These counts are the OUTPUT-relative index the first added external stream
+    lands on, which is what -metadata:s:a:N and -c:s:N address. Seeding from the
+    raw source counts would mis-number every added stream as soon as a source
+    track is removed in the same run.
+    """
+    typed: list[tuple[str, int]] = []
+    totals: dict[str, int] = {}
+    for stream in streams or []:
+        kind = {"audio": "a", "subtitle": "s", "video": "v"}.get(str(stream.get("codec_type")), "?")
+        index = totals.get(kind, 0)
+        totals[kind] = index + 1
+        typed.append((kind, index))
+    removed: set[tuple[str, int]] = set()
+    for spec in remove_specs or []:
+        text = str(spec).strip().lower()
+        if re.fullmatch(r"\d+", text):
+            position = int(text)
+            if 0 <= position < len(typed):
+                removed.add(typed[position])
+            continue
+        kind, _, number = text.partition(":")
+        if number.isdigit():
+            removed.add((kind, int(number)))
+    counts: list[int] = []
+    for kind in ("a", "s"):
+        total = totals.get(kind, 0)
+        gone = len([1 for k, i in removed if k == kind and i < total])
+        counts.append(max(0, total - gone))
+    return counts[0], counts[1]
+
+
+def track_manager_subtitle_container_problems(
+    output_ext: str, extra_items: list[dict[str, Any]]
+) -> list[str]:
+    """External subtitle streams the Track Manager's output container cannot
+    carry at all (e.g. PGS into MP4). Codecs that only need a transcode are not
+    a problem -- build_track_manager_command emits the -c:s for those."""
+    problems: list[str] = []
+    for item in extra_items or []:
+        name = Path(item["path"]).name
+        for stream in item.get("subtitle_streams") or []:
+            codec = str(stream.get("codec_name") or "unknown").lower()
+            if subtitle_codec_for_container(output_ext, codec) is None:
+                problems.append(
+                    f"{name}: {codec} subtitles cannot be stored in "
+                    f".{str(output_ext).lower().lstrip('.')}."
+                )
+    return problems
+
+
 def build_track_manager_command(
     ffmpeg: str,
     input_path: Path,
@@ -293,17 +348,37 @@ def build_track_manager_command(
     cmd.extend(["-map", "0"])
     for spec in remove_specs:
         cmd.extend(["-map", f"-0:{spec}"])
+    source_streams = ((answers or {}).get("probe") or {}).get("streams") or []
+    output_audio_index, output_subtitle_index = track_manager_source_stream_counts(
+        source_streams, remove_specs)
+    output_ext = output_path.suffix
+    metadata_args: list[str] = []
+    subtitle_codec_args: list[str] = []
     for input_number, item in enumerate(extra_items, start=1):
-        # Required maps (no trailing '?'): if the external file's audio/subtitle
-        # stream is missing or undetectable, FFmpeg must fail loudly instead of
-        # silently producing output without the replacement track. Map only the
-        # FIRST stream of each kind (:a:0 / :s:0) so a multi-track external file
-        # adds exactly one audio/subtitle track, matching the metadata prompt
-        # which only configures stream 0.
-        if item.get("audio_streams"):
-            cmd.extend(["-map", f"{input_number}:a:0"])
-        if item.get("subtitle_streams"):
-            cmd.extend(["-map", f"{input_number}:s:0"])
+        # One required map per external stream (no trailing '?'), so a missing
+        # stream still fails loudly. Every stream is mapped because
+        # ask_additional_track_metadata prompts for every one of them; mapping
+        # only :a:0/:s:0 silently dropped the rest and discarded the answers.
+        audio_metadata = item.get("audio_metadata") or []
+        subtitle_metadata = item.get("subtitle_metadata") or []
+        for index, _stream in enumerate(item.get("audio_streams") or []):
+            cmd.extend(["-map", f"{input_number}:a:{index}"])
+            metadata = audio_metadata[index] if index < len(audio_metadata) else {}
+            for key, value in (metadata or {}).items():
+                metadata_args.extend([f"-metadata:s:a:{output_audio_index}", f"{key}={value}"])
+            output_audio_index += 1
+        for index, stream in enumerate(item.get("subtitle_streams") or []):
+            cmd.extend(["-map", f"{input_number}:s:{index}"])
+            # The output keeps the source container, so an external subtitle it
+            # cannot stream-copy (subrip into MP4) must be transcoded instead of
+            # failing at header-write time with a 0-byte output.
+            target = subtitle_codec_for_container(output_ext, str(stream.get("codec_name") or ""))
+            if target and target != "copy":
+                subtitle_codec_args.extend([f"-c:s:{output_subtitle_index}", target])
+            metadata = subtitle_metadata[index] if index < len(subtitle_metadata) else {}
+            for key, value in (metadata or {}).items():
+                metadata_args.extend([f"-metadata:s:s:{output_subtitle_index}", f"{key}={value}"])
+            output_subtitle_index += 1
     keep_metadata = True if answers is None else bool(answers.get("track_manager_keep_metadata", True))
     if keep_metadata:
         cmd.extend(["-map_metadata", "0"])
@@ -331,6 +406,10 @@ def build_track_manager_command(
         cmd.extend(["-filter:a", build_loudnorm_filter(answers)])
     else:
         cmd.extend(["-c", "copy"])
+    # After the global -c so the per-stream codec wins for those streams.
+    cmd.extend(subtitle_codec_args)
+    if keep_metadata:
+        cmd.extend(metadata_args)
     cmd.append(str(output_path))
     return cmd
 
@@ -452,6 +531,8 @@ __all__ = [
     'step_folder_output_location',
     'ask_metadata_for_added_stream',
     'describe_additional_track_file_colored',
+    'track_manager_source_stream_counts',
+    'track_manager_subtitle_container_problems',
     'build_track_manager_command',
     'choose_extract_stream_output_path',
     'build_extract_jobs',
