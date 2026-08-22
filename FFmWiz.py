@@ -457,7 +457,12 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     # part shows an accurate, clean 0->100% progress line. A single multi-output
     # command reports ambiguous -progress counters across parts, which made the
     # Part-1 percent a wrong byte/bitrate-based guess.
-    if answers.get("separator_points"):
+    # ...but only when there is a single input. run_separator_main_encode
+    # rebuilds every part with the single-input builder, which ignores
+    # join_input_items entirely and clips the range to input 0's duration --
+    # a Join + Split job encoded only the first file. The already-built join
+    # command contains a correct multi-output split graph.
+    if answers.get("separator_points") and not answers.get("join_input_items"):
         try:
             return run_separator_main_encode(answers)
         finally:
