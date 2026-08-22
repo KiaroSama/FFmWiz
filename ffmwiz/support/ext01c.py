@@ -123,39 +123,6 @@ def mux_ask_language_codes_required(answers: dict[str, Any], title: str, availab
         appio.error("Enter at least one language code.")
 
 
-def mux_ask_output_base(answers: dict[str, Any], input_root: Path) -> Path:
-    default_text = "Enter=input parent folder"
-    prompt_number = mux_assign_prompt_number(answers)
-    while True:
-        answers["_question_number"] = prompt_number
-        value = appio.ask_raw(appio.question_prompt(answers, "Enter output folder path", default_text))
-        if is_back_value(value):
-            raise Back()
-        if not value:
-            return input_root.parent
-        if value.lower() in {"y", "yes", "n", "no", "y/n", "yes/no", "n/y", "no/yes"}:
-            appio.error("Please enter a folder path, or press Enter to use the input parent folder.")
-            continue
-        path = terminal_path(value)
-        if path.exists() and not path.is_dir():
-            appio.error("Output path exists but is not a folder. Enter another path.")
-            continue
-        if path.suffix.lower() in MUX_CLEANUP_VIDEO_EXTS:
-            appio.error("Output path must be a folder, not a media file name.")
-            continue
-        if path.suffix and not path.exists():
-            appio.note(f"This output folder name has an extension: {path.name}")
-            if not mux_ask_yes_no(answers, "Use this as a folder path?", False):
-                continue
-        if not path.is_absolute():
-            resolved = (Path.cwd() / path).resolve()
-            appio.note(f"Relative output folder will resolve to: {resolved}")
-            if not mux_ask_yes_no(answers, "Use this relative output folder?", False):
-                continue
-            return resolved
-        return path
-
-
 def mux_copy_video_without_remux(input_file: Path, output_file: Path) -> None:
     if shutil.which(ROBOCOPY_BIN) is None:
         raise OSError("robocopy was not found in PATH")
@@ -512,7 +479,6 @@ __all__ = [
     'mux_print_setting',
     'mux_ask_csv_int_required',
     'mux_ask_language_codes_required',
-    'mux_ask_output_base',
     'mux_copy_video_without_remux',
     'ask_mux_cleanup_input_path',
     'gpu_available_for_answers',

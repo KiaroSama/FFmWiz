@@ -442,39 +442,6 @@ class CommandGenerationCoreTests(CommandGenBase):
         self.assertEqual(dims, (1080, 1920))
         self.assertIn("stretch", warning)
 
-    def test_stream_cleanup_output_suffix_matches_input_and_copy_maps_video(self):
-        rules = FFmWiz.mux.MuxCleanupRules(
-            audio_mode="4",
-            audio_languages=[],
-            audio_titles=[],
-            audio_indexes=[],
-            subtitle_mode="1",
-            subtitle_languages=[],
-            subtitle_titles=[],
-            subtitle_indexes=[],
-            keep_attachments=False,
-            keep_metadata=True,
-            keep_chapters=True,
-            overwrite=True,
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            input_file = root / "input.mp4"
-            output_root = root / "out"
-            input_file.write_bytes(b"")
-            output_root.mkdir()
-            output = FFmWiz.mux_make_output_path(input_file, output_root, input_file, rules)
-            self.assertEqual(output.suffix, ".mp4")
-            media = FFmWiz.mux.MuxMediaFile(
-                path=input_file,
-                format={},
-                streams=[FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264")],
-            )
-            cmd, _audio, _subtitle = FFmWiz.mux_build_ffmpeg_command("ffmpeg", input_file, output, media, rules)
-        self.assertIn("-map", cmd)
-        self.assertIn("0:v?", cmd)
-        self.assertIn("-c", cmd)
-        self.assertEqual(cmd[cmd.index("-c") + 1], "copy")
 
     def test_video_bitstream_single_video_stream_auto_selected(self):
         answers = {
@@ -552,66 +519,6 @@ class CommandGenerationCoreTests(CommandGenBase):
         with mock.patch.object(FFmWiz.appio, "ask_raw", return_value="0"):
             self.assertEqual(FFmWiz.mux_ask_csv_int_required(answers, "Audio stream indexes to edit", [0, 2]), [0])
 
-    def test_stream_cleanup_detects_when_remux_is_not_needed(self):
-        rules = FFmWiz.mux.MuxCleanupRules(
-            audio_mode="4",
-            audio_languages=[],
-            audio_titles=[],
-            audio_indexes=[],
-            subtitle_mode="5",
-            subtitle_languages=[],
-            subtitle_titles=[],
-            subtitle_indexes=[],
-            keep_attachments=True,
-            keep_metadata=True,
-            keep_chapters=True,
-            overwrite=False,
-        )
-        media = FFmWiz.mux.MuxMediaFile(
-            path=Path("input.mkv"),
-            format={},
-            streams=[
-                FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
-                FFmWiz.mux.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", disposition_default=1),
-                FFmWiz.mux.MuxStreamInfo(index=2, codec_type="subtitle", codec_name="ass", disposition_default=1),
-            ],
-        )
-        audio_keep = FFmWiz.mux_selected_audio_streams(media, rules)
-        subtitle_keep = FFmWiz.mux_selected_subtitle_streams(media, rules)
-        self.assertEqual(FFmWiz.mux_remux_needed_reasons(media, rules, audio_keep, subtitle_keep), [])
-        rules.metadata_edits = [FFmWiz.mux.MuxStreamMetadataEdit(codec_type="audio", match_indexes=[1], title="Edited")]
-        self.assertIn("stream metadata is edited", FFmWiz.mux_remux_needed_reasons(media, rules, audio_keep, subtitle_keep))
-
-    def test_stream_cleanup_visible_question_numbers_do_not_jump_when_steps_are_skipped(self):
-        media_files = [
-            FFmWiz.mux.MuxMediaFile(
-                path=Path("input.mkv"),
-                format={},
-                streams=[
-                    FFmWiz.mux.MuxStreamInfo(index=0, codec_type="video", codec_name="h264"),
-                    FFmWiz.mux.MuxStreamInfo(index=1, codec_type="audio", codec_name="aac", language="jpn"),
-                ],
-            )
-        ]
-        prompts: list[str] = []
-        responses = iter(["", "n", "", "", "", "", ""])
-
-        def fake_ask_raw(prompt: str) -> str:
-            prompts.append(prompt.strip())
-            return next(responses)
-
-        answers = {"_question_number": 1, "_mux_next_question_number": 2}
-        with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=fake_ask_raw), \
-             mock.patch.object(FFmWiz.appio, "note", lambda _message: None):
-            FFmWiz.mux_configure_rules(answers, media_files)
-            FFmWiz.mux_ask_output_base(answers, Path("input.mkv"))
-            FFmWiz.mux_ask_yes_no(answers, "Start Stream Cleanup Remux now?", True)
-
-        visible_numbers = [int(prompt.split(".", 1)[0]) for prompt in prompts]
-        self.assertEqual(visible_numbers, [2, 3, 4, 5, 6, 7, 8])
-        self.assertIn("Keep input metadata?", prompts[0])
-        self.assertIn("Enter output folder path", prompts[-2])
-        self.assertIn("Start Stream Cleanup Remux now?", prompts[-1])
 
     def test_run_wizard_uses_unified_editor_before_legacy_video_edit_prompts(self):
         calls: list[str] = []

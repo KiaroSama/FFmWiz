@@ -115,12 +115,6 @@ def mux_ask_choice(answers: dict[str, Any], title: str, details: str, valid: set
         appio.error("Enter one of: " + ", ".join(sorted(valid)))
 
 
-def mux_ask_yes_no(answers: dict[str, Any], title: str, default: bool) -> bool:
-    prompt_number = mux_assign_prompt_number(answers)
-    answers["_question_number"] = prompt_number
-    return appio.ask_yes_no(appio.question_prompt(answers, title, "y/n", "y" if default else "n"), default)
-
-
 def mux_ask_text(answers: dict[str, Any], title: str, details: str, *, zero_is_value: bool = False) -> str:
     prompt_number = mux_assign_prompt_number(answers)
     back = "back=b, quit=exit" if zero_is_value else "back=0, quit=exit"
@@ -546,7 +540,6 @@ __all__ = [
     'mux_format_value_list',
     'mux_parse_csv_int',
     'mux_ask_choice',
-    'mux_ask_yes_no',
     'mux_ask_text',
     'mux_path_total_size',
     'mux_run_robocopy',

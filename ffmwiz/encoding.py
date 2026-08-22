@@ -80,8 +80,6 @@ from ffmwiz.metadata import *  # noqa: F401,F403
 from ffmwiz import metadata  # noqa: F401
 from ffmwiz.modes import *  # noqa: F401,F403
 from ffmwiz import modes  # noqa: F401
-from ffmwiz.mux import *  # noqa: F401,F403
-from ffmwiz import mux  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
 from ffmwiz import runner  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
