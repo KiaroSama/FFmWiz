@@ -1,31 +1,40 @@
-name: Python smoke test
+name: CI
 
+# Push is limited to main: a branch push with an open PR otherwise starts every
+# job twice on 2x-billed Windows minutes.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  py-compile:
+  # Installs nothing: py_compile, the template check and the import smoke check
+  # all run on the standard library alone.
+  compile:
     runs-on: windows-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # The floor and the ceiling of requires-python = ">=3.10".
+        python-version: ["3.10", "3.13"]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install runtime dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --upgrade -r requirements.txt
 
       - name: Compile Python files
         run: |
@@ -35,8 +44,91 @@ jobs:
       - name: Validate config.env template
         run: python -c "import FFmWiz, pathlib; tpl=pathlib.Path('config.env.example').read_text(encoding='utf-8'); assert FFmWiz.CONFIG_TEMPLATE==tpl, 'template/example drift'; s=FFmWiz.parse_env_config(tpl)['settings']; assert s.get('video_codec') and 'use_gpu' in s and s.get('gui_engine')=='classic'; print('config.env template OK')"
 
-      - name: Import smoke check
-        run: python -c "import FFmWiz; assert hasattr(FFmWiz, 'build_add_files_to_video_command'); assert hasattr(FFmWiz, 'run_media_info_mode'); assert hasattr(FFmWiz, 'run_mux_cleanup_mode'); assert hasattr(FFmWiz, 'run_hardsub_encode_mode'); assert hasattr(FFmWiz, 'build_hardsub_command'); assert hasattr(FFmWiz, 'confirm_numeric_target_not_above_source'); assert hasattr(FFmWiz, 'confirm_resolution_not_above_source'); assert hasattr(FFmWiz, 'analyze_copy_cut_chapter_plan'); assert hasattr(FFmWiz, 'add_files_stream_copy_compatibility_errors'); assert '.webvtt' in FFmWiz.HARDSUB_SUBTITLE_EXTS; assert FFmWiz.display_language('und') == 'unknown'; assert FFmWiz.describe_video_bit_depth({'pix_fmt':'yuv420p10le'}) == '10-bit'; s=FFmWiz.MuxStreamInfo.from_ffprobe({'index':1,'codec_type':'audio','codec_name':'aac','tags':{'language':'und'},'duration':'10'}, {}, {1:160000}); assert s.language == 'unknown' and s.bitrate_kbps == 128 and s.size_bytes == 160000; assert 'MB' in FFmWiz.media_info_value_with_units('size', '1048576'); assert 'bit/s' in FFmWiz.media_info_value_with_units('bit_rate', '128000'); assert 's)' in FFmWiz.media_info_value_with_units('duration', '12.5'); assert FFmWiz.default_media_reports_dir().name == 'MediaReports'"
+      - name: Import smoke check (CLI must import without PySide6)
+        run: python -c "import sys; sys.modules['PySide6'] = None; import FFmWiz; assert hasattr(FFmWiz, 'build_add_files_to_video_command'); assert hasattr(FFmWiz, 'run_media_info_mode'); assert hasattr(FFmWiz, 'run_mux_cleanup_mode'); assert hasattr(FFmWiz, 'run_hardsub_encode_mode'); assert hasattr(FFmWiz, 'build_hardsub_command'); assert hasattr(FFmWiz, 'confirm_numeric_target_not_above_source'); assert hasattr(FFmWiz, 'confirm_resolution_not_above_source'); assert hasattr(FFmWiz, 'analyze_copy_cut_chapter_plan'); assert hasattr(FFmWiz, 'add_files_stream_copy_compatibility_errors'); assert '.webvtt' in FFmWiz.HARDSUB_SUBTITLE_EXTS; assert FFmWiz.display_language('und') == 'unknown'; assert FFmWiz.describe_video_bit_depth({'pix_fmt':'yuv420p10le'}) == '10-bit'; s=FFmWiz.MuxStreamInfo.from_ffprobe({'index':1,'codec_type':'audio','codec_name':'aac','tags':{'language':'und'},'duration':'10'}, {}, {1:160000}); assert s.language == 'unknown' and s.bitrate_kbps == 128 and s.size_bytes == 160000; assert 'MB' in FFmWiz.media_info_value_with_units('size', '1048576'); assert 'bit/s' in FFmWiz.media_info_value_with_units('bit_rate', '128000'); assert 's)' in FFmWiz.media_info_value_with_units('duration', '12.5'); assert FFmWiz.default_media_reports_dir().name == 'MediaReports'"
 
-      - name: Command generation tests
-        run: python -m unittest discover -s tests -v
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    # The real-ffmpeg tests print progress lines containing non-ASCII separators;
+    # on a cp1252 console that is a UnicodeEncodeError, not a test failure.
+    env:
+      PYTHONUTF8: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        # numpy is needed by the waveform tests only; requirements.txt is the
+        # runtime manifest and stays untouched. PySide6 is not installed here -
+        # no test imports it (see the gui-import job).
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Install ffmpeg
+        # Without ffmpeg on PATH the real-encode suites self-skip and this job
+        # reports OK having never executed a single ffmpeg assertion.
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Run test suite
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re, sys, unittest, warnings
+
+          # Unclosed subprocess pipes are a real, previously shipped bug class.
+          warnings.simplefilter("error", ResourceWarning)
+
+          result = unittest.TextTestRunner(verbosity=1).run(
+              unittest.defaultTestLoader.discover("tests"))
+          for test, why in result.skipped:
+              print(f"skipped: {test.id()}: {why}")
+
+          # A skip is legitimate only when the runner genuinely cannot provide the
+          # thing (no NVIDIA GPU, no symlink privilege). A skip for something this
+          # job installs means CI stopped installing it and the suite silently
+          # shrank - the false green this guard exists to prevent.
+          missing = [f"{test.id()}: {why}" for test, why in result.skipped
+                     if re.search(r"ffmpeg|ffprobe|numpy|powershell", why, re.I)
+                     and "nvenc" not in why.lower()]
+          if missing:
+              print("suite shrank - capability missing on the runner:")
+              for item in missing:
+                  print("  " + item)
+              sys.exit(1)
+          sys.exit(not result.wasSuccessful())
+          PY
+
+  # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
+  # module still fails CI now that the other jobs install nothing.
+  gui-import:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Import the classic GUI headless
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -c "import importlib.util, PySide6; spec = importlib.util.spec_from_file_location('ffmwiz_gui', 'ffmwiz/gui/ffmwiz_gui.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('GUI import OK', PySide6.__version__)"

@@ -195,11 +195,12 @@ class CommandGenerationCoreTests(CommandGenBase):
         started = _time.perf_counter() - 60.0
         state = {"_ffmwiz_current_s": "60.0"}
         first = eta_of(FFmWiz._render_progress_line(state, total, started))
-        # Heartbeat re-renders at the SAME position but a later wall clock.
-        _time.sleep(0.2)
-        second = eta_of(FFmWiz._render_progress_line(state, total, started))
-        _time.sleep(0.2)
-        third = eta_of(FFmWiz._render_progress_line(state, total, started))
+        # Heartbeat re-renders at the SAME media position but a later wall
+        # clock. Moving the START backwards is exactly equivalent to time
+        # passing, and needs no real sleep: the point is that the cached ETA
+        # ignores wall-clock drift while the position is unchanged.
+        second = eta_of(FFmWiz._render_progress_line(state, total, started - 0.2))
+        third = eta_of(FFmWiz._render_progress_line(state, total, started - 0.4))
         self.assertIsNotNone(first)
         self.assertEqual(first, second)
         self.assertEqual(first, third)
