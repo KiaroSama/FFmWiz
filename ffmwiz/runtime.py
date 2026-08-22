@@ -208,6 +208,11 @@ def ensure_pyside6_installed(interactive: bool = True) -> bool:
     return False
 
 
+# ponytail: single-renderer module state, deliberately not thread-safe. Every
+# run_ffmpeg_with_progress / _begin_progress_render call site is on the main
+# thread, so one progress run exists at a time. If a parallel/batch mode is ever
+# added, this state belongs on a renderer object created per run -- two
+# concurrent runs would otherwise interleave and steal each other's final line.
 _VT_MODE_ATTEMPTED = False
 _PROGRESS_LAST_LEN = 0
 _PROGRESS_LAST_ROWS = 0

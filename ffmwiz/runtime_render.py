@@ -74,7 +74,11 @@ from ffmwiz.runtime import *  # noqa: E402,F401,F403  (back-import)
 
 def _progress_terminal_width() -> int:
     try:
-        return max(60, shutil.get_terminal_size((100, 20)).columns)
+        # No 60-column floor: over-reporting the width is what makes the
+        # single-row clamp wrap on a genuinely narrow terminal, and a wrapped
+        # line defeats the carriage-return redraw. A missing/zero size is
+        # already covered by the (100, 20) fallback.
+        return max(20, shutil.get_terminal_size((100, 20)).columns)
     except Exception:
         return 100
 

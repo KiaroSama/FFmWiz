@@ -14,26 +14,30 @@ class C:
     RED = "\033[91m"
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN = "\033[96m"
+    # USER-12-4: every name below that also exists in ffmwiz.core.colors.Color
+    # carries Color's value, so entering Stream Cleanup from the wizard menu
+    # does not change the colour scheme mid-session. The basic-ANSI originals
+    # (94/95/96/90) read visibly duller than the wizard's 256-colour palette.
+    BLUE = "\033[38;5;117m"
+    MAGENTA = "\033[38;5;219m"
+    CYAN = "\033[38;5;123m"
     WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    ORANGE = "\033[38;5;208m"
+    GRAY = "\033[38;5;252m"
+    ORANGE = "\033[38;5;222m"
     GOLD = "\033[38;5;220m"
     AMBER = "\033[38;5;214m"
-    LIME = "\033[38;5;154m"
+    LIME = "\033[38;5;118m"
     MINT = "\033[38;5;121m"
     EMERALD = "\033[38;5;48m"
     TEAL = "\033[38;5;37m"
-    AQUA = "\033[38;5;51m"
+    AQUA = "\033[38;5;159m"
     SKY = "\033[38;5;117m"
     AZURE = "\033[38;5;75m"
     INDIGO = "\033[38;5;99m"
     VIOLET = "\033[38;5;135m"
     PURPLE = "\033[38;5;141m"
     LAVENDER = "\033[38;5;183m"
-    PINK = "\033[38;5;213m"
+    PINK = "\033[38;5;218m"
     ROSE = "\033[38;5;204m"
     SILVER = "\033[38;5;250m"
     LAUNCHER_PINK = "\033[38;2;255;50;115m"
@@ -78,12 +82,17 @@ class C:
     BAR_FILL = "\033[38;2;0;191;185m"
     BAR_TRACK = "\033[38;2;214;0;68m"
     BAR_FAIL = "\033[38;2;255;79;109m"
-    PROGRESS_PERCENT = "\033[38;2;48;209;88m"
-    PROGRESS_SIZE = "\033[38;2;142;238;255m"
+    # The five PROGRESS_* names below are shared with Color, so they carry
+    # Color's values: percent/size/ETA/elapsed must not change colour between
+    # the wizard's FFmpeg progress line and this one. BAR_*, PROGRESS_MUTED,
+    # PROGRESS_DONE_WORD and PROGRESS_OVERALL have no counterpart in Color and
+    # keep the upstream palette.
+    PROGRESS_PERCENT = "\033[38;5;46m"
+    PROGRESS_SIZE = "\033[38;5;119m"
     PROGRESS_DONE_WORD = "\033[38;2;57;255;106m"
-    PROGRESS_ETA_LABEL = "\033[38;2;255;194;71m"
-    PROGRESS_ETA_VALUE = "\033[38;2;255;154;47m"
-    PROGRESS_ELAPSED = "\033[38;2;217;145;69m"
+    PROGRESS_ETA_LABEL = "\033[38;2;255;78;178m"
+    PROGRESS_ETA_VALUE = "\033[38;2;255;132;206m"
+    PROGRESS_ELAPSED = "\033[38;5;180m"
     PROGRESS_MUTED = "\033[38;2;138;143;163m"
     PROGRESS_OVERALL = "\033[38;2;66;232;255m"
 
@@ -93,7 +102,8 @@ LANGUAGE_COLORS = (
     C.CYAN,
     C.MAGENTA,
     C.YELLOW,
-    C.BLUE,
+    # C.BLUE is deliberately absent: it now carries the same value as C.SKY
+    # below, and two identical entries make two languages indistinguishable.
     C.ORANGE,
     C.GOLD,
     C.LIME,

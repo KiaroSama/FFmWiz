@@ -449,6 +449,55 @@ class VendoringContractTests(unittest.TestCase):
             ('"""MuxCls package (split from the original single-file MuxCls.py)."""',
              '"""FFmWiz Stream Cleanup Remux subsystem."""'),
         ],
+        # USER-12-4: standalone MuxCls owns its palette, but embedded in FFmWiz
+        # it shares a session with the wizard - so every name that also exists
+        # in ffmwiz.core.colors.Color is retinted to Color's value. Upstream's
+        # basic-ANSI BLUE/MAGENTA/CYAN/GRAY read visibly duller than the
+        # wizard's 256-colour palette, which is what made menu 8 look like a
+        # different program.
+        "colors.py": [
+            ('    BLUE = "\\033[94m"\n'
+             '    MAGENTA = "\\033[95m"\n'
+             '    CYAN = "\\033[96m"\n'
+             '    WHITE = "\\033[97m"\n'
+             '    GRAY = "\\033[90m"\n'
+             '    ORANGE = "\\033[38;5;208m"\n',
+             '    # USER-12-4: every name below that also exists in ffmwiz.core.colors.Color\n'
+             '    # carries Color\'s value, so entering Stream Cleanup from the wizard menu\n'
+             '    # does not change the colour scheme mid-session. The basic-ANSI originals\n'
+             '    # (94/95/96/90) read visibly duller than the wizard\'s 256-colour palette.\n'
+             '    BLUE = "\\033[38;5;117m"\n'
+             '    MAGENTA = "\\033[38;5;219m"\n'
+             '    CYAN = "\\033[38;5;123m"\n'
+             '    WHITE = "\\033[97m"\n'
+             '    GRAY = "\\033[38;5;252m"\n'
+             '    ORANGE = "\\033[38;5;222m"\n'),
+            ('    LIME = "\\033[38;5;154m"\n', '    LIME = "\\033[38;5;118m"\n'),
+            ('    AQUA = "\\033[38;5;51m"\n', '    AQUA = "\\033[38;5;159m"\n'),
+            ('    PINK = "\\033[38;5;213m"\n', '    PINK = "\\033[38;5;218m"\n'),
+            ('    PROGRESS_PERCENT = "\\033[38;2;48;209;88m"\n'
+             '    PROGRESS_SIZE = "\\033[38;2;142;238;255m"\n'
+             '    PROGRESS_DONE_WORD = "\\033[38;2;57;255;106m"\n'
+             '    PROGRESS_ETA_LABEL = "\\033[38;2;255;194;71m"\n'
+             '    PROGRESS_ETA_VALUE = "\\033[38;2;255;154;47m"\n'
+             '    PROGRESS_ELAPSED = "\\033[38;2;217;145;69m"\n',
+             '    # The five PROGRESS_* names below are shared with Color, so they carry\n'
+             '    # Color\'s values: percent/size/ETA/elapsed must not change colour between\n'
+             '    # the wizard\'s FFmpeg progress line and this one. BAR_*, PROGRESS_MUTED,\n'
+             '    # PROGRESS_DONE_WORD and PROGRESS_OVERALL have no counterpart in Color and\n'
+             '    # keep the upstream palette.\n'
+             '    PROGRESS_PERCENT = "\\033[38;5;46m"\n'
+             '    PROGRESS_SIZE = "\\033[38;5;119m"\n'
+             '    PROGRESS_DONE_WORD = "\\033[38;2;57;255;106m"\n'
+             '    PROGRESS_ETA_LABEL = "\\033[38;2;255;78;178m"\n'
+             '    PROGRESS_ETA_VALUE = "\\033[38;2;255;132;206m"\n'
+             '    PROGRESS_ELAPSED = "\\033[38;5;180m"\n'),
+            ("    C.YELLOW,\n    C.BLUE,\n    C.ORANGE,\n",
+             "    C.YELLOW,\n"
+             "    # C.BLUE is deliberately absent: it now carries the same value as C.SKY\n"
+             "    # below, and two identical entries make two languages indistinguishable.\n"
+             "    C.ORANGE,\n"),
+        ],
         "logsetup.py": [
             ("        # This module lives in the muxcls package, so the project root (where the\n"
              "        # Logs folder belongs) is the parent of the package directory.\n"

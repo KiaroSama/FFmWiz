@@ -31,7 +31,9 @@ class Color:
     RES_NUMBERS = "\033[38;5;165m"
     RES_TARGET = "\033[38;5;204m"
     RES_EXACT = "\033[38;5;141m"
-    # Distinct prompt option-key colors (high-contrast, not used elsewhere).
+    # Distinct prompt option-key colors, chosen for high contrast against the
+    # surrounding prompt text. Two of the three are shared with another token
+    # (OPT_KEY_CYAN with AUDIO_TRACK_NOTE, OPT_KEY_CORAL with MUX_CORAL).
     OPT_KEY_CYAN = "\033[38;5;87m"     # Bright cyan-turquoise for bitrate/CRF keys.
     OPT_KEY_CHARTREUSE = "\033[38;5;154m"  # Bright yellow-green for y/n keys.
     OPT_KEY_CORAL = "\033[38;5;209m"   # Bright coral-orange for 0/1/2 keys.

@@ -13,6 +13,7 @@ window so a regression fails loudly instead of printing a warning nobody reads.
 """
 import contextlib
 import io
+import pathlib
 import subprocess
 import sys
 import threading
@@ -119,6 +120,50 @@ class SubprocessLifecycle(unittest.TestCase):
         self.assertLess(elapsed, 20.0, "reap_subprocess must be bounded, not open-ended")
         self.assertIsNotNone(process.returncode, "the child must actually be reaped")
         self.assertTrue(process.stdout.closed)
+
+    # ---------------- ffprobe read budgets ----------------
+
+    def test_ffprobe_json_passes_a_positive_timeout(self):
+        """NEW-TRK6: the primary probe ran unbounded while every sibling probe
+        was bounded, so one wedged ffprobe hung the wizard with no output."""
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, b'{"streams": []}', b"")
+
+        with mock.patch("subprocess.run", side_effect=_fake_run):
+            payload = FFmWiz.services.ffprobe_json("ffprobe", pathlib.Path("clip.mkv"))
+        self.assertEqual(payload, {"streams": []})
+        self.assertGreater(seen.get("timeout") or 0, 0, "ffprobe_json must bound its read")
+
+    def test_packet_probe_returns_instead_of_hanging_on_a_wedged_child(self):
+        """NEW-RT4: the reap bounded wait(), but it was only reached after the
+        stdout loop hit EOF -- which a wedged ffprobe never delivers. This runs
+        a REAL child that emits one line and then sleeps far past the budget."""
+        child = [sys.executable, "-c",
+                 "import sys,time; sys.stdout.write('0,1500\\n'); sys.stdout.flush(); time.sleep(60)"]
+        real_run = subprocess.run
+
+        def _fake_run(args, **kwargs):
+            return real_run(child, **kwargs)
+
+        buffer = io.StringIO()
+        started = time.perf_counter()
+        with mock.patch.object(FFmWiz.services, "_FFPROBE_PACKETS_TIMEOUT", 2.0), \
+                mock.patch("subprocess.run", side_effect=_fake_run), \
+                contextlib.redirect_stdout(buffer):
+            sizes = FFmWiz.services.probe_packet_sizes("ffprobe", pathlib.Path("clip.mkv"))
+        elapsed = time.perf_counter() - started
+        self.assertEqual(sizes, {}, "a probe that never finished cannot report sizes")
+        self.assertLess(elapsed, 30.0, "probe_packet_sizes must be bounded, not open-ended")
+
+    def test_packet_probe_still_sums_a_healthy_probe(self):
+        csv_out = "0,1500\n0,500\n1,64\n"
+        with mock.patch("subprocess.run",
+                        return_value=subprocess.CompletedProcess(["ffprobe"], 0, csv_out, "")):
+            sizes = FFmWiz.services.probe_packet_sizes("ffprobe", pathlib.Path("clip.mkv"))
+        self.assertEqual(sizes, {0: 2000, 1: 64})
 
     def test_reap_joins_reader_threads_before_closing(self):
         # The reader must never race a closed handle: reap joins threads first.
