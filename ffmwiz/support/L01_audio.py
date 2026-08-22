@@ -146,6 +146,79 @@ def lossless_audio_copy_ext(codec_name: str, input_suffix: str = "") -> str:
     return lossless_audio_copy_ext_choices(codec_name, input_suffix)[0]
 
 
+def container_video_codec(output_ext: str, requested: str) -> tuple[str, str | None]:
+    """(codec alias to use, note when it was changed) for this container.
+
+    HardSub, standalone Join and the main wizard each resolved the video codec
+    independently, so H.264 into .webm was emitted from two of the three paths
+    and died at header-write time.
+    """
+    ext = str(output_ext or "").lower().lstrip(".")
+    policy = VIDEO_CODECS_BY_FORMAT.get(ext)
+    if not policy:
+        return requested, None
+    if str(requested).upper() in {str(item).upper() for item in policy["allowed"]}:
+        return requested, None
+    replacement = policy["fallback"]
+    return replacement, (
+        f".{ext} cannot store {requested} video; {replacement} was selected "
+        "for container compatibility."
+    )
+
+
+def container_audio_codec(output_ext: str, requested: str,
+                          source_codec: str | None = None) -> tuple[str, str | None]:
+    """(audio encoder to use, note when it was changed) for this container.
+
+    `copy` is only safe when the SOURCE codec is one the container accepts:
+    stream-copying an AAC track into WebM is rejected by the muxer exactly like
+    encoding AAC into it would be, so a `source_codec` must be supplied wherever
+    copy is a real option.
+    """
+    ext = str(output_ext or "").lower().lstrip(".")
+    allowed = AUDIO_CODECS_BY_FORMAT.get(ext)
+    if not allowed:
+        return requested, None
+    if requested == "copy":
+        if source_codec is None:
+            return requested, None
+        normalized = normalize_audio_codec(source_codec)
+        if normalized in allowed or f"lib{normalized}" in allowed:
+            return requested, None
+        replacement = default_audio_codec_for_ext(ext)
+        return replacement, (
+            f".{ext} cannot store a copied {source_codec} track; {replacement} "
+            "was selected for container compatibility."
+        )
+    if requested in allowed:
+        return requested, None
+    replacement = default_audio_codec_for_ext(ext)
+    return replacement, (
+        f".{ext} cannot store {requested} audio; {replacement} was selected "
+        "for container compatibility."
+    )
+
+
+def container_audio_encode_args(output_ext: str, requested: str, bitrate_kbps: int | None,
+                                channels: int | None = None,
+                                sample_rate: int | None = None,
+                                source_codec: str | None = None) -> tuple[list[str], str | None]:
+    """Full `-c:a [...]` for a container, dropping -b:a for lossless codecs.
+
+    `-b:a` on flac/pcm is meaningless, and the join/audio-tool builders used to
+    hardcode `-c:a aac -b:a Nk` regardless of the output container.
+    """
+    codec, note = container_audio_codec(output_ext, requested, source_codec)
+    args = ["-c:a", codec]
+    if codec != "copy" and bitrate_kbps and audio_codec_uses_bitrate(codec):
+        args.extend(["-b:a", f"{int(bitrate_kbps)}k"])
+    if channels:
+        args.extend(["-ac", str(int(channels))])
+    if sample_rate:
+        args.extend(["-ar", str(int(sample_rate))])
+    return args, note
+
+
 def _selected_audio_tool_stream(answers: dict[str, Any]) -> dict[str, Any] | None:
     streams = answers.get("audio_streams") or []
     try:
@@ -207,6 +280,9 @@ __all__ = [
     'loudnorm_mode',
     '_loudnorm_output_sample_rate',
     'resolve_audio_tool_output_ext',
+    'container_video_codec',
+    'container_audio_codec',
+    'container_audio_encode_args',
     'resolve_audio_tool_bitrate_kbps',
     'resolve_audio_tool_channels',
     'audio_mean_max_volume_field',

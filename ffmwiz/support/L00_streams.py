@@ -208,6 +208,61 @@ def parse_stream_index_spec(value: str) -> list[int]:
     return sorted(result)
 
 
+
+def subtitle_codec_for_container(output_ext: str, source_codec: str) -> str | None:
+    """How this container must carry this subtitle codec.
+
+    Returns "copy" when a stream copy is legal, a codec name when the subtitle
+    has to be transcoded, or None when the container cannot carry it at all.
+
+    Only the MP4 family used to get a decision here; every other container was
+    given a blind `-c:s copy`, so mov_text -> mkv, subrip -> webm and
+    subrip -> avi all reached FFmpeg and failed at header-write time.
+    """
+    ext = str(output_ext or "").lower().lstrip(".")
+    codec = str(source_codec or "").lower()
+    policy = SUBTITLE_CONTAINER_POLICY.get(ext)
+    if policy is None:
+        # Unknown container: keep the historical permissive behaviour rather
+        # than blocking a format this table has not been verified against.
+        return "copy"
+    if codec in policy:
+        return policy[codec]
+    if codec in BITMAP_SUBTITLE_CODECS:
+        return policy.get("bitmap")
+    if codec in TEXT_SUBTITLE_CODECS:
+        return policy.get("text")
+    return policy.get("text")
+
+
+def subtitle_codec_args_for_container(output_ext: str, source_codecs: list[str]) -> tuple[list[str], list[str]]:
+    """(-c:s args, human-readable problems) for a set of source subtitle codecs.
+
+    A container needing several different target codecs cannot be expressed with
+    one global `-c:s`, so that is reported as a problem instead of silently
+    picking one.
+    """
+    wanted: list[str] = []
+    problems: list[str] = []
+    for codec in source_codecs:
+        target = subtitle_codec_for_container(output_ext, codec)
+        if target is None:
+            problems.append(
+                f"{codec or 'unknown'} subtitles cannot be stored in .{str(output_ext).lstrip('.')}"
+            )
+            continue
+        if target not in wanted:
+            wanted.append(target)
+    if not wanted:
+        return [], problems
+    if len(wanted) > 1:
+        problems.append(
+            "the selected subtitle streams need different codecs for this container: "
+            + ", ".join(wanted)
+        )
+    return ["-c:s", wanted[0]], problems
+
+
 __all__ = [
     'streams_for_statistics_from_answers',
     'source_video_stream',
@@ -228,4 +283,6 @@ __all__ = [
     'extract_stream_default_extension',
     'extract_stream_codec_args',
     'parse_stream_index_spec',
+    'subtitle_codec_for_container',
+    'subtitle_codec_args_for_container',
 ]

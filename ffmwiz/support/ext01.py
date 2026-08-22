@@ -91,8 +91,9 @@ def enforce_bit_depth_compatible_video_encoder(
         source_depth = source_video_bit_depth(answers)
         target_depth = output_video_bit_depth(answers)
         cpu_encoder, cpu_tag, cpu_profile = cpu_encoder_for_high_bit_depth(answers, video_encoder)
+        limit = "8-bit" if str(video_encoder) == H264_NVENC_ENCODER else "10-bit"
         appio.note(
-            f"Source video is {source_depth}-bit. NVENC output is limited to 10-bit here, "
+            f"Source video is {source_depth}-bit. {video_encoder} output is limited to {limit}, "
             f"so {cpu_encoder} was selected to preserve {target_depth}-bit output."
         )
         return cpu_encoder, cpu_tag if cpu_tag is not None else tag, cpu_profile if cpu_profile is not None else profile

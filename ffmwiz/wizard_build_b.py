@@ -156,6 +156,15 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
     answers["output_path"] = output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # The container, the video codec and the audio policy are three independent
+    # questions, so nothing stopped H.264 + copied AAC landing in a .webm and
+    # dying at header-write time. Reconcile the codec with the container the
+    # same way the main wizard does, before resolving the encoder.
+    requested_codec = answers.get("video_codec", DEFAULT_VIDEO_CODEC)
+    container_codec, codec_note = container_video_codec(output_ext, requested_codec)
+    if codec_note:
+        appio.note(codec_note)
+        answers["video_codec"] = container_codec
     video_encoder, tag, _profile = resolve_video_encoder(answers)
     if video_encoder == "copy":
         video_encoder = "libx265"
@@ -181,17 +190,29 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
         mapped_audio_output_count = len(selected_hardsub_audio)
         if audio_policy == "aac":
             bitrate = int(answers.get("hardsub_audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
-            cmd.extend(["-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2"])
+            audio_args, audio_note = container_audio_encode_args(output_ext, "aac", bitrate, AUDIO_CHANNELS)
         else:
-            cmd.extend(["-c:a", "copy"])
+            first_audio = (answers.get("audio_streams") or [{}])[0]
+            audio_args, audio_note = container_audio_encode_args(
+                output_ext, "copy", None,
+                source_codec=str(first_audio.get("codec_name") or "") or None)
+        if audio_note:
+            appio.note(audio_note)
+        cmd.extend(audio_args)
     else:
         cmd.extend(["-map", "0:a?"])
         mapped_audio_output_count = len(answers.get("audio_streams") or [])
         if audio_policy == "aac":
             bitrate = int(answers.get("hardsub_audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
-            cmd.extend(["-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", "2"])
+            audio_args, audio_note = container_audio_encode_args(output_ext, "aac", bitrate, AUDIO_CHANNELS)
         else:
-            cmd.extend(["-c:a", "copy"])
+            first_audio = (answers.get("audio_streams") or [{}])[0]
+            audio_args, audio_note = container_audio_encode_args(
+                output_ext, "copy", None,
+                source_codec=str(first_audio.get("codec_name") or "") or None)
+        if audio_note:
+            appio.note(audio_note)
+        cmd.extend(audio_args)
 
     cmd.extend(["-sn", "-dn", "-map_metadata", "0", "-map_chapters", "0"])
     log_info("Hard Sub Encode uses the CPU subtitles/libass filter chain; NVENC may still be used for video encode.")

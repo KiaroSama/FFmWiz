@@ -100,6 +100,8 @@ MAX_PRESERVED_AUDIO_CHANNELS = 8
 
 # Video defaults:
 # DEFAULT_VIDEO_CODEC aliases supported by this script: H265,H264,AV1,VP9,MPEG4,copy
+# h264_nvenc is 8-bit only; every 10-bit gate has to name it explicitly.
+H264_NVENC_ENCODER = "h264_nvenc"
 DEFAULT_VIDEO_CODEC = "H265"
 DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS = 400
 
@@ -266,6 +268,11 @@ DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS = 400
 COMMON_VIDEO_FORMATS = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "ts"]
 COMMON_AUDIO_FORMATS = ["mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"]
 
+# Containers the Video Speed/Reverse builder can really produce: it always maps
+# a video stream and encodes H.264 + AAC, which rules out the audio-only
+# containers and WebM (VP8/VP9/AV1 + Vorbis/Opus only).
+VIDEO_SPEED_REVERSE_FORMATS = ["mp4", "mkv", "mov", "m4v", "ts", "avi"]
+
 # Recognized output container/format extensions. A value outside this set is
 # very likely a typo (e.g. "acc" for "aac") that would make FFmpeg fail with
 # "Unable to find a suitable output format"; the wizard warns and suggests the
@@ -285,6 +292,9 @@ MAX_AUDIO_SAMPLE_RATE = 192000
 CONFIG_FILE_NAME = "config.env"
 CONFIG_EXAMPLE_FILE_NAME = "config.env.example"
 LAUNCHER_FILE_NAME = "run.ps1"
+# The user-facing entry point. Used by launcher_content(); it must NOT be derived
+# from __file__, which became an internal module name after the package split.
+MAIN_SCRIPT_FILE_NAME = "FFmWiz.py"
 ASSET_DIR_NAME = "assets"
 ICON_DIR_NAME = "icons"
 CURSOR_DIR_NAME = "cursors"
@@ -331,6 +341,32 @@ AUDIO_CODEC_DEFAULTS_BY_FORMAT = {
     "weba": "libopus",
     "flac": "flac",
     "wav": "pcm_s16le",
+}
+
+# Which audio encoders each container can actually mux. Only WebM used to be
+# checked, so `-c:a aac` into .flac / .ogg / .opus reached FFmpeg and failed with
+# "Exactly one FLAC audio stream is required" / "Unsupported codec id in stream 0".
+# An extension missing from this table is unconstrained -- mp4/mkv/mov/ts/avi
+# accept a wide mix and were verified to (aac, flac and pcm_s16le all mux into
+# mp4 or mkv on ffmpeg 8.1.1), so listing them would only create false rejects.
+# Which VIDEO codec aliases each constrained container can mux, plus the one to
+# fall back to. WebM is the only common container that genuinely refuses the
+# defaults, but HardSub, standalone Join and the main wizard each had their own
+# ad-hoc WebM special case (or none at all), so they are unified here.
+# An extension missing from this table is unconstrained.
+VIDEO_CODECS_BY_FORMAT = {
+    "webm": {"allowed": {"VP9", "VP8", "AV1", "copy"}, "fallback": "VP9"},
+    "weba": {"allowed": {"VP9", "VP8", "AV1", "copy"}, "fallback": "VP9"},
+}
+
+AUDIO_CODECS_BY_FORMAT = {
+    "flac": {"flac", "copy"},
+    "opus": {"libopus", "copy"},
+    "ogg": {"libopus", "libvorbis", "flac", "copy"},
+    "oga": {"libopus", "libvorbis", "flac", "copy"},
+    "mp3": {"libmp3lame", "copy"},
+    "webm": {"libopus", "libvorbis", "copy"},
+    "weba": {"libopus", "libvorbis", "copy"},
 }
 
 STREAM_STAT_METADATA_TAGS = (
@@ -383,6 +419,34 @@ BITMAP_SUBTITLE_CODECS = {
     "vobsub",
     "xsub",
 }
+# Which subtitle codec a container can actually carry. `-c:s copy` was emitted
+# for every non-MP4 container without checking, so mov_text -> mkv, subrip ->
+# webm and subrip -> avi all reached FFmpeg and died at header-write time with
+# "Subtitle codec ... is not supported" / "Could not write header".
+# Verified against ffmpeg 8.1.1 by really muxing each pair.
+#   "copy" -> stream-copy is legal
+#   a codec name -> must be transcoded to that codec
+#   None -> the container cannot carry this subtitle at all; drop it
+SUBTITLE_CONTAINER_POLICY: dict[str, dict[str, str | None]] = {
+    # MP4 family: timed text only, and bitmap subtitles cannot be carried.
+    "mp4": {"text": "mov_text", "bitmap": None},
+    "m4v": {"text": "mov_text", "bitmap": None},
+    "m4a": {"text": "mov_text", "bitmap": None},
+    "mov": {"text": "mov_text", "bitmap": None},
+    "ismv": {"text": "mov_text", "bitmap": None},
+    # Matroska carries essentially everything, but not MP4's mov_text.
+    "mkv": {"text": "copy", "bitmap": "copy", "mov_text": "srt"},
+    "mka": {"text": "copy", "bitmap": "copy", "mov_text": "srt"},
+    # WebM: WebVTT only.
+    "webm": {"text": "webvtt", "bitmap": None},
+    # MPEG-TS accepts both text and bitmap subtitles as-is.
+    "ts": {"text": "copy", "bitmap": "copy"},
+    "mpg": {"text": "copy", "bitmap": "copy"},
+    "mpeg": {"text": "copy", "bitmap": "copy"},
+    # AVI has no usable subtitle muxing in FFmpeg ("Not yet implemented").
+    "avi": {"text": None, "bitmap": None},
+}
+
 HARDSUB_BITMAP_SUBTITLE_ERROR = (
     "Bitmap subtitle streams such as PGS/VobSub/DVDSub are not supported by this HardSub mode. "
     "Choose a text subtitle stream or use an external .srt/.ass/.ssa/.vtt/.webvtt file."
@@ -647,9 +711,11 @@ __all__ = [
     'MAX_PRESERVED_AUDIO_CHANNELS',
     'REVERSE_SEGMENT_SECONDS',
     'DEFAULT_VIDEO_CODEC',
+    'H264_NVENC_ENCODER',
     'DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS',
     'COMMON_VIDEO_FORMATS',
     'COMMON_AUDIO_FORMATS',
+    'VIDEO_SPEED_REVERSE_FORMATS',
     'KNOWN_OUTPUT_FORMATS',
     'COMMON_VIDEO_CODECS',
     'COMMON_AUDIO_CODECS',
@@ -659,6 +725,7 @@ __all__ = [
     'CONFIG_FILE_NAME',
     'CONFIG_EXAMPLE_FILE_NAME',
     'LAUNCHER_FILE_NAME',
+    'MAIN_SCRIPT_FILE_NAME',
     'ASSET_DIR_NAME',
     'ICON_DIR_NAME',
     'CURSOR_DIR_NAME',
@@ -676,11 +743,14 @@ __all__ = [
     'VOLUME_SCAN_WORKERS',
     'FOLDER_PROBE_WORKERS',
     'AUDIO_CODEC_DEFAULTS_BY_FORMAT',
+    'AUDIO_CODECS_BY_FORMAT',
+    'VIDEO_CODECS_BY_FORMAT',
     'STREAM_STAT_METADATA_TAGS',
     'AUDIO_CODEC_ALIASES',
     'BITRATE_AUDIO_CODECS',
     'TEXT_SUBTITLE_CODECS',
     'BITMAP_SUBTITLE_CODECS',
+    'SUBTITLE_CONTAINER_POLICY',
     'HARDSUB_BITMAP_SUBTITLE_ERROR',
     'FFMPEG_REFERENCE_FILE_NAME',
     'CONFIG_TEMPLATE',
