@@ -71,6 +71,7 @@ from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 
+from ffmwiz.support.L01_cover import cover_art_method  # noqa: F401
 from ffmwiz.support.ext04 import *  # sibling helpers  # noqa: F401,F403
 
 
@@ -239,7 +240,7 @@ def build_audio_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
         str(input_path),
         "-map",
         f"0:a:{audio_index}",
-        "-vn",
+        *audio_tool_picture_args(answers, answers["output_ext"]),
         "-sn",
         "-dn",
         "-filter:a",
@@ -259,6 +260,50 @@ def build_audio_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
     return cmd
 
 
+def audio_tool_picture_args(answers: dict[str, Any], output_ext: str) -> list[str]:
+    """Args that carry the source cover art through an audio tool, or ["-vn"].
+
+    Mapping the picture only works for containers that store a cover AS a
+    stream (mp4/m4a, mp3, flac). Opus/Ogg keep it in a base64 VorbisComment and
+    reject a mapped image stream outright, and wav has no mechanism at all, so
+    those still drop video.
+    """
+    method = cover_art_method(output_ext)
+    if method not in {"attached_pic", "id3", "flac_stream"}:
+        return ["-vn"]
+    for position, stream in enumerate(answers.get("video_streams") or []):
+        if (stream.get("disposition") or {}).get("attached_pic"):
+            args = ["-map", f"0:v:{position}", "-c:v", "copy"]
+            if method == "id3":
+                args.extend(["-id3v2_version", "3"])
+            args.extend(["-disposition:v", "attached_pic"])
+            return args
+    return ["-vn"]
+
+
+def audio_cut_stream_copy_available(answers: dict[str, Any]) -> bool:
+    """True when a single-range Audio Cut can be trimmed by stream copy.
+
+    The tool asks for no encode setting, so re-encoding a track the chosen
+    container already accepts only loses quality. An explicit bitrate or sample
+    rate, loudnorm, or a second keep range all mean a filter graph is required.
+    """
+    if len(answers.get("audio_keep_ranges") or []) != 1:
+        return False
+    if loudnorm_transform_enabled(answers):
+        return False
+    if answers.get("audio_bitrate_kbps") not in (None, "", "n", "keep"):
+        return False
+    if answers.get("audio_sample_rate") not in (None, "", "n", "keep"):
+        return False
+    streams = answers.get("audio_streams") or []
+    index = int(answers.get("audio_index", 0))
+    if index >= len(streams):
+        return False
+    output_ext = str(answers.get("output_ext") or resolve_audio_tool_output_ext(answers)).lower().lstrip(".")
+    return output_ext in lossless_audio_copy_ext_choices(str(streams[index].get("codec_name") or ""))
+
+
 def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
     ffmpeg = answers["ffmpeg"]
     input_path: Path = answers["input_path"]
@@ -273,6 +318,8 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
     answers["output_path"] = output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     audio_index = int(answers.get("audio_index", 0))
+    picture_args = audio_tool_picture_args(answers, answers["output_ext"])
+    stream_copy = bool(answers.get("audio_cut_stream_copy")) and audio_cut_stream_copy_available(answers)
 
     cmd: list[str] = [ffmpeg, "-y" if OVERWRITE_OUTPUT else "-n"]
     if len(keep_ranges) == 1:
@@ -280,7 +327,7 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
         if start > 0:
             cmd.extend(["-ss", f"{start:.6f}"])
         cmd.extend(["-i", str(input_path), "-t", f"{max(0.0, end - start):.6f}"])
-        cmd.extend(["-map", f"0:a:{audio_index}", "-vn", "-sn", "-dn"])
+        cmd.extend(["-map", f"0:a:{audio_index}", *picture_args, "-sn", "-dn"])
     else:
         cmd.extend(["-i", str(input_path)])
         parts: list[str] = []
@@ -301,17 +348,23 @@ def build_audio_cut_command(answers: dict[str, Any]) -> list[str]:
                 f"asetpts=PTS-STARTPTS[{label}]"
             )
         parts.append(f"{''.join(labels)}concat=n={len(keep_ranges)}:v=0:a=1[a]")
-        cmd.extend(["-filter_complex", ";".join(parts), "-map", "[a]", "-vn", "-sn", "-dn"])
+        cmd.extend(["-filter_complex", ";".join(parts), "-map", "[a]", *picture_args, "-sn", "-dn"])
 
-    cmd.extend(audio_tool_encode_options(
-        answers["output_ext"],
-        bitrate_kbps=resolve_audio_tool_bitrate_kbps(answers),
-        sample_rate=resolve_audio_sample_rate(answers),
-        channels=resolve_audio_tool_channels(answers),
-    ))
+    if stream_copy:
+        # Input seeking snaps the cut to the nearest audio packet; that is the
+        # price of not re-encoding, and it is what the user was offered.
+        cmd.extend(["-c:a", "copy", "-avoid_negative_ts", "make_zero"])
+    else:
+        cmd.extend(audio_tool_encode_options(
+            answers["output_ext"],
+            bitrate_kbps=resolve_audio_tool_bitrate_kbps(answers),
+            sample_rate=resolve_audio_sample_rate(answers),
+            channels=resolve_audio_tool_channels(answers),
+        ))
     cmd.append(str(output_path))
     log_info(
-        f"Audio cut command built: audio_index={audio_index}; ranges={keep_ranges}; output={output_path}"
+        f"Audio cut command built: audio_index={audio_index}; ranges={keep_ranges}; "
+        f"stream_copy={stream_copy}; output={output_path}"
     )
     return cmd
 
@@ -737,6 +790,8 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
 
 __all__ = [
     'build_audio_transform_filter_complex',
+    'audio_tool_picture_args',
+    'audio_cut_stream_copy_available',
     'build_video_speed_reverse_command',
     'run_segmented_reverse_video_speed',
     'build_audio_speed_reverse_command',

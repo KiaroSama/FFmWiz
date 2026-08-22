@@ -308,6 +308,33 @@ def build_cut_filter_complex(
     return ";".join(fc_parts)
 
 
+def join_extras_outcome_notes(answers: dict[str, Any], items: list[dict[str, Any]]) -> list[str]:
+    """What the joined re-encode really does with each "keep source extras"
+    category, one line per category.
+
+    One yes/no covers metadata, chapters, extra video, subtitles, data streams
+    and attachments, but the join command maps metadata/data/attachments from
+    input 1 alone and drops chapters, subtitles and extra video outright.
+    Stating each outcome before the confirmation is what stops the question
+    from promising what the command discards.
+    """
+    first = Path(items[0]["path"]).name if items and items[0].get("path") else "input 1"
+    lines: list[str] = []
+    if source_metadata_keep_enabled(answers):
+        lines.append(f"Join extras -- Metadata: copied from {first} only; the other inputs contribute none.")
+    if source_chapters_keep_enabled(answers):
+        lines.append("Join extras -- Chapters: dropped; a joined timeline cannot reuse the source chapter times.")
+    if answers.get("keep_embedded_attachments") and embedded_attachment_streams(answers):
+        lines.append(f"Join extras -- Attachments/fonts: taken from {first} only.")
+    if source_data_keep_enabled(answers) and source_data_streams(answers):
+        lines.append(f"Join extras -- Data streams: taken from {first} only.")
+    if source_extra_video_keep_enabled(answers) and additional_source_video_streams(answers):
+        lines.append("Join extras -- Extra video streams: dropped; the join graph produces one video stream.")
+    if answers.get("subtitle_tracks") or (source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")):
+        lines.append("Join extras -- Subtitles: dropped; the joined re-encode maps no subtitle stream (-sn).")
+    return lines
+
+
 def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
     output_path = resolve_output_collision_against_inputs(
         output_path,
@@ -341,26 +368,43 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         cmd.extend(["-i", str(item["path"])])
 
     selected_audio = selected_audio_streams(join_answers) if join_answers.get("audio_streams") else []
-    if selected_audio:
-        # Reject the join with a clear message listing EVERY input that lacks a
-        # selected audio track, instead of letting an unmapped [n:a:idx] label
-        # fail deep inside FFmpeg. (Missing-audio behavior is explicit + tested.)
-        missing_files: list[str] = []
-        for item_pos, item in enumerate(items, start=1):
-            audio_count = len(item.get("audio_streams") or [])
-            missing = [idx for idx in selected_audio if idx >= audio_count]
-            if missing:
-                missing_files.append(
-                    f"input {item_pos} ({Path(item.get('path')).name}): has {audio_count} audio track(s), "
-                    f"missing selected track(s) {missing}"
-                )
-        if missing_files:
-            raise RuntimeError(
-                "Join cannot map the selected audio track(s) because some inputs lack them:\n  "
-                + "\n  ".join(missing_files)
-                + "\nRe-run and select only audio tracks present in every joined input, "
-                "or remove the inputs without that audio."
+    if not selected_audio and any(item.get("audio_streams") for item in items):
+        # The track question is asked for input 1 only, so a silent input 1 left
+        # every LATER input's audio unmapped and unmentioned.
+        selected_audio = [0]
+        appio.note(
+            "Join audio: input 1 has no audio, so track 0 of the other inputs is joined and "
+            "input 1's segment is silent."
+        )
+    # How many tracks the question could reach: input 1's count, or the
+    # recovered track above when input 1 was silent.
+    offered_tracks = max(
+        len(join_answers.get("audio_streams") or []),
+        (max(selected_audio) + 1) if selected_audio else 0,
+    )
+    silenced: list[str] = []
+    unreachable: list[str] = []
+    for item_pos, item in enumerate(items, start=1):
+        audio_count = len(item.get("audio_streams") or [])
+        name = Path(item.get("path")).name
+        if any(idx >= audio_count for idx in selected_audio):
+            silenced.append(f"input {item_pos} ({name})")
+        if audio_count > offered_tracks:
+            unreachable.append(
+                f"input {item_pos} ({name}): track(s) {list(range(offered_tracks, audio_count))}"
             )
+    if silenced:
+        # The standalone join path has always synthesised silence here; the
+        # wizard join used to refuse the very same set of files instead.
+        appio.note(
+            "Join audio: silence is synthesised for the selected track(s) missing from "
+            + ", ".join(silenced) + "."
+        )
+    if unreachable:
+        appio.note(
+            f"Join audio: the track question covers input 1's {offered_tracks} track(s), so these "
+            "are NOT in the joined output: " + "; ".join(unreachable) + "."
+        )
 
     filters: list[str] = []
     concat_inputs: list[str] = []
@@ -383,7 +427,8 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     # VFR join re-encode: omit the per-input fps= filter (which forces CFR) and
     # keep variable timing on the output via -fps_mode vfr (added per output).
     vfr_join = bool(join_answers.get("join_vfr"))
-    for input_idx, _item in enumerate(items):
+    join_rate = join_target_sample_rate(join_answers)
+    for input_idx, item in enumerate(items):
         chain = []
         if crop_filter:
             chain.append(crop_filter)
@@ -397,12 +442,17 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         chain = [part for part in chain if part]
         filters.append(f"[{input_idx}:v:0]{','.join(chain)}[jv{input_idx}]")
         concat_inputs.append(f"[jv{input_idx}]")
+        item_audio_count = len(item.get("audio_streams") or [])
         for audio_pos, audio_index in enumerate(selected_audio):
-            filters.append(
-                f"[{input_idx}:a:{audio_index}]"
-                f"{join_audio_prep_filter(join_target_sample_rate(join_answers))}[ja{input_idx}_{audio_pos}]"
-            )
-            concat_inputs.append(f"[ja{input_idx}_{audio_pos}]")
+            label = f"[ja{input_idx}_{audio_pos}]"
+            if audio_index < item_audio_count:
+                filters.append(f"[{input_idx}:a:{audio_index}]{join_audio_prep_filter(join_rate)}{label}")
+            else:
+                silence = max(0.001, float(item.get("duration") or 0.001))
+                filters.append(
+                    f"anullsrc=channel_layout=stereo:sample_rate={join_rate}:d={silence:.6f}{label}"
+                )
+            concat_inputs.append(label)
 
     concat_outputs = ["[jvcat]"] + [f"[jacat{pos}]" for pos, _idx in enumerate(selected_audio)]
     filters.append(
@@ -495,6 +545,8 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
                 for idx, (start, end) in enumerate(split_intervals)
             )
         )
+    for line in join_extras_outcome_notes(join_answers, items):
+        appio.note(line)
     answers["final_resolution"] = join_answers.get("final_resolution")
     answers.pop("_join_complex_graph", None)
     return cmd
@@ -504,5 +556,6 @@ __all__ = [
     'build_hardsub_video_filter',
     'build_hardsub_command',
     'build_cut_filter_complex',
+    'join_extras_outcome_notes',
     'build_join_encode_command',
 ]
