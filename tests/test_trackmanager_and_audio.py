@@ -164,6 +164,39 @@ class TrackManagerBackTests(unittest.TestCase):
         self.assertEqual(len(ext_calls), 2)
 
 
+class TrackManagerFolderResultTests(unittest.TestCase):
+    """Folder scope must report the aggregate outcome, not the last file's."""
+
+    def setUp(self):
+        FFmWiz.appio.USE_COLOR = False
+
+    def _run_folder(self, results):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "a.mkv").write_bytes(b"")
+            (folder / "b.mkv").write_bytes(b"")
+            answers = {"ffmpeg": "ffmpeg", "ffprobe": "ffprobe"}
+            buf = io.StringIO()
+            with mock.patch.object(FFmWiz.appio, "ask_required", return_value=str(folder)),                  mock.patch.object(FFmWiz.appio, "ask_raw", return_value="a:1"),                  mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True),                  mock.patch.object(FFmWiz.trackmanager, "_track_manager_collect_externals",
+                                   lambda a: []),                  mock.patch.object(FFmWiz.trackmanager, "_track_manager_ask_loudnorm",
+                                   lambda a, sample_path=None: None),                  mock.patch.object(FFmWiz.trackmanager, "run_ffmpeg_with_progress",
+                                   side_effect=list(results)):
+                with contextlib.redirect_stdout(buf):
+                    result = FFmWiz._run_track_manager_folder(answers)
+            return result, buf.getvalue()
+
+    def test_early_failure_is_not_masked_by_a_successful_last_file(self):
+        (rc, elapsed), out = self._run_folder([(1, 1.0), (0, 2.0)])
+        self.assertEqual(rc, 1)
+        self.assertIn("1 failure", out)
+        # Elapsed must time the whole run, not repeat the last file's value.
+        self.assertLess(elapsed, 2.0)
+
+    def test_all_success_returns_zero(self):
+        (rc, _elapsed), _out = self._run_folder([(0, 1.0), (0, 2.0)])
+        self.assertEqual(rc, 0)
+
+
 class AudioTrackSelectionTests(unittest.TestCase):
     """Single audio track is auto-selected (with a note); multiple tracks are
     listed and chosen by the user."""

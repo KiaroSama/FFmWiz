@@ -634,6 +634,15 @@ def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | No
                 return None
             input_path = Path(answers["input_path"])
             output_path = track_manager_output_path(input_path)
+            # The output keeps the source container, so a subtitle it cannot
+            # carry at all has to be refused here instead of failing at
+            # header-write time and leaving a 0-byte file next to the source.
+            problems = track_manager_subtitle_container_problems(output_path.suffix, extra_items)
+            if problems:
+                for problem in problems:
+                    appio.error(problem)
+                appio.error("Convert that subtitle first, or add it to a container that supports it.")
+                return None
             output_path.parent.mkdir(parents=True, exist_ok=True)
             cmd = build_track_manager_command(answers["ffmpeg"], input_path, remove_specs, extra_items, output_path, answers)
             print()
@@ -723,21 +732,42 @@ def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | No
     if not remove_specs and not extra_items and not loudnorm_transform_enabled(answers):
         appio.note("No track was removed or added; nothing to do.")
         return None
-    last_result: tuple[int, float] | None = None
+    started_at = time.perf_counter()
     succeeded = 0
+    failures = 0
     for media in media_files:
         output_path = track_manager_output_path(media)
+        # A folder can mix containers, so both the compatibility check and the
+        # output-relative stream indexes have to be resolved per file.
+        problems = track_manager_subtitle_container_problems(output_path.suffix, extra_items)
+        if problems:
+            for problem in problems:
+                appio.error(f"{media.name}: {problem}")
+            failures += 1
+            continue
+        if extra_items:
+            try:
+                answers["probe"] = services.ffprobe_json(answers["ffprobe"], media)
+            except Exception:
+                answers["probe"] = {}
         cmd = build_track_manager_command(answers["ffmpeg"], media, remove_specs, extra_items, output_path, answers)
         appio.note(f"Processing: {media.name} -> {output_path.name}")
         print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
-        rc, elapsed = run_ffmpeg_with_progress(cmd, total_duration=None, label=f"Track Manager: {media.name}")
-        last_result = (rc, elapsed)
+        rc, _elapsed = run_ffmpeg_with_progress(cmd, total_duration=None, label=f"Track Manager: {media.name}")
         if rc == 0:
             succeeded += 1
         else:
+            failures += 1
             appio.error(f"FFmpeg failed on {media.name} (exit {rc}).")
     appio.note(f"Track Manager folder run finished: {succeeded}/{len(media_files)} succeeded.")
-    return last_result
+    # The caller prints one overall result, so a single file's rc/elapsed must
+    # not stand in for the batch: report failure if ANY file failed and time the
+    # whole run (same contract as run_folder_encode_mode).
+    elapsed = time.perf_counter() - started_at
+    if failures:
+        appio.error(f"Track Manager folder run: {succeeded} success(es), {failures} failure(s).")
+        return 1, elapsed
+    return 0, elapsed
 
 
 __all__ = [

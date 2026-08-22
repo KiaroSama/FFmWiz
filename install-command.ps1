@@ -32,15 +32,25 @@ if ($resp -match '^(?i:y|yes|1|true)$') {
             $pythonArgs = $py[1..($py.Length - 1)]
         }
         Write-Host "Installing Python GUI dependencies via $($py -join ' ') -m pip ..." -ForegroundColor Cyan
+        # $ErrorActionPreference = 'Stop' does not apply to a native command's
+        # exit code, so the catch below only fires when pip cannot be launched
+        # at all; a pip that runs and fails has to be caught via $LASTEXITCODE.
+        $pipExit = 1
         try {
             if (Test-Path -LiteralPath $requirements) {
                 & $pythonExe @pythonArgs -m pip install --upgrade -r $requirements
             } else {
                 & $pythonExe @pythonArgs -m pip install --upgrade PySide6==6.11.1
             }
+            $pipExit = $LASTEXITCODE
         } catch {
             Write-Host "Python GUI dependency install failed: $_" -ForegroundColor Yellow
-            Write-Host "FFmWiz will fall back to the legacy Tk GUI." -ForegroundColor DarkGray
+        }
+        if ($pipExit -ne 0) {
+            Write-Host "Python GUI dependency install failed (pip exit $pipExit)." -ForegroundColor Red
+            Write-Host "Nothing was installed: no launcher, PATH entry or profile function was created." -ForegroundColor Red
+            Write-Host "Fix the dependency install (or re-run and answer 'n') and try again." -ForegroundColor Red
+            exit 1
         }
     } else {
         Write-Host 'Python was not found in PATH; skipping PySide6 install.' -ForegroundColor Yellow
