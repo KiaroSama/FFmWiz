@@ -12,6 +12,7 @@ import math
 import json
 import time
 import shutil
+import signal
 import subprocess
 import tempfile
 import platform
@@ -317,8 +318,60 @@ def _render_initial_progress_line(label: str, detail: str, started_at: float) ->
     return _join_progress_segments(segments, USE_COLOR)
 
 
+def _signal_graceful_stop(process, label: str, own_process_group: bool) -> bool:
+    """Ask the child to stop the way it would on a console Ctrl+C.
+
+    Windows `terminate()` is TerminateProcess: the child dies instantly and
+    FFmpeg never runs av_write_trailer, so the half-written output has no index
+    and most players will not open it. CTRL_BREAK_EVENT reaches a child started
+    in its own process group and lets FFmpeg finalise the container first.
+
+    `own_process_group` is NOT optional on Windows: CTRL_BREAK_EVENT is
+    delivered to a whole process GROUP, so sending it to a child that shares our
+    console group takes down FFmWiz itself -- and, when a suite is running, the
+    test runner with it (observed: exit 130 mid-suite). Only the caller knows
+    whether it passed CREATE_NEW_PROCESS_GROUP, so it has to say so.
+
+    Returns True when a stop signal was actually delivered.
+    """
+    try:
+        if sys.platform == "win32":
+            if not own_process_group:
+                return False
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            # POSIX SIGINT goes to the one process, so it is always safe here.
+            process.send_signal(signal.SIGINT)
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _kill_process_tree(process, label: str) -> None:
+    """Kill the child AND anything it spawned.
+
+    `process.kill()` reaps ffmpeg.exe alone; a helper it started keeps the
+    output file locked and the pipes open.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True, timeout=10.0, check=False,
+            )
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 def reap_subprocess(process, threads=(), *, wait_timeout: float = 60.0,
-                    join_timeout: float = 5.0, label: str = "process") -> None:
+                    join_timeout: float = 5.0, label: str = "process",
+                    cancelled: bool = False,
+                    own_process_group: bool = False) -> None:
     """Reap a child process deterministically: bounded wait, bounded reader-thread
     join, then close the PIPE handles.
 
@@ -327,24 +380,48 @@ def reap_subprocess(process, threads=(), *, wait_timeout: float = 60.0,
     file`, and an unbounded `wait()`/`join()` would let one wedged child hang the
     whole wizard with no way out. The pipes are closed only AFTER the reader
     threads are joined, so a reader never races a closed handle.
+
+    `cancelled=True` means the user pressed Ctrl+C: skip straight to the stop
+    ladder instead of waiting out `wait_timeout`. Without it a Ctrl+C during a
+    long encode left the wizard apparently frozen for a full minute while this
+    function politely waited for a process the user had already abandoned.
+
+    The stop ladder is graceful-first so a cancelled encode still leaves a
+    playable file: signal -> bounded wait -> terminate -> bounded wait -> kill
+    the whole process tree.
     """
     if process is None:
         return
-    try:
-        process.wait(timeout=wait_timeout)
-    except subprocess.TimeoutExpired:
-        log_warn(f"{label} did not exit within {wait_timeout:.0f}s; terminating it.")
-        for stop in (process.terminate, process.kill):
+    if not cancelled:
+        try:
+            process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            log_warn(f"{label} did not exit within {wait_timeout:.0f}s; stopping it.")
+        except OSError:
+            pass
+
+    if process.poll() is None:
+        if cancelled:
+            log_info(f"{label} cancelled by the user; asking it to finalise the output.")
+        if _signal_graceful_stop(process, label, own_process_group):
             try:
-                stop()
-                process.wait(timeout=5.0)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-            except OSError:
-                break
-    except OSError:
-        pass
+                process.wait(timeout=GRACEFUL_STOP_TIMEOUT)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=GRACEFUL_STOP_TIMEOUT)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        if process.poll() is None:
+            log_warn(f"{label} ignored the stop request; killing its process tree.")
+            _kill_process_tree(process, label)
+            try:
+                process.wait(timeout=GRACEFUL_STOP_TIMEOUT)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
     for thread in threads:
         if thread is not None and thread.is_alive():
             thread.join(timeout=join_timeout)
@@ -414,6 +491,7 @@ def run_ffmpeg_with_progress(
     split_active_part = 0
     split_active_part_start_raw = 0.0
     split_previous_raw_s: float | None = None
+    cancelled = False
 
     try:
         process = subprocess.Popen(
@@ -423,6 +501,12 @@ def run_ffmpeg_with_progress(
             text=True,
             encoding="utf-8",
             errors="replace",
+            # Its own group so a cancel can send CTRL_BREAK_EVENT to FFmpeg
+            # alone -- letting it write the container trailer -- instead of
+            # TerminateProcess, which truncates the output. Without the flag the
+            # event would also hit the wizard's own console.
+            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+               if sys.platform == "win32" else {}),
         )
     except Exception as exc:
         log_exception(f"Failed to start {label}")
@@ -692,10 +776,22 @@ def run_ffmpeg_with_progress(
                 # FFmpeg's progress=end is terminal; stop the render loop so
                 # post-end queue-drain ticks cannot repaint a second 100% line.
                 break
+    except KeyboardInterrupt:
+        # `except Exception` does NOT catch this, so Ctrl+C used to fall through
+        # to the bare finally below and sit in reap_subprocess's 60 s wait -- the
+        # wizard looked frozen for a full minute after the user cancelled.
+        # Reaping with cancelled=True skips the wait and goes straight to the
+        # graceful stop ladder, so FFmpeg still gets to write its trailer.
+        cancelled = True
+        _finish_progress_line(last_render or None)
+        appio.note(f"{label} cancelled; stopping FFmpeg and finalising the output.")
+        raise
     except Exception:
         log_exception(f"{label} progress reader crashed")
     finally:
-        reap_subprocess(process, (stdout_thread, stderr_thread), label=label)
+        reap_subprocess(process, (stdout_thread, stderr_thread), label=label,
+                        cancelled=cancelled,
+                        own_process_group=(sys.platform == "win32"))
 
     elapsed = time.perf_counter() - started_at
 

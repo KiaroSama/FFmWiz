@@ -374,6 +374,15 @@ ApplicationWindow {
     property int activeAB: 0       // 0 -> playerA active, 1 -> playerB active
     property bool wantPlaying: false
 
+    // Release BOTH media sources before the app exits. On Windows the
+    // MediaPlayer keeps the reverse proxy file open, so TemporaryDirectory
+    // cleanup on the Python side hits WinError 32 and abandons the file in
+    // %TEMP% -- silently, because that cleanup swallows OSError (NEW-GUI3).
+    onClosing: {
+        playerA.stop(); playerB.stop()
+        playerA.source = ""; playerB.source = ""
+    }
+
     function actP() { return activeAB === 0 ? playerA : playerB }
     function idleP() { return activeAB === 0 ? playerB : playerA }
     function srcOf(i) { return "file:///" + String(segs[i].path).replace(/\\/g, "/") }

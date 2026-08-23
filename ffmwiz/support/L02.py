@@ -241,14 +241,21 @@ def _truncate_ansi_visible(text: str, max_visible: int) -> str:
     out: list[str] = []
     visible = 0
     idx = 0
-    while idx < len(text) and visible < limit:
+    while idx < len(text):
         match = ANSI_ESCAPE_RE.match(text, idx)
         if match:
             out.append(match.group(0))
             idx = match.end()
             continue
+        # Measure with the same oracle the early-out above used. Counting a
+        # CJK or fullwidth character as one column under-measured the kept
+        # portion, so the result was still wider than the terminal and
+        # wrapped -- the exact thing this clamp exists to prevent.
+        char_width = _visible_len(text[idx])
+        if visible + char_width > limit:
+            break
         out.append(text[idx])
-        visible += 1
+        visible += char_width
         idx += 1
     truncated = "".join(out) + "..."
     if "\x1b[" in truncated and not truncated.endswith(Color.RESET):
