@@ -471,11 +471,11 @@ def build_unified_timeline_widget():
             p.setBrush(QtGui.QBrush(QtGui.QColor(PALETTE["timeline_track"])))
             p.drawRoundedRect(r, 6, 6)
             p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["border_soft"]), 1))
-            p.setBrush(QtGui.QBrush(QtGui.QColor("#111820")))
+            p.setBrush(QtGui.QBrush(QtGui.QColor(PALETTE["panel"])))
             p.drawRoundedRect(ruler, 5, 5)
-            p.setBrush(QtGui.QBrush(QtGui.QColor("#101722")))
+            p.setBrush(QtGui.QBrush(QtGui.QColor(PALETTE["timeline_bg"])))
             p.drawRoundedRect(wave, 4, 4)
-            grid_pen = QtGui.QPen(QtGui.QColor("#263447"), 1)
+            grid_pen = QtGui.QPen(QtGui.QColor(PALETTE["border"]), 1)
             p.setPen(grid_pen)
             for i in range(1, 12):
                 x = wave.left() + wave.width() * i / 12.0
@@ -504,10 +504,10 @@ def build_unified_timeline_widget():
                 x2 = self._time_to_x(min(seg_end, end))
                 if x2 <= x1:
                     continue
-                fill = QtGui.QColor("#0d1b2a" if idx % 2 == 0 else "#132238")
+                fill = QtGui.QColor(PALETTE["panel"] if idx % 2 == 0 else PALETTE["panel_alt"])
                 fill.setAlpha(150)
                 p.setBrush(QtGui.QBrush(fill))
-                p.setPen(QtGui.QPen(QtGui.QColor("#254567"), 1))
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["border"]), 1))
                 p.drawRect(QRectF(x1, ruler.top(), x2 - x1, wave.bottom() - ruler.top()))
             p.setFont(QtGui.QFont("Segoe UI Semibold", 9))
             tick_label_width = 100
@@ -590,7 +590,7 @@ def build_unified_timeline_widget():
             else:
                 p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_mute"])))
                 p.drawText(wave, Qt.AlignCenter, "Audio waveform loading...")
-            grid_overlay = QtGui.QColor("#2b3b52")
+            grid_overlay = QtGui.QColor(PALETTE["border"])
             grid_overlay.setAlpha(120)
             p.setPen(QtGui.QPen(grid_overlay, 1))
             for i in range(1, 12):
@@ -599,7 +599,7 @@ def build_unified_timeline_widget():
             for i in range(1, 4):
                 y = wave.top() + wave.height() * i / 4.0
                 p.drawLine(QPointF(wave.left(), y), QPointF(wave.right(), y))
-            tick_guide = QtGui.QColor("#75869a")
+            tick_guide = QtGui.QColor(PALETTE["tick_lo"])
             tick_guide.setAlpha(78)
             p.setPen(QtGui.QPen(tick_guide, 1))
             for x in tick_positions:
@@ -611,30 +611,30 @@ def build_unified_timeline_widget():
                 x2 = self._time_to_x(min(e, end))
                 color = QtGui.QColor(PALETTE["cut_red"] if idx == self.selected_cut else PALETTE["cut_red_dim"])
                 color.setAlpha(150 if idx == self.selected_cut else 105)
-                border = QtGui.QColor("#ffb3ad" if idx == self.selected_cut else "#ff8c86")
+                border = QtGui.QColor(PALETTE["danger_text"] if idx == self.selected_cut else PALETTE["cut_red"])
                 border.setAlpha(230 if idx == self.selected_cut else 190)
                 p.setPen(QtGui.QPen(border, 2))
                 p.setBrush(QtGui.QBrush(color))
                 cut_rect = QRectF(x1, wave.top(), max(3, x2 - x1), wave.height()).adjusted(0.5, 0.5, -0.5, -0.5)
                 p.drawRoundedRect(cut_rect, 5, 5)
                 if cut_rect.width() >= 34:
-                    p.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1))
+                    p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_on_accent"]), 1))
                     p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
                     p.drawText(cut_rect.adjusted(5, 3, -5, -3), Qt.AlignCenter, f"Cut #{idx + 1}")
                 bar_rect = self._cut_bar_rect(max(s, start), min(e, end))
-                bar_fill = QtGui.QColor("#4b1118" if idx == self.selected_cut else "#301117")
+                bar_fill = QtGui.QColor(PALETTE["cut_bar"] if idx == self.selected_cut else PALETTE["cut_bar_dim"])
                 bar_fill.setAlpha(245 if idx == self.selected_cut else 210)
-                bar_border = QtGui.QColor("#ffd1cc" if idx == self.selected_cut else "#e88a84")
+                bar_border = QtGui.QColor(PALETTE["danger_text"] if idx == self.selected_cut else PALETTE["cut_red"])
                 bar_border.setAlpha(245 if idx == self.selected_cut else 190)
                 p.setBrush(QtGui.QBrush(bar_fill))
                 p.setPen(QtGui.QPen(bar_border, 2 if idx == self.selected_cut else 1))
                 p.drawRoundedRect(bar_rect, 4, 4)
-                p.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1))
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_on_accent"]), 1))
                 p.setFont(QtGui.QFont("Segoe UI Semibold", 8))
                 p.drawText(bar_rect.adjusted(7, 1, -7, -1), Qt.AlignCenter, f"Cut #{idx + 1}")
-                handle_fill = QtGui.QColor("#ffffff")
+                handle_fill = QtGui.QColor(PALETTE["text_on_accent"])
                 handle_fill.setAlpha(245 if idx == self.selected_cut else 205)
-                handle_border = QtGui.QColor("#ffb3ad")
+                handle_border = QtGui.QColor(PALETTE["danger_text"])
                 handle_border.setAlpha(245 if idx == self.selected_cut else 190)
                 p.setBrush(QtGui.QBrush(handle_fill))
                 p.setPen(QtGui.QPen(handle_border, 1))
@@ -740,7 +740,7 @@ def build_unified_timeline_widget():
             center_time = self.duration / 2.0
             cx = self._time_to_x(center_time)
             if ruler.left() - 2 <= cx <= ruler.right() + 2:
-                guide_color = QtGui.QColor("#c084fc")
+                guide_color = QtGui.QColor(PALETTE["center_guide"])
                 guide_backing = QtGui.QColor(10, 6, 18, 220)
                 arrow_top = ruler.top() + 1
                 arrow_tip = ruler.top() + 19
@@ -773,7 +773,7 @@ def build_unified_timeline_widget():
                 p.setBrush(QtGui.QBrush(QtGui.QColor(20, 12, 32, 235)))
                 p.setPen(QtGui.QPen(guide_color, 1))
                 p.drawRoundedRect(_pill, 4, 4)
-                p.setPen(QtGui.QPen(QtGui.QColor("#e9d5ff"), 1))
+                p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["center_guide_text"]), 1))
                 p.drawText(_pill, Qt.AlignCenter, f"Center  {_ctc}")
             ph_x = self._time_to_x(self.playhead)
             if wave.left() - 4 <= ph_x <= wave.right() + 4:

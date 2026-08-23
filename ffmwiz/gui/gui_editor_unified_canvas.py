@@ -213,6 +213,12 @@ def build_unified_preview_widgets():
                 self.setCursor(Qt.OpenHandCursor)
 
         def _make_zoom_cursor(self, zoom_out: bool):
+            # THEME EXEMPTION: the colours below are deliberately NOT palette
+            # tokens. This cursor is drawn over arbitrary video frames, so it
+            # needs a fixed near-black outline plus high-chroma fills that stay
+            # legible against any content -- including a frame that happens to
+            # match the app's navy. Tying it to the theme would make it vanish
+            # on some footage. tests/test_theme_tokens.py allows exactly this.
             pix = QtGui.QPixmap(34, 34)
             pix.fill(Qt.transparent)
             p = QtGui.QPainter(pix)
@@ -295,7 +301,7 @@ def build_unified_preview_widgets():
                 p.setPen(QtGui.QPen(QtGui.QColor(PALETTE["text_mute"])))
                 p.setFont(QtGui.QFont("Segoe UI", 12))
                 p.drawText(self.rect(), Qt.AlignCenter, "Loading video preview...")
-            center_line = QtGui.QColor("#b9c7d8")
+            center_line = QtGui.QColor(PALETTE["text_dim"])
             center_line.setAlpha(82)
             p.setPen(QtGui.QPen(center_line, 1))
             center_x = img.left() + img.width() * 0.5
