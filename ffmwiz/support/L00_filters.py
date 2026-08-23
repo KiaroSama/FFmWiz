@@ -221,16 +221,32 @@ def has_crop(answers: dict[str, Any]) -> bool:
     )
 
 
+# An apostrophe inside a single-quoted filtergraph option has to survive TWO
+# unescaping passes: the filtergraph parser, then av_opt_set_from_string. A
+# plain \' is eaten by the second pass, so `bob's/s.srt` reached libass as
+# `bobs/s.srt` and hard-subbing any such file failed with "Unable to open".
+#
+# The sequence that survives both is: close the quote, three literal
+# backslashes, a quote, reopen the quote. Determined by probing every
+# 0..6-backslash variant against real ffmpeg 8.1.1 and confirming the text was
+# actually burned in (a black frame's YAVG went 0 -> 16.1); every other variant
+# either dropped the apostrophe or left a stray backslash in the path.
+_FILTER_APOSTROPHE = "'" + ("\\" * 3) + "'" + "'"
+
+
 def metadata_filter_path(path: Path) -> str:
-    text = str(path).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+    text = str(path).replace("\\", "/").replace(":", r"\:")
+    text = text.replace("'", _FILTER_APOSTROPHE)
     return "'" + text + "'"
 
 
 def hardsub_filter_quote_path(path: Path) -> str:
     text = path.resolve().as_posix()
+    # The backslash doubling must stay FIRST: it would otherwise double the
+    # backslashes inside _FILTER_APOSTROPHE and break the escape again.
     text = text.replace("\\", "\\\\")
     text = text.replace(":", "\\:")
-    text = text.replace("'", "\\'")
+    text = text.replace("'", _FILTER_APOSTROPHE)
     text = text.replace(",", "\\,")
     text = text.replace("[", "\\[")
     text = text.replace("]", "\\]")
