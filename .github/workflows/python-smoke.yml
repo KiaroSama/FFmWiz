@@ -58,6 +58,15 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
+        ffmpeg: ["latest"]
+        include:
+          # scale/scale_cuda gained reset_sar in the 7.2/8.0 line; 7.1.1 is the
+          # last release without it, so it is the only leg that runs the
+          # portable square-pixel fallback older users actually get. One extra
+          # leg, not a 2x2 cross product: which branch is taken depends on the
+          # ffmpeg build, never on the Python version.
+          - python-version: "3.13"
+            ffmpeg: "7.1.1"
 
     steps:
       - name: Check out repository
@@ -75,10 +84,34 @@ jobs:
         # no test imports it (see the gui-import job).
         run: python -m pip install --disable-pip-version-check numpy
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg ${{ matrix.ffmpeg }}
         # Without ffmpeg on PATH the real-encode suites self-skip and this job
-        # reports OK having never executed a single ffmpeg assertion.
-        run: choco install ffmpeg -y --no-progress
+        # reports OK having never executed a single ffmpeg assertion. The
+        # chocolatey package embeds the build, so a pinned old version installs
+        # as reliably as the newest one.
+        run: |
+          if ("${{ matrix.ffmpeg }}" -eq "latest") {
+            choco install ffmpeg -y --no-progress
+          } else {
+            choco install ffmpeg -y --no-progress --version=${{ matrix.ffmpeg }} --allow-downgrade
+          }
+
+      - name: Confirm this leg is the ffmpeg it claims to be
+        shell: bash
+        # A silent version drift would turn the two legs into duplicates and
+        # the reset_sar branch of the other one would stop being covered.
+        # No pipes: this shell runs with -o pipefail, and a reader that exits
+        # early (head, grep -q) can leave ffmpeg killed by SIGPIPE and fail the
+        # step for a reason that has nothing to do with the build.
+        run: |
+          ffmpeg -version
+          case "$(ffmpeg -hide_banner -h filter=scale)" in
+            *reset_sar*) have=yes ;;
+            *)           have=no ;;
+          esac
+          want=$([ "${{ matrix.ffmpeg }}" = latest ] && echo yes || echo no)
+          echo "scale reset_sar: have=$have want=$want"
+          [ "$have" = "$want" ]
 
       - name: Run test suite
         shell: bash

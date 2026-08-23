@@ -6,6 +6,9 @@ from pathlib import Path
 from unittest import mock
 import FFmWiz
 from command_gen_base import CommandGenBase
+# reset_sar exists only on FFmpeg 7.2+; the shared helper asserts the scale
+# chain each capability branch must emit. See tests/test_sar_capability.py.
+from test_sar_capability import assert_both_scale_branches
 
 
 class CommandColorAndPixelTests(CommandGenBase):
@@ -387,62 +390,82 @@ class CommandColorAndPixelTests(CommandGenBase):
 
     def test_non_square_sar_display_ar_preserved(self):
         """Test 7: Non-square SAR source has display AR preserved after resize."""
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = self.base_answers(tmp)
-            # Anamorphic: 720x576, SAR 64:45 → display 1024x576 (16:9)
-            answers.update({
-                "video_streams": [{"codec_type": "video", "codec_name": "h264",
-                                   "width": 720, "height": 576,
-                                   "sample_aspect_ratio": "64:45"}],
-                "crop_enabled": False,
-                "use_gpu": False,
-                "resolution": FFmWiz.parse_resolution("480p"),
-            })
-            text = self.command_text(answers)
-            # Display AR is 16:9. 480p should produce ~854x480.
+        def build():
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                # Anamorphic: 720x576, SAR 64:45 → display 1024x576 (16:9)
+                answers.update({
+                    "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                       "width": 720, "height": 576,
+                                       "sample_aspect_ratio": "64:45"}],
+                    "crop_enabled": False,
+                    "use_gpu": False,
+                    "resolution": FFmWiz.parse_resolution("480p"),
+                })
+                text = self.command_text(answers)
+            # The geometry is the contract and is the same answer on either
+            # FFmpeg: display AR 16:9, so 480p lands on 854x480 square pixels.
             dims = answers.get("final_resolution")
-            self.assertIsNotNone(dims)
+            self.assertEqual((854, 480), dims)
             display_ar = (720 * 64 / 45) / 576  # ≈ 1.778 (16:9)
-            out_ar = dims[0] / dims[1]
-            self.assertAlmostEqual(out_ar, display_ar, delta=0.02)
-            # SAR is reset inside the scale filter, output uses square pixels.
-            self.assertIn("reset_sar=1", text)
+            self.assertAlmostEqual(dims[0] / dims[1], display_ar, delta=0.02)
+            return text
+
+        # Those square pixels come from whichever scale chain this build takes.
+        assert_both_scale_branches(
+            self, build,
+            "scale=854:480:force_original_aspect_ratio=decrease:force_divisible_by=2")
 
     def test_preserve_mode_scale_includes_reset_sar(self):
-        """Preserve-mode scale must include reset_sar=1 and no trailing setsar=1 after pad."""
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = self.base_answers(tmp)
-            answers.update({
-                "video_streams": [{"codec_type": "video", "codec_name": "h264",
-                                   "width": 1920, "height": 1080}],
-                "crop_enabled": False,
-                "use_gpu": False,
-                "resolution": FFmWiz.parse_resolution("1016x480"),
-            })
-            text = self.command_text(answers)
-            self.assertIn("reset_sar=1", text)
-            # There must be no trailing setsar=1 after pad
+        """Preserve-mode scale squares the pixels inside the scale chain, never
+        with a trailing setsar=1 after pad."""
+        def build():
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                answers.update({
+                    "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                       "width": 1920, "height": 1080}],
+                    "crop_enabled": False,
+                    "use_gpu": False,
+                    "resolution": FFmWiz.parse_resolution("1016x480"),
+                })
+                text = self.command_text(answers)
+            self.assertEqual((1016, 480), answers.get("final_resolution"))
+            self.assertIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2", text)
+            # A trailing setsar only relabels the pixels; on an anamorphic
+            # source that squeezes the picture instead of scaling it.
             self.assertNotIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
+            return text
+
+        assert_both_scale_branches(
+            self, build,
+            "scale=1016:480:force_original_aspect_ratio=decrease:force_divisible_by=2")
 
     def test_non_square_sar_preserved_after_reset_sar(self):
-        """Non-square SAR input: display AR is preserved, output uses square pixels via reset_sar."""
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = self.base_answers(tmp)
-            # 720x576 SAR 64:45 → display 1024x576 (16:9)
-            answers.update({
-                "video_streams": [{"codec_type": "video", "codec_name": "h264",
-                                   "width": 720, "height": 576,
-                                   "sample_aspect_ratio": "64:45"}],
-                "crop_enabled": False,
-                "use_gpu": False,
-                "resolution": FFmWiz.parse_resolution("854x480"),
-            })
-            text = self.command_text(answers)
-            self.assertIn("reset_sar=1", text)
-            # Output canvas is 854x480
+        """Non-square SAR input: display AR is preserved, output uses square pixels."""
+        def build():
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                # 720x576 SAR 64:45 → display 1024x576 (16:9)
+                answers.update({
+                    "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                       "width": 720, "height": 576,
+                                       "sample_aspect_ratio": "64:45"}],
+                    "crop_enabled": False,
+                    "use_gpu": False,
+                    "resolution": FFmWiz.parse_resolution("854x480"),
+                })
+                text = self.command_text(answers)
+            # Output canvas is 854x480 on either FFmpeg.
+            self.assertEqual((854, 480), answers.get("final_resolution"))
             self.assertIn("pad=854:480", text)
             # No trailing setsar=1 after pad
             self.assertNotIn("pad=854:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
+            return text
+
+        assert_both_scale_branches(
+            self, build,
+            "scale=854:480:force_original_aspect_ratio=decrease:force_divisible_by=2")
 
     def test_stretch_mode_not_affected_by_reset_sar(self):
         """Stretch mode does not add force_original_aspect_ratio or reset_sar."""
@@ -465,30 +488,31 @@ class CommandColorAndPixelTests(CommandGenBase):
 
     def test_exact_reported_workflow_crop_exact_and_reset_sar(self):
         """Exact reported workflow: multi-range trim + crop + 4fps + 1016x480 + NVENC + split.
-        Must contain crop=...:exact=1 and scale=...:reset_sar=1, no trailing setsar=1 after pad."""
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = self.base_answers(tmp)
-            answers.update({
-                "video_streams": [{"codec_type": "video", "codec_name": "h264",
-                                   "width": 2876, "height": 1442, "avg_frame_rate": "30/1", "color_range": "tv"}],
-                "crop_enabled": True,
-                "crop_left": 421, "crop_right": 730,
-                "crop_top": 176, "crop_bottom": 182,
-                "fps": 4,
-                "resolution": FFmWiz.parse_resolution("1016x480"),
-                "use_gpu": True,
-                "video_codec": "H265",
-                "separator_points": [3000.0],
-                "cut_keep_ranges": [(10, 4000), (5000, 7000)],
-                "format": {"duration": "8000.0"},
-                "audio_speed_from_video": False,
-            })
-            text = self.command_text(answers)
+        Must contain crop=...:exact=1 and the square-pixel scale chain this
+        build supports, with no trailing setsar=1 after pad."""
+        def build():
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                answers.update({
+                    "video_streams": [{"codec_type": "video", "codec_name": "h264",
+                                       "width": 2876, "height": 1442, "avg_frame_rate": "30/1", "color_range": "tv"}],
+                    "crop_enabled": True,
+                    "crop_left": 421, "crop_right": 730,
+                    "crop_top": 176, "crop_bottom": 182,
+                    "fps": 4,
+                    "resolution": FFmWiz.parse_resolution("1016x480"),
+                    "use_gpu": True,
+                    "video_codec": "H265",
+                    "separator_points": [3000.0],
+                    "cut_keep_ranges": [(10, 4000), (5000, 7000)],
+                    "format": {"duration": "8000.0"},
+                    "audio_speed_from_video": False,
+                })
+                text = self.command_text(answers)
             # Must contain exact=1 in crop (left normalized 421->420 for 4:2:0 origin)
             self.assertIn("crop=iw-420-730:ih-176-182:420:176:exact=1", text)
-            # Must contain reset_sar=1 in scale
-            self.assertIn("scale=1016:480:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1", text)
-            # Must contain pad
+            # Output canvas and pad are the same on either FFmpeg
+            self.assertEqual((1016, 480), answers.get("final_resolution"))
             self.assertIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2", text)
             # Must NOT have trailing setsar=1 after pad
             self.assertNotIn("pad=1016:480:(ow-iw)/2:(oh-ih)/2,setsar=1", text)
@@ -500,8 +524,13 @@ class CommandColorAndPixelTests(CommandGenBase):
             self.assertIn("-map_chapters -1", text)
             self.assertIn("_Part01", text)
             self.assertIn("_Part02", text)
-            # Cleanup
+            # Cleanup: the builder writes a chapter-metadata file per build.
             FFmWiz.cleanup_encode_chapter_metadata(answers)
+            return text
+
+        assert_both_scale_branches(
+            self, build,
+            "scale=1016:480:force_original_aspect_ratio=decrease:force_divisible_by=2")
 
     def test_crop_norm_7_crop_near_boundary_rejected(self):
         """Test 7: an impossible crop rectangle is rejected before FFmpeg runs."""
