@@ -259,6 +259,32 @@ def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
     return specs
 
 
+def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
+                        total_duration: float | None, label: str) -> tuple[int, float]:
+    """The single place that chooses between a bounded plan and one-shot execution.
+
+    The project promises that reverse is segmented so a long clip does not have
+    to be buffered whole, but each caller decided for itself and Folder Encode
+    simply never asked -- it called run_ffmpeg_with_progress directly, so a
+    reversed folder job ran the full-buffer `reverse` filter with the UI still
+    claiming the safe behaviour (R09).
+
+    Routing every caller through here means the promise and the execution can
+    only disagree in one place. A join deliberately does NOT segment: the
+    segment builder understands a single input, and reversing input 1 alone is
+    far worse than buffering (R01). `reverse_video_needs_segmented_main_encode`
+    owns that decision.
+    """
+    if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
+        answers["cmd"] = cmd
+        return run_segmented_reverse_main_encode(answers)
+    if answers.get("reverse_video") and answers.get("join_input_items"):
+        # Say so rather than let the UI imply a bounded plan it will not use.
+        appio.note("Reverse across a join is encoded in one pass; a very long "
+                   "joined timeline needs proportional memory.")
+    return run_ffmpeg_with_progress(cmd, total_duration=total_duration, label=label)
+
+
 def run_separator_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
     specs = build_separator_job_specs(answers)
     if not specs:
@@ -356,6 +382,23 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
         concat_list = tmpdir / "concat.txt"
         write_concat_list(list(reversed(segment_paths)), concat_list)
         concat_cmd = build_concat_copy_command(answers["ffmpeg"], concat_list, output_path)
+        # The per-segment encodes carry chapter metadata, but this final
+        # concat-copy did not restore any of it, so a reversed chaptered source
+        # came out with ZERO chapters (R05). Attach the remapped chapters here,
+        # where the output timeline finally exists. remap_chapters_for_encode
+        # applies the reverse flip itself.
+        chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed)
+        if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
+            chapter_metadata = write_encode_chapter_metadata(chapter_plan, tmpdir, "_reverse")
+            insert_at = concat_cmd.index(str(concat_list)) + 1
+            concat_cmd[insert_at:insert_at] = ["-i", str(chapter_metadata)]
+            concat_cmd.extend(copy_cut_chapter_map_args(chapter_plan, metadata_input_index=1))
+            log_info(f"Reverse encode: restored {len(chapter_plan['chapters'])} chapter(s) "
+                     "onto the reversed timeline")
+        else:
+            # Be explicit rather than leaving a silent gap: a source WITH
+            # chapters whose plan is not usable loses them here.
+            concat_cmd.extend(copy_cut_chapter_map_args(chapter_plan))
         log_info("Reverse encode concat command: " + command_to_powershell(concat_cmd))
         appio.note("Concatenating reversed encoded segments...")
         rc, _ = run_ffmpeg_with_progress(
@@ -461,6 +504,7 @@ __all__ = [
     'run_crop_only_prompt',
     'run_metadata_report_inspect',
     'run_segmented_reverse_main_encode',
+    'execute_encode_plan',
     'run_separator_main_encode',
     'FFMPEG_REFERENCE_SECTIONS',
 ]
