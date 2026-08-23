@@ -505,6 +505,21 @@ def should_use_cuda_decode_for_complex_graph(
 
 
 def reverse_video_needs_segmented_main_encode(answers: dict[str, Any]) -> bool:
+    """Should this reverse run through the bounded segmented executor?
+
+    NOT for a join. The segmented executor rebuilds every segment with the
+    single-input builder, which reads only answers["input_path"], so a joined
+    job silently reversed input 1 alone: a red+blue 2+2 s join came back as
+    2.12 s of red with input 2 missing entirely (R01). The join command already
+    reverses the complete joined timeline correctly -- verified 4.04 s, blue
+    then red -- so a join must execute its own command instead.
+
+    This mirrors the guard build_separator_job_specs already applies for the
+    same reason, and lives here rather than at the call sites so every caller
+    is covered.
+    """
+    if answers.get("join_input_items"):
+        return False
     return bool(output_has_video(answers) and video_speed_transform_enabled(answers) and answers.get("reverse_video"))
 
 
