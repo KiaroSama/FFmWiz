@@ -79,6 +79,15 @@ PALETTE: dict[str, str] = {
     "marker_out":      "#d29922",
     "cut_red":         "#f85149",
     "cut_red_dim":     "#a92927",
+    # Cut chip on the timeline bar: a very dark maroon so the white "Cut #n"
+    # label stays readable. Nothing else in the palette is this dark, so these
+    # keep their original values instead of being remapped onto a brighter red.
+    "cut_bar":         "#4b1118",
+    "cut_bar_dim":     "#301117",
+    # Centre guide: deliberately violet so it is never mistaken for the red
+    # playhead. Tokenised at its original value so both engines can share it.
+    "center_guide":    "#c084fc",
+    "center_guide_text": "#e9d5ff",
     "playhead":        "#ff4d55",
     "playhead_halo":   "#3b82f6",
     # --- text ---
@@ -95,6 +104,16 @@ QSS = f"""
 QMainWindow, QWidget#central {{
     background-color: {PALETTE['bg']};
     color: {PALETTE['text']};
+}}
+
+/* The side control column is a QScrollArea. Its viewport is NOT covered by the
+   QMainWindow rule above, so without this it paints with Qt's default light
+   palette -- visible as light-grey bars in the 8px gaps between the docked
+   panels, and across the whole column while the panels are still streaming in
+   after first paint (USER-12). */
+QScrollArea, QScrollArea > QWidget > QWidget, QAbstractScrollArea::viewport {{
+    background-color: {PALETTE['bg']};
+    border: none;
 }}
 
 QLabel {{ color: {PALETTE['text']}; background: transparent; }}

@@ -5,6 +5,7 @@ read it directly, the QML editor imports it, and the Tk editors read it through
 guibridge._UIPalette. These tests are the ratchet that keeps a second palette
 from growing back (USER-12-1/2/3/5).
 """
+import ast
 import re
 import sys
 import unittest
@@ -139,6 +140,102 @@ class TerminalPaletteTests(unittest.TestCase):
     def test_language_colours_stay_distinguishable(self):
         from ffmwiz.muxcleanup.colors import LANGUAGE_COLORS
         self.assertEqual(len(set(LANGUAGE_COLORS)), len(LANGUAGE_COLORS))
+
+
+class NoSecondPaletteTests(unittest.TestCase):
+    """USER-12: every ACTIVE surface must draw from gui_style.PALETTE.
+
+    Measured on the real rendered window before this ratchet existed:
+      * the classic timeline painted #0f1a26 / #111820 -- a slate-green family,
+        while the toolbar and panels were navy #121a44, so that whole section
+        visibly did not match the rest of the app;
+      * the side control column is a QScrollArea whose viewport the QSS never
+        styled, leaving 5124 pixels of #efefef light grey showing through the
+        8px gaps between the docked panels (and across the entire column while
+        those panels stream in after first paint).
+
+    Both now resolve through tokens. This keeps a second palette from growing back.
+    """
+
+    # Modules a user actually looks at. The Tk bridges are an archived fallback
+    # reached only when PySide6 is missing, so they are out of scope here.
+    ACTIVE = ["gui_editor_unified.py", "gui_editor_unified_canvas.py",
+              "gui_editor_unified_timeline.py", "gui_common.py"]
+
+    # The zoom cursor is drawn over arbitrary video frames and must stay legible
+    # against any content, so it is exempt BY DESIGN. See the THEME EXEMPTION
+    # comment on the function itself.
+    EXEMPT_FUNCTIONS = {"_make_zoom_cursor"}
+
+    # A hex inside col()/colA()/PALETTE.get() is a fallback for a token that
+    # already owns that colour, not a second palette.
+    FALLBACK = re.compile(r'(?:col|colA|PALETTE\.get)\s*\([^()]*?"#[0-9a-fA-F]{6}"')
+    HEX = re.compile(r'"#[0-9a-fA-F]{6}"')
+
+    def _exempt_line_ranges(self, source):
+        """Line spans of functions allowed to hard-code colours."""
+        spans = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name in self.EXEMPT_FUNCTIONS:
+                spans.append((node.lineno, node.end_lineno))
+        return spans
+
+    def _standalone_hexes(self, path):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        fallback = [m.span() for m in self.FALLBACK.finditer(text)]
+        exempt = self._exempt_line_ranges(text)
+        found = []
+        for m in self.HEX.finditer(text):
+            if any(a <= m.start() < b for a, b in fallback):
+                continue
+            line = text[:m.start()].count("\n") + 1
+            if any(start <= line <= end for start, end in exempt):
+                continue
+            found.append((line, m.group(0), lines[line - 1].strip()[:60]))
+        return found
+
+    def test_active_classic_modules_declare_no_colours_of_their_own(self):
+        for name in self.ACTIVE:
+            with self.subTest(name):
+                found = self._standalone_hexes(_GUI_DIR / name)
+                self.assertEqual(
+                    [], found,
+                    f"{name} hard-codes colours instead of using PALETTE: "
+                    + "; ".join(f"L{ln} {hx} -> {snip}" for ln, hx, snip in found))
+
+    def test_the_cursor_exemption_stays_documented(self):
+        # If the exemption is ever silently widened, the reason must still be
+        # written down at the place it applies.
+        src = (_GUI_DIR / "gui_editor_unified_canvas.py").read_text(encoding="utf-8")
+        self.assertIn("THEME EXEMPTION", src)
+        for name in self.EXEMPT_FUNCTIONS:
+            self.assertIn(f"def {name}", src)
+
+    def test_the_timeline_is_fully_token_driven(self):
+        # The regression that started this: the timeline was the one section
+        # painting outside the palette entirely.
+        self.assertEqual([], self._standalone_hexes(_GUI_DIR / "gui_editor_unified_timeline.py"))
+
+    def test_the_scroll_area_viewport_is_themed(self):
+        # Without this rule the side column viewport falls back to Qt's default
+        # light grey and shows as bars between the docked panels. Match the whole
+        # rule, not just the word "QScrollArea" -- a renamed selector still
+        # contains that substring while styling nothing.
+        rule = re.search(
+            r"(QScrollArea[^{}]*QAbstractScrollArea::viewport[^{}]*)\{([^{}]*)\}",
+            gui_style.QSS)
+        self.assertIsNotNone(
+            rule, "QSS has no rule covering both QScrollArea and its viewport")
+        self.assertIn(gui_style.PALETTE["bg"], rule.group(2),
+                      "the scroll-area rule must paint a palette background")
+
+    def test_the_new_tokens_exist_and_are_used(self):
+        timeline = (_GUI_DIR / "gui_editor_unified_timeline.py").read_text(encoding="utf-8")
+        for token in ("cut_bar", "cut_bar_dim", "center_guide", "center_guide_text"):
+            with self.subTest(token):
+                self.assertIn(token, gui_style.PALETTE)
+                self.assertIn(f'PALETTE["{token}"]', timeline)
 
 
 if __name__ == "__main__":
