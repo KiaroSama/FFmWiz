@@ -141,6 +141,49 @@ class TerminalPaletteTests(unittest.TestCase):
         from ffmwiz.muxcleanup.colors import LANGUAGE_COLORS
         self.assertEqual(len(set(LANGUAGE_COLORS)), len(LANGUAGE_COLORS))
 
+    # Color.MUX_* existed only to re-declare a muxcleanup value on the wizard
+    # side. Every one of them WITHOUT a caller is gone; these six still have
+    # call sites outside this file's reach (ffmwiz/support/ext00b.py,
+    # ext00c.py, ext01c.py, L00_metadata.py) and go when those
+    # switch to importing C directly. This bound may shrink, never grow.
+    MUX_MIRRORS_LEFT = {
+        "MUX_EMERALD", "MUX_LAVENDER", "MUX_HEADER", "MUX_SEPARATOR",
+        "MUX_SETTING_LABEL", "MUX_SETTING_VALUE",
+    }
+
+    def test_the_mux_mirror_block_does_not_grow_back(self):
+        Color, _ = self._classes()
+        mirrors = {n for n in vars(Color) if n.startswith("MUX_")}
+        self.assertLessEqual(mirrors, self.MUX_MIRRORS_LEFT,
+                             "a Color.MUX_* mirror of muxcleanup.colors.C came back; "
+                             "import C at the call site instead")
+
+    def test_wizard_banner_wears_the_gui_title_colour(self):
+        """USER-12-5: the terminal banner was hot pink, which is in neither the
+        logo nor the GUI. ffmwiz/gui is a script directory, so core/colors.py
+        cannot import PALETTE -- this assertion is the link that keeps the two
+        from drifting apart again."""
+        Color, _ = self._classes()
+        red, green, blue = (int(gui_style.PALETTE["accent_text"][i:i + 2], 16)
+                            for i in (1, 3, 5))
+        self.assertEqual(
+            Color.WIZARD_TITLE,
+            chr(27) + "[38;2;{};{};{}m".format(red, green, blue),
+            "the wizard banner drifted from the GUI title colour")
+
+    def test_one_literal_per_colour_where_the_names_are_synonyms(self):
+        # LIGHT_BLUE and BLUE are the same colour under two names; keeping two
+        # literals meant a retint of one silently left the other behind.
+        Color, _ = self._classes()
+        src = (_ROOT / "ffmwiz" / "core" / "colors.py").read_text(encoding="utf-8")
+        # Line-level so a failure reports the line, not the whole module.
+        declaration = [ln.strip() for ln in src.splitlines()
+                       if ln.strip().startswith("LIGHT_BLUE =")]
+        self.assertEqual(1, len(declaration), declaration)
+        self.assertTrue(declaration[0].startswith("LIGHT_BLUE = BLUE"),
+                        f"LIGHT_BLUE re-declared its own literal: {declaration[0]}")
+        self.assertEqual(Color.LIGHT_BLUE, Color.BLUE)
+
 
 class NoSecondPaletteTests(unittest.TestCase):
     """USER-12: every ACTIVE surface must draw from gui_style.PALETTE.

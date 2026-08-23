@@ -295,6 +295,7 @@ Every key is also documented inline in `config.env.example`.
 | `reverse_audio` | y/n | `n` | Reverse the audio (ignored when `audio_speed=match_video`). |
 | `logging_enabled` | y/n | `y` | Write dated logs into `logs/`. |
 | `log_retention_days` | integer | `0` | `0` keeps forever; N deletes logs older than N days. |
+| `log_level` | debug / info / warning / error / critical | `debug` | File log detail; the console is unaffected (env `FFMWIZ_LOG_LEVEL` overrides). |
 | `gui_engine` | classic / qml | `classic` | Unified‑editor engine (env `FFMWIZ_GUI_ENGINE` overrides). |
 
 ### Example recipes
@@ -940,7 +941,14 @@ Logging is enabled by default. Each run writes a dated UTF‑8 log to `Logs/` ne
 ```ini
 logging_enabled=y       # set n to stop creating logs
 log_retention_days=0    # 0 keeps forever; N prunes logs older than N days
+log_level=debug         # debug | info | warning | error | critical
 ```
+
+`log_level` controls the **file** only; console output never changes. More than half of a
+typical log is DEBUG detail (per-line FFmpeg stderr, progress-parser events, the exact
+argv), so `log_level=info` gives a much smaller file. Keep `debug` when collecting evidence
+for a bug report. The environment variable `FFMWIZ_LOG_LEVEL` overrides the config value,
+and an unrecognized value falls back to `debug`.
 
 Logs record startup, resolved paths, the exact command/argv, ffprobe/ffmpeg activity, and
 errors with context. Attach the relevant log when reporting a problem.
@@ -1406,6 +1414,10 @@ for no change. Changing speed forces a re-encode and remaps chapters.
 **`log_retention_days`** — `0` keeps logs forever; a positive integer deletes FFmWiz logs older
 than that many days when logging starts.
 
+**`log_level`** — `debug` (default), `info`, `warning`, `error`, or `critical`. Sets how much
+reaches the log file; the console is unaffected. The environment variable `FFMWIZ_LOG_LEVEL`
+overrides this value, and an unknown value falls back to `debug`.
+
 **`gui_engine`** — `classic` (default, PySide6 widgets) or `qml` (QtQuick). The environment
 variable `FFMWIZ_GUI_ENGINE` overrides this value.
 
@@ -1732,7 +1744,7 @@ Set `video_codec=copy` and `audio_codec=copy` and pick the new `output_format`.
 
 **Q: Where are the logs?**
 In the `Logs/` folder next to `FFmWiz.py`, one dated UTF-8 file per run. Control them with
-`logging_enabled` and `log_retention_days`.
+`logging_enabled`, `log_retention_days`, and `log_level`.
 
 **Q: How do I pick the modern editor?**
 Set `gui_engine=qml` (or the `FFMWIZ_GUI_ENGINE=qml` environment variable). It falls back to
@@ -1922,6 +1934,7 @@ These environment variables tune behavior. Set them in the shell before launchin
 | `FFMWIZ_NO_AUTO_INSTALL` | set / unset | Skip the PySide6 install prompt entirely; GUI editors stay unavailable until you install it yourself. |
 | `FFMWIZ_AUTO_INSTALL` / `FFMWIZ_AUTO_INSTALL_PYSIDE` | set / unset | Install PySide6 without asking (good for unattended/CI). |
 | `FFMWIZ_AUTO_INSTALL_FFMPEG` | set / unset | Allow the FFmpeg auto-install fallback to proceed without asking. |
+| `FFMWIZ_LOG_LEVEL` | debug / info / warning / error / critical | Overrides the `log_level` config key for the run's log file; an unrecognized value falls back to `debug`. |
 | `FFMWIZ_CACHE_DIR` | directory path | Relocate the FFmpeg capability cache (default `ffmwiz/support/.cache/`). Useful for an isolated or throwaway run; the test suite uses it for isolation. |
 | `FFMWIZ_ALLOW_ESTIMATED_STREAM_SIZES` | set / unset | When a stream's real size cannot be measured from packets or trusted tags, fall back to `bitrate x duration` instead of reporting it as unknown. Changes reported sizes, so it is off by default. |
 | `NO_COLOR` | set / unset | Standard "no color" convention; disables ANSI coloring of console output. |

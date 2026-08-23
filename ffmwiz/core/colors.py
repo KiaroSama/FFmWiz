@@ -20,7 +20,7 @@ class Color:
     DIM = "\033[38;5;250m"
     GRAY = "\033[38;5;252m"
     ORANGE = "\033[38;5;222m"
-    LIGHT_BLUE = "\033[38;5;117m"
+    LIGHT_BLUE = BLUE  # same colour; one literal so a BLUE retint follows through
     LIGHT_YELLOW = "\033[38;5;229m"
     NOTE_YELLOW = "\033[38;5;227m"
     HINT_YELLOW = "\033[38;5;221m"
@@ -32,8 +32,8 @@ class Color:
     RES_TARGET = "\033[38;5;204m"
     RES_EXACT = "\033[38;5;141m"
     # Distinct prompt option-key colors, chosen for high contrast against the
-    # surrounding prompt text. Two of the three are shared with another token
-    # (OPT_KEY_CYAN with AUDIO_TRACK_NOTE, OPT_KEY_CORAL with MUX_CORAL).
+    # surrounding prompt text. OPT_KEY_CYAN shares its value with
+    # AUDIO_TRACK_NOTE; the other two are unique.
     OPT_KEY_CYAN = "\033[38;5;87m"     # Bright cyan-turquoise for bitrate/CRF keys.
     OPT_KEY_CHARTREUSE = "\033[38;5;154m"  # Bright yellow-green for y/n keys.
     OPT_KEY_CORAL = "\033[38;5;209m"   # Bright coral-orange for 0/1/2 keys.
@@ -69,20 +69,14 @@ class Color:
     UNIFIED_CAP_CUTS = "\033[38;2;255;122;122m"
     UNIFIED_CAP_SPEED = "\033[38;2;210;156;255m"
     UNIFIED_CAP_WAVEFORM = "\033[38;2;118;255;191m"
-    WIZARD_TITLE = "\033[38;2;255;50;115m"
-    MUX_GOLD = "\033[38;5;220m"
-    MUX_AMBER = "\033[38;5;214m"
-    MUX_MINT = "\033[38;5;121m"
+    # The wizard banner is the product's terminal identity, so it carries the
+    # same brand accent the GUI title bar wears -- gui_style.PALETTE["accent_text"]
+    # #7db3ff -- instead of the hot pink it was picked at, which appears nowhere
+    # in the logo. ffmwiz/gui is a script directory, not a package, so core cannot
+    # import the palette; tests/test_theme_tokens.py pins the two together.
+    WIZARD_TITLE = "\033[38;2;125;179;255m"
     MUX_EMERALD = "\033[38;5;48m"
-    MUX_TEAL = "\033[38;5;37m"
-    MUX_AQUA = "\033[38;5;51m"
-    MUX_SKY = "\033[38;5;117m"
-    MUX_AZURE = "\033[38;5;75m"
-    MUX_INDIGO = "\033[38;5;99m"
-    MUX_VIOLET = "\033[38;5;135m"
-    MUX_PURPLE = "\033[38;5;141m"
     MUX_LAVENDER = "\033[38;5;183m"
-    MUX_ROSE = "\033[38;5;204m"
     # Compact Join input summary (min/max bitrate, fps, file count).
     JOIN_SUMMARY = "\033[38;5;111m"
     # Join summary value styling: highest vs lowest must use distinct colors.
@@ -92,37 +86,14 @@ class Color:
     JOIN_FILE = "\033[38;5;147m"        # soft violet for file names
     JOIN_COUNT = "\033[38;5;123m"       # cyan for the file count
     JOIN_DURATION = "\033[38;5;120m"    # mint for total raw duration
-    JOIN_FRAMES = "\033[38;5;180m"      # tan for approximate frame count
     JOIN_VOL_LOW = "\033[38;5;39m"      # blue for lowest mean volume
     JOIN_VOL_HIGH = "\033[38;5;203m"    # coral-red for highest max volume
-    MUX_CORAL = "\033[38;5;209m"
-    MUX_SALMON = "\033[38;5;210m"
-    MUX_STEEL = "\033[38;5;110m"
-    MUX_SILVER = "\033[38;5;250m"
     # Audio sample-rate (Hz) value styling, distinct from bitrate/volume colors.
     AUDIO_SAMPLE_RATE = "\033[38;5;43m"
     MUX_HEADER = "\033[1m\033[38;2;255;50;115m"
-    MUX_SCAN_HEADER = "\033[1m\033[38;2;68;221;255m"
-    MUX_SUMMARY_HEADER = "\033[1m\033[38;2;170;255;82m"
-    MUX_VERIFY_HEADER = "\033[1m\033[38;2;255;115;225m"
-    MUX_CONFIRM_HEADER = "\033[1m\033[38;2;255;155;60m"
-    MUX_PROCESS_HEADER = "\033[1m\033[38;2;80;255;205m"
-    MUX_DONE_HEADER = "\033[1m\033[38;2;145;255;95m"
     MUX_SEPARATOR = "\033[1m\033[38;2;75;130;190m"
-    MUX_FILE_LINE = "\033[1m\033[38;2;255;20;20m"
     MUX_SETTING_LABEL = "\033[1m\033[38;2;110;210;255m"
     MUX_SETTING_VALUE = "\033[38;2;245;245;245m"
-    MUX_INPUT_PATH = "\033[38;2;70;255;210m"
-    MUX_OUTPUT_BASE = "\033[38;2;255;105;180m"
-    MUX_OUTPUT_ROOT = "\033[38;2;190;255;70m"
-    MUX_MODE = "\033[1m\033[38;2;180;145;255m"
-    MUX_AUDIO = "\033[38;2;120;255;170m"
-    MUX_SUBTITLE = "\033[38;2;255;150;220m"
-    MUX_TRUE = "\033[1m\033[38;2;95;255;120m"
-    MUX_FALSE = "\033[1m\033[38;2;255;95;95m"
-    MUX_UNKNOWN_LANGUAGE = "\033[38;5;244m"
-    MUX_SIZE_DIFF = "\033[38;2;0;170;125m"
-    MUX_ELAPSED = "\033[38;2;205;122;42m"
 
 
 

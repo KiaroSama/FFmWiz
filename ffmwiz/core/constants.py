@@ -106,6 +106,11 @@ MAX_PRESERVED_AUDIO_CHANNELS = 8
 # (the failure report below), so the buffer is bounded rather than growing for
 # the whole encode -- a chatty filter on a long job emits tens of thousands of
 # lines and every one of them used to be retained.
+# How long each rung of the child-process stop ladder waits before escalating
+# (signal -> terminate -> kill the tree). Short on purpose: it runs when the user
+# has already asked to cancel, or when the child is already considered wedged.
+GRACEFUL_STOP_TIMEOUT = 8.0
+
 STDERR_TAIL_LINES = 200
 # How many of those lines a failure report quotes.
 STDERR_TAIL_REPORT_LINES = 12
@@ -721,6 +726,7 @@ __all__ = [
     'AUDIO_TOOL_MIN_BITRATE_KBPS',
     'AUDIO_TOOL_MAX_BITRATE_KBPS',
     'MAX_PRESERVED_AUDIO_CHANNELS',
+    'GRACEFUL_STOP_TIMEOUT',
     'STDERR_TAIL_LINES',
     'STDERR_TAIL_REPORT_LINES',
     'REVERSE_SEGMENT_SECONDS',

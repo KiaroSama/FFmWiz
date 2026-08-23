@@ -1,5 +1,21 @@
 from __future__ import annotations
 
+import sys as _sys
+
+# pyproject declares requires-python >=3.10 and the package uses 3.10 syntax, but
+# nothing stopped `python FFmWiz.py` under an older interpreter -- it died on an
+# import-time SyntaxError deep inside the package, which reads like a corrupt
+# install rather than the real cause. Check before importing anything of ours.
+# Kept at the very top and deliberately 3.6-parseable so the message survives.
+MINIMUM_PYTHON = (3, 10)
+if _sys.version_info < MINIMUM_PYTHON:
+    _sys.stderr.write(
+        "FFmWiz needs Python {}.{} or newer; this is Python {}.{}.{}.\n"
+        "Run it with a newer interpreter, e.g.  py -3 FFmWiz.py\n".format(
+            MINIMUM_PYTHON[0], MINIMUM_PYTHON[1], *_sys.version_info[:3])
+    )
+    raise SystemExit(2)
+
 import datetime
 import concurrent.futures
 import csv
