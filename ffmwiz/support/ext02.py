@@ -151,13 +151,26 @@ def build_cuda_video_filter(answers: dict[str, Any]) -> str | None:
     resolution = answers.get("resolution", "n")
     scale_dimensions = resolve_scale_dimensions(answers, resolution)
     cuda_format = cuda_pixel_format_for_output(answers)
+    # scale_cuda gained reset_sar in the same 2025 commit as scale, so a pre-7.2
+    # build rejects it and the whole encode fails at filter init. The CPU path
+    # can fall back to a square-pixel pre-pass; inside a CUDA chain the frames
+    # are already on the device, so the only safe downgrade is to omit the
+    # option and leave the source SAR flag alone -- the picture is still
+    # correct, it just keeps non-square pixels (D01).
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    if filter_option_available(ffmpeg, "scale_cuda", "reset_sar"):
+        sar_option = ":reset_sar=1"
+    else:
+        sar_option = ""
+        log_info("FFmpeg scale_cuda has no reset_sar (pre-7.2 build); the GPU "
+                 "scale keeps the source sample aspect ratio.")
     if scale_dimensions:
         width, height = scale_dimensions
         return (
             f"scale_cuda=w={width}:h={height}:format={cuda_format}:"
-            "interp_algo=bicubic:passthrough=0:reset_sar=1"
+            f"interp_algo=bicubic:passthrough=0{sar_option}"
         )
-    return f"scale_cuda=format={cuda_format}:passthrough=0:reset_sar=1"
+    return f"scale_cuda=format={cuda_format}:passthrough=0{sar_option}"
 
 
 def list_streams_for_selection(probe_json: dict[str, Any], streams: list[dict[str, Any]] | None = None) -> None:

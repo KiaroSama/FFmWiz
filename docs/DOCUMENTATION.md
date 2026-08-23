@@ -931,6 +931,17 @@ During a run FFmWiz shows a single in‑place progress line, e.g.:
 - `Total time elapsed` reported at the end counts the FFmpeg run only, not time spent waiting
   for your answers.
 
+### Cancelling a running encode
+
+Press **Ctrl+C** while an encode is running. FFmWiz asks FFmpeg to stop the way a console
+interrupt would, so FFmpeg finalises the container before exiting and the partial output
+stays **playable** — a cancelled 60‑second encode stopped after 3 seconds leaves a readable
+file holding the seconds already encoded, rather than an unreadable fragment. If FFmpeg does
+not respond it is terminated, and finally its whole process tree is killed, so nothing is
+left holding the output file.
+
+The cancel takes effect immediately; FFmWiz does not wait out any encode timeout first.
+
 ---
 
 ## 16. Logging
