@@ -156,8 +156,9 @@ def build_video_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
         for label in labels:
             cmd.extend(["-map", f"[{label}]"])
         cmd.extend(["-c:a", DEFAULT_AUDIO_CODEC, "-b:a", f"{DEFAULT_SPEED_AUDIO_BITRATE_KBPS}k"])
-        if AUDIO_CHANNELS:
-            cmd.extend(["-ac", str(AUDIO_CHANNELS)])
+        channels = resolve_audio_channels(answers)
+        if channels:
+            cmd.extend(["-ac", str(channels)])
     else:
         cmd.append("-an")
     if answers["output_ext"].lower() in MP4_LIKE_EXTS and MOVFLAGS:
@@ -750,7 +751,8 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
         cmd.extend(["-i", str(item["path"])])
     filters: list[str] = []
     inputs: list[str] = []
-    prep = join_audio_prep_filter(join_target_sample_rate(answers))
+    prep = join_audio_prep_filter(join_target_sample_rate(answers),
+                                  join_target_channel_layout(items))
     for idx, _item in enumerate(items):
         filters.append(f"[{idx}:a:0]{prep}[a{idx}]")
         inputs.append(f"[a{idx}]")
@@ -778,7 +780,7 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
     # AAC into .flac / .ogg / .opus and the muxer refused the header.
     join_audio_args, join_audio_note = container_audio_encode_args(
         output_path.suffix, "aac", bitrate,
-        channels=AUDIO_CHANNELS, sample_rate=join_target_sample_rate(answers))
+        channels=resolve_audio_channels(answers), sample_rate=join_target_sample_rate(answers))
     if join_audio_note:
         appio.note(join_audio_note)
     cmd.extend(join_audio_args)

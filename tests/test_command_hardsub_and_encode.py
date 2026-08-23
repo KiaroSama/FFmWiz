@@ -342,7 +342,31 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
         self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
         self.assertIn("-b:a", cmd)
         self.assertEqual(cmd[cmd.index("-b:a") + 1], f"{FFmWiz.DEFAULT_AUDIO_BITRATE_KBPS}k")
+        # This used to assert a hard `-ac 2`, which pinned the USER-5-2 defect:
+        # every hard-sub downmixed to stereo regardless of the source. The
+        # fixture's stream declares no channel count, so the correct behaviour
+        # is to emit NO -ac and let the source layout through.
+        self.assertNotIn("-ac", cmd,
+                         "an unknown source layout must not be forced to stereo")
+
+    def test_hardsub_keeps_a_51_source_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.hardsub_answers(tmp, "input.mkv", "mp4")
+            answers["hardsub_audio_container_policy"] = "aac"
+            answers["audio_streams"] = [
+                {"codec_type": "audio", "codec_name": "aac", "channels": 6}]
+            cmd = FFmWiz.build_hardsub_command(answers)
         self.assertIn("-ac", cmd)
+        self.assertEqual(cmd[cmd.index("-ac") + 1], "6")
+
+    def test_hardsub_honours_an_explicit_downmix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.hardsub_answers(tmp, "input.mkv", "mp4")
+            answers["hardsub_audio_container_policy"] = "aac"
+            answers["audio_streams"] = [
+                {"codec_type": "audio", "codec_name": "aac", "channels": 6}]
+            answers["audio_channels"] = 2
+            cmd = FFmWiz.build_hardsub_command(answers)
         self.assertEqual(cmd[cmd.index("-ac") + 1], "2")
 
     def test_hardsub_different_container_copy_anyway_policy_warns_by_choice_and_copies(self):

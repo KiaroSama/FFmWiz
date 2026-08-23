@@ -55,6 +55,61 @@ def resolve_audio_sample_rate(answers: dict[str, Any]) -> int | None:
     return rate if rate > 0 else None
 
 
+def resolve_audio_channels(answers: dict[str, Any]) -> int | None:
+    """Chosen OUTPUT channel count, or None to keep the source layout.
+
+    AUDIO_CHANNELS used to default to 2 and was applied unconditionally on every
+    encode path, so a 5.1 or 7.1 source came back stereo without a word -- a
+    lossless FLAC cut silently destroyed four channels. The policy now mirrors
+    resolve_audio_sample_rate: an explicit request wins, otherwise keep what the
+    source has.
+
+    A layout wider than MAX_PRESERVED_AUDIO_CHANNELS is not preserved: past that
+    point the odds of the target encoder/container refusing the layout outweigh
+    the benefit, so it falls back to the configured default.
+    """
+    value = answers.get("audio_channels")
+    if value not in (None, "", "n", "keep"):
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            return count
+
+    stream = _selected_channel_source_stream(answers)
+    channels = stream_channel_count(stream) if stream else None
+    if channels and 1 <= channels <= MAX_PRESERVED_AUDIO_CHANNELS:
+        return channels
+    return int(AUDIO_CHANNELS) if AUDIO_CHANNELS else None
+
+
+def stream_channel_count(stream: dict[str, Any]) -> int | None:
+    """Parse an audio stream's channel count to int, or None when unknown."""
+    try:
+        value = int((stream or {}).get("channels"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _selected_channel_source_stream(answers: dict[str, Any]) -> dict[str, Any] | None:
+    """The audio stream whose layout the output should follow.
+
+    Kept dependency-free on purpose: this module is level 0 and must not import
+    the stream helpers that live beside it.
+    """
+    streams = answers.get("audio_streams") or []
+    if not streams:
+        return None
+    selected = answers.get("audio_tracks")
+    if isinstance(selected, list):
+        for index in selected:
+            if isinstance(index, int) and 0 <= index < len(streams):
+                return streams[index]
+    return streams[0]
+
+
 def loudnorm_transform_enabled(answers: dict[str, Any]) -> bool:
     return bool(answers.get("loudnorm_enabled"))
 
@@ -307,6 +362,8 @@ def add_files_supported_audio_codecs_for_container(ext: str) -> set[str] | None:
 __all__ = [
     'stream_sample_rate',
     'resolve_audio_sample_rate',
+    'resolve_audio_channels',
+    'stream_channel_count',
     'loudnorm_transform_enabled',
     'loudnorm_number',
     'parse_loudnorm_target',

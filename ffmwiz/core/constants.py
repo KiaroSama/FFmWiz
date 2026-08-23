@@ -71,7 +71,11 @@ TWO_PASS_CPU_ENCODERS = {"libx264", "libx265", "libvpx-vp9", "libaom-av1", "libs
 # AUDIO_SAMPLE_RATE options/examples: None=auto/source, 44100, 48000, 96000
 DEFAULT_AUDIO_CODEC = "aac"
 DEFAULT_AUDIO_BITRATE_KBPS = 128
-AUDIO_CHANNELS = 2
+# Default None = keep the source layout. This used to be 2 and was applied
+# unconditionally on every encode path, so a 5.1/7.1 source came back stereo
+# with no warning -- a lossless FLAC cut destroyed four channels (USER-5-2).
+# Set an integer here (or answer the channel prompt) to force a downmix.
+AUDIO_CHANNELS: int | None = None
 AUDIO_SAMPLE_RATE: int | None = None
 LOUDNORM_DEFAULT_TARGET_I = -16.0
 LOUDNORM_TARGET_TP = -1.5

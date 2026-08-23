@@ -31,9 +31,36 @@ from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
 
 
-def join_audio_prep_filter(rate: int) -> str:
-    """Per-input audio prep for Join graphs at the given uniform sample rate."""
-    return f"aresample={int(rate)}:async=1:first_pts=0,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS"
+# FFmpeg layout names for the counts a join can end up normalising to. A join
+# genuinely needs ONE common layout -- the concat filter refuses mismatched
+# inputs -- but it used to be hard-wired to stereo, so joining 5.1 sources
+# produced a stereo master (USER-5-2). Anything not listed here has no single
+# obvious name, so those fall back to stereo rather than guessing.
+JOIN_CHANNEL_LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}
+
+
+def join_target_channel_layout(items: list[dict[str, Any]] | None) -> str:
+    """The layout every input in a Join is normalised to: the widest one present.
+
+    Widening a narrow input costs nothing (silence in the extra channels);
+    narrowing a wide one destroys it, so the maximum is the safe direction.
+    """
+    widest = 0
+    for item in (items or []):
+        for stream in (item.get("audio_streams") or []):
+            try:
+                count = int(stream.get("channels") or 0)
+            except (TypeError, ValueError):
+                continue
+            if count in JOIN_CHANNEL_LAYOUTS:
+                widest = max(widest, count)
+    return JOIN_CHANNEL_LAYOUTS.get(widest, "stereo")
+
+
+def join_audio_prep_filter(rate: int, layout: str = "stereo") -> str:
+    """Per-input audio prep for Join graphs at one uniform rate and layout."""
+    return (f"aresample={int(rate)}:async=1:first_pts=0,"
+            f"aformat=channel_layouts={layout},asetpts=PTS-STARTPTS")
 
 
 def _apply_dark_title_bar(window: Any) -> None:
@@ -255,6 +282,8 @@ def hardsub_filter_quote_path(path: Path) -> str:
 
 __all__ = [
     'join_audio_prep_filter',
+    'join_target_channel_layout',
+    'JOIN_CHANNEL_LAYOUTS',
     '_apply_dark_title_bar',
     'format_crop_margins',
     'format_resolution_summary',

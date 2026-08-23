@@ -138,8 +138,19 @@ def can_use_full_source_map_for_simple_encode(
         return False
     if embedded_attachment_streams(answers) and not embedded_attachment_keep_enabled(answers):
         return False
-    if answers.get("output_ext", "").lower() in MP4_LIKE_EXTS and answers.get("subtitle_streams"):
-        return False
+    # `-map 0 -c copy` copies every source subtitle verbatim, so the shortcut is
+    # only legal when the target container can actually hold each of them. This
+    # used to check the MP4 family alone, which let subrip -> .avi and
+    # subrip -> .webm through: both reach FFmpeg and die at header-write time
+    # ("Not yet implemented" / "Only VP8 or VP9 or AV1 video and Vorbis or Opus
+    # audio and WebVTT subtitles are supported for WebM"). Asking the shared
+    # resolver covers every container instead of just one family, and routes
+    # those sources through the per-stream path that transcodes or drops them
+    # with a note.
+    output_ext = answers.get("output_ext", "")
+    for stream in (answers.get("subtitle_streams") or []):
+        if subtitle_codec_for_container(output_ext, stream.get("codec_name")) != "copy":
+            return False
     return True
 
 

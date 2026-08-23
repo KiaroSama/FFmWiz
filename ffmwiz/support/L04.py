@@ -146,8 +146,9 @@ def build_video_speed_reverse_segment_command(
         for label in labels:
             cmd.extend(["-map", f"[{label}]"])
         cmd.extend(["-c:a", DEFAULT_AUDIO_CODEC, "-b:a", f"{DEFAULT_SPEED_AUDIO_BITRATE_KBPS}k"])
-        if AUDIO_CHANNELS:
-            cmd.extend(["-ac", str(AUDIO_CHANNELS)])
+        channels = resolve_audio_channels(answers)
+        if channels:
+            cmd.extend(["-ac", str(channels)])
     else:
         cmd.append("-an")
     if output_path.suffix.lstrip(".").lower() in MP4_LIKE_EXTS and MOVFLAGS:

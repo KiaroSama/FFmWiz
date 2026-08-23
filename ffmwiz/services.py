@@ -593,7 +593,8 @@ def build_join_loudnorm_analysis_args(
         args.extend(["-i", str(item["path"])])
     filters: list[str] = []
     concat_inputs: list[str] = []
-    prep = join_audio_prep_filter(join_target_sample_rate(answers))
+    prep = join_audio_prep_filter(join_target_sample_rate(answers),
+                                  join_target_channel_layout(items))
     for input_idx, _item in enumerate(items):
         filters.append(f"[{input_idx}:a:{int(audio_index)}]{prep}[mja{input_idx}]")
         concat_inputs.append(f"[mja{input_idx}]")
