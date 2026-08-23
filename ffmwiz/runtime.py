@@ -25,6 +25,7 @@ import atexit
 import concurrent.futures
 import queue
 import threading
+from collections import deque
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
@@ -377,9 +378,10 @@ def run_ffmpeg_with_progress(
     Returns (returncode, elapsed_seconds).
     """
     progress_cmd = _inject_progress_args(cmd)
-    log_command(label, cmd)
-    log_info(f"{label} executed command with progress: {command_to_text(progress_cmd)}")
-    log_info(f"{label} executed argv with progress: {json.dumps([str(part) for part in progress_cmd], ensure_ascii=False)}")
+    # Record the difference, not the whole command again: the progress variant
+    # is the same argv plus a couple of reporting flags.
+    injected = [part for part in progress_cmd if part not in cmd]
+    log_command(label, cmd, injected)
 
     _begin_progress_render()
     started_at = time.perf_counter()
@@ -389,7 +391,10 @@ def run_ffmpeg_with_progress(
         state["_ffmwiz_target_bitrate_kbps"] = f"{target_mux_bitrate_kbps:.6f}"
         log_info(f"{label} progress target mux bitrate estimate: {target_mux_bitrate_kbps:.1f} kbits/s")
     last_render = ""
-    stderr_lines: list[str] = []
+    # Only the last few lines are ever read (the failure tail below), so an
+    # unbounded list just grows for the length of the encode. A chatty filter
+    # on a long job can emit tens of thousands of lines.
+    stderr_lines: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
     final_emitted = False
     progress_events = 0
     output_paths = [Path(path) for path in (progress_output_paths or [])]
@@ -436,13 +441,32 @@ def run_ffmpeg_with_progress(
     # Capture stderr into the log in a worker so the main thread can
     # render progress without blocking on stderr drain.
     def _capture_stderr() -> None:
+        # FFmpeg repeats the same warning once per stream, per pass, sometimes
+        # per packet -- one real log had "Could not find codec parameters for
+        # stream 1" a dozen times verbatim. Logging each copy buries the lines
+        # that differ, so collapse a run of identical lines into one entry with
+        # a count.
+        previous = None
+        repeats = 0
+
+        def flush_repeats() -> None:
+            if repeats:
+                log_debug(f"{label} stderr: (previous line repeated {repeats}x)")
+
         try:
             for line in process.stderr:  # type: ignore[union-attr]
                 stripped = line.rstrip()
                 if not stripped:
                     continue
                 stderr_lines.append(stripped)
+                if stripped == previous:
+                    repeats += 1
+                    continue
+                flush_repeats()
+                repeats = 0
+                previous = stripped
                 log_debug(f"{label} stderr: {stripped}")
+            flush_repeats()
         except Exception:
             pass
 
@@ -682,7 +706,7 @@ def run_ffmpeg_with_progress(
 
     if process.returncode != 0:
         log_error(f"{label} exited with code {process.returncode}")
-        tail = "\n".join(stderr_lines[-12:])
+        tail = "\n".join(list(stderr_lines)[-STDERR_TAIL_REPORT_LINES:])
         if tail:
             log_error(f"{label} stderr tail:\n{tail}")
         # Ask appio for the live path. `_LOG_PATH` is a private module global of
