@@ -389,7 +389,9 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
     start_now = appio.ask_yes_no(appio.question_prompt(answers, "Start FFmpeg now?", "y/n", "y"), True)
     if not start_now:
         appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        cleanup_join_concat_list(answers)
+        # Keep, do not clean: the printed command references generated inputs,
+        # and deleting them here made that promise false (R07).
+        preserve_artifacts_for_manual_run(answers)
         return None
     total_duration = sum(float(item.get("duration") or 0.0) for item in items)
     print()

@@ -162,6 +162,28 @@ def remap_chapters_for_encode(
             "metadata": dict(ch.get("tags") or {}),
         })
 
+    # Reverse: the timeline runs backwards, so a chapter that was last is now
+    # first. This step was missing entirely -- cuts and speed were handled and
+    # reverse silently left every chapter at its original time (R05). Read from
+    # `answers` rather than taking a new parameter so every existing caller is
+    # covered without changing its signature.
+    if answers.get("reverse_video"):
+        processed_duration = sum(max(0.0, end - start) for start, end in keep_ranges)
+        if speed_factor > 0 and abs(speed_factor - 1.0) > 1e-9:
+            processed_duration /= speed_factor
+        flipped: list[dict[str, Any]] = []
+        for ch in remapped:
+            new_start = processed_duration - ch["end"]
+            new_end = processed_duration - ch["start"]
+            if new_end <= new_start + 1e-6:
+                continue
+            flipped.append({
+                "start": max(0.0, new_start),
+                "end": max(0.0, new_end),
+                "metadata": dict(ch.get("metadata") or {}),
+            })
+        remapped = sorted(flipped, key=lambda item: item["start"])
+
     # Clip to part interval if splitting.
     if part_interval is not None:
         part_start, part_end = part_interval

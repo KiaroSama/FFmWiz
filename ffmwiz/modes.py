@@ -543,7 +543,14 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
             f"output={job_answers.get('output_path')}; duration={total_duration or 'unknown'}"
         )
         print(paint("Starting FFmpeg...", Color.GREEN))
-        return_code, _elapsed = run_ffmpeg_with_progress(
+        # Folder Encode used to call the runner directly, so a reversed job ran
+        # the full-buffer filter while the UI promised the segmented plan (R09).
+        # Imported here, not at module scope: encoding sits ABOVE modes in the
+        # layering and imports it, so a top-level import would be circular. By
+        # the time a job runs, the package is fully loaded.
+        from ffmwiz import encoding as _encoding
+        return_code, _elapsed = _encoding.execute_encode_plan(
+            job_answers,
             cmd,
             total_duration=(total_duration if total_duration > 0 else None),
             label=f"Folder Encode {index}/{total}",

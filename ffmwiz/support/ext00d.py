@@ -462,6 +462,39 @@ def step_hardsub_audio_container_policy(answers: dict[str, Any]) -> None:
         appio.error("Enter 1, 2, 3, or 4.")
 
 
+def preserve_artifacts_for_manual_run(answers: dict[str, Any]) -> list[Path]:
+    """Keep the generated inputs a printed command still needs, and say so.
+
+    Declining execution used to print "the command above is ready to run
+    manually" and then immediately delete the files that command references --
+    the generated `.ffconcat` list, chapter metadata, the merged joined-subtitle
+    track. The printed command was not runnable by the time the user read it
+    (R07).
+
+    Ownership is handed back rather than the cleanup being skipped, so a later
+    cleanup call cannot delete them either. The user is told exactly what was
+    kept, because these are now files only they can remove.
+    """
+    lease = answers.get(ARTIFACT_LEASE_KEY)
+    kept: list[Path] = []
+    if isinstance(lease, ArtifactLease):
+        for path in list(lease):
+            lease.forget(path)
+            kept.append(Path(path))
+    list_path = answers.pop("_join_concat_list", None)
+    if list_path:
+        kept.append(Path(list_path))
+    existing = [path for path in kept if path.exists()]
+    if existing:
+        appio.note(
+            "Generated input(s) the command needs were KEPT so it stays runnable. "
+            "Delete them yourself when you are done:")
+        for path in existing:
+            appio.note(f"    {path}")
+        log_info(f"Manual run: preserved {len(existing)} generated input(s)")
+    return existing
+
+
 def cleanup_join_concat_list(answers: dict[str, Any]) -> None:
     # The merged joined-subtitle file lives in its own temp directory; it is
     # created during command build, so it has to be cleaned on the same paths
@@ -547,6 +580,7 @@ __all__ = [
     'ass_ssa_has_embedded_fonts',
     'step_hardsub_audio_container_policy',
     'cleanup_join_concat_list',
+    'preserve_artifacts_for_manual_run',
     'cleanup_encode_chapter_metadata',
     'append_join_trim_concat_filter',
 ]
