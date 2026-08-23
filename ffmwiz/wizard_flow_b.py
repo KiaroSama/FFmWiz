@@ -32,6 +32,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -405,7 +406,7 @@ def step_hardsub_start_now(answers: dict[str, Any]) -> None:
     else:
         print("  " + field_text("subtitle", answers.get("hardsub_subtitle_path"), Color.MAGENTA))
     print("  " + field_text("output", answers["output_path"], Color.LIME))
-    print("  " + field_text("video codec", answers.get("video_codec"), Color.CYAN))
+    print("  " + field_text("video codec", effective_value(answers, "video_codec"), Color.CYAN))
     if "_nvenc" in command_to_text(cmd):
         print("  " + field_text("NVENC multipass", normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")), Color.YELLOW))
     print("  " + field_text("quality", answers.get("hardsub_quality_mode"), Color.YELLOW))

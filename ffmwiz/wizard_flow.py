@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -288,7 +289,9 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
         print("  " + field_text("join settings", "video/audio settings apply by track number to every joined input", Color.YELLOW))
     print("  " + field_text("output", answers["output_path"], Color.LIME))
     if output_has_video(answers):
-        print("  " + field_text("video codec", answers.get("video_codec", DEFAULT_VIDEO_CODEC), Color.CYAN))
+        print("  " + field_text("video codec",
+                                effective_value(answers, "video_codec", DEFAULT_VIDEO_CODEC),
+                                Color.CYAN))
         _resolved_encoder = resolve_video_encoder(answers)[0]
         print("  " + field_text("source bit depth", describe_video_bit_depth(source_video_stream(answers) or {}), Color.PINK))
         print("  " + field_text("output bit depth", f"{output_video_bit_depth(answers)}-bit", Color.PINK))

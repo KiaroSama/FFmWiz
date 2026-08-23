@@ -425,6 +425,7 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     # the object, so anything the copy leases below is still owned out here --
     # but only if the lease already exists at copy time.
     artifact_lease(answers)
+    effective_settings(answers)
     join_answers = dict(answers)
     join_answers["_join_complex_graph"] = True
     video_encoder, tag, profile = resolve_video_encoder(join_answers)
@@ -432,6 +433,16 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         join_answers["video_codec"] = DEFAULT_VIDEO_CODEC
         video_encoder, tag, profile = resolve_video_encoder(join_answers)
     video_encoder, tag, profile = enforce_bit_depth_compatible_video_encoder(join_answers, video_encoder, tag, profile)
+    # A join always re-encodes through the concat filter, so a requested "copy"
+    # silently became libx264/libx265 while `answers` still said copy and the
+    # summary reported the request rather than the reality (R10). Record what
+    # was actually resolved, on the OUTER dict, so summaries and logs can show
+    # the truth without losing what the user originally asked for.
+    effective_settings(answers)["video_codec"] = video_encoder
+    if str(answers.get("video_codec", "")).lower() == "copy":
+        appio.note(
+            "Video copy cannot be used across a join; the joined timeline is "
+            f"re-encoded with {video_encoder}.")
     first_video = items[0]["video_streams"][0]
     join_answers["video_streams"] = [first_video]
     target_dimensions = resolve_scale_dimensions(join_answers, join_answers.get("resolution", "n"))

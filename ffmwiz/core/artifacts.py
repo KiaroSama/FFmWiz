@@ -1,4 +1,13 @@
-"""Ownership of the temporary files a command build creates.
+"""State that must survive a shallow-copied answers dict.
+
+Two problems, one mechanism. Builders work on `join_answers = dict(answers)`,
+so anything they record as a KEY on that copy is invisible to the outer
+executor: temporary files leaked because their cleanup path died with the copy
+(R06), and resolved codecs were lost the same way, leaving the summary showing
+what the user REQUESTED rather than what the command actually does (R10).
+
+`dict()` copies keys but shares mutable VALUES, so a container object placed in
+answers before the copy is the same object on both sides.
 
 Builders routinely work on a SHALLOW COPY of the answers dict
 (`join_answers = dict(answers)`), and a cleanup key written onto that copy never
@@ -21,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 ARTIFACT_LEASE_KEY = "_artifact_lease"
+EFFECTIVE_SETTINGS_KEY = "_effective_settings"
 
 
 class ArtifactLease:
@@ -104,7 +114,35 @@ def release_artifacts(answers: dict[str, Any]) -> list[Path]:
 
 __all__ = [
     "ARTIFACT_LEASE_KEY",
+    "EFFECTIVE_SETTINGS_KEY",
     "ArtifactLease",
     "artifact_lease",
     "release_artifacts",
+    "effective_settings",
+    "effective_value",
 ]
+
+
+def effective_settings(answers: dict[str, Any]) -> dict[str, Any]:
+    """What the build actually resolved, as opposed to what was requested.
+
+    Same sharing rule as the lease: open it on the outer dict before any
+    shallow copy, and a builder working on the copy still reaches it.
+
+    Kept separate from the requested values on purpose -- Back/reopen has to
+    show the user their own choice, while summaries, logs and "what will this
+    command do?" must show the resolved one.
+    """
+    resolved = answers.get(EFFECTIVE_SETTINGS_KEY)
+    if not isinstance(resolved, dict):
+        resolved = {}
+        answers[EFFECTIVE_SETTINGS_KEY] = resolved
+    return resolved
+
+
+def effective_value(answers: dict[str, Any], name: str, default: Any = None) -> Any:
+    """The resolved value for `name`, falling back to the requested one."""
+    resolved = answers.get(EFFECTIVE_SETTINGS_KEY)
+    if isinstance(resolved, dict) and name in resolved:
+        return resolved[name]
+    return answers.get(name, default)
