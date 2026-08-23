@@ -27,6 +27,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -280,6 +281,10 @@ def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_aud
         appio.note("Audio copy cannot be used after Split/filter processing. AAC was selected for audio.")
         audio_codec = DEFAULT_AUDIO_CODEC
         answers["audio_codec"] = audio_codec
+    # `answers` here is often a shallow copy the caller made, so the write above
+    # never reaches the dict the summary reads. Record it where a copy cannot
+    # hide it (R10).
+    effective_settings(answers)["audio_codec"] = audio_codec
     cmd.extend(["-c:a", audio_codec])
     audio_bitrate = answers.get("audio_bitrate_kbps")
     if audio_bitrate and audio_codec_uses_bitrate(str(audio_codec)):
