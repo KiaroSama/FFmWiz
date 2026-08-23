@@ -622,6 +622,20 @@ input is silent but later ones have audio, it joins track 0 of the others rather
 audio entirely. Tracks beyond the number the track question could offer are reported as not
 included, instead of disappearing without a word.
 
+#### Choosing `copy` for a re-encode join
+
+A join that goes through the concat **filter** — anything but a plain stream-copy join —
+re-encodes by definition, so a requested `copy` codec cannot be honoured. FFmWiz says so
+explicitly for both streams, e.g.
+
+```
+Video copy cannot be used across a join; the joined timeline is re-encoded with libx265.
+Audio copy cannot be used after Split/filter processing. AAC was selected for audio.
+```
+
+The selected-settings summary then shows the codec that will actually be used, not the one
+you asked for. Your original choice is still what you return to if you go **back**.
+
 #### Mixed frame rates (constant vs variable)
 
 When you join two or more videos whose source frame rates differ, FFmWiz asks
