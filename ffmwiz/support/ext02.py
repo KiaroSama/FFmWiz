@@ -152,15 +152,25 @@ def build_cuda_video_filter(answers: dict[str, Any]) -> str | None:
     scale_dimensions = resolve_scale_dimensions(answers, resolution)
     cuda_format = cuda_pixel_format_for_output(answers)
     # scale_cuda gained reset_sar in the same 2025 commit as scale, so a pre-7.2
-    # build rejects it and the whole encode fails at filter init. The CPU path
-    # can fall back to a square-pixel pre-pass; inside a CUDA chain the frames
-    # are already on the device, so the only safe downgrade is to omit the
-    # option and leave the source SAR flag alone -- the picture is still
-    # correct, it just keeps non-square pixels (D01).
+    # build rejects it and the whole encode fails at filter init (D01).
     ffmpeg = answers.get("ffmpeg") or "ffmpeg"
     if filter_option_available(ffmpeg, "scale_cuda", "reset_sar"):
         sar_option = ":reset_sar=1"
     else:
+        if scale_dimensions and resize_mode_is_stretch(answers):
+            # Without the option scale_cuda propagates the source DAR instead
+            # of resetting SAR. An AR-preserving resize survives that, but an
+            # exact stretch does not: measured on 720x576 SAR 64:45 stretched
+            # to 1000x500, the result is SAR 8:9 / DAR 16:9 -- not the promised
+            # square-pixel 2:1. Omitting the option there would return the
+            # WRONG geometry silently instead of failing. Nothing in a CUDA
+            # graph can relabel SAR on such a build, so hand the whole resize
+            # to the CPU graph, which reaches square pixels with setsar=1 (R08).
+            from ffmwiz import encoding  # higher tier: deferred to avoid a cycle
+            log_info("FFmpeg scale_cuda has no reset_sar (pre-7.2 build); exact "
+                     "stretch leaves the GPU fast path so the output really has "
+                     "square pixels.")
+            return encoding.build_cpu_fallback_from_cuda_filter(answers)
         sar_option = ""
         log_info("FFmpeg scale_cuda has no reset_sar (pre-7.2 build); the GPU "
                  "scale keeps the source sample aspect ratio.")
