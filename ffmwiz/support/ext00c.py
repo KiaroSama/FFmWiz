@@ -487,6 +487,58 @@ def render_info_report(lines: list[tuple[str, str]], color: bool = True) -> str:
     return "\n".join(rendered)
 
 
+_FILTER_OPTION_CACHE: dict[tuple[str, str, str], bool] = {}
+
+
+def filter_option_available(ffmpeg: str, filter_name: str, option: str) -> bool:
+    """Does this FFmpeg build's `filter_name` accept `option`?
+
+    ffmpeg_filter_available only greps `-filters` for a NAME, so it cannot see
+    whether an OPTION exists. `scale`/`scale_cuda` gained `reset_sar` in 2025
+    (first shipped in the 7.2/8.0 line); every release up to and including 7.1.x
+    rejects it with "Option 'reset_sar' not found" and the whole encode fails.
+
+    Memoised per (binary, filter, option): the probe costs a process launch and
+    the answer cannot change while the binary does not.
+    """
+    key = (str(ffmpeg), filter_name, option)
+    cached = _FILTER_OPTION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    supported = False
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-h", f"filter={filter_name}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+            timeout=FILTER_PROBE_TIMEOUT,
+        )
+        text, _ = decode_subprocess_bytes(result.stdout, "utf-8")
+        # The help output lists one option per line, name first.
+        supported = any(line.strip().startswith(option)
+                        for line in text.splitlines())
+    except Exception:
+        log_exception(f"Could not inspect FFmpeg options for {filter_name}")
+    _FILTER_OPTION_CACHE[key] = supported
+    return supported
+
+
+def square_pixel_scale_chain(ffmpeg: str, scale_expr: str) -> str:
+    """`scale_expr` extended so the OUTPUT has square pixels, on any FFmpeg.
+
+    Modern builds do it inside the filter with `reset_sar=1`. Older ones need
+    the source normalised to square pixels FIRST, because a bare trailing
+    `setsar=1` only relabels the pixels -- measured on a 720x576 DAR-16:9
+    source, `scale=1280:720:force_original_aspect_ratio=decrease,setsar=1`
+    produced a squeezed 900x720 DAR-5:4 picture, while both `reset_sar=1` and
+    the pre-pass below produced the correct 1280x720 DAR 16:9.
+    """
+    if filter_option_available(ffmpeg, "scale", "reset_sar"):
+        return f"{scale_expr}:reset_sar=1"
+    log_info("FFmpeg scale has no reset_sar (pre-7.2 build); using the "
+             "square-pixel pre-pass instead.")
+    return f"scale=iw*sar:ih,setsar=1,{scale_expr}"
+
+
 def ffmpeg_filter_available(ffmpeg: str, filter_name: str) -> bool:
     try:
         result = subprocess.run(
@@ -538,5 +590,7 @@ __all__ = [
     'run_media_info_text_command',
     'render_info_report',
     'ffmpeg_filter_available',
+    'filter_option_available',
+    'square_pixel_scale_chain',
     'media_info_next_prompt',
 ]

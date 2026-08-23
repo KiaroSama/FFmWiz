@@ -119,14 +119,18 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
             # the target, FFmpeg produces the exact dimensions and the pad is a
             # no-op. This approach handles all cases uniformly.
             # reset_sar=1 inside the scale filter ensures output pixels are
-            # square, making a trailing setsar=1 unnecessary.
+            # square, making a trailing setsar=1 unnecessary -- but it does not
+            # exist before FFmpeg 7.2, so ask before emitting it. A bare
+            # trailing setsar=1 is NOT a substitute: on a 720x576 DAR-16:9
+            # source it yields a squeezed 900x720 DAR-5:4 picture (D01).
             sar = source_sar(answers)
             crop_w, crop_h = cropped_source_size(answers)
             display_w, display_h = cropped_display_size(answers)
-            filters.append(
+            filters.append(square_pixel_scale_chain(
+                answers.get("ffmpeg") or "ffmpeg",
                 f"scale={width}:{height}:"
-                f"force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1"
-            )
+                f"force_original_aspect_ratio=decrease:force_divisible_by=2",
+            ))
             filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
             scale_resets_sar = True
             log_info(

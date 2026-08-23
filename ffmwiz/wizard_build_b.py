@@ -522,7 +522,9 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             chain.append(crop_filter)
         chain.extend([
             "" if vfr_join else f"fps={target_fps:g}",
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:reset_sar=1",
+            square_pixel_scale_chain(
+                join_answers.get("ffmpeg") or "ffmpeg",
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease"),
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2",
             output_pix_fmt and f"format={output_pix_fmt}",
             "setpts=PTS-STARTPTS",

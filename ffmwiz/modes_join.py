@@ -136,12 +136,19 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     # and let the output keep variable timing via -fps_mode vfr.
     vfr_join = bool(answers.get("join_vfr"))
     join_rate = join_target_sample_rate(answers)
-    prep = join_audio_prep_filter(join_rate, join_target_channel_layout(items))
+    # One layout for the real audio AND the synthesised silence: concat
+    # refuses mismatched inputs.
+    join_layout = join_target_channel_layout(items)
+    prep = join_audio_prep_filter(join_rate, join_layout)
+    # reset_sar=1 does not exist before FFmpeg 7.2, and a bare trailing setsar=1
+    # is not a substitute (it squeezes an anamorphic source) -- see D01.
+    scale_chain = square_pixel_scale_chain(
+        answers.get("ffmpeg") or "ffmpeg",
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease")
     for idx, item in enumerate(items):
         fps_prefix = "" if vfr_join else f"fps={target_fps:g},"
         filters.append(
-            f"[{idx}:v:0]{fps_prefix}"
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease:reset_sar=1,"
+            f"[{idx}:v:0]{fps_prefix}{scale_chain},"
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
             f"format={output_pix_fmt},setpts=PTS-STARTPTS[v{idx}]"
         )
@@ -151,7 +158,8 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
             inputs.append(f"[a{idx}]")
         elif any_audio:
             duration = max(0.001, float(item.get("duration") or 0.001))
-            filters.append(f"anullsrc=channel_layout=stereo:sample_rate={join_rate}:d={duration:.6f}[a{idx}]")
+            filters.append(f"anullsrc=channel_layout={join_layout}:"
+                           f"sample_rate={join_rate}:d={duration:.6f}[a{idx}]")
             inputs.append(f"[a{idx}]")
     filters.append(f"{''.join(inputs)}concat=n={len(items)}:v=1:a={1 if any_audio else 0}[v]{'[a]' if any_audio else ''}")
     cmd.extend(["-filter_complex", ";".join(filters), "-map", "[v]"])

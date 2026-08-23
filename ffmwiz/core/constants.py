@@ -109,6 +109,9 @@ MAX_PRESERVED_AUDIO_CHANNELS = 8
 # How long each rung of the child-process stop ladder waits before escalating
 # (signal -> terminate -> kill the tree). Short on purpose: it runs when the user
 # has already asked to cancel, or when the child is already considered wedged.
+# Bound on the one-shot `ffmpeg -h filter=...` capability probe.
+FILTER_PROBE_TIMEOUT = 15.0
+
 GRACEFUL_STOP_TIMEOUT = 8.0
 
 STDERR_TAIL_LINES = 200
@@ -726,6 +729,7 @@ __all__ = [
     'AUDIO_TOOL_MIN_BITRATE_KBPS',
     'AUDIO_TOOL_MAX_BITRATE_KBPS',
     'MAX_PRESERVED_AUDIO_CHANNELS',
+    'FILTER_PROBE_TIMEOUT',
     'GRACEFUL_STOP_TIMEOUT',
     'STDERR_TAIL_LINES',
     'STDERR_TAIL_REPORT_LINES',
