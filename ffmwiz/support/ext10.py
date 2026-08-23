@@ -263,9 +263,21 @@ def step_audio_bitrate(answers: dict[str, Any]) -> None:
             )
         else:
             log_info("Join audio bitrate default: all joined source audio bitrates unknown; using safe default.")
-    default_audio_bitrate = DEFAULT_AUDIO_BITRATE_KBPS
-    if source and source < DEFAULT_AUDIO_BITRATE_KBPS:
-        default_audio_bitrate = source
+    # The source bitrate is computed with real effort above -- including the
+    # highest across joined inputs -- and used to be discarded unless it was
+    # BELOW 128, so the prompt offered 128 for a 320 kbps track and pressing
+    # Enter down-rated it by 60% (USER-5-3). Default to the source when it is
+    # known; the clamp matters because a lossless source estimates in the four
+    # figures, which is meaningless as a target for a lossy encoder.
+    # confirm_numeric_target_not_above_source below still guards a user value
+    # above the source, so defaulting to the source cannot inflate the file.
+    # No floor here on purpose: raising the default ABOVE a very low source
+    # would both inflate the file and trip confirm_numeric_target_not_above_source
+    # below, leaving the prompt stuck asking to confirm its own default.
+    if source:
+        default_audio_bitrate = min(int(source), AUDIO_TOOL_MAX_BITRATE_KBPS)
+    else:
+        default_audio_bitrate = DEFAULT_AUDIO_BITRATE_KBPS
     while True:
         value = appio.ask_raw(
             appio.question_prompt(

@@ -230,7 +230,10 @@ class ProcessingEndToEndTests(unittest.TestCase):
             "-metadata:s:s:0", "language=eng",
             "-shortest", str(dst),
         ]
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # Bounded: a wedged ffmpeg here would otherwise hang the whole suite
+        # until the outer guarded-runner wall limit, 2400s away.
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr[-800:])
 
     def test_remux_keeps_only_selected_audio_language_and_subs(self):
