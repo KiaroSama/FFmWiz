@@ -66,6 +66,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 from ffmwiz.core.constants import *  # noqa: F401,F403  (constants extracted to ffmwiz/core/constants.py)
+from ffmwiz.core.artifacts import *  # noqa: F401,F403  (temp-artifact ownership)
 from ffmwiz.core.colors import *  # noqa: F401,F403  (extracted to ffmwiz/core/colors.py)
 
 

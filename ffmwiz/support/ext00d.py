@@ -27,6 +27,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -465,13 +466,10 @@ def cleanup_join_concat_list(answers: dict[str, Any]) -> None:
     # The merged joined-subtitle file lives in its own temp directory; it is
     # created during command build, so it has to be cleaned on the same paths
     # that clean the concat list -- success, cancel and failure alike.
-    subtitle_dir = answers.pop("_join_subtitle_temp_dir", None)
-    if subtitle_dir:
-        try:
-            shutil.rmtree(subtitle_dir, ignore_errors=True)
-            log_debug(f"Removed temporary joined-subtitle directory: {subtitle_dir}")
-        except Exception:
-            log_exception("Could not remove temporary joined-subtitle directory")
+    # Everything a builder leased, however many shallow copies of `answers` it
+    # passed through on the way down.
+    for path in release_artifacts(answers):
+        log_debug(f"Removed leased temporary artifact: {path}")
 
     list_path = answers.pop("_join_concat_list", None)
     if not list_path:

@@ -32,6 +32,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -361,8 +362,11 @@ def build_joined_subtitle_file(answers: dict[str, Any], items: list[dict[str, An
             log_info(f"Joined subtitles skipped: {reason}")
         return None
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="ffmwiz_join_subs_"))
-    answers["_join_subtitle_temp_dir"] = str(temp_dir)
+    # Registered on the shared lease, NOT as a key: this function is called
+    # with `join_answers = dict(answers)`, so a key written here never reaches
+    # the executor that cleans up and the directory leaked on every run (R06).
+    temp_dir = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_join_subs_")))
     ffmpeg = answers.get("ffmpeg") or "ffmpeg"
     segments: list[tuple[str, float]] = []
     extracted = 0
@@ -417,6 +421,10 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         answers.get("output_collision_suffix", "_Encode"),
     )
     answers["output_path"] = output_path
+    # Open the lease BEFORE the shallow copy. dict() copies the key but shares
+    # the object, so anything the copy leases below is still owned out here --
+    # but only if the lease already exists at copy time.
+    artifact_lease(answers)
     join_answers = dict(answers)
     join_answers["_join_complex_graph"] = True
     video_encoder, tag, profile = resolve_video_encoder(join_answers)
