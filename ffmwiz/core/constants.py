@@ -102,6 +102,14 @@ AUDIO_TOOL_MAX_BITRATE_KBPS = 320
 # preserved, because not every target encoder handles exotic layouts.
 MAX_PRESERVED_AUDIO_CHANNELS = 8
 
+# Rolling stderr buffer for a running FFmpeg job. Only the tail is ever read
+# (the failure report below), so the buffer is bounded rather than growing for
+# the whole encode -- a chatty filter on a long job emits tens of thousands of
+# lines and every one of them used to be retained.
+STDERR_TAIL_LINES = 200
+# How many of those lines a failure report quotes.
+STDERR_TAIL_REPORT_LINES = 12
+
 # Video defaults:
 # DEFAULT_VIDEO_CODEC aliases supported by this script: H265,H264,AV1,VP9,MPEG4,copy
 # h264_nvenc is 8-bit only; every 10-bit gate has to name it explicitly.
@@ -713,6 +721,8 @@ __all__ = [
     'AUDIO_TOOL_MIN_BITRATE_KBPS',
     'AUDIO_TOOL_MAX_BITRATE_KBPS',
     'MAX_PRESERVED_AUDIO_CHANNELS',
+    'STDERR_TAIL_LINES',
+    'STDERR_TAIL_REPORT_LINES',
     'REVERSE_SEGMENT_SECONDS',
     'DEFAULT_VIDEO_CODEC',
     'H264_NVENC_ENCODER',

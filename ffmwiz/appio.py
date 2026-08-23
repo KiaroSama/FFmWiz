@@ -136,7 +136,13 @@ class _LogContextFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "component") or not getattr(record, "component"):
-            record.component = _DEFAULT_LOG_COMPONENT
+            # Almost no call site passes a component, so 96 of 115 lines in a
+            # real session log all read [FFmWiz] -- the field carried no
+            # information and the log could not be filtered by subsystem.
+            # `_emit_log` sets stacklevel so record.module is the module that
+            # actually logged, which is both free and more specific than any
+            # name a call site would have bothered to pass.
+            record.component = getattr(record, "module", None) or _DEFAULT_LOG_COMPONENT
         try:
             rendered = record.getMessage()
         except Exception:
@@ -163,6 +169,19 @@ def _logging_enabled_from_config() -> bool:
     if value is None:
         return True
     return parse_bool_config(str(value).strip(), True)
+
+
+def _log_level_from_config() -> int:
+    """File log level. Defaults to DEBUG so support evidence is never lost by
+    surprise; set log_level=info (or FFMWIZ_LOG_LEVEL=info) for a lean log.
+
+    More than half of a real session log is DEBUG detail, so this is the knob
+    for users who want the file small rather than complete.
+    """
+    names = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING,
+             "warn": logging.WARNING, "error": logging.ERROR, "critical": logging.CRITICAL}
+    value = os.environ.get("FFMWIZ_LOG_LEVEL") or _config_setting_for_logging("log_level", "debug")
+    return names.get(str(value).strip().lower(), logging.DEBUG)
 
 
 def _log_retention_days_from_config() -> int:
@@ -201,7 +220,7 @@ def setup_logging() -> Path | None:
             candidate = logs_dir / f"ffmwiz_{stamp}_UTC_{_EXECUTION_ID}.log"
         _LOG_PATH = candidate
         logger = logging.getLogger("ffmwiz")
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(_log_level_from_config())
         # Wipe any handlers added by previous runs in the same process.
         for h in list(logger.handlers):
             logger.removeHandler(h)
@@ -266,7 +285,10 @@ def _emit_log(level: int, msg: str, component: str | None, exc_info: bool = Fals
         return
     try:
         extra = {"component": component} if component else None
-        _LOGGER.log(level, msg, exc_info=exc_info, extra=extra)
+        # stacklevel=3 walks past _emit_log and its log_*() wrapper so the
+        # record's module/lineno describe the code that actually logged, not
+        # this file. _LogContextFilter uses that as the [COMPONENT] field.
+        _LOGGER.log(level, msg, exc_info=exc_info, extra=extra, stacklevel=3)
     except Exception:
         pass
 
@@ -321,9 +343,23 @@ def log_environment(extra: dict[str, Any] | None = None) -> None:
             log_info(f"{k}: {v}", component="Startup")
 
 
-def log_command(label: str, cmd: list[str]) -> None:
-    log_info(f"{label} display command: {command_to_text(cmd)}")
-    log_info(f"{label} actual argv: {json.dumps([str(part) for part in cmd], ensure_ascii=False)}")
+def log_command(label: str, cmd: list[str], extra_args: list[str] | None = None) -> None:
+    """Record one command: a pasteable line at INFO, the exact argv at DEBUG.
+
+    A single run used to emit the SAME command four times -- "display command"
+    and "actual argv" from here, then both again from the progress wrapper with
+    only `-progress pipe:1 -nostats` added. That was ~2.5 KB of near-identical
+    text per invocation and it buried everything else in the log.
+
+    The two forms that remain answer different questions: the INFO line is what
+    a human re-runs in a terminal, the DEBUG argv is the exact token split when
+    an argument's quoting is itself the suspect. `extra_args` records what the
+    progress wrapper injected without re-dumping the whole command.
+    """
+    log_info(f"{label}: {command_to_text(cmd)}")
+    log_debug(f"{label} argv: {json.dumps([str(part) for part in cmd], ensure_ascii=False)}")
+    if extra_args:
+        log_debug(f"{label} progress args: {' '.join(str(part) for part in extra_args)}")
 
 
 def question_prompt(
