@@ -1225,6 +1225,10 @@ Notes:    the container picks a sensible default (e.g. opus for webm). flac/pcm_
 ```
 Prompt:   Audio bitrate per stream in kbps
 Accepts:  64, 128, 192, 256, 320, ... or n to keep the source bitrate
+Default:  the DETECTED source bitrate, capped at 320 kbps. A 320 kbps track offers 320,
+          so pressing Enter does not down-rate it. The default is never raised above the
+          source, and a source whose bitrate cannot be detected falls back to 128.
+          In a Join, the default is the highest source bitrate among the joined inputs.
 When:     only for lossy codecs that use a bitrate (not flac/pcm_*/copy)
 Estimate: after a number is entered, FFmWiz prints the approximate output size at that
           audio bitrate plus the same accuracy note as the video bitrate prompt.
