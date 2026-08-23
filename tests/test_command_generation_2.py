@@ -8,6 +8,9 @@ from unittest import mock
 import FFmWiz
 import cache_test_utils
 from command_gen_base import CommandGenBase, _home_module
+# reset_sar exists only on FFmpeg 7.2+; the shared helper asserts the scale
+# chain each capability branch must emit. See tests/test_sar_capability.py.
+from test_sar_capability import assert_both_scale_branches
 
 
 class CommandGenerationCoreTests2(CommandGenBase):
@@ -176,23 +179,27 @@ class CommandGenerationCoreTests2(CommandGenBase):
 
     def test_16x9_source_into_1146x480_preserves_aspect_ratio_with_padding(self):
         """Anamorphic 4:3 source (SAR 16:15) scaled to a 16:9 target uses display AR for dimensions."""
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = self.base_answers(tmp)
-            # Anamorphic 4:3 source: coded 720x576 with SAR 16:15 → display 768x576 (4:3)
-            answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264", "width": 720, "height": 576, "sample_aspect_ratio": "16:15"}]
-            answers["crop_enabled"] = False
-            answers["use_gpu"] = False
-            answers["resolution"] = FFmWiz.parse_resolution("480p")
-            text = self.command_text(answers)
-            # The display AR is 4:3, so 480p should produce ~640x480 (4:3), NOT 600x480 (which would be from coded 720:576 = 5:4)
+        def build():
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                # Anamorphic 4:3 source: coded 720x576 with SAR 16:15 → display 768x576 (4:3)
+                answers["video_streams"] = [{"codec_type": "video", "codec_name": "h264", "width": 720, "height": 576, "sample_aspect_ratio": "16:15"}]
+                answers["crop_enabled"] = False
+                answers["use_gpu"] = False
+                answers["resolution"] = FFmWiz.parse_resolution("480p")
+                text = self.command_text(answers)
+            # The display AR is 4:3, so the canvas is 4:3 (720x540), NOT the
+            # 5:4 the coded 720x576 would give. Same on either FFmpeg.
             dims = answers.get("final_resolution")
-            self.assertIsNotNone(dims)
-            out_ar = dims[0] / dims[1]
+            self.assertEqual((720, 540), dims)
             display_ar = 768 / 576  # 4:3
-            self.assertAlmostEqual(out_ar, display_ar, delta=0.02)
-            # reset_sar=1 is inside scale filter; no trailing setsar=1
-            self.assertIn("reset_sar=1", text)
-            self.assertIn("scale=", text)
+            self.assertAlmostEqual(dims[0] / dims[1], display_ar, delta=0.02)
+            return text
+
+        # The square pixels come from the scale chain, never a trailing setsar.
+        assert_both_scale_branches(
+            self, build,
+            "scale=720:540:force_original_aspect_ratio=decrease:force_divisible_by=2")
 
     def test_matching_aspect_ratio_no_effective_padding(self):
         """Source whose aspect ratio matches the target: pad is present but is a no-op."""

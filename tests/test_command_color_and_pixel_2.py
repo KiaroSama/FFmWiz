@@ -6,6 +6,9 @@ from pathlib import Path
 from unittest import mock
 import FFmWiz
 from command_gen_base import CommandGenBase
+# reset_sar exists only on FFmpeg 7.2+; the shared helper asserts the scale
+# chain each capability branch must emit. See tests/test_sar_capability.py.
+from test_sar_capability import assert_both_scale_branches
 
 
 class CommandColorAndPixelTests2(CommandGenBase):
@@ -330,23 +333,33 @@ class CommandColorAndPixelTests2(CommandGenBase):
 
     def test_workflow_preserve_fit_resize_uses_resolved_dar(self):
         """Preserve/Fit resize uses resolved DAR from a derived non-square SAR."""
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = self.base_answers(tmp)
-            answers["use_gpu"] = False
-            answers["crop_enabled"] = False
-            answers["color_range_choice"] = "tv"
-            stream = {"codec_type": "video", "codec_name": "h264",
-                      "width": 720, "height": 576, "display_aspect_ratio": "16:9"}
-            answers["video_streams"] = [stream]
-            answers["resolution"] = FFmWiz.parse_resolution("480p")
-            info = FFmWiz.sar_dar_info(answers)
-            self.assertEqual(info["sar_text"], "64:45")
-            self.assertEqual(info["pixel_shape"], "non-square")
-            self.assertAlmostEqual(info["resolved_dar"], 16 / 9, places=4)
-            text = self.command_text(answers)
-            self.assertIn("reset_sar=1", text)
-            self.assertNotIn("setsar=1,scale", text)  # not a forced stretch
+        def build():
+            with tempfile.TemporaryDirectory() as tmp:
+                answers = self.base_answers(tmp)
+                answers["use_gpu"] = False
+                answers["crop_enabled"] = False
+                answers["color_range_choice"] = "tv"
+                stream = {"codec_type": "video", "codec_name": "h264",
+                          "width": 720, "height": 576, "display_aspect_ratio": "16:9"}
+                answers["video_streams"] = [stream]
+                answers["resolution"] = FFmWiz.parse_resolution("480p")
+                info = FFmWiz.sar_dar_info(answers)
+                self.assertEqual(info["sar_text"], "64:45")
+                self.assertEqual(info["pixel_shape"], "non-square")
+                self.assertAlmostEqual(info["resolved_dar"], 16 / 9, places=4)
+                text = self.command_text(answers)
+            # Same resolved geometry on either FFmpeg; only the chain differs.
+            self.assertEqual((720, 576), answers.get("final_resolution"))
+            # Not a forced stretch: the target scale keeps the source AR, so a
+            # bare `scale=720:576` (the stretch shape) must never appear.
+            self.assertIn("force_original_aspect_ratio=decrease", text)
+            self.assertNotIn("scale=720:576,", text)
             self._assert_raw_immutable(stream, None, "16:9")
+            return text
+
+        assert_both_scale_branches(
+            self, build,
+            "scale=720:576:force_original_aspect_ratio=decrease:force_divisible_by=2")
 
     def test_workflow_no_resize_preserves_derived_sar(self):
         """No-resize keeps the derived non-square SAR; source not claimed detected."""

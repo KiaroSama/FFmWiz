@@ -17,9 +17,11 @@ A trailing setsar only relabels the pixels as square without rescaling, so the
 picture is distorted. The portable fallback normalises to square pixels FIRST.
 """
 import ast
+import contextlib
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +34,66 @@ FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
 BOX = "scale=1280:720:force_original_aspect_ratio=decrease"
+
+# ---------------------------------------------------------------------------
+# Shared with the builder suites (test_command_color_and_pixel[_2],
+# test_command_generation_2). A command-text test cannot run ffmpeg, so it
+# proves the SHAPE of both capability branches; that the two shapes mean the
+# same geometry is proved by the real encodes further down this module.
+# ---------------------------------------------------------------------------
+
+# Every module holding its own star-imported binding of the probe. Patching
+# ext00c alone would leave the CUDA path (ext02) answering from the real binary.
+_PROBE_MODULES = ("ffmwiz.support.ext00c", "ffmwiz.support.ext02",
+                  "ffmwiz.wizard_build", "ffmwiz.wizard_build_b",
+                  "ffmwiz.modes_join")
+
+
+@contextlib.contextmanager
+def forced_reset_sar(supported):
+    """Answer the reset_sar probe with `supported`; every other probe stays honest."""
+    real = ext00c.filter_option_available
+
+    def probe(ffmpeg, filter_name, option):
+        if option == "reset_sar":
+            return supported
+        return real(ffmpeg, filter_name, option)
+
+    saved = [(sys.modules[name], sys.modules[name].filter_option_available)
+             for name in _PROBE_MODULES
+             if name in sys.modules
+             and hasattr(sys.modules[name], "filter_option_available")]
+    for module, _ in saved:
+        module.filter_option_available = probe
+    try:
+        yield
+    finally:
+        for module, original in saved:
+            module.filter_option_available = original
+
+
+def expected_scale_chain(supported, scale_expr):
+    """The exact filter text a branch must emit.
+
+    Spelled out here rather than taken from square_pixel_scale_chain, so a
+    builder that starts emitting the wrong chain cannot also rewrite the value
+    it is compared against.
+    """
+    if supported:
+        return f"{scale_expr}:reset_sar=1"
+    return f"scale=iw*sar:ih,setsar=1,{scale_expr}"
+
+
+def assert_both_scale_branches(case, build_text, scale_expr):
+    """Assert the emitted chain for both capability branches.
+
+    `build_text()` rebuilds the command and returns it; it is called once per
+    branch with the probe forced, so an 8.x machine still proves what a 7.1
+    user gets and a 7.1 machine still proves the modern shape.
+    """
+    for supported in (True, False):
+        with case.subTest(reset_sar=supported), forced_reset_sar(supported):
+            case.assertIn(expected_scale_chain(supported, scale_expr), build_text())
 
 
 class OptionProbe(unittest.TestCase):
@@ -47,10 +109,14 @@ class OptionProbe(unittest.TestCase):
 
     @unittest.skipUnless(FFMPEG, "ffmpeg not on PATH")
     def test_a_name_that_is_only_a_SUBSTRING_of_a_real_option_is_rejected(self):
-        # `scale` has reset_sar but no bare `sar`. A substring match would
-        # report `sar` as supported and the probe would silently start
-        # approving options that do not exist.
-        self.assertTrue(FFmWiz.filter_option_available(FFMPEG, "scale", "reset_sar"))
+        # A substring match would approve options that do not exist. The pair
+        # used here is on every build in support, so the trap stays pinned on a
+        # pre-7.2 binary that has no reset_sar to hide inside.
+        self.assertTrue(FFmWiz.filter_option_available(
+            FFMPEG, "scale", "force_original_aspect_ratio"))
+        self.assertFalse(FFmWiz.filter_option_available(FFMPEG, "scale", "aspect_ratio"))
+        # `sar` is never an option of its own, whether or not this build has
+        # reset_sar for it to sit inside.
         self.assertFalse(FFmWiz.filter_option_available(FFMPEG, "scale", "sar"))
 
     @unittest.skipUnless(FFMPEG, "ffmpeg not on PATH")
@@ -145,18 +211,28 @@ class BothFormsProduceTheSameGeometry(unittest.TestCase):
                          "the fixture is not anamorphic; the test proves nothing")
 
     def test_the_fallback_matches_the_inline_option(self):
-        inline = self._encode("inline", f"{BOX}:reset_sar=1")
-        fallback = self._encode("fallback", f"scale=iw*sar:ih,setsar=1,{BOX}")
-        self.assertEqual(inline, fallback,
-                         "the portable fallback must produce the same geometry")
-        self.assertEqual((1280, 720, "1:1", "16:9"), inline)
+        # Never execute an option this binary rejects: ask the builder, which
+        # asks the probe, and encode whichever form this build actually gets.
+        # On a 7.2+ build that is the inline option and the two lines below are
+        # two different filter strings that must agree; on an older build it is
+        # the fallback and the inline option is never run. Correctness is the
+        # same geometry tuple either way.
+        correct = (1280, 720, "1:1", "16:9")
+        self.assertEqual(correct, self._encode(
+            "production", FFmWiz.square_pixel_scale_chain(FFMPEG, BOX)))
+        self.assertEqual(correct, self._encode(
+            "fallback", f"scale=iw*sar:ih,setsar=1,{BOX}"),
+            "the portable fallback must produce the same geometry")
 
     def test_a_bare_trailing_setsar_would_have_been_wrong(self):
         # Pinning the defect the brief proposed, so nobody "simplifies" the
-        # fallback back into it.
+        # fallback back into it. A trailing setsar is accepted by every build,
+        # so this runs everywhere.
         squeezed = self._encode("squeezed", f"{BOX},setsar=1")
         self.assertEqual((900, 720, "1:1", "5:4"), squeezed)
-        self.assertNotEqual(self._encode("inline2", f"{BOX}:reset_sar=1"), squeezed)
+        self.assertNotEqual(
+            self._encode("production2", FFmWiz.square_pixel_scale_chain(FFMPEG, BOX)),
+            squeezed)
 
 
 class EveryScaleSiteIsGuarded(unittest.TestCase):
