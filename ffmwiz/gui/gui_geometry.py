@@ -39,18 +39,20 @@ def seconds_to_timecode(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
-def seconds_to_hmsf(seconds: float, fps: float) -> str:
-    if seconds is None or seconds < 0:
-        seconds = 0.0
-    if fps <= 0:
-        fps = 25.0
-    fps_int = max(1, round(fps))
-    total_frames = int(round(float(seconds) * fps))
-    frame = total_frames % fps_int
-    whole_seconds = total_frames // fps_int
-    hours, rem = divmod(whole_seconds, 3600)
-    minutes, secs = divmod(rem, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}:{frame:02d}"
+# seconds_to_hmsf is IMPORTED, never copied. The copy that used to live here
+# kept the mixed-clock bug after core/timeline.py was fixed: it counted total
+# frames at the TRUE rate (23.976) and then split them with the ROUNDED one
+# (24), losing (fps_int - fps) / fps_int per second -- -3.58 s per hour, and it
+# made the editor's timecodes stop being the inverse of parse_hmsf_time. A
+# single definition cannot drift again.
+#
+# This module also runs inside the standalone GUI subprocess, which is started
+# as `python ffmwiz/gui/ffmwiz_gui.py` and therefore begins with only
+# ffmwiz/gui on sys.path -- hence the explicit project-root entry. Appended,
+# not inserted, so it can never shadow a sibling GUI module.
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from ffmwiz.core.timeline import seconds_to_hmsf  # noqa: E402,F401
 
 
 def normalize_ranges(ranges, duration: float):

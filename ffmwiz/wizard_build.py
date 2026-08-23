@@ -645,8 +645,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             audio_bitrate = answers.get("audio_bitrate_kbps")
             if audio_bitrate and audio_codec_uses_bitrate(audio_codec):
                 cmd.extend(["-b:a", f"{audio_bitrate}k"])
-            if AUDIO_CHANNELS:
-                cmd.extend(["-ac", str(AUDIO_CHANNELS)])
+            channels = resolve_audio_channels(answers)
+            if channels:
+                cmd.extend(["-ac", str(channels)])
             _ar = resolve_audio_sample_rate(answers)
             if _ar:
                 cmd.extend(["-ar", str(_ar)])

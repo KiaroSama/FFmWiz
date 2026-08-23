@@ -136,7 +136,7 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     # and let the output keep variable timing via -fps_mode vfr.
     vfr_join = bool(answers.get("join_vfr"))
     join_rate = join_target_sample_rate(answers)
-    prep = join_audio_prep_filter(join_rate)
+    prep = join_audio_prep_filter(join_rate, join_target_channel_layout(items))
     for idx, item in enumerate(items):
         fps_prefix = "" if vfr_join else f"fps={target_fps:g},"
         filters.append(
@@ -159,7 +159,28 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
         cmd.extend(["-map", "[a]"])
     else:
         cmd.append("-an")
-    if use_nvenc_encode:
+    # The output container comes from input 0 but the encoder below used to be
+    # chosen from hardware/bit-depth alone, so a .webm join emitted H.264 and
+    # died with "Only VP8 or VP9 or AV1 video ... are supported for WebM".
+    # Ask the shared resolver the same question every other builder asks.
+    requested_alias = "H265" if target_depth > 10 else "H264"
+    container_alias, container_note = container_video_codec(output_path.suffix, requested_alias)
+    container_forced = container_alias.upper() != requested_alias.upper()
+
+    if container_forced:
+        if container_note:
+            appio.note(container_note)
+        forced_encoder = resolve_video_encoder(
+            {"video_codec": container_alias, "use_gpu": False})[0]
+        # CRF is not comparable across encoder families: 18 is near-lossless for
+        # x264/x265 but wastefully large for VP9/AV1, whose usable near-quality
+        # band sits around 24. `-b:v 0` is what puts libvpx in constant-quality
+        # mode at all; without it the CRF is only an upper bound.
+        cmd.extend(["-c:v", forced_encoder, "-crf", "24", "-b:v", "0",
+                    "-pix_fmt", output_pix_fmt])
+        if forced_encoder == "libvpx-vp9":
+            cmd.extend(["-row-mt", "1"])
+    elif use_nvenc_encode:
         log_info("Join Videos near-quality encode selected h264_nvenc because NVENC is available.")
         cmd.extend([
             "-c:v", "h264_nvenc",

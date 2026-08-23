@@ -284,8 +284,9 @@ def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_aud
     audio_bitrate = answers.get("audio_bitrate_kbps")
     if audio_bitrate and audio_codec_uses_bitrate(str(audio_codec)):
         cmd.extend(["-b:a", f"{audio_bitrate}k"])
-    if AUDIO_CHANNELS:
-        cmd.extend(["-ac", str(AUDIO_CHANNELS)])
+    channels = resolve_audio_channels(answers)
+    if channels:
+        cmd.extend(["-ac", str(channels)])
     sample_rate = resolve_audio_sample_rate(answers)
     if sample_rate:
         cmd.extend(["-ar", str(sample_rate)])

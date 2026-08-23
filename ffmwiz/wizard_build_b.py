@@ -191,7 +191,7 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
         mapped_audio_output_count = len(selected_hardsub_audio)
         if audio_policy == "aac":
             bitrate = int(answers.get("hardsub_audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
-            audio_args, audio_note = container_audio_encode_args(output_ext, "aac", bitrate, AUDIO_CHANNELS)
+            audio_args, audio_note = container_audio_encode_args(output_ext, "aac", bitrate, resolve_audio_channels(answers))
         else:
             first_audio = (answers.get("audio_streams") or [{}])[0]
             audio_args, audio_note = container_audio_encode_args(
@@ -205,7 +205,7 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
         mapped_audio_output_count = len(answers.get("audio_streams") or [])
         if audio_policy == "aac":
             bitrate = int(answers.get("hardsub_audio_bitrate_kbps") or DEFAULT_AUDIO_BITRATE_KBPS)
-            audio_args, audio_note = container_audio_encode_args(output_ext, "aac", bitrate, AUDIO_CHANNELS)
+            audio_args, audio_note = container_audio_encode_args(output_ext, "aac", bitrate, resolve_audio_channels(answers))
         else:
             first_audio = (answers.get("audio_streams") or [{}])[0]
             audio_args, audio_note = container_audio_encode_args(
@@ -512,6 +512,10 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     # keep variable timing on the output via -fps_mode vfr (added per output).
     vfr_join = bool(join_answers.get("join_vfr"))
     join_rate = join_target_sample_rate(join_answers)
+    # The concat filter refuses mismatched audio, so every input AND every
+    # synthesised-silence segment has to share one layout. Take the widest
+    # present instead of forcing stereo, which used to flatten a 5.1 join.
+    join_layout = join_target_channel_layout(items)
     for input_idx, item in enumerate(items):
         chain = []
         if crop_filter:
@@ -530,11 +534,12 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         for audio_pos, audio_index in enumerate(selected_audio):
             label = f"[ja{input_idx}_{audio_pos}]"
             if audio_index < item_audio_count:
-                filters.append(f"[{input_idx}:a:{audio_index}]{join_audio_prep_filter(join_rate)}{label}")
+                filters.append(f"[{input_idx}:a:{audio_index}]"
+                               f"{join_audio_prep_filter(join_rate, join_layout)}{label}")
             else:
                 silence = max(0.001, float(item.get("duration") or 0.001))
                 filters.append(
-                    f"anullsrc=channel_layout=stereo:sample_rate={join_rate}:d={silence:.6f}{label}"
+                    f"anullsrc=channel_layout={join_layout}:sample_rate={join_rate}:d={silence:.6f}{label}"
                 )
             concat_inputs.append(label)
 

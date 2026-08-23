@@ -48,11 +48,26 @@ _MODULES = [
     gui_editor_unified_timeline,
 ]
 
+def _exported_names(module) -> dict:
+    """One child's contribution to the shared namespace.
+
+    Honouring `__all__` is what keeps a child's private imports out of the
+    shared dict and stops it silently shadowing a sibling's name of the same
+    spelling. No declaration means nothing to honour, so every public name
+    still goes in and today's behaviour is unchanged.
+    """
+    declared = getattr(module, "__all__", None)
+    if declared is None:
+        return {k: v for k, v in vars(module).items() if not k.startswith("__")}
+    # Lenient on drift: a stale name in `__all__` must not kill GUI startup.
+    return {name: getattr(module, name) for name in declared if hasattr(module, name)}
+
+
 # Assemble the full namespace, then inject it into every module so that a
 # function defined in one file can freely call names defined in another.
 _ASSEMBLED = {}
 for _m in _MODULES:
-    _ASSEMBLED.update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
+    _ASSEMBLED.update(_exported_names(_m))
 for _m in _MODULES:
     for _k, _v in _ASSEMBLED.items():
         setattr(_m, _k, _v)
