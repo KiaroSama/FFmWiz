@@ -56,9 +56,22 @@ class EditedJoinsKeepTheirSubtitles(NoLeakedArtifacts, unittest.TestCase):
                  "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
                  "-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s",
                  "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                 "-c:a", "aac", "-c:s", "srt", "-shortest", str(path)],
+                 "-c:a", "aac", "-c:s", "srt", str(path)],
                 check=True, capture_output=True, timeout=300)
             cls.inputs.append(path)
+
+    def test_each_input_really_carries_two_seconds_of_picture(self):
+        # Guard the fixture. It used to be muxed with `-shortest`, which clipped
+        # the picture to the 1.500 s subtitle: every number in this file assumes
+        # 2.000 s per input, and the joined output was really 3.009 s with the
+        # colour changing at 1.500. The offsets below are only meaningful while
+        # the picture is what the fixture claims.
+        for path in self.inputs:
+            info = self._probe(path)
+            video = [s for s in info["streams"] if s["codec_type"] == "video"][0]
+            self.assertAlmostEqual(
+                2.0, FFmWiz.video_stream_span_seconds(video, info["format"]),
+                delta=0.05, msg=f"{path.name} picture span")
 
     @classmethod
     def tearDownClass(cls):
