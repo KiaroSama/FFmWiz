@@ -201,6 +201,7 @@ def append_single_input_split_outputs(
     audio_transform_active: bool,
     multi_cut: bool,
     audio_for_cut: int | None,
+    retimed_subtitles: list[dict[str, Any]] | None = None,
 ) -> bool:
     source_duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     final_duration = final_processed_duration_for_splits(answers, source_duration)
@@ -271,7 +272,10 @@ def append_single_input_split_outputs(
                 split_chapter_metadata_paths.append(None)
 
     # Add chapter metadata inputs (input index 1, 2, ... for each part that has chapters).
-    chapter_input_base = 1  # Input 0 is the main source file.
+    # Not a literal 1: the caller adds the retimed-subtitle inputs before this
+    # runs, so a hardcoded base pointed -map_chapters at an .srt and gave every
+    # part the PREVIOUS part's chapters. Count what is already there instead.
+    chapter_input_base = sum(1 for arg in cmd if arg == "-i")
     metadata_input_count = 0
     part_chapter_input_indices: list[int | None] = []
     for metadata_path in split_chapter_metadata_paths:
@@ -282,11 +286,31 @@ def append_single_input_split_outputs(
         else:
             part_chapter_input_indices.append(None)
 
+    # Slice the subtitles onto each part's own clock and map them. Without this
+    # the Split path emitted -sn: a cut/speed Split built and announced a
+    # retimed track that no output ever carried.
+    split_subtitles = wizard.build_split_subtitle_inputs(
+        answers, split_intervals, retimed_subtitles)
+    subtitle_input_indices: list[list[int]] = []
+    next_input_index = chapter_input_base + metadata_input_count
+    for part_tracks in split_subtitles:
+        indices: list[int] = []
+        for track in part_tracks:
+            cmd.extend(["-i", str(track["path"])])
+            indices.append(next_input_index)
+            next_input_index += 1
+        subtitle_input_indices.append(indices)
+
     cmd.extend(["-filter_complex", ";".join(filters)])
     for part_idx, part_output in enumerate(output_paths):
         cmd.extend(["-map", f"[{video_outputs[part_idx]}]"])
         for audio_label in audio_outputs_by_part[part_idx]:
             cmd.extend(["-map", f"[{audio_label}]"])
+        part_subtitles = (split_subtitles[part_idx]
+                          if part_idx < len(split_subtitles) else [])
+        for subtitle_input in (subtitle_input_indices[part_idx]
+                               if part_idx < len(subtitle_input_indices) else []):
+            cmd.extend(["-map", f"{subtitle_input}:s:0"])
         attachments_mapped = append_embedded_attachment_maps(cmd, answers)
         data_mapped = append_source_data_maps(cmd, answers)
 
@@ -303,7 +327,10 @@ def append_single_input_split_outputs(
             else:
                 cmd.extend(["-map_chapters", "-1"])
 
-        append_negative_stream_options(cmd, answers, True, [], data_mapped)
+        append_negative_stream_options(
+            cmd, answers, True,
+            list(range(len(part_subtitles))) if part_subtitles else [],
+            data_mapped)
         wizard.append_video_encode_options(cmd, answers, video_encoder, tag, profile)
         append_audio_encode_options(cmd, answers, bool(audio_outputs_by_part[part_idx]))
         append_clear_reencoded_stream_stat_metadata(
@@ -311,8 +338,19 @@ def append_single_input_split_outputs(
             answers,
             video_output_count=1 if video_encoder != "copy" else 0,
             audio_output_count=len(audio_outputs_by_part[part_idx]) if audio_outputs_by_part[part_idx] else 0,
-            subtitle_output_count=0,
+            subtitle_output_count=len(part_subtitles),
         )
+        if part_subtitles:
+            # Sliced tracks are freshly written SRT whatever the source was, so
+            # ask the container about subrip -- the same check the non-split
+            # path makes before mapping anything.
+            subtitle_args, subtitle_problems = subtitle_codec_args_for_container(
+                answers["output_ext"], ["subrip"] * len(part_subtitles))
+            for problem in subtitle_problems:
+                log_warn(f"Subtitle/container: {problem}")
+            if subtitle_args:
+                cmd.extend(subtitle_args)
+            append_subtitle_track_metadata(cmd, part_subtitles)
         if attachments_mapped:
             append_embedded_attachment_codec_options(cmd, answers)
         if data_mapped:
@@ -518,6 +556,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             audio_transform_active,
             multi_cut,
             audio_for_cut,
+            retimed_subtitles,
         )
     ):
         return cmd

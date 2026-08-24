@@ -585,6 +585,114 @@ def build_retimed_subtitle_inputs(answers: dict[str, Any]) -> list[dict[str, Any
     return built
 
 
+def build_split_subtitle_inputs(
+    answers: dict[str, Any],
+    part_intervals: list[tuple[float, float]],
+    retimed: list[dict[str, Any]] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """One text subtitle file per Split part, on that part's own clock.
+
+    A Split part is its own output starting at zero, so the whole-timeline cues
+    have to be sliced to that part's processed interval and shifted back to it.
+    The Split builder emitted `-sn` instead. With a cut or a speed change that
+    was worse than a silent drop: the retimed track WAS built, announced as
+    "1 text track(s) were retimed onto the processed timeline", handed to
+    FFmpeg as an input -- and then never mapped, so the message described an
+    output that carried no subtitles at all.
+
+    `retimed` is the whole-timeline set the caller already built (cut/speed/
+    reverse). Without one the timeline is identity, so the source cues already
+    sit on the output clock and only need slicing.
+
+    Returns one list of track dicts per part, parallel to `part_intervals`.
+    """
+    if not part_intervals:
+        return []
+    if not (output_has_video(answers) and source_subtitles_keep_enabled(answers)):
+        return []
+    streams = list(answers.get("subtitle_streams") or [])
+    if not streams:
+        return []
+    selected = [index for index in selected_subtitle_streams(answers)
+                if 0 <= int(index) < len(streams)]
+    if not selected:
+        return []
+    # A sliced track is SRT whatever the source was. Mapping a stream the muxer
+    # cannot carry kills the whole output at header-write time.
+    if subtitle_codec_for_container(answers.get("output_ext", ""), "subrip") is None:
+        appio.note(
+            f".{str(answers.get('output_ext') or '').lstrip('.')} cannot store text "
+            "subtitles, so the Split parts carry none.")
+        return []
+
+    sources: list[tuple[list[tuple[float, float, str]], dict[str, Any]]] = []
+    if retimed:
+        for track in retimed:
+            try:
+                text = Path(track["path"]).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            cues = parse_srt(text)
+            if cues:
+                sources.append((cues, track))
+    else:
+        bitmap = [(index, str(streams[index].get("codec_name") or ""))
+                  for index in selected if not is_text_subtitle(streams[index])]
+        if bitmap and not confirm_bitmap_subtitle_drop(answers, bitmap):
+            raise RuntimeError(
+                "Bitmap subtitle tracks cannot be sliced into Split parts, and dropping "
+                "them was not confirmed. Deselect those tracks in the subtitle question, "
+                "or remove the Split points.")
+        text_indices = [index for index in selected if is_text_subtitle(streams[index])]
+        if not text_indices:
+            return []
+        temp_dir = artifact_lease(answers).register(
+            Path(tempfile.mkdtemp(prefix="ffmwiz_split_subs_")))
+        ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+        source = Path(answers["input_path"])
+        for index in text_indices:
+            raw = temp_dir / f"source{index:02d}.srt"
+            text = extract_subtitle_text(ffmpeg, source, index, raw, "Split subtitles")
+            cues = parse_srt(text) if text else []
+            if cues:
+                sources.append((cues, {"source_index": index,
+                                       **subtitle_track_metadata(streams[index])}))
+    if not sources:
+        return []
+
+    part_dir = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_split_subs_parts_")))
+    per_part: list[list[dict[str, Any]]] = []
+    for part_idx, (part_start, part_end) in enumerate(part_intervals):
+        tracks: list[dict[str, Any]] = []
+        for order, (cues, meta) in enumerate(sources):
+            sliced = []
+            for start, end, text in cues:
+                clipped_start = max(float(start), float(part_start))
+                clipped_end = min(float(end), float(part_end))
+                if clipped_end > clipped_start + 1e-6:
+                    sliced.append((clipped_start - part_start,
+                                   clipped_end - part_start, text))
+            if not sliced:
+                continue
+            path = part_dir / f"part{part_idx + 1:02d}_track{order:02d}.srt"
+            path.write_text(render_srt(sliced), encoding="utf-8", newline="\n")
+            tracks.append({**meta, "path": path})
+        per_part.append(tracks)
+
+    carried = sum(len(tracks) for tracks in per_part)
+    if carried:
+        appio.note(
+            f"Subtitles: {len(sources)} text track(s) were sliced across "
+            f"{len(part_intervals)} Split part(s) ({carried} output track(s)).")
+        log_info(
+            "Split subtitles: tracks="
+            + ",".join(str(meta.get("source_index")) for _c, meta in sources)
+            + "; parts=" + ",".join(f"{s:.3f}-{e:.3f}" for s, e in part_intervals)
+            + f"; output_tracks={carried}")
+    return per_part
+
+
 def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
     output_path = resolve_output_collision_against_inputs(
         output_path,
@@ -861,5 +969,6 @@ __all__ = [
     'encode_subtitle_retiming_required',
     'confirm_bitmap_subtitle_drop',
     'build_retimed_subtitle_inputs',
+    'build_split_subtitle_inputs',
     'build_join_encode_command',
 ]
