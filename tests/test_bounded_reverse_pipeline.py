@@ -320,6 +320,47 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
         self.assertEqual("blue", self._colour_at(parts[0], 0.3),
                          "the reversed timeline starts at the blue tail")
 
+    def test_a_custom_output_name_survives_the_pipeline(self):
+        # The final stage took its stem from `input_path`, which by then is the
+        # pipeline's own scratch file: a job summarised as CustomMovie_Part01
+        # actually wrote a_Part01 (B14). The names the user confirmed are the
+        # contract, not the scratch file's.
+        out = self._tmp / "customname"
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+        items = [self._item(path) for path in self.inputs]
+        answers = self.own({
+            "ffmpeg": FFMPEG, "ffprobe": FFPROBE, "input_path": self.inputs[0],
+            "probe": items[0]["probe"], "format": items[0]["format"],
+            "output_location": out, "output_name_stem": "CustomMovie",
+            "video_streams": items[0]["video_streams"],
+            "audio_streams": items[0]["audio_streams"],
+            "subtitle_streams": [], "output_ext": "mkv", "audio_tracks": [0],
+            "color_range_choice": "tv",
+            "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
+            "audio_codec": "aac", "join_input_items": items[1:],
+            "video_speed_enabled": True, "video_speed_factor": 1.0,
+            "reverse_video": True, "separator_points": [2.0],
+        })
+        noise = StringIO()
+        with redirect_stdout(noise), redirect_stderr(noise):
+            # The builder writes split_output_paths into the dict it is GIVEN,
+            # so read them back from that one rather than the outer copy.
+            built = dict(answers)
+            answers["cmd"] = [str(p) for p in FFmWiz.build_join_encode_command(
+                built, items, out / "CustomMovie.mkv")]
+            promised = [Path(p).name for p in (built.get("split_output_paths") or [])]
+            answers["split_output_paths"] = built.get("split_output_paths")
+            answers["split_part_intervals"] = built.get("split_part_intervals")
+            answers["output_path"] = (built.get("split_output_paths")
+                                      or [out / "CustomMovie.mkv"])[0]
+            code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
+        self.assertEqual(0, code, noise.getvalue()[-1500:])
+        self.assertTrue(promised, "the build promised no part paths to compare")
+        written = sorted(part.name for part in out.glob("*Part*.mkv"))
+        self.assertEqual(sorted(promised), written,
+                         "the files on disk must be the ones the summary showed")
+
     def test_the_user_is_told_which_plan_ran(self):
         _output, _commands, log = self._reverse("note")
         self.assertIn("joining first", log.lower())
