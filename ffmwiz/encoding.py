@@ -517,6 +517,183 @@ def _single_input_answers(answers: dict[str, Any], source: Path) -> dict[str, An
     return rebased
 
 
+def bounded_reverse_plan(answers: dict[str, Any],
+                        workspace: Path) -> list[tuple[str, list[str]]]:
+    """The staged commands this job WILL run, without running any of them.
+
+    The summary printed the ordinary one-shot command, which for a Join or
+    Split reverse carries a full-timeline `reverse` filter that execution never
+    uses. Running it by hand buffers the whole timeline -- exactly what the
+    staged plan exists to avoid -- so the printed command described a different
+    job from the one that would run (B04).
+
+    The intermediates are DESCRIBED rather than probed, because they do not
+    exist yet: their geometry comes from the source and their codec/container
+    from `intermediate_profile`, which is what actually produces them. The
+    regression that keeps the two honest runs the exported plan in a fresh
+    process and compares its media to the automatic path.
+    """
+    stages: list[tuple[str, list[str]]] = []
+    extension = INTERMEDIATE_CONTAINER_EXT
+    split_points = list(answers.get("separator_points") or [])
+    planned_output_paths = list(answers.get("split_output_paths") or [])
+    stage_source = answers
+
+    def described(source_answers: dict[str, Any], produced: Path) -> dict[str, Any]:
+        """The intermediate as it will be, built from what we know we write."""
+        rebased = dict(source_answers)
+        rebased.pop("join_input_items", None)
+        rebased["input_path"] = produced
+        streams = [dict(stream) for stream in (source_answers.get("video_streams") or [])]
+        for stream in streams:
+            stream["codec_name"] = "h264"
+        rebased["video_streams"] = streams
+        rebased["audio_streams"] = [
+            {**dict(stream), "codec_name": INTERMEDIATE_AUDIO_CODEC}
+            for stream in (source_answers.get("audio_streams") or [])]
+        rebased["subtitle_streams"] = []
+        rebased["probe"] = {"streams": streams, "format": source_answers.get("format") or {}}
+        rebased["format"] = dict(source_answers.get("format") or {})
+        return rebased
+
+    if answers.get("join_input_items"):
+        items = join_items_from_answers(answers)
+        if not items:
+            return stages
+        joined = workspace / f"joined_forward.{extension}"
+        forward = intermediate_profile(stage_answers(answers, owns=()))
+        forward["output_path"] = joined
+        stages.append(("Join the inputs forward",
+                       [str(part) for part in
+                        wizard.build_join_encode_command(forward, items, joined)]))
+        stage_source = described(answers, joined)
+
+    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
+                    "video_reverse", "audio_reverse", "loudnorm")
+    reverse_answers = stage_answers(stage_source, owns=reverse_owns)
+    reverse_answers.pop("join_input_items", None)
+    if split_points:
+        reversed_whole = workspace / f"reversed_whole.{extension}"
+        reverse_answers = intermediate_profile(reverse_answers)
+        reverse_answers["output_path"] = reversed_whole
+        reverse_answers["output_location"] = workspace
+        reverse_answers["output_name_stem"] = reversed_whole.stem
+        reverse_answers["output_collision_suffix"] = ""
+    else:
+        reverse_answers["output_path"] = answers["output_path"]
+
+    duration = services.stream_duration_seconds({}, reverse_answers.get("format")) or 0.0
+    keep_ranges = normalize_cut_ranges(
+        list(reverse_answers.get("cut_keep_ranges") or []), duration)
+    chunks = split_ranges_for_reverse_segments(
+        keep_ranges, duration, reverse_segment_seconds(reverse_answers))
+    segment_ext = Path(reverse_answers["output_path"]).suffix.lstrip(".") or extension
+    segments: list[Path] = []
+    for index, (start, end) in enumerate(chunks, start=1):
+        segment = workspace / f"reverse_encode_seg_{index:04d}.{segment_ext}"
+        segments.append(segment)
+        stages.append((
+            f"Reverse segment {index}/{len(chunks)}",
+            [str(part) for part in build_main_encode_reverse_segment_command(
+                reverse_answers, start, end, segment)]))
+
+    # The concat lists are written NOW so the exported script is runnable as
+    # it stands; the executor writes its own at run time from the same order.
+    ffmpeg = reverse_answers.get("ffmpeg") or "ffmpeg"
+    reverse_target = Path(reverse_answers["output_path"])
+    audio_follows = encode_audio_reverse_enabled(reverse_answers)
+    has_audio = bool(reverse_answers.get("audio_streams")) and bool(
+        reverse_answers.get("audio_tracks", True))
+    if segments and has_audio and not audio_follows:
+        video_list = workspace / "plan_concat_video.txt"
+        audio_list = workspace / "plan_concat_audio.txt"
+        write_concat_list(list(reversed(segments)), video_list)
+        write_concat_list(list(segments), audio_list)
+        reversed_video = workspace / f"video_reversed.{segment_ext}"
+        forward_audio = workspace / f"audio_forward.{segment_ext}"
+        video_cmd = build_concat_copy_command(ffmpeg, video_list, reversed_video)
+        video_cmd[video_cmd.index(str(reversed_video)):] = ["-an", str(reversed_video)]
+        audio_cmd = build_concat_copy_command(ffmpeg, audio_list, forward_audio)
+        audio_cmd[audio_cmd.index(str(forward_audio)):] = ["-vn", str(forward_audio)]
+        stages.append(("Concatenate the video in reversed order",
+                       [str(part) for part in video_cmd]))
+        stages.append(("Concatenate the audio in source order",
+                       [str(part) for part in audio_cmd]))
+        stages.append(("Mux the reversed picture with its own audio", [
+            str(ffmpeg), "-y", "-hide_banner",
+            "-i", str(reversed_video), "-i", str(forward_audio),
+            "-map", "0:v", "-map", "1:a", "-c", "copy",
+            "-avoid_negative_ts", "make_zero", str(reverse_target)]))
+    elif segments:
+        concat_list = workspace / "plan_concat.txt"
+        write_concat_list(list(reversed(segments)), concat_list)
+        stages.append(("Concatenate the reversed segments",
+                       [str(part) for part in build_concat_copy_command(
+                           ffmpeg, concat_list, reverse_target)]))
+
+    if split_points:
+        split_answers = stage_answers(
+            described(answers, Path(reverse_answers["output_path"])), owns=("split",))
+        split_answers.pop("split_output_paths", None)
+        split_answers.pop("split_part_intervals", None)
+        split_answers["separator_points"] = split_points
+        resolved_stem = str(answers.get("output_name_stem") or "").strip()
+        if not resolved_stem and planned_output_paths:
+            resolved_stem = re.sub(r"_Part\d+$", "", Path(planned_output_paths[0]).stem)
+        if not resolved_stem:
+            resolved_stem = Path(answers["input_path"]).stem
+        split_answers["output_name_stem"] = resolved_stem
+        stages.append(("Split the reversed result",
+                       [str(part) for part in build_ffmpeg_command(split_answers)]))
+    return stages
+
+
+def export_bounded_reverse_plan(answers: dict[str, Any], destination: Path) -> Path | None:
+    """Write the staged plan as a runnable PowerShell script.
+
+    A multi-stage job has no single "final command", so exporting one and
+    labelling it that way is what made the manual path wrong. The script stops
+    on the first failure and names the scratch directory the user has to remove
+    afterwards, because the generated inputs are deliberately preserved.
+    """
+    stem = re.sub(r"_Part\d+$", "", Path(destination).stem)
+    workspace = Path(destination).parent / f"{stem}_plan"
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        stages = bounded_reverse_plan(answers, workspace)
+    except Exception as exc:  # a plan we cannot describe must not break the run
+        log_warn(f"Could not export the staged reverse plan: {exc}")
+        return None
+    if not stages:
+        return None
+    script = Path(destination).parent / f"{stem}.plan.ps1"
+    lines = [
+        "# FFmWiz staged reverse plan.",
+        "# This job runs as several FFmpeg commands, in this order. The single",
+        "# command shown in the summary is a readable reference only: running it",
+        "# would buffer the whole timeline, which is what the staged plan avoids.",
+        "$ErrorActionPreference = 'Stop'",
+        "",
+    ]
+    for label, cmd in stages:
+        lines.append(f"# {label}")
+        if cmd and cmd[0].startswith("<"):
+            lines.append(f"#   {cmd[0]} -- FFmWiz writes this list at run time")
+        else:
+            # `&` is required: command_to_powershell quotes the executable for
+            # DISPLAY, and PowerShell parses a bare quoted string followed by
+            # arguments as an expression, not a command.
+            lines.append("& " + command_to_powershell(cmd))
+            lines.append("if ($LASTEXITCODE -ne 0) { throw '"
+                         + label.replace("'", "''") + " failed' }")
+        lines.append("")
+    lines.append(f"# Scratch files live in: {workspace}")
+    lines.append("# Remove that directory once the outputs are correct.")
+    script.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    log_info(f"Exported staged reverse plan with {len(stages)} stage(s) to {script}")
+    return script
+
+
 def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     """Reverse without ever handing the filter a whole timeline (F10).
 
@@ -848,6 +1025,8 @@ __all__ = [
     'run_metadata_report_inspect',
     'reverse_segment_seconds',
     'run_bounded_reverse_pipeline',
+    'bounded_reverse_plan',
+    'export_bounded_reverse_plan',
     'intermediate_profile',
     'stage_answers',
     'validate_stage_plan',
