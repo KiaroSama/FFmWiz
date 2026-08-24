@@ -417,6 +417,75 @@ def reverse_segment_seconds(answers: dict[str, Any]) -> float:
                min(float(REVERSE_SEGMENT_SECONDS), seconds))
 
 
+# Every user edit the staged reverse pipeline can apply, grouped by the
+# transformation that owns it. A stage that does not own a transformation must
+# not carry its keys: the pipeline used to clear only the VIDEO edits, so an
+# independent 2x audio speed was applied by the forward-join stage, again by
+# the segmented reverse and again by the final split. Measured on two joined
+# 2 s clips: 4.100 s of video against 1.111 s of audio, where one application
+# owes about 2 s (B01).
+STAGE_TRANSFORMATIONS: dict[str, tuple[str, ...]] = {
+    "cuts": ("cut_keep_ranges",),
+    "audio_cuts": ("audio_cut_keep_ranges", "audio_cut_stream_copy"),
+    "video_speed": ("video_speed_enabled", "video_speed_factor"),
+    "audio_speed": ("audio_speed_enabled", "audio_speed_factor",
+                    "audio_speed_from_video"),
+    "video_reverse": ("reverse_video",),
+    "audio_reverse": ("reverse_audio",),
+    "loudnorm": ("loudnorm_enabled", "loudnorm_mode", "loudnorm_measured",
+                 "loudnorm_target_i"),
+    "split": ("separator_points", "split_output_paths", "split_part_intervals"),
+}
+
+# Falsey neutral values, so a stage that reads a key without checking for its
+# absence still sees "no transformation" rather than a stale truth.
+_NEUTRAL_VALUES: dict[str, Any] = {
+    "video_speed_factor": 1.0,
+    "audio_speed_factor": 1.0,
+    "loudnorm_mode": "off",
+}
+
+
+def stage_answers(answers: dict[str, Any], owns: tuple[str, ...]) -> dict[str, Any]:
+    """A copy of `answers` carrying ONLY the transformations this stage owns.
+
+    Ownership is declared, never inferred from what happens to be in a copied
+    dictionary. Anything the stage does not own is removed, and the effective
+    map is dropped with it so a resolution made for another stage cannot leak
+    in (the same map is what let a Join's libx265 fallback survive a rebuild).
+    """
+    unknown = set(owns) - set(STAGE_TRANSFORMATIONS)
+    if unknown:
+        raise ValueError(f"unknown transformation(s): {sorted(unknown)}")
+    staged = dict(answers)
+    staged.pop(EFFECTIVE_SETTINGS_KEY, None)
+    for name, keys in STAGE_TRANSFORMATIONS.items():
+        if name in owns:
+            continue
+        for key in keys:
+            if key in _NEUTRAL_VALUES:
+                staged[key] = _NEUTRAL_VALUES[key]
+            else:
+                staged.pop(key, None)
+    return staged
+
+
+def validate_stage_plan(stages: list[tuple[str, tuple[str, ...]]]) -> None:
+    """Every transformation the job requests is owned by exactly one stage.
+
+    Raises on a duplicate: applying a speed change twice is silent in the argv
+    and only visible in the finished media, which is how B01 survived.
+    """
+    seen: dict[str, str] = {}
+    for label, owns in stages:
+        for name in owns:
+            if name in seen:
+                raise ValueError(
+                    f"transformation {name!r} is owned by both {seen[name]!r} "
+                    f"and {label!r}")
+            seen[name] = label
+
+
 def _single_input_answers(answers: dict[str, Any], source: Path) -> dict[str, Any]:
     """Re-point a job at one already-produced file, keeping its output settings."""
     probe = services.ffprobe_json(answers.get("ffprobe") or "ffprobe", source)
@@ -467,15 +536,10 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
         if not items:
             return 1, time.perf_counter() - started_at
         joined = workspace / f"joined_forward.{extension}"
-        forward = dict(answers)
-        # The intermediate is the joined program and nothing else. Editing here
-        # as well would apply cuts and speed twice.
-        for key in ("cut_keep_ranges", "separator_points", "split_output_paths",
-                    "split_part_intervals", "audio_cut_keep_ranges"):
-            forward.pop(key, None)
-        forward["reverse_video"] = False
-        forward["video_speed_enabled"] = False
-        forward["video_speed_factor"] = 1.0
+        # Owns NOTHING: the intermediate is the joined program and nothing
+        # else. Clearing only the video edits left an independent audio speed
+        # to be applied here AND by the reverse stage AND by the split (B01).
+        forward = stage_answers(answers, owns=())
         forward["video_crf"] = REVERSE_INTERMEDIATE_CRF
         forward["output_path"] = joined
         forward_cmd = wizard.build_join_encode_command(forward, items, joined)
@@ -490,14 +554,19 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
             return (code or 1), time.perf_counter() - started_at
         stage_source = _single_input_answers(answers, joined)
 
-    reverse_answers = dict(stage_source)
+    # Owns everything except the split: cuts, both speeds, both reverses and
+    # loudnorm are applied here, exactly once.
+    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
+                    "video_reverse", "audio_reverse", "loudnorm")
+    validate_stage_plan([("forward join", ()), ("reverse", reverse_owns),
+                         ("split", ("split",) if split_points else ())])
+    reverse_answers = stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
     if split_points:
         # Split AFTER the reverse: reversing each part separately would return
         # the parts in their original order, and reversing the whole thing at
         # once is the unbounded plan this exists to avoid.
-        for key in ("separator_points", "split_output_paths", "split_part_intervals"):
-            reverse_answers.pop(key, None)
+        pass
         reversed_whole = workspace / f"reversed_whole.{extension}"
         reverse_answers["video_crf"] = REVERSE_INTERMEDIATE_CRF
         reverse_answers["output_path"] = reversed_whole
@@ -516,14 +585,12 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     reversed_whole = Path(reverse_answers["output_path"])
     if not reversed_whole.exists():
         return 1, time.perf_counter() - started_at
-    split_answers = _single_input_answers(answers, reversed_whole)
-    # Stage 2 already applied them; leaving them here would edit twice.
-    for key in ("cut_keep_ranges", "audio_cut_keep_ranges", "split_output_paths",
-                "split_part_intervals"):
-        split_answers.pop(key, None)
-    split_answers["reverse_video"] = False
-    split_answers["video_speed_enabled"] = False
-    split_answers["video_speed_factor"] = 1.0
+    # Owns the split alone. Stage 2 already applied every other edit; leaving
+    # any of them here would apply it a second (or third) time.
+    split_answers = stage_answers(
+        _single_input_answers(answers, reversed_whole), owns=("split",))
+    split_answers.pop("split_output_paths", None)
+    split_answers.pop("split_part_intervals", None)
     split_answers["separator_points"] = split_points
     # Keep the part filenames the summary already showed the user.
     split_answers["output_name_stem"] = Path(answers["input_path"]).stem
@@ -752,6 +819,9 @@ __all__ = [
     'run_metadata_report_inspect',
     'reverse_segment_seconds',
     'run_bounded_reverse_pipeline',
+    'stage_answers',
+    'validate_stage_plan',
+    'STAGE_TRANSFORMATIONS',
     'run_segmented_reverse_main_encode',
     'execute_encode_plan',
     'run_separator_main_encode',
