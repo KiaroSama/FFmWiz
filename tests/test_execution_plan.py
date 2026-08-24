@@ -35,17 +35,22 @@ class PlanSelection(unittest.TestCase):
         self.segmented = []
         self.one_shot = []
         self.notes = []
+        self.bounded_join = []
         self._real_segmented = encoding.run_segmented_reverse_main_encode
+        self._real_bounded = encoding.run_bounded_join_reverse
         self._real_runner = encoding.run_ffmpeg_with_progress
         self._real_note = FFmWiz.appio.note
         encoding.run_segmented_reverse_main_encode = (
             lambda answers: (self.segmented.append(answers) or (0, 0.0)))
+        encoding.run_bounded_join_reverse = (
+            lambda answers: (self.bounded_join.append(answers) or (0, 0.0)))
         encoding.run_ffmpeg_with_progress = (
             lambda cmd, **kwargs: (self.one_shot.append(cmd) or (0, 0.0)))
         FFmWiz.appio.note = self.notes.append
 
     def tearDown(self):
         encoding.run_segmented_reverse_main_encode = self._real_segmented
+        encoding.run_bounded_join_reverse = self._real_bounded
         encoding.run_ffmpeg_with_progress = self._real_runner
         FFmWiz.appio.note = self._real_note
 
@@ -68,17 +73,28 @@ class PlanSelection(unittest.TestCase):
         self._run(_answers(separator_points=[5.0]))
         self.assertEqual(0, len(self.segmented))
 
-    def test_a_joined_reverse_is_not_segmented(self):
-        # Segmenting a join would reverse input 1 alone (R01) -- far worse.
+    def test_a_joined_reverse_never_reaches_the_single_input_segmenter(self):
+        # Pointing the segmenter at a join reverses input 1 alone (R01). It is
+        # used on the forward-joined INTERMEDIATE instead, from inside
+        # run_bounded_join_reverse.
         self._run(_answers(join_input_items=[{"path": "b.mkv"}]))
         self.assertEqual(0, len(self.segmented))
-        self.assertEqual(1, len(self.one_shot))
 
-    def test_a_joined_reverse_says_it_is_one_pass(self):
+    def test_a_joined_reverse_takes_the_bounded_plan(self):
+        # Was one pass with a memory warning. One pass across a join is 336 GiB
+        # of decoded frames for an hour of 1080p30 -- not a caveat, a failure
+        # (F10), so it joins forward first and then reverses in segments.
         self._run(_answers(join_input_items=[{"path": "b.mkv"}]))
-        joined = " ".join(self.notes).lower()
-        self.assertIn("one pass", joined,
-                      "the memory characteristic must not be implied wrongly")
+        self.assertEqual(1, len(self.bounded_join))
+        self.assertEqual(0, len(self.one_shot))
+
+    def test_a_split_join_still_warns_that_it_is_one_pass(self):
+        # The bounded path writes a single intermediate, so the split graph
+        # keeps the joined command -- and keeps saying so.
+        self._run(_answers(join_input_items=[{"path": "b.mkv"}],
+                           separator_points=[5.0]))
+        self.assertEqual(0, len(self.bounded_join))
+        self.assertIn("one pass", " ".join(self.notes).lower())
 
     def test_an_ordinary_reverse_does_not_emit_that_warning(self):
         self._run(_answers())

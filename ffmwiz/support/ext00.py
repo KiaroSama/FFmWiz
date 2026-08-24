@@ -518,6 +518,48 @@ def item_audio_streams(item: dict[str, Any]) -> list[dict[str, Any]]:
     return list(streams or [])
 
 
+def _format_duration_seconds(fmt: dict[str, Any] | None) -> float:
+    try:
+        return float((fmt or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def join_items_from_answers(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """The COMPLETE join item list, input 1 rebuilt from the top-level answers.
+
+    `answers["join_input_items"]` holds inputs 2..N only; input 1 lives in the
+    ordinary answer keys, so anything that needs the whole list has to
+    reassemble it. Doing that by hand in more than one place is how input 1's
+    `subtitle_streams` came to be missing from one of the copies (R04).
+
+    Returns [] when this is not a join.
+    """
+    extra = list(answers.get("join_input_items") or [])
+    if not extra:
+        return []
+    primary = {
+        "path": answers["input_path"],
+        "probe": answers.get("probe") or {},
+        "format": answers.get("format") or {},
+        "streams": (
+            list(answers.get("video_streams") or [])
+            + list(answers.get("audio_streams") or [])
+            + list(answers.get("subtitle_streams") or [])
+            + list(answers.get("attachment_streams") or [])
+            + list(answers.get("data_streams") or [])
+        ),
+        "video_streams": answers.get("video_streams") or [],
+        "audio_streams": answers.get("audio_streams") or [],
+        "subtitle_streams": answers.get("subtitle_streams") or [],
+        "data_streams": answers.get("data_streams") or [],
+        # Read straight off the format dict: this layer sits below `services`,
+        # and the helper there is the same two lines.
+        "duration": _format_duration_seconds(answers.get("format")),
+    }
+    return [primary, *extra]
+
+
 def join_audio_segment_flags(answers: dict[str, Any]) -> list[bool]:
     """Audio presence per joined input, input 1 first."""
     flags = [bool(answers.get("audio_streams"))]
@@ -788,6 +830,7 @@ __all__ = [
     'source_extra_stream_outcome_notes',
     'confirm_source_extra_stream_outcomes',
     'item_audio_streams',
+    'join_items_from_answers',
     'join_audio_segment_flags',
     'join_audio_track_count',
     'join_audio_streams_view',
