@@ -460,7 +460,24 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
 
     cmd = answers["cmd"]
     if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
+        # A Join or Split reverse does NOT run as the command printed above: it
+        # runs as several, and that one carries a full-timeline `reverse` the
+        # executor never uses. Calling it "the command" sent the user off to
+        # buffer the whole timeline by hand (B04). Export the real stages.
+        staged = (answers.get("reverse_video")
+                  and (answers.get("join_input_items")
+                       or answers.get("separator_points"))
+                  and answers.get("output_path"))
+        plan_script = (export_bounded_reverse_plan(answers, Path(answers["output_path"]))
+                       if staged else None)
+        if plan_script:
+            appio.note(
+                "FFmpeg was not started. This job runs as SEVERAL commands, so the "
+                "single command above is a readable reference, not the plan: running "
+                "it would buffer the whole timeline. The runnable plan was written to:")
+            appio.note(f"    {plan_script}")
+        else:
+            appio.note("FFmpeg was not started. The command above is ready to run manually.")
         # Keep, do not clean. This is the PRIMARY dispatcher; only the
         # standalone Mode 12 branch had been fixed, so declining here still
         # deleted the generated concat list, retimed/split subtitles and
