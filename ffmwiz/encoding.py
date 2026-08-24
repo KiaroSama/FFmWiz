@@ -214,6 +214,13 @@ def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
         # command's own multi-output split graph.
         log_info("Split job specs skipped: this is a join; the join command owns its own split graph.")
         return []
+    if not split_parts_share_the_source_clock(answers):
+        # Same shape of guard, second reason: the ranges below are SOURCE
+        # seconds, and a cut/speed/reverse means the split points are not. Let
+        # the caller run the built multi-output graph instead (F02).
+        log_info("Split job specs skipped: the timeline is transformed, so the split points "
+                 "are processed-clock seconds and the built multi-output graph owns them.")
+        return []
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     segments = separator_ranges(answers.get("separator_points"), duration)
     if len(segments) <= 1:
@@ -260,7 +267,8 @@ def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
-                        total_duration: float | None, label: str) -> tuple[int, float]:
+                        total_duration: float | None, label: str,
+                        **progress_kwargs: Any) -> tuple[int, float]:
     """The single place that chooses between a bounded plan and one-shot execution.
 
     The project promises that reverse is segmented so a long clip does not have
@@ -275,6 +283,13 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
     far worse than buffering (R01). `reverse_video_needs_segmented_main_encode`
     owns that decision.
     """
+    # Last line of defence: the join and audio-only builders never go through
+    # build_ffmpeg_command, so this is the only point every executor shares.
+    # Idempotent -- it returns immediately when the flag is unset or supported.
+    two_pass_off = normalize_cpu_two_pass_selection(answers)
+    if two_pass_off:
+        appio.note(f"CPU two-pass was turned off for this job: {two_pass_off}.")
+        log_info(f"CPU two-pass disabled before execution: {two_pass_off}")
     if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
         answers["cmd"] = cmd
         return run_segmented_reverse_main_encode(answers)
@@ -282,7 +297,16 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
         # Say so rather than let the UI imply a bounded plan it will not use.
         appio.note("Reverse across a join is encoded in one pass; a very long "
                    "joined timeline needs proportional memory.")
-    return run_ffmpeg_with_progress(cmd, total_duration=total_duration, label=label)
+    # The two-pass check lives here too, so no executor can quietly skip it.
+    # The main dispatcher used to duplicate this whole selection and reach the
+    # runner directly, which is how a retained cpu_two_pass was downgraded to
+    # one pass on some paths and executed unsupported on others (F10/F11).
+    if cpu_two_pass_enabled_for_command(answers, cmd):
+        return run_cpu_two_pass_ffmpeg(
+            cmd, answers, total_duration=total_duration,
+            progress_output_paths=progress_kwargs.get("progress_output_paths"))
+    return run_ffmpeg_with_progress(cmd, total_duration=total_duration,
+                                    label=label, **progress_kwargs)
 
 
 def run_separator_main_encode(answers: dict[str, Any]) -> tuple[int, float]:

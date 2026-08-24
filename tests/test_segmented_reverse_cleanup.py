@@ -13,12 +13,14 @@ from pathlib import Path
 
 import FFmWiz
 
+from ffmwiz import encoding
+
 
 class SegmentedReverseReleasesItsArtifacts(unittest.TestCase):
     def setUp(self):
         self._tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_segrev_"))
         self._real_wizard = FFmWiz.run_wizard
-        self._real_segmented = FFmWiz.run_segmented_reverse_main_encode
+        self._real_segmented = encoding.run_segmented_reverse_main_encode
         self._real_plan = FFmWiz.print_ffmpeg_processing_plan
         self._real_menu = FFmWiz.ask_main_menu
         FFmWiz.ask_main_menu = lambda answers, config_path: 1
@@ -26,7 +28,7 @@ class SegmentedReverseReleasesItsArtifacts(unittest.TestCase):
 
     def tearDown(self):
         FFmWiz.run_wizard = self._real_wizard
-        FFmWiz.run_segmented_reverse_main_encode = self._real_segmented
+        encoding.run_segmented_reverse_main_encode = self._real_segmented
         FFmWiz.print_ffmpeg_processing_plan = self._real_plan
         FFmWiz.ask_main_menu = self._real_menu
         shutil.rmtree(self._tmp, ignore_errors=True)
@@ -49,7 +51,7 @@ class SegmentedReverseReleasesItsArtifacts(unittest.TestCase):
             answers.update(prepared)
 
         FFmWiz.run_wizard = fake_wizard
-        FFmWiz.run_segmented_reverse_main_encode = executor
+        encoding.run_segmented_reverse_main_encode = executor
         return FFmWiz.run_one_job({}, self._tmp / "cfg.json")
 
     def test_segment_files_do_not_survive_the_job(self):

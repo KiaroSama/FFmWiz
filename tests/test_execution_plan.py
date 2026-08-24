@@ -100,10 +100,67 @@ class EveryExecutorGoesThroughIt(unittest.TestCase):
         self.assertIn("execute_encode_plan", block,
                       "Folder Encode must ask the shared selector, not the runner")
 
-    def test_the_main_dispatcher_still_selects(self):
-        source = (Path(FFmWiz.__file__).resolve().parent
-                  / "FFmWiz.py").read_text(encoding="utf-8")
-        self.assertIn("reverse_video_needs_segmented_main_encode", source)
+    def test_the_main_dispatcher_calls_the_shared_selector(self):
+        # Was a source-substring search, which passed while `run_one_job`
+        # carried its own COPY of the selection and reached the runner
+        # directly -- so the selector's memory notice never fired on the
+        # primary path (F10/F13). Drive the dispatcher instead.
+        seen = []
+        real_plan = FFmWiz.execute_encode_plan
+        real_menu = FFmWiz.ask_main_menu
+        real_wizard = FFmWiz.run_wizard
+        real_print = FFmWiz.print_ffmpeg_processing_plan
+
+        def spy(answers, cmd, **kwargs):
+            seen.append(cmd)
+            return 0, 0.0
+
+        FFmWiz.execute_encode_plan = spy
+        FFmWiz.ask_main_menu = lambda answers, config_path: 1
+        FFmWiz.print_ffmpeg_processing_plan = lambda *a, **k: None
+        FFmWiz.run_wizard = lambda answers, config=None: answers.update({
+            "cmd": ["ffmpeg", "-i", "in.mkv", "out.mkv"],
+            "start_now": True, "output_path": Path("out.mkv"),
+        })
+        try:
+            FFmWiz.run_one_job({}, Path("cfg.json"))
+        finally:
+            FFmWiz.execute_encode_plan = real_plan
+            FFmWiz.ask_main_menu = real_menu
+            FFmWiz.run_wizard = real_wizard
+            FFmWiz.print_ffmpeg_processing_plan = real_print
+        self.assertEqual(1, len(seen),
+                         "run_one_job must route through execute_encode_plan")
+
+    def test_the_dispatcher_hands_over_the_per_part_progress_data(self):
+        # The selector is only useful if it still receives what the runner
+        # needs; a bare call would silently kill Split progress.
+        captured = {}
+        real_plan = FFmWiz.execute_encode_plan
+        real_menu = FFmWiz.ask_main_menu
+        real_wizard = FFmWiz.run_wizard
+        real_print = FFmWiz.print_ffmpeg_processing_plan
+
+        def spy(answers, cmd, **kwargs):
+            captured.update(kwargs)
+            return 0, 0.0
+
+        FFmWiz.execute_encode_plan = spy
+        FFmWiz.ask_main_menu = lambda answers, config_path: 1
+        FFmWiz.print_ffmpeg_processing_plan = lambda *a, **k: None
+        FFmWiz.run_wizard = lambda answers, config=None: answers.update({
+            "cmd": ["ffmpeg", "-i", "in.mkv", "out.mkv"],
+            "start_now": True, "output_path": Path("out.mkv"),
+        })
+        try:
+            FFmWiz.run_one_job({}, Path("cfg.json"))
+        finally:
+            FFmWiz.execute_encode_plan = real_plan
+            FFmWiz.ask_main_menu = real_menu
+            FFmWiz.run_wizard = real_wizard
+            FFmWiz.print_ffmpeg_processing_plan = real_print
+        for key in ("label", "total_duration", "progress_output_paths"):
+            self.assertIn(key, captured, f"the selector lost {key}")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,18 @@ read; emitted after the last `-i` it is an OUTPUT option bounding the result.
 and the timeline is edited, the builder injects a generated ffmetadata file as
 input #1 -- and the `-t` then bound that metadata file instead of the output, so
 a 10-second cut silently produced 20 seconds of video.
+
+Moving it after EVERY `-i` cured that by making it an output option, and that
+was the wrong cure: an output `-t` only truncates what the graph already
+produced. `reverse` must consume its whole input before it emits anything, so
+the segmented reverse still decoded the entire file and `-t` then kept the
+wrong end of the reversed result -- reversing the 0-2 s half of a red/blue clip
+returned blue (F01). Slow motion broke the same way: a 4 s window at 0.5x wants
+an 8 s output and an output `-t 4` cut it back to 4 s.
+
+The correct position is immediately before the SOURCE `-i`, where it bounds
+what is decoded. The auxiliary chapter/subtitle inputs are appended after it,
+so they still cannot capture it -- which is what the original defect was about.
 """
 import json
 import shutil
@@ -89,13 +101,28 @@ class CutDurationOptionOrder(unittest.TestCase):
         self.assertEqual(cmd.count("-i"), 2, "expected source + chapter-metadata inputs")
         self.assertEqual(cmd[cmd.index("-map_chapters") + 1], "1")
 
-    def test_duration_is_an_output_option_not_an_input_option(self):
+    def test_duration_binds_to_the_source_input(self):
         _, cmd = self._build()
-        last_input = max(index for index, part in enumerate(cmd) if part == "-i")
-        self.assertGreater(
-            cmd.index("-t"), last_input,
-            "-t must follow EVERY -i or it binds to the next input instead of the output",
-        )
+        inputs = [index for index, part in enumerate(cmd) if part == "-i"]
+        self.assertEqual(1, cmd.count("-t"), "one window, one -t")
+        self.assertLess(cmd.index("-t"), inputs[0],
+                        "-t must bound the SOURCE decode, not the finished graph")
+
+    def test_an_auxiliary_input_still_cannot_capture_the_duration(self):
+        # The original defect: the generated ffmetadata file appeared as input 1
+        # and swallowed the -t emitted just before it. Placing -t before the
+        # source keeps that impossible, so this stays pinned.
+        _, cmd = self._build()
+        inputs = [index for index, part in enumerate(cmd) if part == "-i"]
+        self.assertGreater(len(inputs), 1, "expected an auxiliary input to exist here")
+        self.assertLess(cmd.index("-t"), inputs[1],
+                        "-t must not sit between the source and an auxiliary input")
+        self.assertEqual(str(self._source_of(cmd)), cmd[inputs[0] + 1],
+                         "the option before -t must be the source input")
+
+    def _source_of(self, cmd):
+        inputs = [index for index, part in enumerate(cmd) if part == "-i"]
+        return cmd[inputs[0] + 1]
 
     def test_seek_stays_an_input_option(self):
         # -ss before the source -i is the fast demuxer seek; moving it would be
