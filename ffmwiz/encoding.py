@@ -518,6 +518,9 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     workspace = artifact_lease(answers).register(
         Path(tempfile.mkdtemp(prefix="ffmwiz_reverse_pipeline_")))
     split_points = list(answers.get("separator_points") or [])
+    # Captured BEFORE any stage rewrites them: these are the paths the summary
+    # showed and the user confirmed.
+    planned_output_paths = list(answers.get("split_output_paths") or [])
     stage_source = answers
 
     if answers.get("join_input_items"):
@@ -581,8 +584,19 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     split_answers.pop("split_output_paths", None)
     split_answers.pop("split_part_intervals", None)
     split_answers["separator_points"] = split_points
-    # Keep the part filenames the summary already showed the user.
-    split_answers["output_name_stem"] = Path(answers["input_path"]).stem
+    # Keep the part filenames the summary already showed the user. Taking the
+    # stem from input_path instead promised CustomMovie_Part01.mkv and wrote
+    # a_Part01.mkv, because by this point input_path is the pipeline's own
+    # scratch file (B14). Prefer the user's stem, then the stem the first build
+    # already resolved, and only then the source name.
+    resolved_stem = str(answers.get("output_name_stem") or "").strip()
+    if not resolved_stem:
+        planned = [Path(part) for part in (planned_output_paths or [])]
+        if planned:
+            resolved_stem = re.sub(r"_Part\d+$", "", planned[0].stem)
+    if not resolved_stem:
+        resolved_stem = Path(answers["input_path"]).stem
+    split_answers["output_name_stem"] = resolved_stem
     split_cmd = build_ffmpeg_command(split_answers)
     log_info(f"Bounded reverse pipeline: splitting {reversed_whole} into "
              f"{len(split_answers.get('split_output_paths') or [])} part(s)")
