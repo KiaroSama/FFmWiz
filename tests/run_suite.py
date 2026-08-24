@@ -43,16 +43,25 @@ DEFAULT_WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))
 CAPABILITY_SKIP_RE = re.compile(r"ffmpeg|ffprobe|numpy|powershell", re.I)
 
 
-def discover_modules(pattern: str | None = None) -> list[str]:
+def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
     """Top-level test module names, ordered slowest-first when known.
 
     Slowest-first matters: dispatching the long modules while every worker is
     still idle keeps the tail short. Without it the 7 s packaging module can be
     picked up last and become the critical path on its own.
+
+    `patterns` may be one substring or several; several means "any of these",
+    which is how CI selects the handful of suites that need PySide6.
     """
+    if patterns is None:
+        wanted: list[str] = []
+    elif isinstance(patterns, str):
+        wanted = [patterns]
+    else:
+        wanted = [p for p in patterns if p]
     names = sorted(
         path.stem for path in TESTS_DIR.glob("test*.py")
-        if not pattern or pattern in path.stem
+        if not wanted or any(pattern in path.stem for pattern in wanted)
     )
     # Rough cost order measured with --durations; unknown modules sort after.
     slow_first = ["test_packaging", "test_hdr_dolby_detection", "test_import_topology",
@@ -99,8 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("-j", "--jobs", type=int, default=DEFAULT_WORKERS,
                         help=f"worker processes (default {DEFAULT_WORKERS})")
-    parser.add_argument("-k", "--filter", default=None,
-                        help="only modules whose name contains this substring")
+    parser.add_argument("-k", "--filter", action="append", default=None,
+                        help="only modules whose name contains this substring; "
+                             "repeat to select several")
     parser.add_argument("--strict-skips", action="store_true",
                         help="fail when a suite skipped for a capability CI installs")
     args = parser.parse_args(argv)

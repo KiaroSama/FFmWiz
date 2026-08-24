@@ -31,6 +31,8 @@ from pathlib import Path
 
 import FFmWiz
 
+from artifact_guard import NoLeakedArtifacts
+
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
@@ -73,13 +75,12 @@ def _answers_for(src: Path, tmp: Path, probe: dict, keep_range=(10.0, 20.0)):
 
 
 @unittest.skipIf(not FFMPEG or not FFPROBE, "ffmpeg/ffprobe not on PATH")
-class CutDurationOptionOrder(unittest.TestCase):
+class CutDurationOptionOrder(NoLeakedArtifacts, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         FFmWiz.appio.USE_COLOR = False
         self._tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_optorder_"))
-
-    def tearDown(self):
-        shutil.rmtree(self._tmp, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self._tmp, True)
 
     def _probe(self, path, *extra):
         out = subprocess.run(
@@ -90,7 +91,7 @@ class CutDurationOptionOrder(unittest.TestCase):
     def _build(self, keep_range=(10.0, 20.0)):
         src = _chaptered_source(self._tmp)
         probe = self._probe(src, "-show_chapters")
-        answers = _answers_for(src, self._tmp, probe, keep_range)
+        answers = self.own(_answers_for(src, self._tmp, probe, keep_range))
         return answers, [str(part) for part in FFmWiz.build_ffmpeg_command(answers)]
 
     def test_chapter_metadata_input_is_actually_injected(self):

@@ -23,6 +23,8 @@ from pathlib import Path
 
 import FFmWiz
 
+from artifact_guard import NoLeakedArtifacts
+
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
@@ -97,14 +99,13 @@ class ReverseFlipsChapterTimes(unittest.TestCase):
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe not on PATH")
-class RealReverseKeepsChapters(unittest.TestCase):
+class RealReverseKeepsChapters(NoLeakedArtifacts, unittest.TestCase):
     """Through the public execution path, probing the finished file."""
 
     def setUp(self):
+        super().setUp()
         self._tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_revchap_"))
-
-    def tearDown(self):
-        shutil.rmtree(self._tmp, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self._tmp, True)
 
     def _chaptered_source(self, duration=6):
         meta = self._tmp / "chapters.txt"
@@ -155,6 +156,7 @@ class RealReverseKeepsChapters(unittest.TestCase):
             "video_speed_enabled": True, "video_speed_factor": 1.0,
             "reverse_video": True, "audio_speed_from_video": True,
         }
+        self.own(answers)
         answers["cmd"] = [str(part) for part in FFmWiz.build_ffmpeg_command(answers)]
         code, _elapsed = FFmWiz.run_segmented_reverse_main_encode(answers)
         self.assertEqual(0, code, "the reverse encode failed")

@@ -186,6 +186,14 @@ class ThePrintedCommandActuallyRuns(unittest.TestCase):
         produced = list(out.glob("*.mkv"))
         self.assertTrue(produced, "the manual run produced no output")
 
+        # Preserving hands ownership to the USER, so nothing in the program
+        # will ever delete these. That is the feature -- and it means this test
+        # owns the cleanup, or the suite grows an ffmwiz_* directory per run.
+        for path in referenced[1:]:
+            target = Path(path)
+            shutil.rmtree(target if target.is_dir() else target.parent,
+                          ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
