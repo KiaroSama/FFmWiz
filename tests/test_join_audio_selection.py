@@ -469,13 +469,18 @@ class CopyPlan(unittest.TestCase):
         self.assertFalse(plan["supported"])
         self.assertFalse(plan["maps_everything"])
 
-    def test_a_partial_audio_selection_is_not_a_copy_plan(self):
+    def test_a_partial_audio_selection_is_still_a_copy_plan(self):
+        # B10: dropping a track is a MAP decision, not a reason to decode. The
+        # blanket `-map 0` is off the table, an explicit map list is not.
         answers, items = self._copyable(audio_tracks=[0])
         for item in items:
             item["audio_streams"] = item["audio_streams"] * 2
         plan = FFmWiz.join_copy_plan(answers, items)
-        self.assertFalse(plan["supported"])
+        self.assertTrue(plan["supported"])
+        self.assertTrue(plan["can_remux_compatibly"])
         self.assertFalse(plan["maps_everything"])
+        self.assertFalse(plan["maps_every_source_stream"])
+        self.assertEqual([], plan["reasons"])
 
     def test_dropping_subtitles_data_or_attachments_blocks_the_blanket_map(self):
         for key, stream_key, stream in (

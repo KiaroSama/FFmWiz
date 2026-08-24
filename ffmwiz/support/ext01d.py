@@ -355,70 +355,145 @@ def print_startup_banner(config_path: Path, launcher_path: Path, answers: dict[s
 
 
 def join_copy_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Whether a concat-demuxer stream copy delivers EXACTLY the selected plan.
+    """Three different questions about a join, kept apart.
 
-    "The inputs are copy-compatible" and "the selected plan can be stream-
-    copied" are different questions, and conflating them cost the user both
-    ways: the summary announced "stream copy, no re-encode" for a plan the
-    builder then re-encoded, because the gate compared REPRESENTATIONS
-    (`audio_tracks in (None, "all")`) instead of sets -- an ordinary one-track
-    input answered `[0]`, which IS everything, and was pushed onto the encode
-    path anyway (F06).
+    1. **Can it remux at all?** Only a request that has to DECODE says no: a
+       codec other than `copy`, a video filter, a reverse, an audio transform,
+       or a selected track some input does not carry. -> `supported` /
+       `can_remux_compatibly`.
+    2. **May a blanket `-map 0` be used?** Only when every source stream is
+       wanted. A partial selection or a dropped stream class needs an explicit
+       map list -- which copies just as losslessly. -> `maps_everything` /
+       `maps_every_source_stream`.
+    3. **What muxer policy applies?** Dropping metadata or chapters is
+       `-map_metadata -1` / `-map_chapters -1`. Neither touches a packet.
 
-    `"supported"` answers the routing question. `"maps_everything"` answers the
-    narrower one `build_join_copy_command` needs: may a blanket `-map 0` be
-    used, or would it copy streams the user asked to drop? Codec and timeline
-    choices block the first but not the second -- they change how streams are
-    written, not which ones exist.
+    Conflating 1 with 2 and 3 is what sent legal remuxes to the encoder: an
+    ordinary two-track input with track 1 selected, or a job that only dropped
+    the source chapters, was re-encoded to HEVC although every packet could
+    have been copied byte for byte (B10). Conflating 1 with the earlier
+    representation test cost the opposite mistake first -- the summary promised
+    "stream copy, no re-encode" for a plan the builder then re-encoded, because
+    `audio_tracks in (None, "all")` read a one-track input's `[0]`, which IS
+    everything, as a partial selection (F06).
     """
-    stream_reasons: list[str] = []
     audio_state, audio_indices = join_audio_selection(answers, items)
     audio_count = join_audio_track_count(items)
+    subtitle_count = join_subtitle_track_count(items)
+    subtitle_indices = selected_join_subtitle_tracks(answers, items) if subtitle_count else []
+
+    # --- 2. map decisions: an explicit `-map` list delivers all of these ---
+    map_reasons: list[str] = []
     if audio_state != "unasked" and audio_indices != list(range(audio_count)):
-        stream_reasons.append(
+        map_reasons.append(
             "no audio track was selected" if not audio_indices
             else f"only audio track(s) {audio_indices} of {audio_count} were selected")
-    subtitle_count = join_subtitle_track_count(items)
     if subtitle_count:
         if not source_subtitles_keep_enabled(answers):
-            stream_reasons.append("source subtitles are dropped")
+            map_reasons.append("source subtitles are dropped")
         elif ("subtitle_tracks" in answers
-                and selected_join_subtitle_tracks(answers, items) != list(range(subtitle_count))):
-            stream_reasons.append("only some subtitle tracks were selected")
+                and subtitle_indices != list(range(subtitle_count))):
+            map_reasons.append("only some subtitle tracks were selected")
     if any(item.get("data_streams") for item in items) and not source_data_keep_enabled(answers):
-        stream_reasons.append("source data streams are dropped")
+        map_reasons.append("source data streams are dropped")
     if (any(item.get("attachment_streams") for item in items)
             and "keep_embedded_attachments" in answers
             and not answers.get("keep_embedded_attachments")):
         # Only an EXPLICIT answer counts: the standalone join never asks, and a
         # missing key must not be read as "drop them".
-        stream_reasons.append("embedded attachments are dropped")
+        map_reasons.append("embedded attachments are dropped")
     if (any(len(item.get("video_streams") or []) > 1 for item in items)
             and not source_extra_video_keep_enabled(answers)):
-        stream_reasons.append("extra source video streams are dropped")
+        map_reasons.append("extra source video streams are dropped")
 
-    edit_reasons: list[str] = []
-    if (any(item.get("video_streams") for item in items)
-            and str(answers.get("video_codec", "")).lower() != "copy"):
-        edit_reasons.append("the selected video codec re-encodes")
+    # --- 3. muxer policy: switches, not encoding ---
+    policy_reasons: list[str] = []
+    if not source_metadata_keep_enabled(answers):
+        policy_reasons.append("source metadata is dropped")
+    if not source_chapters_keep_enabled(answers):
+        policy_reasons.append("source chapters are dropped")
+
+    # --- 1. the only reasons a join genuinely has to decode ---
+    decode_reasons: list[str] = []
+    has_video = any(item.get("video_streams") for item in items)
+    if has_video and str(answers.get("video_codec", "")).lower() != "copy":
+        decode_reasons.append("the selected video codec re-encodes")
     if (any(item_audio_streams(item) for item in items)
             and str(answers.get("audio_codec", "")).lower() != "copy"):
-        edit_reasons.append("the selected audio codec re-encodes")
-    if not source_metadata_keep_enabled(answers):
-        edit_reasons.append("source metadata is dropped")
-    if not source_chapters_keep_enabled(answers):
-        edit_reasons.append("source chapters are dropped")
+        decode_reasons.append("the selected audio codec re-encodes")
     if video_filters_required(answers) or answers.get("reverse_video"):
-        edit_reasons.append("the selected video edit rebuilds the timeline")
+        decode_reasons.append("the selected video edit rebuilds the timeline")
     if (loudnorm_transform_enabled(answers)
             or audio_speed_transform_enabled(answers)
             or answers.get("audio_cut_keep_ranges")):
-        edit_reasons.append("the selected audio edit requires re-encoding")
+        decode_reasons.append("the selected audio edit requires re-encoding")
+    # A logical track the concat DEMUXER cannot deliver from every input. The
+    # demuxer copies packets; it cannot synthesise the silence the filter path
+    # inserts for an input that lacks one, and `-map 0:a:N?` would answer by
+    # quietly dropping it instead.
+    missing_audio = [index for index in audio_indices
+                     if any(index >= len(item_audio_streams(item)) for item in items)]
+    if missing_audio:
+        decode_reasons.append(
+            f"audio track(s) {missing_audio} are missing from some input and must be rebuilt")
+    missing_subs = [index for index in subtitle_indices
+                    if any(index >= len(item_subtitle_streams(item)) for item in items)]
+    if missing_subs:
+        decode_reasons.append(
+            f"subtitle track(s) {missing_subs} are missing from some input and must be rebuilt")
+    # An explicit EMPTY audio answer on a join that HAS video deliberately stays
+    # on the encode path. `build_join_encode_command` states the request in the
+    # command itself (concat `a=0` plus `-an`); a concat-demuxer copy could
+    # express it only by the ABSENCE of an audio map, and an absent map is
+    # exactly how FFmpeg's automatic stream selection put the audio back (B11).
+    # An audio-only join with the same answer has nothing left to write at all,
+    # so `build_join_copy_command` refuses it outright.
+    if has_video and audio_state == "none" and audio_count:
+        decode_reasons.append("no audio track was selected")
+
+    can_remux_compatibly = not decode_reasons
+    maps_every_source_stream = not map_reasons
     return {
-        "supported": not (stream_reasons or edit_reasons),
-        "maps_everything": not stream_reasons,
-        "reasons": stream_reasons + edit_reasons,
+        # `supported` and `maps_everything` are the historical names for the two
+        # booleans below. They are written from the same values, not computed
+        # twice, so the pair cannot drift apart again.
+        "supported": can_remux_compatibly,
+        "can_remux_compatibly": can_remux_compatibly,
+        "maps_everything": maps_every_source_stream,
+        "maps_every_source_stream": maps_every_source_stream,
+        "reasons": decode_reasons,
+        "map_reasons": map_reasons,
+        "policy_reasons": policy_reasons,
     }
+
+
+def join_copy_stream_maps(answers: dict[str, Any], items: list[dict[str, Any]]) -> list[str]:
+    """The explicit `-map` targets for a stream-copy join, in output order.
+
+    `-map 0` copies whatever the concat input happens to carry, so a selective
+    request was silently OVER-fulfilled: tracks the user asked to drop came
+    through anyway (F06). This maps exactly what was asked for -- and returns
+    [] when the answers ask for nothing, which the caller must refuse rather
+    than hand FFmpeg a command with no `-map` at all (B11).
+    """
+    targets: list[str] = []
+    if any(item.get("video_streams") for item in items):
+        targets.append("0:v" if source_extra_video_keep_enabled(answers) else "0:v:0")
+    audio_state, audio_indices = join_audio_selection(answers, items)
+    if audio_state == "unasked":
+        # Never asked means "keep what the joined set has"; reading the empty
+        # index list as an answer would drop every audio track silently.
+        audio_indices = list(range(join_audio_track_count(items)))
+    for index in audio_indices:
+        targets.append(f"0:a:{index}")
+    if source_subtitles_keep_enabled(answers):
+        for index in selected_join_subtitle_tracks(answers, items):
+            targets.append(f"0:s:{index}")
+    if source_data_keep_enabled(answers) and any(item.get("data_streams") for item in items):
+        targets.append("0:d?")
+    if answers.get("keep_embedded_attachments") and any(item.get("attachment_streams") for item in items):
+        targets.append("0:t?")
+    return targets
 
 
 def build_join_copy_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
@@ -428,6 +503,19 @@ def build_join_copy_command(answers: dict[str, Any], items: list[dict[str, Any]]
         answers.get("output_collision_suffix", "_Encode"),
     )
     answers["output_path"] = output_path
+    plan = join_copy_plan(answers, items)
+    targets: list[str] = []
+    if not plan["maps_every_source_stream"]:
+        targets = join_copy_stream_maps(answers, items)
+        # Refuse BEFORE the concat list is written and long before FFmpeg runs.
+        # Emitting no `-map` at all handed the decision to FFmpeg's automatic
+        # stream selection, which put back exactly the audio an explicit empty
+        # answer asked to remove: two FLAC inputs joined with `audio_tracks=[]`
+        # returned 0 and still carried an audio stream (B11).
+        if not targets:
+            raise ValueError(
+                "No output streams are selected for this join. Select at least "
+                "one track, or choose a different output format.")
     list_path = write_join_concat_list(items, output_path)
     answers["_join_concat_list"] = list_path
     cmd = [
@@ -438,23 +526,18 @@ def build_join_copy_command(answers: dict[str, Any], items: list[dict[str, Any]]
         "-safe", "0",
         "-i", str(list_path),
     ]
-    if join_copy_plan(answers, items)["maps_everything"]:
-        cmd.extend(["-map", "0"])
+    if targets:
+        for target in targets:
+            cmd.extend(["-map", target])
     else:
-        # `-map 0` copies whatever the concat input happens to carry, so a
-        # selective request was silently OVER-fulfilled: tracks the user asked
-        # to drop came through anyway (F06). Map exactly what was asked for.
-        if any(item.get("video_streams") for item in items):
-            cmd.extend(["-map", "0:v" if source_extra_video_keep_enabled(answers) else "0:v:0"])
-        for index in join_audio_selection(answers, items)[1]:
-            cmd.extend(["-map", f"0:a:{index}?"])
-        if source_subtitles_keep_enabled(answers):
-            for index in selected_join_subtitle_tracks(answers, items):
-                cmd.extend(["-map", f"0:s:{index}?"])
-        if source_data_keep_enabled(answers) and any(item.get("data_streams") for item in items):
-            cmd.extend(["-map", "0:d?"])
-        if answers.get("keep_embedded_attachments") and any(item.get("attachment_streams") for item in items):
-            cmd.extend(["-map", "0:t?"])
+        cmd.extend(["-map", "0"])
+    # Muxer policy, not encoding: FFmpeg carries input 0's metadata and chapters
+    # by default, so only the DROP has to be stated. Without it a copy join
+    # ignored both answers and shipped metadata the user had asked to remove.
+    if not source_metadata_keep_enabled(answers):
+        cmd.extend(["-map_metadata", "-1"])
+    if not source_chapters_keep_enabled(answers):
+        cmd.extend(["-map_chapters", "-1"])
     cmd.extend(["-c", "copy", str(output_path)])
     return cmd
 
@@ -566,6 +649,7 @@ __all__ = [
     'step_hardsub_audio_mode',
     'print_startup_banner',
     'join_copy_plan',
+    'join_copy_stream_maps',
     'build_join_copy_command',
     'print_join_summary',
     'ask_join_frame_rate_policy',
