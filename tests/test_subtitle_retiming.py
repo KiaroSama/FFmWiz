@@ -531,25 +531,43 @@ class EncodeTemporaryArtifactsAreOwned(RealEncodeBase):
                          "a temporary artifact outlived the workflow")
 
     def test_a_part_that_is_the_first_to_need_a_directory_is_still_owned(self):
-        # The exact trap: this Split has no chapters, so the OUTER build creates
-        # nothing and only the per-part shallow copies register a directory.
-        # Without a lease opened before the copies, each copy gets its own and
-        # everything it registers leaks.
+        # The exact trap: a directory first registered by a per-part SHALLOW
+        # COPY of answers. Without a lease opened before the copies, each copy
+        # gets its own and everything it registers leaks.
         before = self._owned_temp_paths()
         answers = self._answers(separator_points=[2.0], keep_source_chapters=False)
         FFmWiz.build_ffmpeg_command(answers)
-        self.assertEqual(set(), self._owned_temp_paths() - before,
-                         "the outer Split build was expected to create nothing here")
+        # The outer build slices the subtitles per part, so it registers
+        # directories of its own; the parts must add to the SAME lease.
+        outer_created = self._owned_temp_paths() - before
         for segment in FFmWiz.separator_ranges([2.0], float(answers["format"]["duration"])):
             part = dict(answers)
             part["cut_keep_ranges"] = [segment]
             part.pop("separator_points", None)
             part.pop("output_path", None)
             FFmWiz.build_ffmpeg_command(part)
-        self.assertTrue(self._owned_temp_paths() - before, "no part directory was created")
+        self.assertTrue(self._owned_temp_paths() - before - outer_created,
+                        "no part directory was created beyond the outer build's")
         FFmWiz.release_artifacts(answers)
         self.assertEqual(set(), self._owned_temp_paths() - before,
                          "a part's temporary directory outlived the outer job")
+
+    def test_the_outer_dict_holds_the_lease_before_any_part_is_copied(self):
+        # The guard itself, not a leak symptom. Every registrant today happens
+        # to run before the per-part copies, so removing the outer build's
+        # early `artifact_lease(answers)` leaks nothing yet -- and a leak test
+        # alone would let that line be deleted. A job that registers nothing
+        # must STILL leave the container on the outer dict, so whichever copy
+        # is first to need it shares this one instead of making its own.
+        answers = self._answers(separator_points=[2.0], keep_source_chapters=False,
+                                subtitle_streams=[], subtitle_tracks=[])
+        FFmWiz.build_ffmpeg_command(answers)
+        self.addCleanup(FFmWiz.release_artifacts, answers)
+        self.assertIn(
+            FFmWiz.ARTIFACT_LEASE_KEY, answers,
+            "the outer build must open the lease before any shallow copy")
+        self.assertEqual([], list(FFmWiz.artifact_lease(answers)),
+                         "this fixture was meant to register nothing itself")
 
     def test_a_retimed_subtitle_directory_is_owned_too(self):
         before = self._owned_temp_paths()
