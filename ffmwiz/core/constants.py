@@ -113,6 +113,11 @@ REVERSE_FRAME_SAFETY = 1.15
 # by a later stage, so they are kept visually lossless rather than at the
 # output quality: the user should not pay for the extra generation.
 REVERSE_INTERMEDIATE_CRF = 14
+# Scratch files are decoded again by a later stage, so they carry lossless
+# audio and a container that can hold anything rather than the final
+# output's lossy codec and format.
+INTERMEDIATE_AUDIO_CODEC = 'flac'
+INTERMEDIATE_CONTAINER_EXT = 'mkv'
 
 # The Audio Cut / Speed / Reverse tools always re-encode, so they derive their
 # target bitrate from the SOURCE instead of pinning every output to 128 kbps.
@@ -761,6 +766,8 @@ __all__ = [
     'REVERSE_FIXED_OVERHEAD_BYTES',
     'REVERSE_FRAME_SAFETY',
     'REVERSE_INTERMEDIATE_CRF',
+    'INTERMEDIATE_AUDIO_CODEC',
+    'INTERMEDIATE_CONTAINER_EXT',
     'DEFAULT_VIDEO_CODEC',
     'H264_NVENC_ENCODER',
     'DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS',

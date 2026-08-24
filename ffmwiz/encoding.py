@@ -435,6 +435,33 @@ _NEUTRAL_VALUES: dict[str, Any] = {
 }
 
 
+def intermediate_profile(staged: dict[str, Any]) -> dict[str, Any]:
+    """Retune a pipeline stage that writes a SCRATCH file, not the user's output.
+
+    An intermediate is re-encoded again by a later stage, so it must not carry
+    the final output's rate control. Setting `video_crf` alone did nothing: the
+    encoder builder prefers a bitrate when one is present, so a job targeting
+    250 kbps wrote `joined_forward.mkv` AND the reverse segments at `-b:v 250k`
+    with no effective CRF -- several low-bitrate generations before the encode
+    the user actually asked for, and the same again for `-b:a 32k` (B03).
+
+    Video becomes near-lossless CRF, audio becomes lossless FLAC, and the
+    container becomes Matroska so both are always legal. Pixel format, bit
+    depth and colour metadata are left alone: they are the properties the
+    later stage has to preserve.
+    """
+    scratch = dict(staged)
+    for key in ("video_bitrate_kbps", "video_bitrate_mode", "cpu_two_pass",
+                "nvenc_multipass", "nvenc_multipass_skip_reason",
+                "audio_bitrate_kbps"):
+        scratch.pop(key, None)
+    scratch["video_crf"] = REVERSE_INTERMEDIATE_CRF
+    scratch["crf"] = REVERSE_INTERMEDIATE_CRF
+    scratch["audio_codec"] = INTERMEDIATE_AUDIO_CODEC
+    scratch["output_ext"] = INTERMEDIATE_CONTAINER_EXT
+    return scratch
+
+
 def stage_answers(answers: dict[str, Any], owns: tuple[str, ...]) -> dict[str, Any]:
     """A copy of `answers` carrying ONLY the transformations this stage owns.
 
@@ -527,12 +554,11 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
         items = join_items_from_answers(answers)
         if not items:
             return 1, time.perf_counter() - started_at
-        joined = workspace / f"joined_forward.{extension}"
+        joined = workspace / f"joined_forward.{INTERMEDIATE_CONTAINER_EXT}"
         # Owns NOTHING: the intermediate is the joined program and nothing
         # else. Clearing only the video edits left an independent audio speed
         # to be applied here AND by the reverse stage AND by the split (B01).
-        forward = stage_answers(answers, owns=())
-        forward["video_crf"] = REVERSE_INTERMEDIATE_CRF
+        forward = intermediate_profile(stage_answers(answers, owns=()))
         forward["output_path"] = joined
         forward_cmd = wizard.build_join_encode_command(forward, items, joined)
         appio.note("Reverse across a join: joining first, then reversing in bounded "
@@ -559,8 +585,8 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
         # the parts in their original order, and reversing the whole thing at
         # once is the unbounded plan this exists to avoid.
         pass
-        reversed_whole = workspace / f"reversed_whole.{extension}"
-        reverse_answers["video_crf"] = REVERSE_INTERMEDIATE_CRF
+        reversed_whole = workspace / f"reversed_whole.{INTERMEDIATE_CONTAINER_EXT}"
+        reverse_answers = intermediate_profile(reverse_answers)
         reverse_answers["output_path"] = reversed_whole
         reverse_answers["output_location"] = workspace
         reverse_answers["output_name_stem"] = reversed_whole.stem
@@ -822,6 +848,7 @@ __all__ = [
     'run_metadata_report_inspect',
     'reverse_segment_seconds',
     'run_bounded_reverse_pipeline',
+    'intermediate_profile',
     'stage_answers',
     'validate_stage_plan',
     'STAGE_TRANSFORMATIONS',

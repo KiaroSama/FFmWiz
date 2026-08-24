@@ -361,6 +361,115 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
         self.assertEqual(sorted(promised), written,
                          "the files on disk must be the ones the summary showed")
 
+    def test_no_intermediate_inherits_the_final_bitrate(self):
+        # Setting `video_crf` on the scratch stage did nothing: the encoder
+        # builder prefers a bitrate when one is present, so a 250 kbps job wrote
+        # `joined_forward.mkv` AND the reverse segments at -b:v 250k with no
+        # effective CRF -- several low-bitrate generations before the encode the
+        # user asked for, and -b:a 32k again for the audio (B03).
+        out = self._tmp / "profile"
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+        items = [self._item(path) for path in self.inputs]
+        answers = self.own({
+            "ffmpeg": FFMPEG, "ffprobe": FFPROBE, "input_path": self.inputs[0],
+            "probe": items[0]["probe"], "format": items[0]["format"],
+            "output_location": out,
+            "video_streams": items[0]["video_streams"],
+            "audio_streams": items[0]["audio_streams"],
+            "subtitle_streams": [], "output_ext": "mkv", "audio_tracks": [0],
+            "color_range_choice": "tv",
+            "video_encoder": "libx264", "preset": "ultrafast",
+            "audio_codec": "aac",
+            # Deliberately tiny, so inheriting it is unmistakable.
+            "video_bitrate_kbps": 250, "audio_bitrate_kbps": 32,
+            "join_input_items": items[1:],
+            "video_speed_enabled": True, "video_speed_factor": 1.0,
+            "reverse_video": True, "separator_points": [2.0],
+        })
+        commands = []
+        real_runner = encoding.run_ffmpeg_with_progress
+
+        def spy(cmd, **kwargs):
+            commands.append([str(part) for part in cmd])
+            return real_runner(cmd, **kwargs)
+
+        encoding.run_ffmpeg_with_progress = spy
+        noise = StringIO()
+        try:
+            with redirect_stdout(noise), redirect_stderr(noise):
+                built = dict(answers)
+                answers["cmd"] = [str(p) for p in FFmWiz.build_join_encode_command(
+                    built, items, out / "o.mkv")]
+                answers["split_output_paths"] = built.get("split_output_paths")
+                answers["split_part_intervals"] = built.get("split_part_intervals")
+                answers["output_path"] = (built.get("split_output_paths")
+                                          or [out / "o.mkv"])[0]
+                code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
+        finally:
+            encoding.run_ffmpeg_with_progress = real_runner
+        self.assertEqual(0, code, noise.getvalue()[-1500:])
+
+        scratch = [cmd for cmd in commands
+                   if Path(cmd[-1]).name.startswith(("joined_forward",
+                                                     "reverse_encode_seg_"))]
+        self.assertTrue(scratch, "expected the pipeline to write scratch files")
+        for cmd in scratch:
+            name = Path(cmd[-1]).name
+            with self.subTest(scratch=name):
+                self.assertNotIn("-b:v", cmd,
+                                 f"{name} inherited the final video bitrate")
+                self.assertNotIn("-b:a", cmd,
+                                 f"{name} inherited the final audio bitrate")
+                self.assertIn("-crf", cmd, f"{name} has no quality target at all")
+
+    def test_the_final_parts_still_use_the_requested_bitrate(self):
+        # Guard the guard: if the request stopped reaching the final encode the
+        # assertion above would pass for the wrong reason.
+        out = self._tmp / "profilefinal"
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+        items = [self._item(path) for path in self.inputs]
+        answers = self.own({
+            "ffmpeg": FFMPEG, "ffprobe": FFPROBE, "input_path": self.inputs[0],
+            "probe": items[0]["probe"], "format": items[0]["format"],
+            "output_location": out,
+            "video_streams": items[0]["video_streams"],
+            "audio_streams": items[0]["audio_streams"],
+            "subtitle_streams": [], "output_ext": "mkv", "audio_tracks": [0],
+            "color_range_choice": "tv",
+            "video_encoder": "libx264", "preset": "ultrafast",
+            "audio_codec": "aac", "video_bitrate_kbps": 250,
+            "join_input_items": items[1:],
+            "video_speed_enabled": True, "video_speed_factor": 1.0,
+            "reverse_video": True, "separator_points": [2.0],
+        })
+        commands = []
+        real_runner = encoding.run_ffmpeg_with_progress
+
+        def spy(cmd, **kwargs):
+            commands.append([str(part) for part in cmd])
+            return real_runner(cmd, **kwargs)
+
+        encoding.run_ffmpeg_with_progress = spy
+        noise = StringIO()
+        try:
+            with redirect_stdout(noise), redirect_stderr(noise):
+                built = dict(answers)
+                answers["cmd"] = [str(p) for p in FFmWiz.build_join_encode_command(
+                    built, items, out / "o.mkv")]
+                answers["split_output_paths"] = built.get("split_output_paths")
+                answers["split_part_intervals"] = built.get("split_part_intervals")
+                answers["output_path"] = (built.get("split_output_paths")
+                                          or [out / "o.mkv"])[0]
+                encoding.run_bounded_reverse_pipeline(answers)
+        finally:
+            encoding.run_ffmpeg_with_progress = real_runner
+        final = [cmd for cmd in commands if "Part" in Path(cmd[-1]).name]
+        self.assertTrue(final, "no final part command was issued")
+        self.assertTrue(any("-b:v" in cmd for cmd in final),
+                        "the requested bitrate never reached the real output")
+
     def test_the_user_is_told_which_plan_ran(self):
         _output, _commands, log = self._reverse("note")
         self.assertIn("joining first", log.lower())
