@@ -649,11 +649,19 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                 video_filter = wizard.build_video_filter(answers, use_gpu_filtering=use_cuda_fast_path)
                 if video_filter:
                     cmd.extend(["-filter:v:0" if (extra_video_count or full_source_map) else "-filter:v", video_filter])
-            if use_cuda_fast_path and answers.get("fps") is not None:
+            forced_cfr = use_cuda_fast_path and answers.get("fps") is not None
+            if forced_cfr:
                 if extra_video_count or full_source_map:
                     cmd.extend(["-r:v:0", str(answers["fps"]), "-fps_mode:v:0", "cfr"])
                 else:
                     cmd.extend(["-r:v", str(answers["fps"]), "-fps_mode:v", "cfr"])
+            elif video_speed_transform_enabled(answers):
+                # A retimed picture needs its own timing kept, or the encoder
+                # drops whatever arrives faster than the SOURCE rate. Skipped
+                # when an explicit output rate was already forced above: two
+                # -fps_mode options on one output is an error, and a rate the
+                # user asked for outranks this.
+                cmd.extend(VIDEO_SPEED_OUTPUT_TIMING_ARGS)
             cmd.extend(["-c:v:0" if full_source_map else "-c:v", video_encoder])
 
             if video_encoder.endswith("_nvenc"):

@@ -144,6 +144,7 @@ def build_video_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
     cmd.extend(["-map", "0:v:0"])
     cmd.extend(["-sn", "-dn"])
     cmd.extend(["-filter:v", build_video_speed_filter(speed, reverse)])
+    cmd.extend(VIDEO_SPEED_OUTPUT_TIMING_ARGS)
     cmd.extend(["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18", "-pix_fmt", cpu_pixel_format_for_output(answers)])
     if include_audio:
         labels: list[str] = []
