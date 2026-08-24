@@ -38,6 +38,7 @@ def _answers(**extra):
     answers = {
         "ffmpeg": FFMPEG or "ffmpeg", "ffprobe": FFPROBE or "ffprobe",
         "output_ext": "mkv",
+        "color_range_choice": "tv",
         "keep_source_subtitles": True, "subtitle_tracks": [0],
         "keep_source_chapters": True,
         "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
@@ -193,6 +194,7 @@ class BitmapTracksAreDeclaredNotSilentlyLost(NoLeakedArtifacts, unittest.TestCas
             "subtitle_streams": [{"codec_type": "subtitle", "codec_name": codec}],
             "subtitle_tracks": [0], "keep_source_subtitles": True,
             "output_ext": "mkv", "input_path": "x.mkv",
+            "color_range_choice": "tv",
         })
 
     def _build(self, codec, confirm):

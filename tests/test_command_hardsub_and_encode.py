@@ -234,6 +234,7 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
                 "input_path": first,
                 "output_path": base / "out.mp4",
                 "output_ext": "mp4",
+                "color_range_choice": "tv",
                 "video_codec": "H265",
                 "use_gpu": True,
                 "video_bitrate_kbps": 400,

@@ -162,6 +162,7 @@ class ThePrintedCommandActuallyRuns(unittest.TestCase):
                                   if s["codec_type"] == "video"],
                 "audio_streams": [], "subtitle_streams": [],
                 "output_ext": "mkv", "keep_source_chapters": True,
+                "color_range_choice": "tv",
                 "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
                 "cut_keep_ranges": [(1.0, 3.0)],
                 "start_now": False,

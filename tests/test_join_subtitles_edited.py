@@ -105,6 +105,7 @@ class EditedJoinsKeepTheirSubtitles(NoLeakedArtifacts, unittest.TestCase):
             "audio_streams": items[0]["audio_streams"],
             "subtitle_streams": items[0]["subtitle_streams"],
             "output_ext": "mkv", "audio_tracks": [0],
+            "color_range_choice": "tv",
             "keep_source_subtitles": True, "subtitle_tracks": [0],
             "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
             "audio_codec": "aac", "join_input_items": items[1:],
