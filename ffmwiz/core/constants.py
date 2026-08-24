@@ -90,6 +90,13 @@ MIN_SPEED_FACTOR = 0.10
 MAX_SPEED_FACTOR = 8.0
 DEFAULT_SPEED_AUDIO_BITRATE_KBPS = DEFAULT_AUDIO_BITRATE_KBPS
 REVERSE_SEGMENT_SECONDS = 60.0
+# Decoded frames one reverse segment may hold. `reverse` keeps its whole
+# input in RAM, and peak RSS was measured to track the decoded-frame total
+# almost exactly (720p30: 300 frames -> 878 MB, 600 frames -> 1306 MB, i.e.
+# 1.43 MB/frame against a theoretical 1.38). A flat 60 s is therefore only
+# safe at SD: it is 5.2 GiB of frames at 1080p30 and 20.9 GiB at 4K30.
+REVERSE_SEGMENT_BUDGET_BYTES = 1024 ** 3
+REVERSE_SEGMENT_MIN_SECONDS = 2.0
 
 # The Audio Cut / Speed / Reverse tools always re-encode, so they derive their
 # target bitrate from the SOURCE instead of pinning every output to 128 kbps.
@@ -734,6 +741,8 @@ __all__ = [
     'STDERR_TAIL_LINES',
     'STDERR_TAIL_REPORT_LINES',
     'REVERSE_SEGMENT_SECONDS',
+    'REVERSE_SEGMENT_BUDGET_BYTES',
+    'REVERSE_SEGMENT_MIN_SECONDS',
     'DEFAULT_VIDEO_CODEC',
     'H264_NVENC_ENCODER',
     'DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS',
