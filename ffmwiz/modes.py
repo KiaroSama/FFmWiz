@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.constants import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
@@ -509,7 +510,18 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
 
     if not answers.get("start_now", True):
         appio.note("FFmpeg was not started. The example command above is ready to adapt manually.")
+        # The printed example command references the inputs the representative
+        # build generated (retimed subtitles, extracted chapters). Hand them to
+        # the user instead of deleting them, exactly as the single-file wizard
+        # does when a run is declined.
+        preserve_artifacts_for_manual_run(answers)
         return None
+    # Starting automatically: the example command was only ever shown, so the
+    # inputs it generated are dead now. They used to survive the whole batch --
+    # every folder job shallow-copied this dict and inherited the SAME lease, so
+    # nothing was ever released and each ffmwiz_retimed_subs_* directory
+    # outlived the run (B15).
+    release_artifacts(answers)
 
     output_folder: Path = answers["folder_output_location"]
     try:
@@ -526,41 +538,60 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
         input_path: Path = item["path"]
         print()
         print(paint(f"Folder Encode [{index}/{total}]: {input_path.name}", Color.BOLD + Color.LIGHT_BLUE))
+        # One file, one job: its own lease and its own resolved settings.
+        # prepare_folder_job_answers() shallow-copies the dict it is given, so
+        # handing it the shared settings dict gave every file the SAME lease --
+        # releasing after file 1 would have deleted inputs file 2 still needed,
+        # so nothing was released at all and every generated directory survived
+        # the batch (B15). A shared resolved map contaminated the same way: a
+        # fallback the representative or an earlier file needed stayed in force
+        # for files that did not need it (B13). Both are opened HERE, on the
+        # outer dict, before prepare copies it.
+        item_settings = dict(answers)
+        item_settings.pop(ARTIFACT_LEASE_KEY, None)
+        artifact_lease(item_settings)
+        reset_effective_settings(item_settings)
         try:
-            job_answers = prepare_folder_job_answers(answers, item)
-            ensure_color_range_resolved(job_answers, workflow="Folder Encode")
-            log_and_warn_pixel_format(job_answers)
-            cmd = build_ffmpeg_command(job_answers)
-        except Exception as exc:
-            failures += 1
-            log_exception(f"Folder Encode could not prepare file: {input_path}")
-            appio.error(f"Skipped {input_path.name}: {exc}")
-            continue
+            try:
+                job_answers = prepare_folder_job_answers(item_settings, item)
+                ensure_color_range_resolved(job_answers, workflow="Folder Encode")
+                log_and_warn_pixel_format(job_answers)
+                cmd = build_ffmpeg_command(job_answers)
+            except Exception as exc:
+                failures += 1
+                log_exception(f"Folder Encode could not prepare file: {input_path}")
+                appio.error(f"Skipped {input_path.name}: {exc}")
+                continue
 
-        total_duration = services.stream_duration_seconds({}, job_answers.get("format")) or 0.0
-        log_info(
-            f"Folder Encode starting {index}/{total}: input={input_path}; "
-            f"output={job_answers.get('output_path')}; duration={total_duration or 'unknown'}"
-        )
-        print(paint("Starting FFmpeg...", Color.GREEN))
-        # Folder Encode used to call the runner directly, so a reversed job ran
-        # the full-buffer filter while the UI promised the segmented plan (R09).
-        # Imported here, not at module scope: encoding sits ABOVE modes in the
-        # layering and imports it, so a top-level import would be circular. By
-        # the time a job runs, the package is fully loaded.
-        from ffmwiz import encoding as _encoding
-        return_code, _elapsed = _encoding.execute_encode_plan(
-            job_answers,
-            cmd,
-            total_duration=(total_duration if total_duration > 0 else None),
-            label=f"Folder Encode {index}/{total}",
-        )
-        if return_code == 0:
-            completed += 1
-            appio.note(f"Finished {input_path.name}")
-        else:
-            failures += 1
-            appio.error(f"Failed {input_path.name} with exit code {return_code}.")
+            total_duration = services.stream_duration_seconds({}, job_answers.get("format")) or 0.0
+            log_info(
+                f"Folder Encode starting {index}/{total}: input={input_path}; "
+                f"output={job_answers.get('output_path')}; duration={total_duration or 'unknown'}"
+            )
+            print(paint("Starting FFmpeg...", Color.GREEN))
+            # Folder Encode used to call the runner directly, so a reversed job ran
+            # the full-buffer filter while the UI promised the segmented plan (R09).
+            # Imported here, not at module scope: encoding sits ABOVE modes in the
+            # layering and imports it, so a top-level import would be circular. By
+            # the time a job runs, the package is fully loaded.
+            from ffmwiz import encoding as _encoding
+            return_code, _elapsed = _encoding.execute_encode_plan(
+                job_answers,
+                cmd,
+                total_duration=(total_duration if total_duration > 0 else None),
+                label=f"Folder Encode {index}/{total}",
+            )
+            if return_code == 0:
+                completed += 1
+                appio.note(f"Finished {input_path.name}")
+            else:
+                failures += 1
+                appio.error(f"Failed {input_path.name} with exit code {return_code}.")
+        finally:
+            # Preparation failure, FFmpeg failure, exception and cancellation all
+            # land here. job_answers shares this lease, so one release covers both.
+            for removed in release_artifacts(item_settings):
+                log_debug(f"Folder Encode removed leased temporary artifact: {removed}")
 
     elapsed = time.perf_counter() - started_at
     print()

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.constants import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
@@ -156,6 +157,12 @@ def open_audio_cut_gui(answers: dict[str, Any], audio_index: int) -> list[tuple[
 
 
 def step_start_now(answers: dict[str, Any]) -> None:
+    # A rebuild is a NEW plan revision. Back leaves the REQUESTED answers alone
+    # -- which is the point -- but the RESOLVED map used to survive with them,
+    # so a Join's forced libx265/aac stayed in force after the Join was removed
+    # and the rebuilt copy/copy job was re-encoded to HEVC (B13). Reset here,
+    # on the outer dict, before any builder takes its shallow copy.
+    reset_effective_settings(answers)
     if output_is_audio_only(answers) and not answers.get("audio_streams"):
         fail("Audio-only output was selected, but the input file has no audio stream.")
 
