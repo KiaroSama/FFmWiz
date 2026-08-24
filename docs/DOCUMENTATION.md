@@ -623,10 +623,22 @@ subtitle question shows; an input that lacks a given track contributes an empty 
 other inputs' cues stay in place. The question itself counts tracks across **all** inputs, so a
 join whose first file has no subtitles still asks which of the later files' tracks to keep.
 
-It is refused, with the reason printed before you confirm, when:
+**An edited join keeps its subtitles too.** The merged track is assembled on the unedited joined
+clock and then put through the same timeline transform the picture and audio get, so cuts, a
+speed change and reverse all compose; a Split slices the transformed track into its parts and
+rebases each to zero. Measured on two 2‑second inputs whose cues read `FIRST` and `SECOND`:
 
-- the timeline is edited — **cuts, a split, a speed change or reverse** all move the joined
-  clock, so shifted cues would drift out of sync with the picture;
+| edit | resulting cues |
+| --- | --- |
+| none | `FIRST 0.5–1.5`, `SECOND 2.5–3.5` |
+| 2× speed | `FIRST 0.25–0.75`, `SECOND 1.25–1.75` |
+| reverse | `SECOND 0.5–1.5`, `FIRST 2.5–3.5` |
+| keep 0–1 s and 2–4 s | `FIRST 0.5–1.0`, `SECOND 1.5–2.5` |
+| split at 2 s | Part 01 `FIRST`, Part 02 `SECOND 0.5–1.5` |
+
+It is still refused, with the reason printed before you confirm, when:
+
+- an input has no known duration, so the per‑input cue offsets cannot be computed;
 - the inputs carry only **bitmap** subtitles (PGS, VobSub, DVB) — these are pictures with no cue
   text to shift.
 
@@ -685,6 +697,28 @@ Mode 11 (audio), and inside the Unified Editor. Export filters:
 
 Because FFmpeg's `reverse`/`areverse` buffer the whole clip in memory, FFmWiz reverses video
 in short segments and concatenates them in reverse order to avoid RAM spikes.
+
+**The segment length follows the frame size, not the clock.** What `reverse` holds is every
+decoded frame of its input, so a fixed number of seconds means wildly different amounts of
+memory. Each segment is sized against a 1 GiB budget:
+
+| source | segment | frames held |
+| --- | --- | --- |
+| 480p30 | ~58 s | 1.0 GiB |
+| 720p30 | ~26 s | 1.0 GiB |
+| 1080p30 | ~12 s | 1.0 GiB |
+| 1080p60 | ~6 s | 1.0 GiB |
+| 4K30 | ~3 s | 1.0 GiB |
+
+Each segment is bounded **before** the filter sees it (`-ss`/`-t` on the source input), so the
+decoder stops at the segment boundary rather than reading the whole file and trimming after.
+
+**Reversing a join** runs in two stages: the inputs are joined forward into a temporary file
+first, and that file is then reversed in the same bounded segments. Reversing a joined timeline
+in one pass would need memory proportional to every input added together — roughly 336 GiB of
+decoded frames for an hour of joined 1080p30 — so it is not attempted. The temporary file is
+written at a high quality and removed with the rest of the job's temporary files. A join that is
+*also* split still runs in one pass, and says so before it starts.
 
 ---
 
@@ -1430,8 +1464,18 @@ NVENC and exposes `-multipass`. `qres` does a quarter-resolution first pass; `fu
 full-resolution first pass (best quality, slowest). Ignored on CPU encoders.
 
 **`cpu_two_pass`** — `y`/`n`. Enables FFmpeg `-pass 1/2` for supported CPU encoders (libx264,
-libx265, libvpx-vp9, libaom-av1, libsvtav1, mpeg4). Ignored on NVENC and unsupported encoders,
-and on join/split/cut/speed workflows.
+libx265, libvpx-vp9, libaom-av1, libsvtav1, mpeg4). Not available on NVENC, unsupported
+encoders, or join/split/cut/speed/reverse workflows: pass 1 has to analyse the same video
+timeline pass 2 encodes, and those rebuild it. The wizard hides the question for them, and a
+config file that sets it anyway is told before the command is confirmed:
+
+```text
+CPU two-pass was turned off for this job: a join builds its video through
+filter_complex, which pass 1 cannot analyse.
+```
+
+The settings summary then reports it as off, so it can never claim a two-pass encode that is
+not running.
 
 **`color_range`** — `source` (default, do nothing special), `tv` (limited), `pc` (full), or
 `unspecified` (do not force a range). Only meaningful when the source range is unknown and the
