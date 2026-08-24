@@ -1374,7 +1374,13 @@ Notes:    no pixel-value conversion is performed; this only affects range
 Prompt:   Start FFmpeg now?
 Default:  y
 Notes:    declining prints the final PowerShell command and the settings summary
-          so you can run or adapt it manually. The summary includes an "estimated
+          so you can run or adapt it manually. A Join or Split combined with
+          Reverse is the exception: it does not run as one command, so the
+          printed command is a readable reference only — running it would buffer
+          the whole timeline. For those jobs declining also writes the real
+          multi-stage plan next to the output as <name>.plan.ps1, which stops on
+          the first failure and names the scratch directory to remove afterwards.
+          The summary includes an "estimated
           output size" line computed from the TOTAL target bitrate (video + audio)
           over the output duration. It shows N/A when the size cannot be derived from
           a target bitrate — constant-quality (CRF/CQ) mode or a pure video stream copy.
