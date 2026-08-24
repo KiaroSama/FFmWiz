@@ -137,6 +137,7 @@ __all__ = [
     "release_artifacts",
     "effective_settings",
     "effective_value",
+    "reset_effective_settings",
 ]
 
 
@@ -154,6 +155,29 @@ def effective_settings(answers: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(resolved, dict):
         resolved = {}
         answers[EFFECTIVE_SETTINGS_KEY] = resolved
+    return resolved
+
+
+def reset_effective_settings(answers: dict[str, Any]) -> dict[str, Any]:
+    """Begin a new plan revision: forget everything the LAST build resolved.
+
+    The lease and the effective map share one mechanism but not one lifetime.
+    A lease has to outlive the copies so its temporary files can still be
+    deleted; a RESOLUTION is only true for the plan that produced it. Nothing
+    ever ended that plan, so the map behaved like session state: request
+    copy/copy, build a Join (which legitimately resolves to libx265/aac), press
+    Back, drop the Join and rebuild an ordinary single-input job -- and
+    `resolve_video_encoder` still answered libx265, so a job the user asked to
+    stream-copy was re-encoded to HEVC (B13).
+
+    Call it on the OUTER answers dict at the START of a build, before any
+    `dict(answers)` a builder makes. A FRESH map is installed rather than the
+    old one cleared, so copies taken for an EARLIER plan -- a folder
+    representative, a previous revision -- keep their own and cannot write into
+    this one.
+    """
+    resolved: dict[str, Any] = {}
+    answers[EFFECTIVE_SETTINGS_KEY] = resolved
     return resolved
 
 
