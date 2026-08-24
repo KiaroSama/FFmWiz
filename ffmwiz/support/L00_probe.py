@@ -31,6 +31,67 @@ from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
 
 
+def video_stream_span_seconds(stream: dict[str, Any],
+                             fmt: dict[str, Any] | None = None) -> float:
+    """How long the PICTURE lasts, which is not the container duration.
+
+    A container outlives its video whenever another stream is longer -- audio
+    padding, a trailing subtitle, an AAC priming delay. Reverse mirrors the
+    timeline around this value, so using `format.duration` shifted every
+    retimed cue by the difference: on a 4.000 s video in a 4.523 s container, a
+    cue that belongs at the very start of the reversed clip landed 523 ms late.
+
+    Sources in order of precision: the stream's own duration (MP4/MOV report
+    it), Matroska's per-stream `DURATION` tag, the frame count over the frame
+    rate, and finally the container. Returns 0.0 when nothing is known.
+    """
+    for key in ("duration",):
+        try:
+            value = float(stream.get(key) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+
+    tag = ""
+    for tags in (stream.get("tags"), stream.get("TAGS")):
+        if isinstance(tags, dict):
+            for name in ("DURATION", "duration", "DURATION-eng"):
+                if tags.get(name):
+                    tag = str(tags[name])
+                    break
+        if tag:
+            break
+    if tag:
+        # Matroska writes HH:MM:SS.nnnnnnnnn.
+        pieces = tag.split(":")
+        try:
+            if len(pieces) == 3:
+                seconds = (int(pieces[0]) * 3600 + int(pieces[1]) * 60
+                           + float(pieces[2]))
+            else:
+                seconds = float(tag)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds > 0:
+            return seconds
+
+    frames = stream.get("nb_frames")
+    rate = parse_rational(stream.get("avg_frame_rate")) or parse_rational(
+        stream.get("r_frame_rate"))
+    try:
+        count = float(frames or 0.0)
+    except (TypeError, ValueError):
+        count = 0.0
+    if count > 0 and rate and rate > 0:
+        return count / rate
+
+    try:
+        return float((fmt or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def parse_rational(text: Any) -> float | None:
     """Parse 'N:M', 'N/M', or a float to a positive finite float. Return None for
     unknown/empty/invalid/zero/negative/non-finite values (so callers can detect
@@ -73,6 +134,7 @@ def rational_to_float(value: str | None) -> float | None:
 
 
 __all__ = [
+    'video_stream_span_seconds',
     'parse_rational',
     'rational_to_float',
 ]
