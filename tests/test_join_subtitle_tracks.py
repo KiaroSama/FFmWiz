@@ -346,3 +346,82 @@ class JoinedSubtitleTracksInRealOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheQuestionIsAskedForTheWholeJoin(unittest.TestCase):
+    """The track question was gated on input 1, which never asks for a join
+    whose first file has no subtitles -- the plan then kept every later track
+    without offering the choice. Same defect class as the audio gate (R02)."""
+
+    def _silent_first_join(self):
+        return {
+            "subtitle_streams": [],
+            "join_input_items": [
+                _item([_stream(language="eng", title="English"),
+                       _stream(language="spa", title="Spanish")]),
+                _item([_stream(language="eng", title="English")]),
+            ],
+        }
+
+    def test_a_subtitle_free_first_input_still_asks(self):
+        self.assertTrue(FFmWiz.any_join_subtitles(self._silent_first_join()))
+
+    def test_it_offers_every_logical_track_not_input_ones(self):
+        view = FFmWiz.join_subtitle_streams_view(self._silent_first_join())
+        self.assertEqual(2, len(view))
+        self.assertEqual(["eng", "spa"],
+                         [s.get("tags", {}).get("language") for s in view])
+
+    def test_a_track_only_a_later_input_has_is_still_described(self):
+        answers = {
+            "subtitle_streams": [_stream(language="eng", title="English")],
+            "join_input_items": [_item([_stream(language="eng", title="English"),
+                                        _stream(language="fre", title="French")])],
+        }
+        view = FFmWiz.join_subtitle_streams_view(answers)
+        self.assertEqual(2, len(view))
+        self.assertEqual("fre", view[1].get("tags", {}).get("language"))
+
+    def test_nothing_anywhere_does_not_ask(self):
+        self.assertFalse(FFmWiz.any_join_subtitles(
+            {"subtitle_streams": [], "join_input_items": [_item([])]}))
+
+    def test_a_plain_single_input_is_unchanged(self):
+        answers = {"subtitle_streams": [_stream()]}
+        self.assertTrue(FFmWiz.any_join_subtitles(answers))
+        self.assertEqual(answers["subtitle_streams"],
+                         FFmWiz.join_subtitle_streams_view(answers))
+
+    def test_the_view_is_lent_and_taken_back(self):
+        answers = self._silent_first_join()
+        seen = {}
+
+        def step(a):
+            seen["count"] = len(a["subtitle_streams"])
+
+        FFmWiz.with_join_subtitle_view(step)(answers)
+        self.assertEqual(2, seen["count"], "the step must see the joined tracks")
+        self.assertEqual([], answers["subtitle_streams"],
+                         "input 1 must not keep claiming another input's streams")
+
+    def test_the_view_is_restored_even_when_the_step_raises(self):
+        answers = self._silent_first_join()
+
+        def step(a):
+            raise RuntimeError("user pressed back")
+
+        with self.assertRaises(RuntimeError):
+            FFmWiz.with_join_subtitle_view(step)(answers)
+        self.assertEqual([], answers["subtitle_streams"])
+
+
+class TheWizardUsesTheJoinAwareGate(unittest.TestCase):
+    def test_the_subtitle_step_is_not_gated_on_input_one(self):
+        source = (Path(FFmWiz.__file__).resolve().parent
+                  / "ffmwiz" / "wizard_flow.py").read_text(encoding="utf-8")
+        step = [line for line in source.splitlines()
+                if 'wizard.Step("subtitle_tracks"' in line]
+        self.assertEqual(1, len(step))
+        self.assertIn("any_join_subtitles(a)", step[0])
+        self.assertIn("with_join_subtitle_view(step_subtitle_tracks)", step[0])
+        self.assertNotIn('bool(a.get("subtitle_streams"))', step[0])

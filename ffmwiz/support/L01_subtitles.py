@@ -20,7 +20,7 @@ rather than mapped with source timestamps that no longer match the picture.
 from __future__ import annotations
 
 import re
-from typing import Any  # noqa: F401
+from typing import Any, Callable  # noqa: F401
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
@@ -283,6 +283,61 @@ def selected_join_subtitle_tracks(answers: dict[str, Any],
     return []
 
 
+def join_subtitle_streams_view(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """One representative stream per LOGICAL joined subtitle track.
+
+    The track question reads input 1's list alone, so a join whose first input
+    carries no subtitles was never asked which of the later inputs' tracks to
+    keep -- every one of them was kept instead. Track i is described by the
+    first input that actually has an i-th subtitle stream.
+    """
+    items = answers.get("join_input_items") or []
+    if not items:
+        return list(answers.get("subtitle_streams") or [])
+    all_items = [{"subtitle_streams": list(answers.get("subtitle_streams") or [])}, *items]
+    view: list[dict[str, Any]] = []
+    for index in range(join_subtitle_track_count(all_items)):
+        for item in all_items:
+            streams = item_subtitle_streams(item)
+            if index < len(streams):
+                view.append(streams[index])
+                break
+    return view
+
+
+def any_join_subtitles(answers: dict[str, Any]) -> bool:
+    """True when ANY input carries subtitles, not just input 1."""
+    return bool(join_subtitle_streams_view(answers))
+
+
+def with_join_subtitle_view(step: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, Any]], None]:
+    """Run a subtitle step against the JOIN's tracks instead of input 1's.
+
+    Mirrors `with_join_audio_view`: lend the joined track list to the step so it
+    counts and labels what the output really carries, then take it straight
+    back -- nothing outside the step may see input 1 claiming other inputs'
+    streams.
+    """
+
+    def run(answers: dict[str, Any]) -> None:
+        view = join_subtitle_streams_view(answers)
+        if view == list(answers.get("subtitle_streams") or []):
+            step(answers)
+            return
+        missing = object()
+        saved = answers.get("subtitle_streams", missing)
+        answers["subtitle_streams"] = view
+        try:
+            step(answers)
+        finally:
+            if saved is missing:
+                answers.pop("subtitle_streams", None)
+            else:
+                answers["subtitle_streams"] = saved
+
+    return run
+
+
 def join_subtitle_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
     """Which joined subtitle tracks can be assembled, and why the rest cannot.
 
@@ -376,4 +431,7 @@ __all__ = [
     'join_subtitle_track_count',
     'selected_join_subtitle_tracks',
     'join_subtitle_plan',
+    'join_subtitle_streams_view',
+    'any_join_subtitles',
+    'with_join_subtitle_view',
 ]

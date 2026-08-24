@@ -31,6 +31,7 @@ from ffmwiz.core.constants import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import TimelineMap  # noqa: F401
 from ffmwiz.support.L00_audio import *  # noqa: F401,F403
 from ffmwiz.support.L00_color_range import *  # noqa: F401,F403
 from ffmwiz.support.L00_encode_opts import *  # noqa: F401,F403
@@ -115,74 +116,37 @@ def remap_chapters_for_encode(
             source_duration = max(source_duration, end)
     source_duration = max(0.0, source_duration)
 
-    keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), source_duration)
-    if not keep_ranges:
-        keep_ranges = [(0.0, source_duration)]
-
-    # Remap each chapter through retained ranges.
+    # One shared transform for cuts + reverse + speed. This loop used to carry
+    # its own copy of that arithmetic, and reverse was missing from it entirely
+    # -- every chapter stayed at its original time in a reversed clip (R05).
+    # TimelineMap is the same object the subtitle cues are retimed with, so the
+    # two clocks cannot drift apart again.
+    timeline = TimelineMap(
+        keep_ranges=answers.get("cut_keep_ranges"),
+        source_duration=source_duration,
+        speed=speed_factor,
+        reverse=bool(answers.get("reverse_video")),
+    )
     remapped: list[dict[str, Any]] = []
     for ch in chapters:
         start = copy_cut_chapter_seconds(ch, "start")
         end = copy_cut_chapter_seconds(ch, "end")
         if start is None or end is None or end <= start:
             continue
-
-        # Compute output position by accumulating kept ranges.
-        output_offset = 0.0
-        ch_new_start: float | None = None
-        ch_new_end: float | None = None
-
-        for keep_start, keep_end in keep_ranges:
-            keep_duration = keep_end - keep_start
-            # Chapter must overlap this kept range to survive.
-            overlap_start = max(start, keep_start)
-            overlap_end = min(end, keep_end)
-            if overlap_end > overlap_start + 1e-6:
-                seg_start = output_offset + (overlap_start - keep_start)
-                seg_end = output_offset + (overlap_end - keep_start)
-                if ch_new_start is None:
-                    ch_new_start = seg_start
-                ch_new_end = seg_end
-            output_offset += keep_duration
-
-        if ch_new_start is None or ch_new_end is None:
+        pieces = timeline.map_interval(start, end)
+        if not pieces:
             continue
-
-        # Apply speed factor.
-        if speed_factor > 0 and abs(speed_factor - 1.0) > 1e-9:
-            ch_new_start = ch_new_start / speed_factor
-            ch_new_end = ch_new_end / speed_factor
-
-        if ch_new_end <= ch_new_start + 1e-6:
+        # A chapter is one contiguous label: when a cut removes a hole inside
+        # it, keep the span it still covers instead of splitting it in two.
+        new_start, new_end = pieces[0][0], pieces[-1][1]
+        if new_end <= new_start + 1e-6:
             continue
-
         remapped.append({
-            "start": ch_new_start,
-            "end": ch_new_end,
+            "start": max(0.0, new_start),
+            "end": max(0.0, new_end),
             "metadata": dict(ch.get("tags") or {}),
         })
-
-    # Reverse: the timeline runs backwards, so a chapter that was last is now
-    # first. This step was missing entirely -- cuts and speed were handled and
-    # reverse silently left every chapter at its original time (R05). Read from
-    # `answers` rather than taking a new parameter so every existing caller is
-    # covered without changing its signature.
-    if answers.get("reverse_video"):
-        processed_duration = sum(max(0.0, end - start) for start, end in keep_ranges)
-        if speed_factor > 0 and abs(speed_factor - 1.0) > 1e-9:
-            processed_duration /= speed_factor
-        flipped: list[dict[str, Any]] = []
-        for ch in remapped:
-            new_start = processed_duration - ch["end"]
-            new_end = processed_duration - ch["start"]
-            if new_end <= new_start + 1e-6:
-                continue
-            flipped.append({
-                "start": max(0.0, new_start),
-                "end": max(0.0, new_end),
-                "metadata": dict(ch.get("metadata") or {}),
-            })
-        remapped = sorted(flipped, key=lambda item: item["start"])
+    remapped.sort(key=lambda item: item["start"])
 
     # Clip to part interval if splitting.
     if part_interval is not None:

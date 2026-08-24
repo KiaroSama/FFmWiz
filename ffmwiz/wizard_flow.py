@@ -62,6 +62,11 @@ from ffmwiz.support.L05 import *  # noqa: F401,F403
 from ffmwiz.support.L06 import *  # noqa: F401,F403
 from ffmwiz.support.L07 import *  # noqa: F401,F403
 from ffmwiz.support.ext00 import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import (  # noqa: F401
+    any_join_subtitles,
+    join_subtitle_streams_view,
+    with_join_subtitle_view,
+)
 from ffmwiz.support.ext01 import *  # noqa: F401,F403
 from ffmwiz.support.ext02 import *  # noqa: F401,F403
 from ffmwiz.support.ext03 import *  # noqa: F401,F403
@@ -191,7 +196,11 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         # the drop is stated and confirmed while the edit can still change --
         # not logged silently and discovered in the output (R11).
         wizard.Step("source_extra_outcomes", lambda a: bool(source_extra_stream_outcome_notes(a)), confirm_source_extra_stream_outcomes),
-        wizard.Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
+        # any_join_subtitles, not a.get("subtitle_streams"): a join whose FIRST
+        # input has no subtitles still carries the later inputs' tracks, so
+        # gating on input 1 meant the question was skipped and ALL of them
+        # were kept without asking.
+        wizard.Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and any_join_subtitles(a), with_join_subtitle_view(step_subtitle_tracks)),
         wizard.Step("color_range", color_range_prompt_applicable, wizard.step_color_range),
         wizard.Step("start_now", lambda a: True, wizard.step_start_now),
     ]
