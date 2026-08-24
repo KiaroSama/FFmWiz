@@ -26,6 +26,7 @@ from ffmwiz.core.constants import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
 from ffmwiz.support.L00_misc import *  # noqa: F401,F403
+from ffmwiz.support.L00_probe import *  # noqa: F401,F403
 from ffmwiz.support.L00_streams import *  # noqa: F401,F403
 
 
@@ -436,7 +437,15 @@ def join_subtitle_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> 
     # meant an edited join silently shipped none of the tracks the user picked,
     # even though every piece needed to carry them already existed (F09).
 
-    durations = [float(item.get("duration") or 0.0) for item in items]
+    # The PICTURE span, not `item["duration"]`, which is the container's. A
+    # subtitle or audio packet reaching past the last frame lengthens the
+    # container without adding a frame to the joined video, so offsetting by it
+    # pushed every later input late and left this input's own tail cue hanging
+    # past its last frame: a 2.000 s picture in a 3.000 s MKV merged input 2's
+    # 0.500-1.500 cue at 3.500-4.500 instead of 2.500-3.500 (B07). The same
+    # value is the clip limit below, which is what trims the tail cue back to
+    # the picture it belongs to.
+    durations = [join_item_picture_span(item) for item in items]
     if any(duration <= 0 for duration in durations):
         plan["reason"] = "an input has no known duration, so cue offsets cannot be computed"
         return plan
