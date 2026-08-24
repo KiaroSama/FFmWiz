@@ -576,26 +576,76 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
             )
             if rc != 0:
                 return rc, time.perf_counter() - started_at
+        # Concatenating reversed(segments) reverses the order of their AUDIO
+        # blocks too. That is right when the audio follows the video reverse and
+        # wrong when the user declined it: measured on 440 Hz for 0-2 s and
+        # 880 Hz for 2-4 s with reverse_audio=False, the output played 880 Hz at
+        # 0.4 s and 440 Hz at 3.2 s -- chunk-reordered without a single
+        # `areverse` in any command (B02).
+        #
+        # So the two timelines are concatenated separately: video from the
+        # reversed order, audio from the forward one, then muxed. Both passes
+        # are stream copies, so this costs no extra encode.
+        audio_follows_reverse = encode_audio_reverse_enabled(answers)
+        has_audio = bool(answers.get("audio_streams")) and bool(answers.get("audio_tracks", True))
         concat_list = tmpdir / "concat.txt"
-        write_concat_list(list(reversed(segment_paths)), concat_list)
-        concat_cmd = build_concat_copy_command(answers["ffmpeg"], concat_list, output_path)
+        if has_audio and not audio_follows_reverse:
+            video_ext = output_path.suffix.lstrip(".") or segment_ext
+            reversed_video = tmpdir / f"video_reversed.{video_ext}"
+            forward_audio = tmpdir / f"audio_forward.{video_ext}"
+            write_concat_list(list(reversed(segment_paths)), concat_list)
+            video_cmd = build_concat_copy_command(answers["ffmpeg"], concat_list, reversed_video)
+            video_cmd[video_cmd.index(str(reversed_video)):] = ["-an", str(reversed_video)]
+            audio_list = tmpdir / "concat_audio.txt"
+            write_concat_list(list(segment_paths), audio_list)
+            audio_cmd = build_concat_copy_command(answers["ffmpeg"], audio_list, forward_audio)
+            audio_cmd[audio_cmd.index(str(forward_audio)):] = ["-vn", str(forward_audio)]
+            for label, cmd in (("video (reversed order)", video_cmd),
+                               ("audio (source order)", audio_cmd)):
+                log_info(f"Reverse encode concat {label}: " + command_to_powershell(cmd))
+                rc, _ = run_ffmpeg_with_progress(
+                    cmd, total_duration=(total_keep_duration(chunks) / speed if chunks else None),
+                    label=f"Reverse encode concat {label}")
+                if rc != 0:
+                    return rc, time.perf_counter() - started_at
+            appio.note("Video reverse only: the audio keeps its own order and is "
+                       "muxed back onto the reversed picture.")
+            mux_inputs = ["-i", str(reversed_video), "-i", str(forward_audio)]
+            mux_maps = ["-map", "0:v", "-map", "1:a"]
+            metadata_input = 2
+        else:
+            write_concat_list(list(reversed(segment_paths)), concat_list)
+            mux_inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
+            mux_maps = ["-map", "0"]
+            metadata_input = 1
         # The per-segment encodes carry chapter metadata, but this final
         # concat-copy did not restore any of it, so a reversed chaptered source
         # came out with ZERO chapters (R05). Attach the remapped chapters here,
         # where the output timeline finally exists. remap_chapters_for_encode
         # applies the reverse flip itself.
         chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed)
+        concat_cmd = [answers["ffmpeg"], "-y" if OVERWRITE_OUTPUT else "-n",
+                      "-hide_banner", *mux_inputs]
+        chapter_args: list[str] = []
         if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
             chapter_metadata = write_encode_chapter_metadata(chapter_plan, tmpdir, "_reverse")
-            insert_at = concat_cmd.index(str(concat_list)) + 1
-            concat_cmd[insert_at:insert_at] = ["-i", str(chapter_metadata)]
-            concat_cmd.extend(copy_cut_chapter_map_args(chapter_plan, metadata_input_index=1))
+            # Appended LAST so it is always the highest input index: the
+            # video-only branch already occupies 0 and 1, and inserting it
+            # earlier would renumber the audio input the maps depend on.
+            concat_cmd.extend(["-i", str(chapter_metadata)])
+            chapter_args = copy_cut_chapter_map_args(
+                chapter_plan, metadata_input_index=metadata_input)
             log_info(f"Reverse encode: restored {len(chapter_plan['chapters'])} chapter(s) "
                      "onto the reversed timeline")
         else:
             # Be explicit rather than leaving a silent gap: a source WITH
             # chapters whose plan is not usable loses them here.
-            concat_cmd.extend(copy_cut_chapter_map_args(chapter_plan))
+            chapter_args = copy_cut_chapter_map_args(chapter_plan)
+        concat_cmd.extend([*mux_maps, "-c", "copy",
+                           "-avoid_negative_ts", "make_zero", *chapter_args])
+        if output_path.suffix.lstrip(".").lower() in MP4_LIKE_EXTS and MOVFLAGS:
+            concat_cmd.extend(["-movflags", MOVFLAGS])
+        concat_cmd.append(str(output_path))
         log_info("Reverse encode concat command: " + command_to_powershell(concat_cmd))
         appio.note("Concatenating reversed encoded segments...")
         rc, _ = run_ffmpeg_with_progress(
