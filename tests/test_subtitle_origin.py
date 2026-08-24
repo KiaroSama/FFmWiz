@@ -23,11 +23,16 @@ VIDEO packet, and they were checked against the picture itself: the fixture
 flashes white over each cue, and after the fix the 0.5x and reverse cues land on
 exactly the frames that are white.
 
-Not fixed here, because the repair is in the command builders rather than in
-this arithmetic: `-ss` and `trim` count from the container start while the
-unseeked filter chain rebases to the video, so the two clocks still differ by
-`format.start_time - video.start_time` on a cut. `CutKeepsTheSeekClock` pins
-that boundary so the difference cannot be widened by accident.
+That left one clock still split, and B08 closed it. `-ss` and `trim` counted
+from the container while the unseeked chain rebased to the video, so a seeked
+cut of a primed source ran early by exactly `video.start_time -
+format.start_time`. Measured on the same fixture, a requested 2.0-4.0 picture
+cut put its 2.5-3.5 cue at 1.0-2.0 and the white frames with it; the seek had
+landed at picture 1.5. The repair adds that offset to the seek and to every
+trim range, so `subtitle_source_origin` has one answer instead of two.
+
+    single cut   cue 1.0-2.0  ->  0.5-1.5     (white frames agree)
+    multi cut    cue 1.5-2.0  ->  1.0-1.5
 """
 from __future__ import annotations
 
@@ -76,22 +81,32 @@ class SourceOriginRules(unittest.TestCase):
         self.assertIsNone(FFmWiz.video_timeline_origin(
             {"streams": [{"start_time": "N/A"}], "format": {}}))
 
-    def test_an_unseeked_encode_measures_from_the_picture(self):
-        answers = {"video_streams": [{"start_time": "0.000000"}],
-                   "format": {"start_time": "-0.500000"}}
-        self.assertEqual(0.0, FFmWiz.subtitle_source_origin(answers, False))
+    PRIMED = {"video_streams": [{"start_time": "0.000000"}],
+              "format": {"start_time": "-0.500000"}}
 
-    def test_a_seeked_encode_measures_from_the_container(self):
-        # `-ss` adds the file's own start_time, and `trim` sees frames the
-        # demuxer has already rebased by it, so a cut lives on this clock.
-        answers = {"video_streams": [{"start_time": "0.000000"}],
-                   "format": {"start_time": "-0.500000"}}
-        self.assertEqual(-0.5, FFmWiz.subtitle_source_origin(answers, True))
+    def test_every_encode_measures_from_the_picture(self):
+        # One answer now. A seeked encode used to say -0.5 here, because the
+        # seek itself was on the other clock (B08).
+        self.assertEqual(0.0, FFmWiz.subtitle_source_origin(self.PRIMED))
+
+    def test_the_offset_is_the_gap_between_the_two_clocks(self):
+        self.assertEqual(0.5, FFmWiz.picture_clock_offset(self.PRIMED))
+
+    def test_an_ordinary_file_needs_no_offset(self):
+        self.assertEqual(0.0, FFmWiz.picture_clock_offset(
+            {"video_streams": [{"start_time": "1.000000"}],
+             "format": {"start_time": "1.000000"}}))
+
+    def test_an_unknown_clock_shifts_nothing(self):
+        # Guessing an offset would move a cut on a file that never needed one.
+        self.assertEqual(0.0, FFmWiz.picture_clock_offset({}))
+        self.assertEqual(0.0, FFmWiz.picture_clock_offset(
+            {"video_streams": [{"start_time": "0.0"}], "format": {"start_time": "N/A"}}))
 
     def test_a_source_that_says_nothing_leaves_the_clock_alone(self):
-        self.assertEqual(0.0, FFmWiz.subtitle_source_origin({}, False))
+        self.assertEqual(0.0, FFmWiz.subtitle_source_origin({}))
         self.assertEqual(0.0, FFmWiz.subtitle_source_origin(
-            {"video_streams": [{}], "format": {"start_time": "N/A"}}, False))
+            {"video_streams": [{}], "format": {"start_time": "N/A"}}))
 
 
 @requires_ffmpeg
@@ -248,6 +263,9 @@ class OriginFixtures(unittest.TestCase):
         FFmWiz.appio.note = self._real_note
         shutil.rmtree(self._tmp, ignore_errors=True)
 
+    def _cues_and_frames(self, path):
+        return self._cues_against_the_picture(path), self._white_spans(path)
+
     def _assert_span(self, span, start, end, delta=0.06):
         self.assertAlmostEqual(start, span[0], delta=delta, msg=f"start of {span}")
         self.assertAlmostEqual(end, span[1], delta=delta, msg=f"end of {span}")
@@ -357,14 +375,17 @@ class RetimedOutputLandsOnThePicture(OriginFixtures):
         self._assert_span(cues[1], LATE[0] / 2, LATE[1] / 2)
 
 
-class CutKeepsTheSeekClock(OriginFixtures):
-    """A cut is seeked, so its cues stay on the container clock -- and must.
+class EveryEditKeepsThePictureClock(OriginFixtures):
+    """One clock for the seek, the trim ranges, the cues and the frames.
 
-    `-ss` adds the file's own start_time and `trim` reads frames the demuxer has
-    already rebased, so the retained ranges are container-relative. Measuring the
-    cues from the picture instead moves them by the container lead, which is the
-    regression these guard against.
+    `offset` starts at 1.0 on every stream, so its two clocks agree and nothing
+    here may move on it. `primed` starts its audio CONTAINER_LEAD before its
+    picture, which is where the seek and the trim ranges used to be read on the
+    wrong one. Each cue is checked against the white frames it is supposed to
+    sit on, not against a number: an offset applied to only one of the two
+    would satisfy a cue assertion on its own.
     """
+
 
     def test_a_single_range_cut(self):
         cues = self._cues_against_the_picture(
@@ -389,16 +410,94 @@ class CutKeepsTheSeekClock(OriginFixtures):
         self._assert_span(self._cues_against_the_picture(parts[1])[0],
                           LATE[0] - 2.0, LATE[1] - 2.0)
 
-    def test_a_cut_on_a_primed_container_keeps_the_container_answer(self):
-        # Pinned deliberately: moving a seeked cut onto the video clock is what
-        # would break it, because the seek itself never moved. The remaining
-        # `format.start_time - video.start_time` gap belongs to the command
-        # builders, not to the cue arithmetic.
-        cues = self._cues_against_the_picture(
+    # ---- the primed source: where the two clocks used to be read apart ---
+    def test_a_single_cut_on_a_primed_container(self):
+        # Was 1.0-2.0, one CONTAINER_LEAD late, with the white frames late too:
+        # `-ss 2.0` landed at picture 1.5 because the seek counted from the
+        # container. The cue AND the frames have to move together.
+        cues, frames = self._cues_and_frames(
             self._encode(self.primed, cut_keep_ranges=[(2.0, 4.0)]))
         self.assertEqual(1, len(cues), cues)
-        self._assert_span(cues[0], LATE[0] - 2.0 + CONTAINER_LEAD,
-                          LATE[1] - 2.0 + CONTAINER_LEAD)
+        self._assert_span(cues[0], LATE[0] - 2.0, LATE[1] - 2.0)
+        self.assertEqual(1, len(frames), frames)
+        self._assert_span(frames[0], LATE[0] - 2.0, LATE[1] - 2.0, delta=0.12)
+
+    def test_a_multi_range_cut_on_a_primed_container(self):
+        # The trim path, not the seek path: `trim` reads the demuxer's already
+        # rebased frames, so it needed the same offset for a different reason.
+        cues, frames = self._cues_and_frames(self._encode(
+            self.primed, cut_keep_ranges=[(0.0, 1.0), (3.0, 4.0)]))
+        self.assertEqual(2, len(cues), cues)
+        self._assert_span(cues[0], *EARLY)
+        self._assert_span(cues[1], 1.0, 1.0 + (LATE[1] - 3.0))
+        self.assertEqual(2, len(frames), frames)
+        self._assert_span(frames[0], EARLY[0], EARLY[1], delta=0.12)
+        self._assert_span(frames[1], 1.0, 1.0 + (LATE[1] - 3.0), delta=0.12)
+
+    def test_a_split_of_a_primed_container(self):
+        answers = self._answers(self.primed, separator_points=[2.0])
+        self.addCleanup(FFmWiz.release_artifacts, answers)
+        self.assertEqual(0, _run(FFmWiz.build_ffmpeg_command(answers)).returncode)
+        parts = sorted(self._tmp.glob("*_Part*.mkv"))
+        self.assertEqual(2, len(parts), parts)
+        self._assert_span(self._cues_against_the_picture(parts[0])[0], *EARLY)
+        self._assert_span(self._cues_against_the_picture(parts[1])[0],
+                          LATE[0] - 2.0, LATE[1] - 2.0)
+
+    def test_a_cut_then_slow_motion_on_a_primed_container(self):
+        # 0.5x, not 2x, and deliberately: slowing down MULTIPLIES an origin
+        # error, so the half-second the seek used to lose would arrive here as
+        # a full second. It is the strongest of these for that reason.
+        cues, frames = self._cues_and_frames(self._encode(
+            self.primed, cut_keep_ranges=[(2.0, 4.0)],
+            video_speed_enabled=True, video_speed_factor=0.5,
+            audio_speed_from_video=True))
+        self.assertEqual(1, len(cues), cues)
+        self._assert_span(cues[0], (LATE[0] - 2.0) * 2, (LATE[1] - 2.0) * 2)
+        self._assert_span(frames[0], (LATE[0] - 2.0) * 2, (LATE[1] - 2.0) * 2,
+                          delta=0.12)
+
+    def test_speeding_up_keeps_the_cue_on_the_picture_clock(self):
+        # The cue is what this defect governs, and it is exact.
+        #
+        # The PICTURE is not asserted at 2x, and not because it agrees: it does
+        # not. Measured on `offset`, whose two clocks agree, with no cut at all
+        # -- so neither the seek nor the trim is involved:
+        #
+        #     1x     cues (0.2, 0.8) (2.5, 3.5)   frames identical
+        #     0.5x   cues (0.4, 1.6) (5.0, 7.0)   frames identical
+        #     2x     cues (0.1, 0.4) (1.25, 1.75) frames (0.2, 0.6) (1.4, 1.9)
+        #
+        # Speeding up leaves the output frame rate at the SOURCE rate, so a
+        # graph now producing twice the frames is quantised back onto the old
+        # grid: the bands shift late and widen. That is a frame-rate decision
+        # on the encode side, reproducible without any clock disagreement, and
+        # a separate defect from this one. Asserting it here either way would
+        # tie this regression to an unrelated repair.
+        cues = self._cues_against_the_picture(self._encode(
+            self.primed, cut_keep_ranges=[(2.0, 4.0)],
+            video_speed_enabled=True, video_speed_factor=2.0,
+            audio_speed_from_video=True))
+        self.assertEqual(1, len(cues), cues)
+        self._assert_span(cues[0], (LATE[0] - 2.0) / 2, (LATE[1] - 2.0) / 2)
+
+    def test_a_cut_then_reverse_on_a_primed_container(self):
+        # Mirrored inside the kept window, so the cue lands at
+        # window - end .. window - start. A seek that started early would
+        # mirror around the wrong window and move it the other way.
+        cues, frames = self._cues_and_frames(self._encode(
+            self.primed, cut_keep_ranges=[(2.0, 4.0)], reverse_video=True))
+        self.assertEqual(1, len(cues), cues)
+        self._assert_span(cues[0], 2.0 - (LATE[1] - 2.0), 2.0 - (LATE[0] - 2.0))
+        self._assert_span(frames[0], 2.0 - (LATE[1] - 2.0), 2.0 - (LATE[0] - 2.0),
+                          delta=0.16)
+
+    def test_the_two_clocks_still_disagree_on_this_fixture(self):
+        # Guard the guard: on a source whose clocks agreed, every assertion in
+        # this class would pass with the offset removed.
+        self.assertAlmostEqual(CONTAINER_LEAD, FFmWiz.picture_clock_offset(
+            self._answers(self.primed)), delta=0.05)
+        self.assertEqual(0.0, FFmWiz.picture_clock_offset(self._answers(self.offset)))
 
 
 class JoinedSubtitlesUseTheSameOrigin(OriginFixtures):
@@ -432,6 +531,37 @@ class JoinedSubtitlesUseTheSameOrigin(OriginFixtures):
         self._assert_span(cues[0], *EARLY[:2], delta=0.005)
         self._assert_span(cues[2], EARLY[0] + SOURCE_SECONDS, EARLY[1] + SOURCE_SECONDS,
                           delta=0.005)
+
+    def test_a_joined_encode_puts_its_cues_on_its_own_frames(self):
+        # The merged arithmetic above is checked against numbers; this checks
+        # it against the picture the join actually produces. Two primed inputs,
+        # so a per-input origin error would land twice and grow.
+        answers = self._answers(self.primed)
+        self.addCleanup(FFmWiz.release_artifacts, answers)
+        probe = self._probe(self.primed, "-show_format", "-show_streams")
+        item = {
+            "path": self.primed, "probe": probe, "format": probe["format"],
+            "streams": probe["streams"], "duration": SOURCE_SECONDS,
+            "video_streams": [s for s in probe["streams"] if s["codec_type"] == "video"],
+            "audio_streams": [s for s in probe["streams"] if s["codec_type"] == "audio"],
+            "subtitle_streams": [s for s in probe["streams"] if s["codec_type"] == "subtitle"],
+            "attachment_streams": [], "data_streams": [],
+        }
+        answers["join_input_items"] = [item]
+        cmd = FFmWiz.build_join_encode_command(
+            answers, [dict(item), item], self._tmp / "joined.mkv")
+        result = _run(cmd)
+        self.assertEqual(0, result.returncode, result.stderr[-1200:])
+        joined = Path(answers["output_path"])
+        cues, frames = self._cues_and_frames(joined)
+        expected = [EARLY[:2], LATE[:2],
+                    (EARLY[0] + SOURCE_SECONDS, EARLY[1] + SOURCE_SECONDS),
+                    (LATE[0] + SOURCE_SECONDS, LATE[1] + SOURCE_SECONDS)]
+        self.assertEqual(len(expected), len(cues), cues)
+        self.assertEqual(len(expected), len(frames), frames)
+        for index, (start, end) in enumerate(expected):
+            self._assert_span(cues[index], start, end, delta=0.08)
+            self._assert_span(frames[index], start, end, delta=0.14)
 
     def test_a_non_zero_video_start_joins_unchanged(self):
         cues = self._joined_track(self.offset, self.offset)

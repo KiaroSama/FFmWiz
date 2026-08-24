@@ -214,34 +214,54 @@ def video_timeline_origin(probe: dict[str, Any]) -> float | None:
     return None
 
 
-def subtitle_source_origin(answers: dict[str, Any], seeked: bool) -> float:
+def picture_clock_offset(answers: dict[str, Any]) -> float:
+    """How far the demuxer's clock runs ahead of the picture, in seconds.
+
+    Without `-copyts` FFmpeg rebases every input timestamp by the CONTAINER
+    start -- the minimum across all streams -- so an input seek and a `trim`
+    range both count from there. Editor ranges, `TimelineMap`, cues and
+    chapters all count from the first video frame. The two clocks differ by
+    exactly this value, and it is 0 for an ordinary file.
+
+    Measured on a fixture whose audio starts 0.5 s before its picture: a
+    requested picture cut of 2.0-4.0 issued as `-ss 2.0` produced a white flash
+    at 1.0-1.9 instead of 0.5-1.5, because the seek landed at picture 1.5.
+    `-ss 2.522` -- the same range plus this offset -- put it at 0.5-1.5 (B08).
+
+    Add it to a source-clock seek or trim; never to a value that is already on
+    the demuxer's clock, and never to a range on the PROCESSED clock, which the
+    filter graph has already rebased with `setpts=PTS-STARTPTS`.
+    """
+    picture = video_timeline_origin({
+        "streams": list(answers.get("video_streams") or []),
+        "format": answers.get("format") or {},
+    })
+    if picture is None:
+        return 0.0
+    try:
+        container = float((answers.get("format") or {}).get("start_time"))
+    except (TypeError, ValueError):
+        return 0.0
+    return picture - container
+
+
+def subtitle_source_origin(answers: dict[str, Any]) -> float:
     """The source timestamp this encode turns into output zero.
 
-    Extracted cues have to be measured from whatever the encode calls zero, and
-    that is not one value today. When the encode SEEKS -- `-ss` before the input,
-    or a `trim` range -- zero is the CONTAINER start, because FFmpeg adds the
-    file's own start_time to an input seek and hands the filter graph timestamps
-    it has already rebased by the same amount. When it does not, the video chain
-    rebases with `setpts=PTS-STARTPTS`, so zero is the SELECTED VIDEO's first
-    frame instead.
+    ONE clock: the selected video's first frame. It used to be two -- the
+    picture for an unseeked encode and the CONTAINER for a seeked one, because
+    `-ss` and `trim` counted from the container while the unseeked chain
+    rebased to the video. That split put every cue of a seeked cut late by the
+    difference, and the difference is real: on a container starting 0.5 s
+    before its picture a 2.0-4.0 cut landed its 2.5-3.5 cue at 1.0-2.0 instead
+    of 0.5-1.5 (B08).
 
-    The two coincide for an ordinary file and diverge for one whose container
-    starts before its picture: an MKV whose AAC track carries negative priming
-    starts at -0.023 while the video starts at 0. Measured on FFmpeg 8.1.1
-    against a source flashing white over each cue, using the wrong one of the
-    two moves every cue by exactly that difference -- on a 0.545 s fixture a 2x
-    encode put the 0.100 s cue at 0.361 s, and a 0.5x one put 0.400 at 1.490.
-
-    ponytail: two origins because `-ss` and the filter rebase disagree in the
-    encoder, not because subtitles need two. One clock everywhere needs the seek
-    and the split intervals moved onto the video's, which is a change to the
-    command builders rather than to this arithmetic.
+    The seek and the trim ranges now carry `picture_clock_offset` themselves,
+    so both paths call the same moment zero and this needs no second answer.
     """
-    values: list[Any] = []
-    if not seeked:
-        values = [stream.get("start_time") for stream in (answers.get("video_streams") or [])]
-    values.append((answers.get("format") or {}).get("start_time"))
-    for value in values:
+    for value in ([stream.get("start_time") for stream
+                   in (answers.get("video_streams") or [])]
+                  + [(answers.get("format") or {}).get("start_time")]):
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -495,6 +515,7 @@ __all__ = [
     'retime_cues',
     'video_timeline_origin',
     'subtitle_source_origin',
+    'picture_clock_offset',
     'is_text_subtitle',
     'subtitle_track_metadata',
     'merge_joined_srt',
