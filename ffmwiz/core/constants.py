@@ -95,8 +95,20 @@ REVERSE_SEGMENT_SECONDS = 60.0
 # almost exactly (720p30: 300 frames -> 878 MB, 600 frames -> 1306 MB, i.e.
 # 1.43 MB/frame against a theoretical 1.38). A flat 60 s is therefore only
 # safe at SD: it is 5.2 GiB of frames at 1080p30 and 20.9 GiB at 4K30.
-REVERSE_SEGMENT_BUDGET_BYTES = 1024 ** 3
-REVERSE_SEGMENT_MIN_SECONDS = 2.0
+# The PEAK a reverse segment may reach, frames plus process overhead. The old
+# constant budgeted only the frame buffer and then clamped the segment to a
+# 2-second floor -- which on its own is 1.39 GiB at 4K60 8-bit, 2.78 GiB at
+# 4K60 10-bit and 5.56 GiB at 8K60, so the floor broke the cap it was meant to
+# respect (B05).
+REVERSE_PEAK_BUDGET_BYTES = 2 * 1024 ** 3
+# Decoder, encoder and muxer working set before a single frame is buffered.
+# Measured at ~450 MB for libx264 medium on this machine (720p30 peaked at
+# 878 MB holding 300 frames of a 415 MB estimate); rounded up.
+REVERSE_FIXED_OVERHEAD_BYTES = 512 * 1024 ** 2
+# Filter and frame queues on top of the raw frame total. Measured 1.43 MB per
+# frame against a theoretical 1.38 at 720p yuv420p, i.e. about 4%; 15% leaves
+# room for deeper graphs.
+REVERSE_FRAME_SAFETY = 1.15
 # Intermediates the bounded reverse pipeline writes are re-encoded once more
 # by a later stage, so they are kept visually lossless rather than at the
 # output quality: the user should not pay for the extra generation.
@@ -745,8 +757,9 @@ __all__ = [
     'STDERR_TAIL_LINES',
     'STDERR_TAIL_REPORT_LINES',
     'REVERSE_SEGMENT_SECONDS',
-    'REVERSE_SEGMENT_BUDGET_BYTES',
-    'REVERSE_SEGMENT_MIN_SECONDS',
+    'REVERSE_PEAK_BUDGET_BYTES',
+    'REVERSE_FIXED_OVERHEAD_BYTES',
+    'REVERSE_FRAME_SAFETY',
     'REVERSE_INTERMEDIATE_CRF',
     'DEFAULT_VIDEO_CODEC',
     'H264_NVENC_ENCODER',

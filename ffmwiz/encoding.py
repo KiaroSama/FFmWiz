@@ -380,41 +380,30 @@ def build_main_encode_reverse_segment_command(
 def reverse_segment_seconds(answers: dict[str, Any]) -> float:
     """How many seconds of video one reverse segment may safely hold.
 
-    `reverse` keeps every decoded frame of its input in memory, so the safe
-    segment length is set by the frame SIZE, not by a clock. Measured here,
-    peak RSS tracks the decoded-frame total almost exactly: 720p30 buffered
-    300 frames at 878 MB against a 415 MB frame estimate, and 600 frames at
-    1306 MB -- 1.43 MB per frame against a theoretical 1.38.
-
-    The flat 60 s the executor used to pass is only safe at SD. It is 1.0 GiB
-    of frames at 480p30, 5.2 GiB at 1080p30, 10.4 GiB at 1080p60 and 20.9 GiB
-    at 4K30, so the "avoids buffering the full video in RAM" promise was
-    defeated by the segment size itself (F10).
-
-    Falls back to the flat value when the frame geometry is unknown, so an
-    unprobeable input behaves as before rather than failing here.
+    Reads the geometry out of `answers` and defers the arithmetic to
+    `reverse_segment_seconds_for`, which lives beside the chunk splitter so the
+    standalone Video Speed / Reverse mode shares the same budget instead of
+    calling the splitter with no size at all (B06).
     """
     stream = (answers.get("video_streams") or [{}])[0]
-    try:
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
-    except (TypeError, ValueError):
-        width = height = 0
-    if width <= 0 or height <= 0:
-        return float(REVERSE_SEGMENT_SECONDS)
     try:
         fps = float(answers.get("fps") or services.get_video_fps(answers) or 0.0)
     except Exception:
         fps = 0.0
-    if fps <= 0:
-        fps = 30.0
-    # yuv420p: one luma byte plus half a byte of chroma per pixel.
-    bytes_per_second = width * height * 1.5 * fps
-    if bytes_per_second <= 0:
-        return float(REVERSE_SEGMENT_SECONDS)
-    seconds = REVERSE_SEGMENT_BUDGET_BYTES / bytes_per_second
-    return max(REVERSE_SEGMENT_MIN_SECONDS,
-               min(float(REVERSE_SEGMENT_SECONDS), seconds))
+    seconds = reverse_segment_seconds_for(
+        stream.get("width"), stream.get("height"), fps, stream.get("pix_fmt"))
+    log_info(
+        "Reverse budget: %sx%s %s at %.3f fps -> %.3f s/segment (peak cap "
+        "%.2f GiB incl. %.2f GiB overhead, %.0f%% frame safety)"
+        % (stream.get("width") or "?", stream.get("height") or "?",
+           stream.get("pix_fmt") or "unknown", fps or 0.0, seconds,
+           REVERSE_PEAK_BUDGET_BYTES / 1024 ** 3,
+           REVERSE_FIXED_OVERHEAD_BYTES / 1024 ** 3,
+           (REVERSE_FRAME_SAFETY - 1) * 100))
+    if not (stream.get("width") and stream.get("height")):
+        log_warn("Reverse budget: frame geometry unknown; the segment length "
+                 "assumes 1080p60 10-bit. Probe the input for a real bound.")
+    return seconds
 
 
 # Every user edit the staged reverse pipeline can apply, grouped by the
