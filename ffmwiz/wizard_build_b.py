@@ -268,13 +268,19 @@ def build_cut_filter_complex(
         video_sources = ["0:v:0"]
         if audio_for_cut is not None:
             audio_sources = [f"0:a:{audio_for_cut}"]
+    # `trim` reads what the demuxer hands the graph, which is already rebased by
+    # the container start, while these ranges come off the editor's picture
+    # clock. The same offset the input seek needs (B08).
+    offset = picture_clock_offset(answers)
     for idx, (start, end) in enumerate(keep_ranges):
+        trim_start, trim_end = start + offset, end + offset
         fc_parts.append(
-            f"[{video_sources[idx]}]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS[v{idx}]"
+            f"[{video_sources[idx]}]trim=start={trim_start:.6f}:end={trim_end:.6f},"
+            f"setpts=PTS-STARTPTS[v{idx}]"
         )
         if audio_for_cut is not None:
             fc_parts.append(
-                f"[{audio_sources[idx]}]atrim=start={start:.6f}:end={end:.6f},"
+                f"[{audio_sources[idx]}]atrim=start={trim_start:.6f}:end={trim_end:.6f},"
                 f"asetpts=PTS-STARTPTS[a{idx}]"
             )
 
@@ -684,7 +690,7 @@ def build_retimed_subtitle_inputs(answers: dict[str, Any]) -> list[dict[str, Any
     timeline = encode_timeline_map(answers)
     # Cut ranges reach FFmpeg as `-ss`/`trim`, which count from the container
     # start; without them the filter chain rebases to the video's first frame.
-    origin = subtitle_source_origin(answers, bool(answers.get("cut_keep_ranges")))
+    origin = subtitle_source_origin(answers)
     # Leased, not stored as a key: this builder is also called with a shallow
     # copy of answers, and a key written on the copy never reaches cleanup (R06).
     temp_dir = artifact_lease(answers).register(
@@ -790,7 +796,7 @@ def build_split_subtitle_inputs(
             raw = temp_dir / f"source{index:02d}.srt"
             # Every Split part is trimmed, so its clock is the container's.
             text = extract_subtitle_text(ffmpeg, source, index, raw, "Split subtitles",
-                                         subtitle_source_origin(answers, True),
+                                         subtitle_source_origin(answers),
                                          answers.get("ffprobe"))
             cues = parse_srt(text) if text else []
             if cues:

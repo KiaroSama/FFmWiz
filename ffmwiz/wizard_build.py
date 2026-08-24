@@ -467,8 +467,13 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 
     if single_cut:
         start, end = cut_keep_ranges[0]
-        if start > 0:
-            cmd.extend(["-ss", f"{start:.6f}"])
+        # The range is on the PICTURE clock; `-ss` counts from the container.
+        # Issuing the picture value raw started the cut early on any file whose
+        # container leads its picture -- a 2.0-4.0 cut of a source with 0.5 s of
+        # audio priming began at picture 1.5 (B08).
+        seek = start + picture_clock_offset(answers)
+        if seek > 0:
+            cmd.extend(["-ss", f"{seek:.6f}"])
         # -t belongs to the SOURCE INPUT, not to the output. As an output option
         # it only truncates what the graph already produced, which breaks any
         # filter that must consume its whole input first: `reverse` read the
