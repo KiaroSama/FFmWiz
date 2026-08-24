@@ -690,10 +690,17 @@ Mode 12 and the Mode 1 wizard join, and it applies to both stream‑copy and re�
 Speed/reverse is available in Mode 1, Mode 4 (folder), the standalone Mode 10 (video) and
 Mode 11 (audio), and inside the Unified Editor. Export filters:
 
-- video speed: `setpts=(PTS-STARTPTS)/speed`
+- video speed: `setpts=(PTS-STARTPTS)/speed`, plus `-fps_mode passthrough` on the output
 - video reverse: `reverse,setpts=(PTS-STARTPTS)/speed`
 - audio speed: `atempo`, split into safe chained stages when outside one stage's range
 - audio reverse: `areverse`
+
+`setpts` moves frames without changing how many there are, so speeding up delivers them
+faster than the source frame rate. Without `-fps_mode passthrough` the encoder keeps the
+source rate and drops whatever arrives early — measured at 2x, 40 frames became 22, and the
+picture that survived no longer lined up with its own subtitles. Passthrough keeps the
+filter graph's own timing, so every frame is written. At 1x and in slow motion the output is
+byte-identical either way.
 
 Because FFmpeg's `reverse`/`areverse` buffer the whole clip in memory, FFmWiz reverses video
 in short segments and concatenates them in reverse order to avoid RAM spikes.
@@ -1736,8 +1743,10 @@ directly; two-pass measures first for more accurate results. Typical targets: `-
 
 ### D.8 Speed and reverse
 
-Speed changes use `setpts` (video) and an `atempo` chain (audio). Reverse uses `reverse`/
-`areverse`. Both force a re-encode and FFmWiz remaps chapter timestamps to the new timeline.
+Speed changes use `setpts` (video) and an `atempo` chain (audio), with `-fps_mode passthrough`
+on the output so a faster picture keeps every frame instead of being resampled back to the
+source rate (see §11). Reverse uses `reverse`/`areverse`. Both force a re-encode and FFmWiz
+remaps chapter timestamps to the new timeline.
 
 ---
 
@@ -1908,6 +1917,7 @@ Source file info
 
 Final PowerShell command:
   ffmpeg -i "...Bac13.mkv" -map 0:v:0 -vf "scale=...,setpts=(PTS-STARTPTS)/1.5"
+    -fps_mode passthrough
     -c:v hevc_nvenc -preset p4 -tune hq -rc vbr -b:v 3500k -multipass fullres
     -map 0:a:0 -c:a aac -b:a 160k -ar 48000 -af "atempo=1.5,loudnorm=I=-16:..."
     -movflags +faststart "...\Bac13.mp4"
