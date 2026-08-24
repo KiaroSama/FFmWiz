@@ -26,6 +26,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -145,7 +146,18 @@ def encoder_supports_two_pass(video_encoder: Any) -> bool:
 
 
 def resolve_video_encoder(answers: dict[str, Any]) -> tuple[str, str | None, str | None]:
-    requested = answers.get("video_codec", DEFAULT_VIDEO_CODEC).strip()
+    """The encoder this job will really use.
+
+    Reads the RESOLVED codec, not the requested one. A container fallback or a
+    filter that forbids stream copy records its substitution in the effective
+    map, and every consumer of this resolver -- the encoder, profile, pixel
+    format and filter-path lines, the colour-range policy, the size estimate --
+    otherwise kept describing the `copy` the user asked for while the command
+    ran libx265 (F07). Falls back to the requested value when nothing has been
+    resolved yet, so the first call during a build behaves as before.
+    """
+    requested = str(effective_value(answers, "video_codec",
+                                    answers.get("video_codec", DEFAULT_VIDEO_CODEC))).strip()
     lowered = requested.lower()
     if lowered == "copy":
         return "copy", None, None
