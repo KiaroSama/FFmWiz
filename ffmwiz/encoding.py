@@ -27,6 +27,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -357,6 +358,11 @@ def build_main_encode_reverse_segment_command(
     end: float,
     output_path: Path,
 ) -> list[str]:
+    # Open the lease BEFORE the shallow copy. dict() shares the container only
+    # if the key is already there, so without this each segment got a lease of
+    # its own and every per-segment retimed-subtitle and chapter directory
+    # leaked -- the R06 trap, on the one path that makes the most copies.
+    artifact_lease(answers)
     segment_answers = dict(answers)
     segment_answers["cut_keep_ranges"] = [(start, end)]
     segment_answers["output_location"] = output_path.parent

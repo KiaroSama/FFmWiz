@@ -28,6 +28,8 @@ from pathlib import Path
 
 import FFmWiz
 
+from artifact_guard import NoLeakedArtifacts
+
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
@@ -66,7 +68,7 @@ class PerPartSlicing(unittest.TestCase):
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe required")
-class SplitOutputsCarrySubtitlesAndChapters(unittest.TestCase):
+class SplitOutputsCarrySubtitlesAndChapters(NoLeakedArtifacts, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls._tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_split_subs_test_"))
@@ -106,13 +108,13 @@ class SplitOutputsCarrySubtitlesAndChapters(unittest.TestCase):
             capture_output=True, text=True, timeout=120).stdout)
         streams = probe["streams"]
         extra.setdefault("separator_points", [3.0])
-        answers = _answers(
+        answers = self.own(_answers(
             input_path=self.source, probe=probe, format=probe["format"],
             output_location=out,
             video_streams=[s for s in streams if s["codec_type"] == "video"],
             audio_streams=[s for s in streams if s["codec_type"] == "audio"],
             subtitle_streams=[s for s in streams if s["codec_type"] == "subtitle"],
-            **extra)
+            **extra))
         cmd = [str(x) for x in FFmWiz.build_ffmpeg_command(answers)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         self.assertEqual(0, result.returncode, result.stderr[-2000:])
@@ -180,18 +182,18 @@ class SplitOutputsCarrySubtitlesAndChapters(unittest.TestCase):
                     f"part {index + 1}: cue {text!r} ends past the part")
 
 
-class BitmapTracksAreDeclaredNotSilentlyLost(unittest.TestCase):
+class BitmapTracksAreDeclaredNotSilentlyLost(NoLeakedArtifacts, unittest.TestCase):
     """A picture subtitle has no cue text to slice, so it cannot follow a
     Split. The documented contract is that it is stated and confirmed, the
     same as on the non-split cut/speed path -- never dropped in silence."""
 
     def _answers(self, codec):
-        return {
+        return self.own({
             "video_streams": [{"codec_type": "video"}],
             "subtitle_streams": [{"codec_type": "subtitle", "codec_name": codec}],
             "subtitle_tracks": [0], "keep_source_subtitles": True,
             "output_ext": "mkv", "input_path": "x.mkv",
-        }
+        })
 
     def _build(self, codec, confirm):
         from ffmwiz import wizard_build_b as wb

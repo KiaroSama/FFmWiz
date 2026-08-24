@@ -30,6 +30,8 @@ import uuid
 from pathlib import Path
 
 import FFmWiz
+
+from artifact_guard import NoLeakedArtifacts
 import cache_test_utils
 
 FFMPEG = shutil.which("ffmpeg")
@@ -123,7 +125,7 @@ class RetimeCues(unittest.TestCase):
 
 
 @requires_ffmpeg
-class RealEncodeBase(unittest.TestCase):
+class RealEncodeBase(NoLeakedArtifacts, unittest.TestCase):
     """Shared fixtures: build the sources once, encode, read the result back."""
 
     @classmethod
@@ -159,6 +161,7 @@ class RealEncodeBase(unittest.TestCase):
         return path
 
     def setUp(self):
+        super().setUp()
         FFmWiz.appio.USE_COLOR = False
         self._notes = []
         self._real_note = FFmWiz.appio.note
@@ -188,6 +191,9 @@ class RealEncodeBase(unittest.TestCase):
         return json.loads(result.stdout or "{}")
 
     def _answers(self, **extra):
+        # self.own(): every subclass reaches the builder through here, so one
+        # call covers all of them. Without it these direct-builder tests left
+        # the leased retimed-subtitle and chapter directories in %TEMP% (F13).
         source = self._source
         probe = self._probe(source)
         streams = probe["streams"]
@@ -207,7 +213,7 @@ class RealEncodeBase(unittest.TestCase):
             "resolution": "n", "color_range_choice": "tv",
         }
         answers.update(extra)
-        return answers
+        return self.own(answers)
 
     def _encode(self, **extra):
         """Build the real command, run it, and read the result back."""
