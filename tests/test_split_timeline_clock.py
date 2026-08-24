@@ -210,6 +210,44 @@ class TheRealDispatcherProducesTheRightParts(unittest.TestCase):
         self.assertIsNotNone(seen.get("total_duration"),
                              "the progress bar has nothing to divide by")
 
+    def test_cut_speed_reverse_and_split_together_match_a_reference_encode(self):
+        # The composite case. Keep 0-1 (red) and 2-4 (blue) = 3 s, run it at
+        # 2x = 1.5 s, reverse it (blue first), then split at the 1.0 s
+        # processed point. Compared against the SAME edit without a split.
+        #
+        # Durations are compared with a frame-count tolerance, not exactly:
+        # every output file carries two extra frames of container accounting,
+        # measured as +0.200 s at 10 fps and +0.066 s at 30 fps -- the same two
+        # frames, so it scales with the source and is not drift. Two parts
+        # therefore owe four frames where one reference file owes two.
+        edit = dict(cut_keep_ranges=[(0.0, 1.0), (2.0, 4.0)],
+                    video_speed_enabled=True, video_speed_factor=2.0,
+                    reverse_video=True)
+        reference = self._dispatch("compref", **edit)
+        if not reference:
+            reference = sorted((self._tmp / "compref").glob("*.mkv"))
+        self.assertTrue(reference, "the reference encode produced nothing")
+        reference_seconds = sum(
+            float(self._probe(part)["format"]["duration"]) for part in reference)
+
+        parts = self._dispatch("comp", separator_points=[1.0], **edit)
+        self.assertEqual(2, len(parts))
+        frame = 1.0 / 10.0  # the fixture's rate
+        total = sum(float(self._probe(part)["format"]["duration"]) for part in parts)
+        self.assertAlmostEqual(
+            total, reference_seconds, delta=4 * frame,
+            msg=f"split total {total:.3f}s vs reference {reference_seconds:.3f}s")
+
+        # Order and content: reverse puts the blue tail of the source first.
+        self.assertEqual("blue", self._colour_at(parts[0], 0.3))
+        self.assertEqual("red", self._colour_at(parts[1], 0.3))
+
+        # And the proportions survive: 2 s of blue against 1 s of red, halved.
+        blue, red = (float(self._probe(part)["format"]["duration"])
+                     for part in parts)
+        self.assertGreater(blue, red,
+                           "the blue part covers twice as much source as the red one")
+
     def test_an_untransformed_split_still_works(self):
         # The per-part executor keeps this case; it must not have been broken.
         parts = self._dispatch("plain", separator_points=[2.0])
