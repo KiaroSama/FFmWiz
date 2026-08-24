@@ -42,6 +42,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             "input_path": Path(tmp) / "A.mov",
             "output_location": Path(tmp),
             "output_ext": "mp4",
+            "color_range_choice": "tv",
             "video_streams": [video_stream()],
             "audio_streams": [audio_stream(bit_rate=bitrates[0])] if audio else [],
             "subtitle_streams": [],
@@ -140,6 +141,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
             "audio_tracks": [0],
             "audio_codec": "copy",
             "output_ext": "mp4",
+            "color_range_choice": "tv",
             "input_path": Path("x.mkv"),
             "format": {"duration": "5"},
         }

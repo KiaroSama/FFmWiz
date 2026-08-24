@@ -125,9 +125,10 @@ jobs:
         # tests/run_suite.py runs one module per worker process (stdlib only -
         # this project keeps zero test dependencies). The suite is dominated by
         # real ffmpeg child processes, so parallelism cut it 48s -> ~16s on a
-        # 16-core machine; a 2-core runner still gains. --strict-skips keeps the
-        # suite-shrink guard: a skip for a capability THIS job installs fails.
-        run: python tests/run_suite.py --strict-skips
+        # 16-core machine; a 2-core runner still gains. --require names what THIS
+        # job installs, so a skip for ffmpeg or numpy fails the job while a real
+        # NVENC-hardware skip stays legitimate.
+        run: python tests/run_suite.py --require ffmpeg --require numpy
 
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
   # module still fails CI now that the other jobs install nothing.
@@ -147,6 +148,11 @@ jobs:
 
       - name: Install runtime dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Fail early if the Qt modules the QML suites need are missing
+        # Without this the suites below self-skip, and a skip is a weaker signal
+        # than an import error: it tells you nothing about WHICH module failed.
+        run: python -c "import PySide6, PySide6.QtQml, PySide6.QtQuick; print('Qt OK', PySide6.__version__)"
 
       - name: Import the classic GUI headless
         env:
@@ -170,6 +176,9 @@ jobs:
         # An import check cannot see a broken binding, a missing QML property or
         # a QML-only join-audio path. This is the ONLY job with PySide6, so
         # without this step those suites skip in every job forever and report
-        # green (F13). --strict-skips makes a skip for a capability installed
-        # here a failure, so the coverage cannot silently disappear again.
-        run: python tests/run_suite.py --strict-skips -j 2 -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2
+        # green (F13).
+        #
+        # --require names what THIS job installs. The older --strict-skips
+        # classified skips with a pattern that never mentioned PySide6/QtQml/
+        # QtQuick, so it returned OK with exactly those classes skipped (B17).
+        run: python tests/run_suite.py --require pyside6 --require numpy --require ffmpeg -j 2 -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2

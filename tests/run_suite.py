@@ -38,9 +38,37 @@ PROJECT_ROOT = TESTS_DIR.parent
 DEFAULT_WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))
 
 # A skip is legitimate only when the machine genuinely cannot provide the thing
-# (no NVIDIA GPU, no symlink privilege). A skip for a capability CI installs
+# (no NVIDIA GPU, no symlink privilege). A skip for a capability the job INSTALLS
 # means the suite silently shrank -- the false green the guard exists to stop.
-CAPABILITY_SKIP_RE = re.compile(r"ffmpeg|ffprobe|numpy|powershell", re.I)
+#
+# Named capabilities rather than one fuzzy alternation: the old pattern was
+# `ffmpeg|ffprobe|numpy|powershell`, which did not mention PySide6, QtQml or
+# QtQuick. The CI job that installs PySide6 to run the QML behaviour suites
+# therefore reported OK with those very classes skipped -- a false green for the
+# exact dependency the guard was added to enforce (B17).
+CAPABILITY_PATTERNS: dict[str, re.Pattern[str]] = {
+    "ffmpeg": re.compile(r"ffmpeg|ffprobe", re.I),
+    "numpy": re.compile(r"numpy", re.I),
+    "powershell": re.compile(r"powershell|pwsh", re.I),
+    "pyside6": re.compile(r"pyside6|qtqml|qtquick|qt quick|qml", re.I),
+    "wheel": re.compile(r"setuptools|wheel", re.I),
+}
+
+# Genuinely environmental: no amount of installing fixes them on a given runner.
+# Matched FIRST, so "no usable NVIDIA CUDA/hevc_nvenc hardware" is never blamed
+# on the ffmpeg the job did install.
+ENVIRONMENT_SKIP_RE = re.compile(
+    r"nvenc|nvidia|cuda|symlink|privilege|hardware|no usable", re.I)
+
+
+def classify_skip(reason: str) -> str:
+    """Which capability a skip blames, or "" when it is environmental."""
+    if ENVIRONMENT_SKIP_RE.search(reason):
+        return ""
+    for name, pattern in CAPABILITY_PATTERNS.items():
+        if pattern.search(reason):
+            return name
+    return ""
 
 
 def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
@@ -112,7 +140,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="only modules whose name contains this substring; "
                              "repeat to select several")
     parser.add_argument("--strict-skips", action="store_true",
-                        help="fail when a suite skipped for a capability CI installs")
+                        help="fail when a suite skipped for any installable capability")
+    parser.add_argument("--require", action="append", default=None,
+                        metavar="CAPABILITY",
+                        help="fail when a suite skipped for THIS capability "
+                             "(repeat or comma-separate: "
+                             "ffmpeg, numpy, powershell, pyside6, wheel). "
+                             "Use it in a job that installs the dependency.")
     args = parser.parse_args(argv)
 
     modules = discover_modules(args.filter)
@@ -150,11 +184,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED (failures={len(failures)}, errors={len(errors)})")
         return 1
 
-    if args.strict_skips:
-        missing = [f"{test}: {why}" for test, why in skipped
-                   if CAPABILITY_SKIP_RE.search(why) and "nvenc" not in why.lower()]
+    required = {name.strip().lower()
+                for value in (args.require or [])
+                for name in value.split(",") if name.strip()}
+    unknown = required - set(CAPABILITY_PATTERNS)
+    if unknown:
+        print("unknown --require capability: " + ", ".join(sorted(unknown)))
+        print("known: " + ", ".join(sorted(CAPABILITY_PATTERNS)))
+        return 1
+
+    if args.strict_skips or required:
+        missing = []
+        for test, why in skipped:
+            capability = classify_skip(why)
+            if not capability:
+                continue
+            if capability in required or (args.strict_skips and not required):
+                missing.append(f"[{capability}] {test}: {why}")
         if missing:
-            print("suite shrank - capability missing on the runner:")
+            print("suite shrank - a capability this job provides was reported missing:")
             for item in missing:
                 print("  " + item)
             return 1

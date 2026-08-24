@@ -25,6 +25,7 @@ def _answers(tmp, items, **extra):
         "input_path": items[0]["path"],
         "output_location": Path(tmp),
         "output_ext": "mp4",
+        "color_range_choice": "tv",
         "video_streams": items[0]["video_streams"],
         "audio_streams": items[0]["audio_streams"],
         "subtitle_streams": [],

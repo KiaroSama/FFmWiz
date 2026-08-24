@@ -84,6 +84,12 @@ class SegmentedReverseReturnsTheSelectedWindow(unittest.TestCase):
             "video_streams": [s for s in info["streams"] if s["codec_type"] == "video"],
             "audio_streams": [], "subtitle_streams": [],
             "output_ext": "mkv",
+            # color_range_choice is REQUIRED by the strict builders: without it a
+            # source whose range FFmpeg does not report raises
+            # ColorRangeUnresolvedError. Synthetic lavfi sources report "tv" on
+            # FFmpeg 8.1 and nothing on 6.1, so omitting it passes here and
+            # errors on the project's declared floor (B16).
+            "color_range_choice": "tv",
             "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
             "video_speed_enabled": True, "video_speed_factor": 1.0,
             "reverse_video": True,

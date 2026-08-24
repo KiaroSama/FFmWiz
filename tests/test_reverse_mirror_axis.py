@@ -144,6 +144,7 @@ class TheRealOutputAgrees(NoLeakedArtifacts, unittest.TestCase):
             "audio_streams": [s for s in info["streams"] if s["codec_type"] == "audio"],
             "subtitle_streams": [s for s in info["streams"] if s["codec_type"] == "subtitle"],
             "output_ext": "mkv", "audio_tracks": [0],
+            "color_range_choice": "tv",
             "keep_source_subtitles": True, "subtitle_tracks": [0],
             "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
             "audio_codec": "aac", "audio_speed_from_video": True,

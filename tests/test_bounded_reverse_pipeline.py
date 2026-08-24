@@ -68,6 +68,12 @@ class TheSelectorRoutesAJoinedReverse(unittest.TestCase):
         answers = {
             "video_streams": [{"codec_type": "video", "codec_name": "h264"}],
             "audio_streams": [], "output_ext": "mkv",
+            # color_range_choice is REQUIRED by the strict builders: without it a
+            # source whose range FFmpeg does not report raises
+            # ColorRangeUnresolvedError. Synthetic lavfi sources report "tv" on
+            # FFmpeg 8.1 and nothing on 6.1, so omitting it passes here and
+            # errors on the project's declared floor (B16).
+            "color_range_choice": "tv",
             "video_speed_enabled": True, "video_speed_factor": 1.0,
             "reverse_video": True,
         }
@@ -170,6 +176,7 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
             "video_streams": items[0]["video_streams"],
             "audio_streams": items[0]["audio_streams"],
             "subtitle_streams": [], "output_ext": "mkv", "audio_tracks": [0],
+            "color_range_choice": "tv",
             "video_encoder": "libx264", "crf": 28, "preset": "ultrafast",
             "audio_codec": "aac", "join_input_items": items[1:],
             "video_speed_enabled": True, "video_speed_factor": 1.0,
