@@ -155,27 +155,38 @@ class Plan(unittest.TestCase):
         self.assertFalse(plan["supported"])
         self.assertIn("duration", plan["reason"])
 
-    def test_cuts_refuse_assembly(self):
+    # An edited timeline used to refuse assembly outright, which dropped every
+    # track the user had selected. The merged track is built on the unedited
+    # joined clock and then run through the same TimelineMap the picture uses,
+    # so all four of these now assemble (F09). Real cue times for each are in
+    # tests/test_join_subtitles_edited.py.
+    def test_cuts_no_longer_refuse_assembly(self):
         plan = FFmWiz.join_subtitle_plan(
             _answers(cut_keep_ranges=[(0.0, 5.0)]), [_item(), _item()])
-        self.assertFalse(plan["supported"])
-        self.assertIn("drift", plan["reason"])
+        self.assertTrue(plan["supported"], plan.get("reason"))
 
-    def test_a_split_refuses_assembly(self):
+    def test_a_split_no_longer_refuses_assembly(self):
         plan = FFmWiz.join_subtitle_plan(
             _answers(separator_points=[5.0]), [_item(), _item()])
-        self.assertFalse(plan["supported"])
+        self.assertTrue(plan["supported"], plan.get("reason"))
 
-    def test_a_speed_change_refuses_assembly(self):
+    def test_a_speed_change_no_longer_refuses_assembly(self):
         plan = FFmWiz.join_subtitle_plan(
             _answers(video_speed_enabled=True, video_speed=2.0), [_item(), _item()])
-        self.assertFalse(plan["supported"])
-        self.assertIn("timeline", plan["reason"])
+        self.assertTrue(plan["supported"], plan.get("reason"))
 
-    def test_reverse_refuses_assembly(self):
+    def test_reverse_no_longer_refuses_assembly(self):
         plan = FFmWiz.join_subtitle_plan(
             _answers(reverse_video=True), [_item(), _item()])
+        self.assertTrue(plan["supported"], plan.get("reason"))
+
+    def test_a_missing_duration_still_refuses(self):
+        # The one refusal that must stay: without durations the per-input cue
+        # offsets cannot be computed at all.
+        plan = FFmWiz.join_subtitle_plan(
+            _answers(), [_item(duration=0.0), _item()])
         self.assertFalse(plan["supported"])
+        self.assertIn("duration", plan["reason"])
 
 
 class SelectedTrackSurvivesIntoThePlan(unittest.TestCase):

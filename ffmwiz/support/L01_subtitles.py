@@ -429,15 +429,12 @@ def join_subtitle_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> 
         else:
             plan["reason"] = "the selected subtitle track does not exist in any input"
         return plan
-    if answers.get("cut_keep_ranges"):
-        plan["reason"] = "cuts move the joined timeline, so shifted cues would drift"
-        return plan
-    if answers.get("separator_points"):
-        plan["reason"] = "a split writes several files, each needing its own subtitle track"
-        return plan
-    if video_speed_transform_enabled(answers) or answers.get("reverse_video"):
-        plan["reason"] = "a speed or reverse change rescales the timeline"
-        return plan
+    # An edited timeline is no longer a refusal. The merged track is assembled
+    # on the UNEDITED joined clock here, and the caller then runs it through the
+    # same TimelineMap the video and audio use -- cuts, speed and reverse all
+    # compose, and a Split slices the transformed track into its parts. Refusing
+    # meant an edited join silently shipped none of the tracks the user picked,
+    # even though every piece needed to carry them already existed (F09).
 
     durations = [float(item.get("duration") or 0.0) for item in items]
     if any(duration <= 0 for duration in durations):
