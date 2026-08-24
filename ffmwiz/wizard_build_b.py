@@ -581,10 +581,17 @@ def joined_timeline_map(answers: dict[str, Any],
     A join's source timeline is the sum of its inputs, so `encode_timeline_map`
     -- which reads input 1's format duration -- describes the wrong axis for it.
     Cuts, speed and reverse are the same answers either way.
+
+    Summed over each input's PICTURE, for the reason `encode_timeline_map` uses
+    `video_stream_span_seconds`: `concat` splices frames, so a container that
+    outlives its video contributes nothing to the joined picture. Summing
+    `item["duration"]` made a 2.000 s picture inside a 3.000 s MKV count as
+    3.000 s of joined timeline, which moved every cut, split point and cue on
+    the edited join by the difference (B07).
     """
     return TimelineMap(
         keep_ranges=list(answers.get("cut_keep_ranges") or []),
-        source_duration=sum(float(item.get("duration") or 0.0) for item in items),
+        source_duration=sum(join_item_picture_span(item) for item in items),
         speed=encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0,
         reverse=bool(answers.get("reverse_video")),
     )
@@ -819,6 +826,15 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     # but only if the lease already exists at copy time.
     artifact_lease(answers)
     effective_settings(answers)
+    # BEFORE the command exists, so the summary the user confirms and the
+    # command that runs cannot disagree. `build_ffmpeg_command` already did
+    # this; the join path did not, so a config-retained cpu_two_pass survived
+    # into the summary and was only disabled later by the executor -- and a
+    # declined run never reached that point at all (B09).
+    _two_pass_off = normalize_cpu_two_pass_selection(answers)
+    if _two_pass_off:
+        appio.note(f"CPU two-pass was turned off for this job: {_two_pass_off}.")
+        log_info(f"CPU two-pass disabled before the join summary: {_two_pass_off}")
     join_answers = dict(answers)
     join_answers["_join_complex_graph"] = True
     video_encoder, tag, profile = resolve_video_encoder(join_answers)

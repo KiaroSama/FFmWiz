@@ -116,6 +116,69 @@ class UnsupportedCombinationsAreTurnedOff(unittest.TestCase):
         self.assertEqual([], self.notes)
 
 
+class TheJoinBuilderNormalisesBeforeTheSummary(unittest.TestCase):
+    """`build_ffmpeg_command` normalised early; the JOIN path did not (B09).
+
+    A join is built by `build_join_encode_command`, so a config-retained
+    `cpu_two_pass` reached the summary and the printed command untouched and
+    was only disabled later, inside the executor. Automatic execution therefore
+    differed from the command the user confirmed, and DECLINING execution never
+    reached the normalisation at all.
+    """
+
+    def setUp(self):
+        self.notes = []
+        self._real_note = FFmWiz.appio.note
+        FFmWiz.appio.note = self.notes.append
+
+    def tearDown(self):
+        FFmWiz.appio.note = self._real_note
+
+    def _build(self):
+        item = {
+            "path": "b.mkv", "probe": {}, "format": {"duration": "2.0"},
+            "streams": [], "video_streams": [{"codec_type": "video", "width": 320,
+                                              "height": 240, "color_range": "tv"}],
+            "audio_streams": [], "subtitle_streams": [], "data_streams": [],
+            "duration": 2.0,
+        }
+        answers = {
+            "ffmpeg": "ffmpeg", "ffprobe": "ffprobe",
+            "input_path": FFmWiz.Path("a.mkv"),
+            "probe": {}, "format": {"duration": "2.0"},
+            "output_location": FFmWiz.Path("."),
+            "video_streams": item["video_streams"], "audio_streams": [],
+            "subtitle_streams": [], "output_ext": "mkv",
+            "color_range_choice": "tv",
+            "video_codec": "H264", "video_encoder": "libx264", "crf": 28,
+            "preset": "ultrafast", "audio_codec": "aac",
+            "join_input_items": [item], "cpu_two_pass": True,
+        }
+        items = [{**item, "path": FFmWiz.Path("a.mkv")}, item]
+        try:
+            FFmWiz.build_join_encode_command(answers, items, FFmWiz.Path("out.mkv"))
+        except Exception:
+            # The command may not complete without real media; the
+            # normalisation happens before any of that and is what matters.
+            pass
+        return answers
+
+    def test_the_flag_is_cleared_while_the_command_is_being_built(self):
+        answers = self._build()
+        self.assertFalse(answers.get("cpu_two_pass"),
+                         "the summary would still have claimed a two-pass encode")
+
+    def test_the_resolved_map_records_it_too(self):
+        answers = self._build()
+        self.assertIs(False, FFmWiz.effective_settings(answers).get("cpu_two_pass"))
+
+    def test_the_user_is_told_before_confirming(self):
+        self._build()
+        joined = " ".join(self.notes).lower()
+        self.assertIn("two-pass", joined)
+        self.assertIn("turned off", joined)
+
+
 class NoExecutorCanSkipTheCheck(unittest.TestCase):
     """The builder is not the only entry point -- joins skip it entirely."""
 
