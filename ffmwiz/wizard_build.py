@@ -373,6 +373,14 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     # reverse segment rebuilds from `dict(answers)`; opened later, the copy gets
     # one of its own and everything it registers leaks.
     artifact_lease(answers)
+    # Before the command exists, so the user is told while the settings summary
+    # and the command still agree: a config-retained cpu_two_pass=y reaches a
+    # Join/Split/cut/speed/reverse job the wizard would never have offered it
+    # for, and either fails at pass 2 or is silently run as one pass (F11).
+    _two_pass_off = normalize_cpu_two_pass_selection(answers)
+    if _two_pass_off:
+        appio.note(f"CPU two-pass was turned off for this job: {_two_pass_off}.")
+        log_info(f"CPU two-pass disabled before execution: {_two_pass_off}")
     ffmpeg = answers["ffmpeg"]
     input_path: Path = answers["input_path"]
     output_path = services.build_output_path(answers)
@@ -461,6 +469,16 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         start, end = cut_keep_ranges[0]
         if start > 0:
             cmd.extend(["-ss", f"{start:.6f}"])
+        # -t belongs to the SOURCE INPUT, not to the output. As an output option
+        # it only truncates what the graph already produced, which breaks any
+        # filter that must consume its whole input first: `reverse` read the
+        # ENTIRE file and -t then kept the wrong end of the reversed result
+        # (F01) -- keeping 0-2s of a red/blue clip returned blue. It also broke
+        # slow motion, where a 4 s window at 0.5x wants an 8 s output and an
+        # output -t 4 cut it back to 4 s. Placed here it binds to the source
+        # only; the auxiliary chapter/subtitle inputs come later and are
+        # unaffected, which is what the old "-t after every -i" note was about.
+        cmd.extend(["-t", f"{max(0.0, end - start):.6f}"])
 
     cmd.extend(["-i", str(input_path)])
 
@@ -496,15 +514,6 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     retimed_subtitle_base = 1 + chapter_metadata_inputs
     for retimed_track in retimed_subtitles:
         cmd.extend(["-i", str(retimed_track["path"])])
-
-    # -t must come after EVERY -i, otherwise it is parsed as an input option for
-    # whichever input follows it. Emitted before the chapter-metadata input it
-    # bound the duration to that ffmetadata file instead of the output, and the
-    # cut silently ran to the end of the source. `-ss` stays before the source
-    # -i on purpose: there it is the fast demuxer seek.
-    if single_cut:
-        start, end = cut_keep_ranges[0]
-        cmd.extend(["-t", f"{max(0.0, end - start):.6f}"])
 
     # Determine audio mapping. When multi-range cuts are active, only one audio
     # output stream is produced by the filter_complex concat. Pick the first

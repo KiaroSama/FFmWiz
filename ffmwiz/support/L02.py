@@ -26,6 +26,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -433,6 +434,50 @@ def cpu_two_pass_applicable(answers: dict[str, Any]) -> bool:
     return True
 
 
+def cpu_two_pass_unsupported_reason(answers: dict[str, Any]) -> str:
+    """Why this job cannot run CPU two-pass, in the user's terms."""
+    if answers.get("join_input_items"):
+        return "a join builds its video through filter_complex, which pass 1 cannot analyse"
+    if answers.get("separator_points") or answers.get("split_output_paths"):
+        return "a Split writes several outputs from one graph, so one stats file cannot describe them"
+    if answers.get("reverse_video"):
+        return "reverse is encoded in bounded segments, and a stats file cannot span them"
+    if answers.get("cut_keep_ranges") or answers.get("video_speed_enabled"):
+        return "cuts and speed rebuild the video timeline, so pass 1 would measure a different one"
+    if answers.get("use_gpu"):
+        return "the GPU encoder has its own rate-control passes"
+    if str(answers.get("video_codec") or "").strip().lower() in {"copy", "n"}:
+        return "the video is stream-copied, so there is nothing to encode twice"
+    return "this encoder or output does not support it"
+
+
+def normalize_cpu_two_pass_selection(answers: dict[str, Any]) -> str:
+    """Reconcile a retained `cpu_two_pass` with what this job can really do.
+
+    The wizard hides the question for a join, a Split, cuts, speed and reverse,
+    but a config file carries `cpu_two_pass=y` straight past that. Nothing
+    re-checked it once the job was known, so a two-input Join really did run
+    `build_cpu_two_pass_commands`: pass 1 had no `-filter_complex` and a
+    hardcoded `-map 0:v:0`, and pass 2 died with "Incomplete MB-tree stats
+    file" (exit 187). On the segmented-reverse and per-part Split executors the
+    runner is called directly, so the same retained flag was silently downgraded
+    to a single pass while the summary still reported "CPU two-pass: yes" (F11).
+
+    Returns "" when nothing changed, otherwise the reason it was turned off.
+    """
+    if not answers.get("cpu_two_pass"):
+        return ""
+    if cpu_two_pass_applicable(answers):
+        return ""
+    reason = cpu_two_pass_unsupported_reason(answers)
+    answers["cpu_two_pass"] = False
+    effective_settings(answers)["cpu_two_pass"] = False
+    # Pure by design: this layer is below appio, and returning the reason keeps
+    # the notice with the caller that owns the user's screen. A second call
+    # returns "" because the flag is already off, so the message appears once.
+    return reason
+
+
 def embedded_attachment_display_line(stream: dict[str, Any], relative_index: int) -> str:
     filename = stream_tag_value(stream, "filename", "")
     mimetype = stream_tag_value(stream, "mimetype", "")
@@ -502,6 +547,30 @@ def should_use_cuda_decode_for_complex_graph(
         or video_speed_transform_enabled(answers)
         or video_filters_required(answers)
     )
+
+
+def split_parts_share_the_source_clock(answers: dict[str, Any]) -> bool:
+    """True when a Split point means the same instant in the source and output.
+
+    Split points are chosen on the FINAL processed timeline, but the per-part
+    executor rebuilds each part as its own single-input job whose keep range is
+    read straight off the SOURCE clock. That is only equivalent while nothing
+    has moved the clock: a cut collapses it, a speed change scales it, reverse
+    mirrors it.
+
+    Measured on a 4 s red/blue source (F02): a 2x Split at the 1.0 s processed
+    point produced parts of 0.700 s and 1.700 s instead of two ~1 s parts, and a
+    reversed Split returned red then blue when the reversed timeline starts
+    blue. When this returns False the caller must execute the already-built
+    multi-output graph, which is planned on the processed clock.
+    """
+    if answers.get("cut_keep_ranges"):
+        return False
+    if video_speed_transform_enabled(answers):
+        return False
+    if answers.get("reverse_video"):
+        return False
+    return True
 
 
 def reverse_video_needs_segmented_main_encode(answers: dict[str, Any]) -> bool:
@@ -777,11 +846,14 @@ __all__ = [
     'audio_only_transform_prompt_applicable',
     'detected_fps_limit',
     'cpu_two_pass_applicable',
+    'cpu_two_pass_unsupported_reason',
+    'normalize_cpu_two_pass_selection',
     'embedded_attachment_display_line',
     'separator_output_path',
     'can_use_cuda_fast_path',
     'should_use_cuda_decode_for_complex_graph',
     'reverse_video_needs_segmented_main_encode',
+    'split_parts_share_the_source_clock',
     'parse_crop_config_value',
     'apply_config_subtitle_options',
     'apply_config_source_extra_options',

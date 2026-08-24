@@ -461,8 +461,12 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     cmd = answers["cmd"]
     if not answers.get("start_now", True):
         appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        cleanup_join_concat_list(answers)
-        cleanup_encode_chapter_metadata(answers)
+        # Keep, do not clean. This is the PRIMARY dispatcher; only the
+        # standalone Mode 12 branch had been fixed, so declining here still
+        # deleted the generated concat list, retimed/split subtitles and
+        # chapter metadata the printed command names -- the command was dead
+        # before the user could read it (F03).
+        preserve_artifacts_for_manual_run(answers)
         return None
 
     print()
@@ -476,7 +480,15 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
     # join_input_items entirely and clips the range to input 0's duration --
     # a Join + Split job encoded only the first file. The already-built join
     # command contains a correct multi-output split graph.
-    if answers.get("separator_points") and not answers.get("join_input_items"):
+    # ...and only while the source clock still matches the processed one. Split
+    # points are chosen on the FINAL timeline, but the per-part rebuild reads
+    # them as SOURCE seconds, so a 2x Split at 1.0 s produced 0.700 s + 1.700 s
+    # parts and a reversed Split returned its parts in the original order
+    # (F02). The built multi-output graph is planned on the processed clock, so
+    # a transformed Split falls through to it.
+    if (answers.get("separator_points")
+            and not answers.get("join_input_items")
+            and split_parts_share_the_source_clock(answers)):
         try:
             return run_separator_main_encode(answers)
         finally:
@@ -498,15 +510,6 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
              f"{format_elapsed(source_duration) if source_duration else 'unknown'}; "
              f"estimated processed duration: {format_elapsed(processed_duration) if processed_duration else 'unknown'}; "
              f"progress duration: {format_elapsed(progress_duration) if progress_duration else 'unknown'}")
-    if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
-        # Same finally as the two neighbouring paths: the segmented reverse
-        # builds its own per-segment files through the artifact lease, so
-        # returning straight out of here leaked every one of them.
-        try:
-            return run_segmented_reverse_main_encode(answers)
-        finally:
-            cleanup_join_concat_list(answers)
-            cleanup_encode_chapter_metadata(answers)
     try:
         split_progress_fps = None
         if answers.get("separator_points") and progress_duration > 0:
@@ -522,15 +525,14 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
         progress_output_paths = [Path(path) for path in (answers.get("split_output_paths") or [])]
         if not progress_output_paths and answers.get("output_path"):
             progress_output_paths = [Path(answers["output_path"])]
-        if cpu_two_pass_enabled_for_command(answers, cmd):
-            return run_cpu_two_pass_ffmpeg(
-                cmd,
-                answers,
-                total_duration=(progress_duration if progress_duration > 0 else None),
-                progress_output_paths=progress_output_paths,
-            )
-        return_code, elapsed = run_ffmpeg_with_progress(
-            cmd, total_duration=(progress_duration if progress_duration > 0 else None),
+        # execute_encode_plan, not a second copy of the selection. This branch
+        # duplicated the segmented-reverse test and then called the runner
+        # directly, so the shared selector's memory notice never fired on the
+        # PRIMARY path -- a joined reverse ran one full-buffer pass while the
+        # summary said it ran in short segments (F10).
+        return_code, elapsed = execute_encode_plan(
+            answers, cmd,
+            total_duration=(progress_duration if progress_duration > 0 else None),
             label="FFmpeg encode",
             split_progress_fps=split_progress_fps,
             split_progress_part_durations=split_progress_part_durations,
