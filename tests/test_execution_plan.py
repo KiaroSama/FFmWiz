@@ -37,12 +37,12 @@ class PlanSelection(unittest.TestCase):
         self.notes = []
         self.bounded_join = []
         self._real_segmented = encoding.run_segmented_reverse_main_encode
-        self._real_bounded = encoding.run_bounded_join_reverse
+        self._real_bounded = encoding.run_bounded_reverse_pipeline
         self._real_runner = encoding.run_ffmpeg_with_progress
         self._real_note = FFmWiz.appio.note
         encoding.run_segmented_reverse_main_encode = (
             lambda answers: (self.segmented.append(answers) or (0, 0.0)))
-        encoding.run_bounded_join_reverse = (
+        encoding.run_bounded_reverse_pipeline = (
             lambda answers: (self.bounded_join.append(answers) or (0, 0.0)))
         encoding.run_ffmpeg_with_progress = (
             lambda cmd, **kwargs: (self.one_shot.append(cmd) or (0, 0.0)))
@@ -50,7 +50,7 @@ class PlanSelection(unittest.TestCase):
 
     def tearDown(self):
         encoding.run_segmented_reverse_main_encode = self._real_segmented
-        encoding.run_bounded_join_reverse = self._real_bounded
+        encoding.run_bounded_reverse_pipeline = self._real_bounded
         encoding.run_ffmpeg_with_progress = self._real_runner
         FFmWiz.appio.note = self._real_note
 
@@ -76,7 +76,7 @@ class PlanSelection(unittest.TestCase):
     def test_a_joined_reverse_never_reaches_the_single_input_segmenter(self):
         # Pointing the segmenter at a join reverses input 1 alone (R01). It is
         # used on the forward-joined INTERMEDIATE instead, from inside
-        # run_bounded_join_reverse.
+        # run_bounded_reverse_pipeline.
         self._run(_answers(join_input_items=[{"path": "b.mkv"}]))
         self.assertEqual(0, len(self.segmented))
 
@@ -88,13 +88,21 @@ class PlanSelection(unittest.TestCase):
         self.assertEqual(1, len(self.bounded_join))
         self.assertEqual(0, len(self.one_shot))
 
-    def test_a_split_join_still_warns_that_it_is_one_pass(self):
-        # The bounded path writes a single intermediate, so the split graph
-        # keeps the joined command -- and keeps saying so.
+    def test_a_split_join_takes_the_pipeline_as_well(self):
+        # Reversing each part separately returns them in the original order,
+        # and reversing the whole join at once is the unbounded plan. The
+        # pipeline joins forward, reverses in segments, then splits.
         self._run(_answers(join_input_items=[{"path": "b.mkv"}],
                            separator_points=[5.0]))
-        self.assertEqual(0, len(self.bounded_join))
-        self.assertIn("one pass", " ".join(self.notes).lower())
+        self.assertEqual(1, len(self.bounded_join))
+        self.assertEqual(0, len(self.one_shot))
+
+    def test_a_plain_split_reverse_takes_it_too(self):
+        # No join at all: a Split still hands `reverse` the whole timeline,
+        # about 56 GiB for ten minutes of 1080p30.
+        self._run(_answers(separator_points=[5.0]))
+        self.assertEqual(1, len(self.bounded_join))
+        self.assertEqual(0, len(self.one_shot))
 
     def test_an_ordinary_reverse_does_not_emit_that_warning(self):
         self._run(_answers())

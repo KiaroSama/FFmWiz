@@ -713,12 +713,21 @@ memory. Each segment is sized against a 1 GiB budget:
 Each segment is bounded **before** the filter sees it (`-ss`/`-t` on the source input), so the
 decoder stops at the segment boundary rather than reading the whole file and trimming after.
 
-**Reversing a join** runs in two stages: the inputs are joined forward into a temporary file
-first, and that file is then reversed in the same bounded segments. Reversing a joined timeline
-in one pass would need memory proportional to every input added together — roughly 336 GiB of
-decoded frames for an hour of joined 1080p30 — so it is not attempted. The temporary file is
-written at a high quality and removed with the rest of the job's temporary files. A join that is
-*also* split still runs in one pass, and says so before it starts.
+**A join or a Split reverses in stages**, so the filter is never handed a whole timeline:
+
+1. **Join** the inputs forward into a temporary file. The segmented executor understands one
+   input, so pointing it at a join would reverse the first file alone.
+2. **Reverse** that single file in the bounded segments above, applying the cuts and speed
+   along with it.
+3. **Split** the reversed result. Split points are chosen on the final processed timeline,
+   which is exactly what stage 2 produced.
+
+Stages 1 and 3 are skipped when they do not apply. One pass instead would need memory
+proportional to the whole timeline — roughly 336 GiB of decoded frames for an hour of joined
+1080p30, or 56 GiB for ten split minutes of it — so neither is attempted. Each stage costs one
+extra encode; the temporary files are written at a visually lossless quality and removed with
+the rest of the job's temporary files, and the output parts keep the names the summary showed
+you before the run started.
 
 ---
 
