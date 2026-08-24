@@ -520,7 +520,14 @@ def encode_timeline_map(answers: dict[str, Any]) -> TimelineMap:
     its own single-input job carrying that part's `cut_keep_ranges`, which is
     already just another set of keep ranges.
     """
-    source_duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    # The PICTURE's span, not the container's. Reverse mirrors around this, so
+    # a container that outlives its video -- audio padding, a trailing subtitle,
+    # AAC priming -- pushed every retimed cue out by the difference: 523 ms on a
+    # 4.000 s video inside a 4.523 s file.
+    source_duration = video_stream_span_seconds(
+        (answers.get("video_streams") or [{}])[0], answers.get("format"))
+    if source_duration <= 0:
+        source_duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     return TimelineMap(
         keep_ranges=list(answers.get("cut_keep_ranges") or []),
         source_duration=source_duration,
