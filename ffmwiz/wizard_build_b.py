@@ -1100,7 +1100,12 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         cmd.extend(subtitle_args)
         append_subtitle_track_metadata(cmd, mapped_subtitle_tracks)
         wizard.append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
-        if vfr_join and video_encoder != "copy":
+        if video_speed_transform_enabled(join_answers) and video_encoder != "copy":
+            # A speed change outranks the VFR choice below: `vfr` still drops
+            # frames against the guessed source rate (measured 40 -> 22 at 2x),
+            # and only one -fps_mode may be given.
+            cmd.extend(VIDEO_SPEED_OUTPUT_TIMING_ARGS)
+        elif vfr_join and video_encoder != "copy":
             # Preserve variable timing across the joined segments instead of
             # resampling every frame to a single constant rate.
             cmd.extend(["-fps_mode", "vfr"])

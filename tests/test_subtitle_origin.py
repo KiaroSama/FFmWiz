@@ -457,29 +457,21 @@ class EveryEditKeepsThePictureClock(OriginFixtures):
         self._assert_span(frames[0], (LATE[0] - 2.0) * 2, (LATE[1] - 2.0) * 2,
                           delta=0.12)
 
-    def test_speeding_up_keeps_the_cue_on_the_picture_clock(self):
-        # The cue is what this defect governs, and it is exact.
-        #
-        # The PICTURE is not asserted at 2x, and not because it agrees: it does
-        # not. Measured on `offset`, whose two clocks agree, with no cut at all
-        # -- so neither the seek nor the trim is involved:
-        #
-        #     1x     cues (0.2, 0.8) (2.5, 3.5)   frames identical
-        #     0.5x   cues (0.4, 1.6) (5.0, 7.0)   frames identical
-        #     2x     cues (0.1, 0.4) (1.25, 1.75) frames (0.2, 0.6) (1.4, 1.9)
-        #
-        # Speeding up leaves the output frame rate at the SOURCE rate, so a
-        # graph now producing twice the frames is quantised back onto the old
-        # grid: the bands shift late and widen. That is a frame-rate decision
-        # on the encode side, reproducible without any clock disagreement, and
-        # a separate defect from this one. Asserting it here either way would
-        # tie this regression to an unrelated repair.
-        cues = self._cues_against_the_picture(self._encode(
+    def test_a_cut_then_speeding_up_on_a_primed_container(self):
+        # This one used to assert the CUE only. Speeding up was dropping frames
+        # against the guessed source rate, so the picture lagged its own cues
+        # and no assertion here could hold both. That was a separate defect --
+        # it reproduced with no cut on a source whose clocks agree -- and it is
+        # now fixed in tests/test_speed_frame_retention.py, so the picture is
+        # back under assertion here where it belongs.
+        cues, frames = self._cues_and_frames(self._encode(
             self.primed, cut_keep_ranges=[(2.0, 4.0)],
             video_speed_enabled=True, video_speed_factor=2.0,
             audio_speed_from_video=True))
         self.assertEqual(1, len(cues), cues)
         self._assert_span(cues[0], (LATE[0] - 2.0) / 2, (LATE[1] - 2.0) / 2)
+        self._assert_span(frames[0], (LATE[0] - 2.0) / 2, (LATE[1] - 2.0) / 2,
+                          delta=0.12)
 
     def test_a_cut_then_reverse_on_a_primed_container(self):
         # Mirrored inside the kept window, so the cue lands at

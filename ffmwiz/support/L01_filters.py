@@ -68,6 +68,27 @@ def build_video_speed_filter(speed: float, reverse: bool) -> str:
     return ",".join(filters)
 
 
+# The output options a retimed video needs, and the reason the filter alone is
+# not enough. `setpts` moves frames without changing how many there are, but the
+# output frame rate stays whatever FFmpeg guessed from the SOURCE, so speeding up
+# hands the encoder more frames per second than that rate carries and it silently
+# drops the excess. Measured on a 10 fps, 40-frame source:
+#
+#     2.0x   40 frames -> 22   white band (0.20, 0.60) instead of (0.10, 0.40)
+#     1.5x   40 frames -> 28   white band (0.20, 0.70) instead of (0.13, 0.53)
+#
+# So nearly half the picture was thrown away and what survived no longer sat on
+# its own subtitles. `-fps_mode vfr` does NOT help -- it still drops against the
+# guessed rate (22 frames, identical bands) -- and `-r` cannot be combined with a
+# non-CFR mode at all ("One of -r/-fpsmax was specified together a non-CFR
+# -vsync/-fps_mode. This is contradictory."). Passthrough keeps the graph's own
+# timing, which is the only source of truth once `setpts` has run.
+#
+# It needs no speed threshold: at 1.0x and at 0.5x the output is byte-identical
+# to not passing it, because nothing is arriving faster than the guessed rate.
+VIDEO_SPEED_OUTPUT_TIMING_ARGS: tuple[str, ...] = ("-fps_mode", "passthrough")
+
+
 def loudnorm_analysis_filter(target_i: float) -> str:
     """Pass-1 measurement filter: same target, JSON output, no media encode."""
     return (
@@ -162,6 +183,7 @@ def hardsub_subtitle_filter(answers: dict[str, Any]) -> str:
 __all__ = [
     'atempo_filter_chain',
     'build_video_speed_filter',
+    'VIDEO_SPEED_OUTPUT_TIMING_ARGS',
     'loudnorm_analysis_filter',
     'source_sar',
     'crop_margins_validation_message',
