@@ -156,6 +156,17 @@ class SplitOutputsCarrySubtitlesAndChapters(unittest.TestCase):
         self.assertTrue(carried, "the announced retimed track must reach an output")
         self.assertIn("SECOND HALF", carried)
 
+    def test_a_cut_that_removes_every_cue_carries_none(self):
+        # Branch trap: the retimed set is empty here because the cut removed
+        # every cue, NOT because the clock stands still. Falling back to the
+        # source track would slice cues that belong to a timeline this output
+        # does not use -- part 1 would show "FIRST HALF" at 0.5 s.
+        parts = self._run_split("empty", cut_keep_ranges=[(2.6, 3.9)],
+                                separator_points=[0.6])
+        for index, part in enumerate(parts):
+            self.assertEqual([], self._cues_of(part),
+                             f"part {index + 1} carried a cue the cut removed")
+
     def test_no_cue_outlives_the_part_that_carries_it(self):
         parts = self._run_split("bounds")
         for index, part in enumerate(parts):
@@ -167,6 +178,52 @@ class SplitOutputsCarrySubtitlesAndChapters(unittest.TestCase):
                 self.assertLessEqual(
                     end, duration + 0.5,
                     f"part {index + 1}: cue {text!r} ends past the part")
+
+
+class BitmapTracksAreDeclaredNotSilentlyLost(unittest.TestCase):
+    """A picture subtitle has no cue text to slice, so it cannot follow a
+    Split. The documented contract is that it is stated and confirmed, the
+    same as on the non-split cut/speed path -- never dropped in silence."""
+
+    def _answers(self, codec):
+        return {
+            "video_streams": [{"codec_type": "video"}],
+            "subtitle_streams": [{"codec_type": "subtitle", "codec_name": codec}],
+            "subtitle_tracks": [0], "keep_source_subtitles": True,
+            "output_ext": "mkv", "input_path": "x.mkv",
+        }
+
+    def _build(self, codec, confirm):
+        from ffmwiz import wizard_build_b as wb
+        asked = []
+        real = wb.confirm_bitmap_subtitle_drop
+        wb.confirm_bitmap_subtitle_drop = lambda a, t: (asked.append(t) or confirm)
+        try:
+            tracks = wb.build_split_subtitle_inputs(
+                self._answers(codec), [(0.0, 3.0), (3.0, 6.0)])
+        finally:
+            wb.confirm_bitmap_subtitle_drop = real
+        return asked, tracks
+
+    def test_a_pgs_track_is_confirmed_before_it_is_dropped(self):
+        asked, tracks = self._build("hdmv_pgs_subtitle", True)
+        self.assertEqual([[(0, "hdmv_pgs_subtitle")]], asked)
+        self.assertEqual([], tracks)
+
+    def test_declining_stops_the_build_instead_of_dropping_it(self):
+        from ffmwiz import wizard_build_b as wb
+        real = wb.confirm_bitmap_subtitle_drop
+        wb.confirm_bitmap_subtitle_drop = lambda a, t: False
+        try:
+            with self.assertRaises(RuntimeError):
+                wb.build_split_subtitle_inputs(
+                    self._answers("dvd_subtitle"), [(0.0, 3.0), (3.0, 6.0)])
+        finally:
+            wb.confirm_bitmap_subtitle_drop = real
+
+    def test_a_text_track_is_not_treated_as_bitmap(self):
+        asked, _tracks = self._build("subrip", True)
+        self.assertEqual([], asked, "a text track must not trigger the drop prompt")
 
 
 class TheBuilderDoesNotAssumeItOwnsInputOne(unittest.TestCase):

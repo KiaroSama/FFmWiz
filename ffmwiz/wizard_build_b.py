@@ -626,8 +626,11 @@ def build_split_subtitle_inputs(
         return []
 
     sources: list[tuple[list[tuple[float, float, str]], dict[str, Any]]] = []
-    if retimed:
-        for track in retimed:
+    # Branch on whether the clock MOVED, not on whether `retimed` is empty: a
+    # cut can legitimately leave no cue at all, and reading the source track in
+    # that case would slice cues that sit on a timeline the output does not use.
+    if encode_subtitle_retiming_required(answers):
+        for track in (retimed or []):
             try:
                 text = Path(track["path"]).read_text(encoding="utf-8")
             except OSError:
