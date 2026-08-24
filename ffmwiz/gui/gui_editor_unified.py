@@ -3,6 +3,90 @@ import gui_common  # noqa: F401
 from gui_common import *  # noqa: F401,F403
 
 
+def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
+    """The join segments laid out on one timeline, per-segment audio included.
+
+    `has_audio` used to be dropped while copying each segment dict, and the two
+    consumers read it back with opposite wrong defaults: the waveform saw
+    "False" for every segment and fell back to the input-1 flag, while its
+    decode graph saw "True" and asked a silent segment for [i:a:0] -- which made
+    FFmpeg refuse the whole filtergraph and lose the waveform for the join (R02).
+    """
+    segments: list[dict[str, Any]] = []
+    offset = 0.0
+    for idx, segment in enumerate(req.get("join_segments") or []):
+        duration = max(0.001, float(segment.get("duration") or 0.001))
+        path = Path(segment.get("path") or req.get("input_path") or "")
+        segments.append({
+            "index": idx,
+            "path": path,
+            "name": str(segment.get("name") or path.name or f"Video {idx + 1}"),
+            "start": offset,
+            "end": offset + duration,
+            "duration": duration,
+            "label": f"Video {idx + 1}",
+            "has_audio": bool(segment.get("has_audio", True)),
+        })
+        offset += duration
+    return segments
+
+
+def build_classic_waveform_args(
+    req: dict[str, Any], segments: list[dict[str, Any]], out_path: Any
+) -> list[str]:
+    """FFmpeg args that decode the (joined) audio to 4 kHz mono PCM.
+
+    Module level and Qt-free so the join graph can be run for real in a test:
+    it is the part that breaks when a segment's audio flag is wrong, and the
+    window it used to live in cannot be built without a display.
+    """
+    args = ["-hide_banner", "-loglevel", "error", "-y"]
+    if segments:
+        labels = []
+        for idx, segment in enumerate(segments):
+            if segment.get("has_audio", True):
+                args.extend(["-i", str(segment["path"])])
+            else:
+                # [idx:a:0] matching nothing makes ffmpeg refuse the WHOLE
+                # filtergraph, so one silent segment killed the waveform
+                # for the entire join. Feed matching silence instead (D07).
+                seg_duration = max(0.001, float(segment.get("duration") or 0.0))
+                args.extend(["-f", "lavfi", "-t", f"{seg_duration:.3f}",
+                             "-i", "anullsrc=channel_layout=mono:sample_rate=4000"])
+            labels.append(f"[a{idx}]")
+        filters = []
+        for idx, _segment in enumerate(segments):
+            filters.append(f"[{idx}:a:0]aformat=channel_layouts=mono,aresample=4000,asetpts=PTS-STARTPTS[a{idx}]")
+        filters.append(f"{''.join(labels)}concat=n={len(segments)}:v=0:a=1[mix]")
+        args.extend(["-filter_complex", ";".join(filters), "-map", "[mix]"])
+    else:
+        args.extend([
+            "-i", str(req.get("input_path") or ""),
+            "-filter_complex", "[0:a:0]aformat=channel_layouts=mono,aresample=4000[mix]",
+            "-map", "[mix]",
+        ])
+    args.extend(["-f", "s16le", "-acodec", "pcm_s16le", str(out_path)])
+    return args
+
+
+def request_has_any_audio(req: dict[str, Any]) -> bool:
+    """True when ANY input of this request carries audio.
+
+    Feature availability (the sync switch, the waveform) belongs to the whole
+    join, not to input 1: the request-level flag alone disabled audio for a join
+    whose first clip is silent.
+    """
+    return bool(req.get("has_audio")) or any(
+        segment.get("has_audio") for segment in (req.get("join_segments") or []))
+
+
+def active_segment_has_audio(req: dict[str, Any], segments: list[dict[str, Any]], index: int) -> bool:
+    """Whether the segment the preview is playing has audio of its own."""
+    if not segments:
+        return bool(req.get("has_audio"))
+    return bool(segments[max(0, min(len(segments) - 1, int(index)))].get("has_audio"))
+
+
 def build_unified_video_editor(request: dict[str, Any]):
     QtCore, QtGui, QtWidgets, _ = _import_qt()
     # PERF: QtMultimedia pulls in the native multimedia backend (Qt6Multimedia +
@@ -54,25 +138,9 @@ def build_unified_video_editor(request: dict[str, Any]):
         def __init__(self, req):
             super().__init__()
             self.request = req
-            raw_segments = list(req.get("join_segments") or [])
-            self.join_segments: list[dict[str, object]] = []
-            offset = 0.0
-            if raw_segments:
-                for idx, segment in enumerate(raw_segments):
-                    seg_duration = max(0.001, float(segment.get("duration") or 0.001))
-                    path = Path(segment.get("path") or req.get("input_path") or "")
-                    self.join_segments.append(
-                        {
-                            "index": idx,
-                            "path": path,
-                            "name": str(segment.get("name") or path.name or f"Video {idx + 1}"),
-                            "start": offset,
-                            "end": offset + seg_duration,
-                            "duration": seg_duration,
-                            "label": f"Video {idx + 1}",
-                        }
-                    )
-                    offset += seg_duration
+            self.join_segments: list[dict[str, object]] = build_join_segment_model(req)
+            self.any_audio = request_has_any_audio(req)
+            offset = sum(float(segment["duration"]) for segment in self.join_segments)
             self.duration = float(offset if self.join_segments else (req.get("duration") or 0.0))
             self.fps = float(req.get("fps") or 25.0)
             self.source_w = int(req.get("source_w") or 1920)
@@ -119,7 +187,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                 self._initial_margins.append(0)
             self._initial_speed = float(req.get("initial_speed") or 1.0)
             self._initial_reverse = bool(req.get("initial_reverse"))
-            self._initial_include_audio = bool(req.get("initial_include_audio", req.get("has_audio")))
+            self._initial_include_audio = bool(req.get("initial_include_audio", self.any_audio))
             self._history = HistoryStack(self._snapshot(), max_size=120)
             self._syncing_zoom = False
             self._syncing_view = False
@@ -173,7 +241,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                 mark_out=getattr(self, "_mark_out", None),
                 speed=float(self._speed()) if hasattr(self, "speed_combo") else 1.0,
                 reverse=bool(self.reverse_box.isChecked()) if hasattr(self, "reverse_box") else False,
-                include_audio=bool(self.include_audio_box.isChecked()) if hasattr(self, "include_audio_box") else bool(self.request.get("has_audio")),
+                include_audio=bool(self.include_audio_box.isChecked()) if hasattr(self, "include_audio_box") else bool(self.any_audio),
             )
 
         def _restore_snapshot(self, snap):
@@ -661,8 +729,8 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.reverse_box.stateChanged.connect(lambda _v: self._on_reverse_toggled())
             _opt_row.addWidget(self.reverse_box)
             self.include_audio_box = QCheckBox("Sync all audio tracks")
-            self.include_audio_box.setChecked(bool(self.request.get("has_audio")))
-            self.include_audio_box.setEnabled(bool(self.request.get("has_audio")))
+            self.include_audio_box.setChecked(bool(self.any_audio))
+            self.include_audio_box.setEnabled(bool(self.any_audio))
             self.include_audio_box.stateChanged.connect(lambda _v: self._commit_history())
             _opt_row.addWidget(self.include_audio_box)
             _opt_row.addStretch(1)
@@ -1554,12 +1622,15 @@ def build_unified_video_editor(request: dict[str, Any]):
                 chunk = max(0.05, chunk)
                 src = self._segment_path(seg_index)
             else:
+                seg_index = 0
                 src = self.input_path
                 ss = win_start
                 chunk = win_end - win_start
             tw = self._rev_target_width()
             vf = f"scale={tw}:-2,reverse,setpts=(PTS-STARTPTS)/{_ffmpeg_float(speed)}"
-            want_audio = bool(self.request.get("has_audio"))
+            # The active segment's own flag: a silent input 1 muted the reverse
+            # preview of every later audible clip, and vice versa (R02).
+            want_audio = active_segment_has_audio(self.request, self.join_segments, seg_index)
             args = ["-hide_banner", "-loglevel", "error", "-y"]
             if ss > 0:
                 # ACCURATE seek (no -noaccurate_seek): video & audio both start exactly
@@ -2069,7 +2140,7 @@ def build_unified_video_editor(request: dict[str, Any]):
                 mark_out=None,
                 speed=1.0,
                 reverse=False,
-                include_audio=bool(self.request.get("has_audio")),
+                include_audio=bool(self.any_audio),
             )
             self.timeline.selected_cut = -1
             self.timeline.selected_separator = -1
@@ -2280,39 +2351,11 @@ def build_unified_video_editor(request: dict[str, Any]):
         def _start_waveform(self):
             # A join whose FIRST input is silent still has audio to draw: the
             # global has_audio flag is derived from input 0 alone (D07).
-            any_segment_audio = any(seg.get("has_audio") for seg in (self.join_segments or []))
-            if not bool(self.request.get("has_audio")) and not any_segment_audio:
+            if not self.any_audio:
                 if hasattr(self, "status"):
                     self.status.setText("No audio stream is available for waveform preview.")
                 return
-            # Decode the audio to low-rate mono PCM; peaks are computed from it and
-            # drawn as a crisp vector waveform (no stretched image).
-            args = ["-hide_banner", "-loglevel", "error", "-y"]
-            if self.join_segments:
-                labels = []
-                for idx, segment in enumerate(self.join_segments):
-                    if segment.get("has_audio", True):
-                        args.extend(["-i", str(segment["path"])])
-                    else:
-                        # [idx:a:0] matching nothing makes ffmpeg refuse the WHOLE
-                        # filtergraph, so one silent segment killed the waveform
-                        # for the entire join. Feed matching silence instead (D07).
-                        seg_duration = max(0.001, float(segment.get("duration") or 0.0))
-                        args.extend(["-f", "lavfi", "-t", f"{seg_duration:.3f}",
-                                     "-i", "anullsrc=channel_layout=mono:sample_rate=4000"])
-                    labels.append(f"[a{idx}]")
-                filters = []
-                for idx, _segment in enumerate(self.join_segments):
-                    filters.append(f"[{idx}:a:0]aformat=channel_layouts=mono,aresample=4000,asetpts=PTS-STARTPTS[a{idx}]")
-                filters.append(f"{''.join(labels)}concat=n={len(self.join_segments)}:v=0:a=1[mix]")
-                args.extend(["-filter_complex", ";".join(filters), "-map", "[mix]"])
-            else:
-                args.extend([
-                    "-i", str(self.request.get("input_path") or ""),
-                    "-filter_complex", "[0:a:0]aformat=channel_layouts=mono,aresample=4000[mix]",
-                    "-map", "[mix]",
-                ])
-            args.extend(["-f", "s16le", "-acodec", "pcm_s16le", str(self._wave_path)])
+            args = build_classic_waveform_args(self.request, self.join_segments, self._wave_path)
             self._wave_proc = QtCore.QProcess(self)
             self._wave_proc.finished.connect(self._waveform_finished)
             self._wave_proc.start(str(self.request.get("ffmpeg") or "ffmpeg"), args)

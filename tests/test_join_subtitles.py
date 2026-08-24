@@ -178,6 +178,34 @@ class Plan(unittest.TestCase):
         self.assertFalse(plan["supported"])
 
 
+class SelectedTrackSurvivesIntoThePlan(unittest.TestCase):
+    """The selected relative index must reach the segments, not just enable them.
+
+    The plan used to treat `subtitle_tracks` as a yes/no flag and then take each
+    input's first TEXT stream, so a request for track 1 quietly built track 0.
+    """
+
+    @staticmethod
+    def _two_track_item(duration=10.0):
+        return {"duration": duration, "subtitle_streams": [
+            {"index": 2, "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": 3, "codec_name": "subrip", "tags": {"language": "spa"}},
+        ]}
+
+    def test_track_one_selects_the_second_stream_of_every_input(self):
+        items = [self._two_track_item(), self._two_track_item(8.0)]
+        plan = FFmWiz.join_subtitle_plan({"subtitle_tracks": [1]}, items)
+        self.assertTrue(plan["supported"], plan["reason"])
+        for _item, stream, _duration in plan["tracks"][0]["segments"]:
+            self.assertEqual("spa", stream["tags"]["language"])
+
+    def test_segments_still_names_the_first_selected_track(self):
+        # Kept as an alias so single-track callers do not have to change.
+        items = [self._two_track_item(), self._two_track_item(8.0)]
+        plan = FFmWiz.join_subtitle_plan({"subtitle_tracks": [1]}, items)
+        self.assertEqual(plan["tracks"][0]["segments"], plan["segments"])
+
+
 class OutcomeNotes(unittest.TestCase):
     """The note the user reads must match what the command actually does."""
 
@@ -194,6 +222,22 @@ class OutcomeNotes(unittest.TestCase):
             answers,
             [_item("hdmv_pgs_subtitle"), _item("hdmv_pgs_subtitle", duration=8.0)]))
         self.assertIn("bitmap", notes.lower())
+
+    def test_every_merged_track_gets_its_own_line(self):
+        # One line saying "one merged track" would understate a two-track join.
+        item = {"duration": 10.0, "subtitle_streams": [
+            {"index": 2, "codec_name": "subrip", "tags": {"language": "eng"}},
+            {"index": 3, "codec_name": "subrip", "tags": {"language": "spa"}}]}
+        lines = [line for line in FFmWiz.join_extras_outcome_notes(
+            {"subtitle_tracks": "all", "keep_source_subtitles": True}, [item, item])
+            if "Subtitles" in line]
+        self.assertEqual(2, len(lines), lines)
+
+    def test_no_subtitle_selection_says_nothing_about_subtitles(self):
+        lines = FFmWiz.join_extras_outcome_notes(
+            {"subtitle_tracks": [], "keep_source_subtitles": True},
+            [_item(), _item(duration=8.0)])
+        self.assertEqual([], [line for line in lines if "Subtitles" in line])
 
 
 if __name__ == "__main__":

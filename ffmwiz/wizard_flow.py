@@ -176,13 +176,21 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         wizard.Step("video_speed_reverse", lambda a: output_has_video(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard.step_video_speed_reverse_for_encode),
         wizard.Step("cuts", lambda a: video_reencode_options_applicable(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard.step_cuts),
         wizard.Step("audio_tracks", lambda a: bool(a.get("audio_streams")), step_audio_tracks),
-        wizard.Step("loudnorm", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_loudnorm),
+        # any_join_audio, not a.get("audio_streams"): a join whose FIRST input is
+        # silent still produces audio, and gating on input 1 hid every question
+        # that configures it (R02). with_join_audio_view lends the recovered
+        # track to the steps whose bodies index input 1's list directly.
+        wizard.Step("loudnorm", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_loudnorm)),
         wizard.Step("audio_cut", audio_only_transform_prompt_applicable, wizard.step_audio_cut_for_encode),
         wizard.Step("audio_speed_reverse", audio_only_transform_prompt_applicable, wizard.step_audio_speed_reverse_for_encode),
-        wizard.Step("audio_codec", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), step_audio_codec),
-        wizard.Step("audio_bitrate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), step_audio_bitrate),
-        wizard.Step("audio_sample_rate", lambda a: bool(a.get("audio_streams")) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy", step_audio_sample_rate),
+        wizard.Step("audio_codec", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_audio_codec)),
+        wizard.Step("audio_bitrate", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), with_join_audio_view(step_audio_bitrate)),
+        wizard.Step("audio_sample_rate", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy", with_join_audio_view(step_audio_sample_rate)),
         wizard.Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
+        # Runs after the extras answer AND after speed/cuts/Split are known, so
+        # the drop is stated and confirmed while the edit can still change --
+        # not logged silently and discovered in the output (R11).
+        wizard.Step("source_extra_outcomes", lambda a: bool(source_extra_stream_outcome_notes(a)), confirm_source_extra_stream_outcomes),
         wizard.Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and bool(a.get("subtitle_streams")), step_subtitle_tracks),
         wizard.Step("color_range", color_range_prompt_applicable, wizard.step_color_range),
         wizard.Step("start_now", lambda a: True, wizard.step_start_now),
@@ -449,8 +457,13 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
                     duration = max(0.0, end - start)
                     interval_text = f"  [{seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}, duration {format_elapsed(duration)}]"
                 print("    " + field_text(f"Part {idx:02d}", str(part_path) + interval_text, Color.LIME))
-    if answers.get("audio_streams"):
-        print("  " + field_text("audio tracks", answers.get("audio_tracks"), Color.LIGHT_BLUE))
+    if any_join_audio(answers):
+        _recovered_streams, _recovered_tracks = join_audio_recovery(answers)
+        print("  " + field_text(
+            "audio tracks",
+            f"{_recovered_tracks} (input 1 is silent; taken from the other joined inputs)"
+            if _recovered_streams else answers.get("audio_tracks"),
+            Color.LIGHT_BLUE))
         print("  " + field_text("audio codec", answers.get("audio_codec"), Color.CYAN))
         print("  " + field_text("audio bitrate", str(answers.get("audio_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
         _sr = resolve_audio_sample_rate(answers)
@@ -486,6 +499,20 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
     if output_has_video(answers) and services.source_extra_preservation_features(answers):
         print("  " + field_text("source metadata", "keep" if source_metadata_keep_enabled(answers) else "remove", Color.LIGHT_BLUE))
         print("  " + field_text("chapters", "keep" if source_chapters_keep_enabled(answers) else "remove", Color.LIGHT_BLUE))
+    if output_has_video(answers) and additional_source_video_streams(answers):
+        _extra_count = len(additional_source_video_streams(answers))
+        _extra_reason = additional_source_video_drop_reason(answers)
+        _extra_keep = resolve_source_extra_video_keep(answers)
+        print("  " + field_text(
+            "extra source video streams",
+            f"keep {_extra_count}" if _extra_keep
+            else f"dropped ({_extra_reason or 'removed by the metadata policy'})",
+            Color.LIGHT_BLUE if _extra_keep else Color.ORANGE))
+    if output_has_video(answers) and source_data_streams(answers) and source_data_keep_enabled(answers) and timeline_is_modified(answers):
+        print("  " + field_text(
+            "source data streams",
+            f"copied unchanged ({len(source_data_streams(answers))}); timestamps still follow the source timeline",
+            Color.ORANGE))
     if output_has_video(answers) and embedded_attachment_streams(answers):
         attachment_state = "yes" if embedded_attachment_keep_enabled(answers) else "no"
         print("  " + field_text("embedded attachments", attachment_state, Color.PINK))

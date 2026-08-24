@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -258,7 +259,11 @@ def append_single_input_split_outputs(
             if plan.get("mode") == "metadata" and plan.get("chapters"):
                 chapter_temp_dir = answers.get("_chapter_metadata_temp_dir")
                 if not chapter_temp_dir:
-                    chapter_temp_dir = tempfile.mkdtemp(prefix="ffmwiz_split_chapters_")
+                    # Leased, not just keyed: every Split part is rebuilt from a
+                    # SHALLOW COPY of answers, so a key written here dies with
+                    # the copy and the directory outlived the run (R06).
+                    chapter_temp_dir = str(artifact_lease(answers).register(
+                        Path(tempfile.mkdtemp(prefix="ffmwiz_split_chapters_"))))
                     answers["_chapter_metadata_temp_dir"] = chapter_temp_dir
                 metadata_path = write_encode_chapter_metadata(plan, Path(chapter_temp_dir), suffix=f"_part{part_idx + 1:02d}")
                 split_chapter_metadata_paths.append(metadata_path)
@@ -325,6 +330,11 @@ def append_single_input_split_outputs(
 
 
 def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
+    # Open the lease FIRST. `dict()` copies the key but shares the object, so a
+    # lease opened here is still the outer job's lease when a Split part or a
+    # reverse segment rebuilds from `dict(answers)`; opened later, the copy gets
+    # one of its own and everything it registers leaks.
+    artifact_lease(answers)
     ffmpeg = answers["ffmpeg"]
     input_path: Path = answers["input_path"]
     output_path = services.build_output_path(answers)
@@ -419,6 +429,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     # Chapter remapping: if timeline is modified and source has chapters,
     # generate a metadata file and add it as a second input so -map_chapters
     # can reference it. The metadata file path is stored for later cleanup.
+    chapter_metadata_inputs = 0
     if (
         has_video
         and source_chapters_keep_enabled(answers)
@@ -428,12 +439,25 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         speed_factor = encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0
         chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed_factor)
         if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
-            chapter_temp_dir = tempfile.mkdtemp(prefix="ffmwiz_encode_chapters_")
+            chapter_temp_dir = str(artifact_lease(answers).register(
+                Path(tempfile.mkdtemp(prefix="ffmwiz_encode_chapters_"))))
             answers["_chapter_metadata_temp_dir"] = chapter_temp_dir
             metadata_path = write_encode_chapter_metadata(chapter_plan, Path(chapter_temp_dir))
             cmd.extend(["-i", str(metadata_path)])
             answers["_chapter_metadata_input_index"] = 1
+            chapter_metadata_inputs = 1
             log_info(f"Chapters: injected metadata input at index 1 ({metadata_path})")
+
+    # Subtitle packets never enter the video/audio filter graph, so a speed,
+    # reverse or multi-range cut left their timestamps on the SOURCE clock: a
+    # 2.500-3.500 s cue stayed put in a 2 s 2x output, and the stale packet
+    # stretched the container to 3.521 s (R03). The rebuilt tracks arrive as
+    # their own inputs, added AFTER the chapter metadata so its index 1 holds.
+    subtitle_retiming = encode_subtitle_retiming_required(answers)
+    retimed_subtitles = wizard.build_retimed_subtitle_inputs(answers) if subtitle_retiming else []
+    retimed_subtitle_base = 1 + chapter_metadata_inputs
+    for retimed_track in retimed_subtitles:
+        cmd.extend(["-i", str(retimed_track["path"])])
 
     # -t must come after EVERY -i, otherwise it is parsed as an input option for
     # whichever input follows it. Emitted before the chapter-metadata input it
@@ -469,7 +493,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             )
         audio_indices = [audio_for_cut]
 
-    full_source_map = can_use_full_source_map_for_simple_encode(
+    # `-map 0 -c copy` would carry the SOURCE subtitle packets verbatim, which
+    # is exactly what retiming exists to prevent.
+    full_source_map = not subtitle_retiming and can_use_full_source_map_for_simple_encode(
         answers,
         audio_indices,
         audio_transform_active,
@@ -517,7 +543,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         for audio_index in audio_indices:
             cmd.extend(["-map", f"0:a:{audio_index}"])
 
-    subtitle_indices = [] if full_source_map else (
+    subtitle_indices = [] if (full_source_map or subtitle_retiming) else (
         selected_subtitle_streams(answers)
         if has_video and source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")
         else []
@@ -545,12 +571,16 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         subtitle_indices = allowed_subtitles
     for subtitle_index in subtitle_indices:
         cmd.extend(["-map", f"0:s:{subtitle_index}"])
+    for offset in range(len(retimed_subtitles)):
+        cmd.extend(["-map", f"{retimed_subtitle_base + offset}:s:0"])
     attachments_mapped = embedded_attachment_keep_enabled(answers) if full_source_map else append_embedded_attachment_maps(cmd, answers)
     data_mapped = bool(source_data_streams(answers) and source_data_keep_enabled(answers)) if full_source_map else append_source_data_maps(cmd, answers)
     append_source_metadata_chapter_options(cmd, answers)
 
     if not full_source_map:
-        append_negative_stream_options(cmd, answers, has_video, subtitle_indices, data_mapped)
+        append_negative_stream_options(
+            cmd, answers, has_video,
+            subtitle_indices or list(range(len(retimed_subtitles))), data_mapped)
 
     if has_video and video_encoder:
         video_bitrate = answers.get("video_bitrate_kbps")
@@ -660,7 +690,8 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 
     output_is_processed = bool(has_video and video_encoder and video_encoder != "copy")
     output_is_processed = output_is_processed or bool(audio_indices and audio_codec_for_stats and audio_codec_for_stats != "copy")
-    output_is_processed = output_is_processed or bool(subtitle_indices and answers["output_ext"].lower() in MP4_LIKE_EXTS)
+    output_is_processed = output_is_processed or bool(
+        (subtitle_indices or retimed_subtitles) and answers["output_ext"].lower() in MP4_LIKE_EXTS)
     if output_is_processed:
         video_output_count_for_stats = 0
         if has_video:
@@ -668,7 +699,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         audio_output_count_for_stats = 0
         if audio_indices:
             audio_output_count_for_stats = len(answers.get("audio_streams") or []) if full_source_map else len(audio_indices)
-        subtitle_output_count_for_stats = len(answers.get("subtitle_streams") or []) if full_source_map else len(subtitle_indices)
+        subtitle_output_count_for_stats = (
+            len(answers.get("subtitle_streams") or []) if full_source_map
+            else len(subtitle_indices) + len(retimed_subtitles))
         append_clear_reencoded_stream_stat_metadata(
             cmd,
             answers,
@@ -677,7 +710,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             subtitle_output_count=subtitle_output_count_for_stats,
         )
 
-    if subtitle_indices:
+    if subtitle_indices or retimed_subtitles:
         # Ask the container what it can carry instead of assuming "copy works
         # everywhere except MP4". mov_text into mkv, subrip into webm and any
         # subtitle into avi are all rejected by the muxer at header-write time.
@@ -686,6 +719,8 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             str((source_subtitles[index] if index < len(source_subtitles) else {}).get("codec_name") or "")
             for index in subtitle_indices
         ]
+        # A retimed track is a freshly written SRT, whatever the source codec was.
+        source_codecs.extend(["subrip"] * len(retimed_subtitles))
         subtitle_args, subtitle_problems = subtitle_codec_args_for_container(
             answers["output_ext"], source_codecs
         )
@@ -693,6 +728,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             log_warn(f"Subtitle/container: {problem}")
         if subtitle_args:
             cmd.extend(subtitle_args)
+        append_subtitle_track_metadata(cmd, retimed_subtitles)
     if attachments_mapped:
         append_embedded_attachment_codec_options(cmd, answers)
     if data_mapped:

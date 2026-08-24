@@ -400,16 +400,173 @@ def append_source_data_maps(cmd: list[str], answers: dict[str, Any]) -> bool:
     return True
 
 
-def can_map_additional_source_video_streams(answers: dict[str, Any]) -> bool:
-    if not additional_source_video_streams(answers) or not source_extra_video_keep_enabled(answers):
-        return False
-    if answers.get("separator_points") or video_speed_transform_enabled(answers):
-        log_info("Additional source video streams were not mapped because final timeline Split/speed processing is active.")
-        return False
+def additional_source_video_drop_reason(answers: dict[str, Any]) -> str:
+    """Why this command cannot carry the extra source video streams ("" = it can).
+
+    They are stream-copied on the SOURCE timeline, so anything that rebuilds
+    that timeline leaves them unsynchronized and FFmWiz removes them. Returning
+    the reason instead of only logging it is what lets the question and the
+    summary state the exact outcome rather than keep promising "keep" (R11).
+    """
+    if answers.get("join_input_items"):
+        return "the join graph produces a single video stream"
+    if answers.get("separator_points"):
+        return "the final output is split into parts"
+    if video_speed_transform_enabled(answers) or answers.get("reverse_video"):
+        return "a speed/reverse change rebuilds the video timeline"
     if answers.get("cut_keep_ranges"):
-        log_info("Additional source video streams were not mapped because frame-accurate cuts are active.")
+        return "frame-accurate cuts rebuild the video timeline"
+    return ""
+
+
+def resolve_source_extra_video_keep(answers: dict[str, Any]) -> bool:
+    """Whether the extra source video streams SURVIVE this command, recorded.
+
+    The single decider, so the command, the summary and the resolved state can
+    never disagree. It used to be decided in the builder and nowhere else: the
+    keep flag and the summary went on promising streams the command removed.
+    The requested value is left alone -- Back and reopen must still show the
+    user their own answer.
+    """
+    if not additional_source_video_streams(answers):
         return False
-    return True
+    keep = bool(effective_value(
+        answers, "keep_source_extra_video_streams", source_extra_video_keep_enabled(answers)))
+    if keep and additional_source_video_drop_reason(answers):
+        keep = False
+    if not keep:
+        effective_settings(answers)["keep_source_extra_video_streams"] = False
+    return keep
+
+
+def can_map_additional_source_video_streams(answers: dict[str, Any]) -> bool:
+    if resolve_source_extra_video_keep(answers):
+        return True
+    reason = additional_source_video_drop_reason(answers)
+    if reason and source_extra_video_keep_enabled(answers) and additional_source_video_streams(answers):
+        log_info(f"Additional source video streams were not mapped because {reason}.")
+    return False
+
+
+def source_extra_stream_outcome_notes(answers: dict[str, Any]) -> list[str]:
+    """One line per "keep source extras" promise this timeline cannot honour.
+
+    Pure: the wizard calls it from a step predicate as well as from the prompt,
+    so it must not write anything.
+    """
+    notes: list[str] = []
+    extra = additional_source_video_streams(answers)
+    if extra and source_extra_video_keep_enabled(answers):
+        reason = additional_source_video_drop_reason(answers)
+        if reason:
+            notes.append(
+                f"Extra source video streams: all {len(extra)} of them are REMOVED from the "
+                f"output because {reason}."
+            )
+    data = source_data_streams(answers)
+    if data and source_data_keep_enabled(answers) and timeline_is_modified(answers):
+        notes.append(
+            f"Source data streams: all {len(data)} of them are copied unchanged, so their "
+            "timestamps still describe the SOURCE timeline and will not line up with the "
+            "processed one."
+        )
+    return notes
+
+
+def confirm_source_extra_stream_outcomes(answers: dict[str, Any]) -> None:
+    """State what "keep source extras" really does here, then take a yes/no.
+
+    Asked BEFORE the command is generated so the answer can still change the
+    edit; `n` goes back to the previous question instead of explaining the loss
+    after the fact.
+    """
+    notes = source_extra_stream_outcome_notes(answers)
+    if not notes:
+        return
+    # Record it where a shallow answers copy cannot hide it, so the summary and
+    # the command agree even on the build paths that never ask.
+    resolve_source_extra_video_keep(answers)
+    print()
+    appio.note("Keep source extras: this timeline cannot preserve every stream you asked to keep.")
+    for note in notes:
+        print("  " + paint(note, Color.ORANGE))
+    log_info("Source extra stream outcomes disclosed: " + " | ".join(notes))
+    keep_going = appio.ask_yes_no(
+        appio.question_prompt(
+            answers,
+            "Continue with that outcome?",
+            "y/n; n goes back so you can drop the speed/cuts/Split instead",
+            "y",
+        ),
+        True,
+    )
+    if not keep_going:
+        raise Back()
+
+
+def join_audio_segment_flags(answers: dict[str, Any]) -> list[bool]:
+    """Audio presence per joined input, input 1 first."""
+    flags = [bool(answers.get("audio_streams"))]
+    flags.extend(bool(item.get("audio_streams")) for item in (answers.get("join_input_items") or []))
+    return flags
+
+
+def any_join_audio(answers: dict[str, Any]) -> bool:
+    """True when ANY input carries audio.
+
+    Every audio feature gate used to read input 1's stream list alone, so a
+    silent first input hid the speed-sync, codec, sample-rate and LoudNorm
+    questions for a join whose later inputs are audible -- the joined audio then
+    played at 1x under a 2x video and outlived it by its whole length (R02).
+    """
+    return any(join_audio_segment_flags(answers))
+
+
+def join_audio_recovery(answers: dict[str, Any]) -> tuple[list[dict[str, Any]], list[int]]:
+    """The audio the joined output really carries when input 1 is silent.
+
+    Mirrors what `build_join_encode_command` already does: track 0 of the first
+    audible input, with silence synthesised for the inputs that lack it.
+    Returns ([], []) when input 1 has audio or no input does.
+    """
+    if answers.get("audio_streams") or not answers.get("join_input_items"):
+        return [], []
+    for item in answers.get("join_input_items") or []:
+        streams = item.get("audio_streams") or []
+        if streams:
+            return [streams[0]], [0]
+    return [], []
+
+
+def with_join_audio_view(step: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, Any]], None]:
+    """Run an audio step against the JOIN's audio instead of input 1's.
+
+    The audio questions live behind `answers["audio_streams"]` -- input 1 alone
+    -- so a join whose first input is silent lost LoudNorm and the codec/rate
+    questions for audio the output really carries. Lend the recovered track to
+    the step and take it straight back: nothing outside the step may see input 1
+    claiming a stream it does not have.
+    """
+
+    def run(answers: dict[str, Any]) -> None:
+        streams, tracks = join_audio_recovery(answers)
+        if not streams:
+            step(answers)
+            return
+        missing = object()
+        saved = (answers.get("audio_streams", missing), answers.get("audio_tracks", missing))
+        answers["audio_streams"] = streams
+        answers["audio_tracks"] = tracks
+        try:
+            step(answers)
+        finally:
+            for key, value in zip(("audio_streams", "audio_tracks"), saved):
+                if value is missing:
+                    answers.pop(key, None)
+                else:
+                    answers[key] = value
+
+    return run
 
 
 def build_loudnorm_filter(answers: dict[str, Any]) -> str:
@@ -530,7 +687,15 @@ __all__ = [
     'cpu_encoder_for_high_bit_depth',
     'append_embedded_attachment_maps',
     'append_source_data_maps',
+    'additional_source_video_drop_reason',
+    'resolve_source_extra_video_keep',
     'can_map_additional_source_video_streams',
+    'source_extra_stream_outcome_notes',
+    'confirm_source_extra_stream_outcomes',
+    'join_audio_segment_flags',
+    'any_join_audio',
+    'join_audio_recovery',
+    'with_join_audio_view',
     'build_loudnorm_filter',
     '_apply_tk_window_icon',
     '_progress_colorize',

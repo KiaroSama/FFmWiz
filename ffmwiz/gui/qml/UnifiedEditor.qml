@@ -294,13 +294,18 @@ ApplicationWindow {
         if (js.length > 0) {
             for (var i = 0; i < js.length; ++i) {
                 var d = Math.max(0.001, Number(js[i].duration) || 0)
-                list.push({ path: js[i].path, name: js[i].name || ("Video " + (i + 1)), start: off, duration: d })
+                // Carry each segment's own audio flag: the reverse preview picks
+                // one segment, and using the whole job's flag muted an audible
+                // clip whenever input 1 was silent (R02).
+                var segAudio = (js[i].has_audio !== undefined) ? !!js[i].has_audio : true
+                list.push({ path: js[i].path, name: js[i].name || ("Video " + (i + 1)), start: off, duration: d, hasAudio: segAudio })
                 off += d
+                if (segAudio) hasAudio = true
             }
             totalDuration = off
         } else {
             var d0 = Math.max(0.001, Number(req.duration) || 0)
-            list.push({ path: req.input_path, name: "Video 1", start: 0, duration: d0 })
+            list.push({ path: req.input_path, name: "Video 1", start: 0, duration: d0, hasAudio: !!req.has_audio })
             totalDuration = d0
         }
         segs = list
@@ -522,7 +527,8 @@ ApplicationWindow {
         var ss = eff - segs[s.index].start
         var dur = Math.max(0.05, winEnd - eff)
         var w = Math.max(320, Math.min(1280, Math.round(previewArea.width)))
-        bridge.renderReverse(JSON.stringify({ gen: revGen, src: segs[s.index].path, ss: ss, dur: dur, width: w }))
+        bridge.renderReverse(JSON.stringify({ gen: revGen, src: segs[s.index].path, ss: ss, dur: dur, width: w,
+                                             has_audio: !!segs[s.index].hasAudio }))
     }
     function advanceReverse() {
         revPlayBase = revPlayBase + (revWinEnd - revWinStart)

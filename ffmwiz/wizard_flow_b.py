@@ -146,7 +146,7 @@ def step_video_speed_reverse_options(answers: dict[str, Any]) -> None:
             if "speed_factor" not in answers:
                 continue
             answers["reverse_video"] = appio.ask_yes_no(yn_prompt("Reverse video too?", False), False)
-            include_default = bool(answers.get("audio_streams"))
+            include_default = any_join_audio(answers)
             answers["include_audio"] = appio.ask_yes_no(yn_prompt("Sync all audio tracks with the video speed/reverse change?", include_default), include_default)
             answers["_speed_reverse_noop"] = False
             return
@@ -213,7 +213,10 @@ def step_video_speed_reverse_for_encode(answers: dict[str, Any]) -> None:
             if "video_speed_factor" not in answers:
                 continue
             answers["reverse_video"] = appio.ask_yes_no(yn_prompt("Reverse video too?", False), False)
-            if answers.get("audio_streams"):
+            # any_join_audio: a silent input 1 used to skip this question for a
+            # join whose later inputs are audible, so the joined audio kept its
+            # original length under a re-timed video (R02).
+            if any_join_audio(answers):
                 answers["audio_speed_from_video"] = appio.ask_yes_no(yn_prompt("Apply the same speed/reverse to selected audio too?", True), True)
             answers["video_speed_enabled"] = True
             return
@@ -384,6 +387,7 @@ def step_cuts(answers: dict[str, Any]) -> None:
 
 
 def step_start_folder_now(answers: dict[str, Any]) -> None:
+    confirm_source_extra_stream_outcomes(answers)
     cmd = wizard.build_ffmpeg_command(answers)
     answers["cmd"] = cmd
     wizard.print_summary(answers, cmd)

@@ -241,6 +241,19 @@ def normalize_request_chapters(request: dict) -> list[dict]:
                                            float(request.get("duration") or 0.0))
 
 
+def reverse_proxy_wants_audio(req: dict, spec: dict) -> bool:
+    """Whether the reversed preview chunk should carry audio.
+
+    The chunk comes from ONE segment, so its own flag decides. The request-level
+    flag describes the whole job -- using it muted the reverse preview of an
+    audible later clip whenever input 1 was silent, and fed `areverse` to a
+    silent segment in the opposite topology (R02).
+    """
+    if "has_audio" in spec:
+        return bool(spec["has_audio"])
+    return bool(req.get("has_audio"))
+
+
 def build_reverse_proxy_vf(width: int) -> str:
     """Video filter chain for one reversed preview chunk.
 
@@ -503,7 +516,7 @@ def main() -> int:
                 args = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                         "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}", "-i", src,
                         "-vf", build_reverse_proxy_vf(width)]
-                if self._req.get("has_audio"):
+                if reverse_proxy_wants_audio(self._req, spec):
                     args += ["-af", "areverse"]
                 else:
                     args += ["-an"]

@@ -332,27 +332,56 @@ def join_extras_outcome_notes(answers: dict[str, Any], items: list[dict[str, Any
         lines.append(f"Join extras -- Data streams: taken from {first} only.")
     if source_extra_video_keep_enabled(answers) and additional_source_video_streams(answers):
         lines.append("Join extras -- Extra video streams: dropped; the join graph produces one video stream.")
-    if answers.get("subtitle_tracks") or (source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")):
-        plan = join_subtitle_plan(answers, items)
-        if plan.get("supported"):
-            carried = sum(1 for _i, stream, _d in plan["segments"] if stream is not None)
+    plan = join_subtitle_plan(answers, items)
+    if plan.get("supported"):
+        for track in plan["tracks"]:
+            carried = sum(1 for _i, stream, _d in track["segments"] if stream is not None)
+            label = track.get("title") or track.get("language") or f"track {track['index']}"
             lines.append(
-                f"Join extras -- Subtitles: one merged text track from {carried} of "
-                f"{len(plan['segments'])} input(s), shifted onto the joined timeline.")
-        else:
-            lines.append(f"Join extras -- Subtitles: dropped - {plan.get('reason') or 'unavailable'}.")
+                f"Join extras -- Subtitles: merged text track {track['index']} ({label}) from "
+                f"{carried} of {len(track['segments'])} input(s), shifted onto the joined timeline.")
+        for index in plan.get("dropped_tracks") or []:
+            lines.append(
+                f"Join extras -- Subtitles: selected track {index} is dropped - no input carries it "
+                "as text, and a bitmap track has no cue times to shift.")
+    elif plan.get("reason") != "no subtitle track was selected":
+        lines.append(f"Join extras -- Subtitles: dropped - {plan.get('reason') or 'unavailable'}.")
     return lines
 
 
-def build_joined_subtitle_file(answers: dict[str, Any], items: list[dict[str, Any]]) -> Path | None:
-    """Extract, shift and merge each input's text subtitle into one SRT.
+def extract_subtitle_text(ffmpeg: str, source: Path, relative_index: int,
+                          destination: Path, label: str) -> str:
+    """Pull one subtitle stream out as SRT text; "" when it cannot be read."""
+    # -nostdin: this runs inside a wizard/GUI/test process whose stdin is not a
+    # terminal, and an FFmpeg left polling it can sit there until the timeout.
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+               "-i", str(source), "-map", f"0:s:{relative_index}",
+               "-c:s", "srt", str(destination)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL,
+                                encoding="utf-8", errors="replace", timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log_warn(f"{label}: extraction failed for {source.name}: {exc}")
+        return ""
+    if result.returncode != 0 or not destination.exists():
+        log_warn(f"{label}: could not extract stream {relative_index} from {source.name} "
+                 f"(exit {result.returncode})")
+        return ""
+    return destination.read_text(encoding="utf-8", errors="replace")
 
-    Returns the merged file, or None when the join cannot carry subtitles -- in
-    which case the reason is logged and shown, because the wizard asked the user
-    about subtitles and owes them an answer either way.
 
-    The temp directory is recorded on `answers` so the existing cleanup path
-    removes it with the rest of the join scratch files.
+def build_joined_subtitle_files(answers: dict[str, Any], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One merged SRT per SELECTED logical subtitle track.
+
+    Returns [{"path", "index", "language", "title", "default", "forced"}, ...],
+    or [] when the join cannot carry subtitles -- in which case the reason is
+    logged and shown, because the wizard asked the user about subtitles and owes
+    them an answer either way.
+
+    Every selected track gets its own merged file. Reading `subtitle_tracks` as
+    a yes/no flag and then taking each input's track 0 meant a request for the
+    Spanish track silently produced the English one (R04).
     """
     plan = join_subtitle_plan(answers, items)
     if not plan.get("supported"):
@@ -360,7 +389,12 @@ def build_joined_subtitle_file(answers: dict[str, Any], items: list[dict[str, An
         if reason != "no subtitle track was selected":
             appio.note(f"Joined subtitles: not assembled - {reason}.")
             log_info(f"Joined subtitles skipped: {reason}")
-        return None
+        return []
+    for index in plan.get("dropped_tracks") or []:
+        appio.note(
+            f"Joined subtitles: selected track {index} is dropped - no input carries it as "
+            "text, and a bitmap track has no cue times to shift onto a joined timeline.")
+        log_warn(f"Joined subtitles: selected track {index} dropped (no text stream in any input)")
 
     # Registered on the shared lease, NOT as a key: this function is called
     # with `join_answers = dict(answers)`, so a key written here never reaches
@@ -368,50 +402,187 @@ def build_joined_subtitle_file(answers: dict[str, Any], items: list[dict[str, An
     temp_dir = artifact_lease(answers).register(
         Path(tempfile.mkdtemp(prefix="ffmwiz_join_subs_")))
     ffmpeg = answers.get("ffmpeg") or "ffmpeg"
-    segments: list[tuple[str, float]] = []
-    extracted = 0
-    for index, (item, stream, duration) in enumerate(plan["segments"]):
-        text = ""
-        if stream is not None:
-            relative = 0
-            for candidate in item.get("subtitle_streams") or []:
-                if candidate is stream:
-                    break
-                relative += 1
-            part = temp_dir / f"part{index:02d}.srt"
-            command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                       "-i", str(item["path"]), "-map", f"0:s:{relative}",
-                       "-c:s", "srt", str(part)]
-            try:
-                result = subprocess.run(command, capture_output=True, text=True,
-                                        encoding="utf-8", errors="replace", timeout=300)
-                if result.returncode == 0 and part.exists():
-                    text = part.read_text(encoding="utf-8", errors="replace")
+    built: list[dict[str, Any]] = []
+    for track in plan["tracks"]:
+        relative = track["index"]
+        segments: list[tuple[str, float]] = []
+        extracted = 0
+        for position, (item, stream, duration) in enumerate(track["segments"]):
+            text = ""
+            if stream is not None:
+                part = temp_dir / f"track{relative:02d}_part{position:02d}.srt"
+                text = extract_subtitle_text(ffmpeg, Path(item["path"]), relative,
+                                             part, "Joined subtitles")
+                if text:
                     extracted += 1
-                else:
-                    log_warn(
-                        f"Joined subtitles: could not extract from {Path(item['path']).name} "
-                        f"(exit {result.returncode})")
-            except (OSError, subprocess.SubprocessError) as exc:
-                log_warn(f"Joined subtitles: extraction failed for {Path(item['path']).name}: {exc}")
-        segments.append((text, duration))
+            segments.append((text, duration))
+        if not extracted:
+            appio.note(f"Joined subtitles: track {relative} produced no cues and was dropped.")
+            continue
+        merged_text = merge_joined_srt(segments)
+        if not merged_text.strip():
+            appio.note(f"Joined subtitles: track {relative} contained no cues and was dropped.")
+            continue
+        merged = temp_dir / f"joined{relative:02d}.srt"
+        merged.write_text(merged_text, encoding="utf-8", newline="\n")
+        log_info(f"Joined subtitles: merged track {relative} from {extracted}/"
+                 f"{len(track['segments'])} input(s) into {merged}")
+        appio.note(
+            f"Joined subtitles: assembled track {relative} from {extracted} input(s) "
+            "with each input's cues shifted onto the joined timeline.")
+        built.append({"path": merged, "index": relative,
+                      "language": track.get("language", ""), "title": track.get("title", ""),
+                      "default": bool(track.get("default")), "forced": bool(track.get("forced"))})
+    return built
 
-    if not extracted:
-        appio.note("Joined subtitles: no cues could be extracted; the output has no subtitle track.")
-        return None
-    merged_text = merge_joined_srt(segments)
-    if not merged_text.strip():
-        appio.note("Joined subtitles: the selected tracks contained no cues.")
-        return None
-    merged = temp_dir / "joined.srt"
-    merged.write_text(merged_text, encoding="utf-8", newline="\n")
-    log_info(
-        f"Joined subtitles: merged {extracted}/{len(plan['segments'])} input track(s) "
-        f"into {merged}")
+
+def append_subtitle_track_metadata(cmd: list[str], tracks: list[dict[str, Any]]) -> None:
+    """Carry each rebuilt track's language/title/disposition onto the output.
+
+    A retimed or merged track is a brand new stream, so without this it lands as
+    an untitled, language-less, never-default subtitle whatever the source said.
+    """
+    for position, track in enumerate(tracks):
+        if track.get("language"):
+            cmd.extend([f"-metadata:s:s:{position}", f"language={track['language']}"])
+        if track.get("title"):
+            cmd.extend([f"-metadata:s:s:{position}", f"title={track['title']}"])
+        flags = [name for name in ("default", "forced") if track.get(name)]
+        cmd.extend([f"-disposition:s:{position}", "+".join(flags) if flags else "0"])
+
+
+def encode_timeline_map(answers: dict[str, Any]) -> TimelineMap:
+    """The one source->output transform this encode applies.
+
+    Cut, speed and reverse are read from the same answers the filter graph reads,
+    so the cues cannot disagree with the picture. A Split part arrives here as
+    its own single-input job carrying that part's `cut_keep_ranges`, which is
+    already just another set of keep ranges.
+    """
+    source_duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    return TimelineMap(
+        keep_ranges=list(answers.get("cut_keep_ranges") or []),
+        source_duration=source_duration,
+        speed=encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0,
+        reverse=bool(answers.get("reverse_video")),
+    )
+
+
+def encode_subtitle_retiming_required(answers: dict[str, Any]) -> bool:
+    """Does this encode move the clock away from the source subtitle timestamps?
+
+    Every timeline edit qualifies, a single-range trim included. `-ss` before the
+    source input does NOT rebase its subtitle packets with the picture: measured
+    on a 4 s source trimmed to 2.0-4.0 s, the cues moved by 0.2 s instead of 2 s
+    and one of them ended 1.3 s past the end of the output.
+    """
+    if not output_has_video(answers):
+        return False
+    return not encode_timeline_map(answers).is_identity
+
+
+def confirm_bitmap_subtitle_drop(answers: dict[str, Any],
+                                 tracks: list[tuple[int, str]]) -> bool:
+    """State that bitmap tracks cannot be retimed, then ask before dropping them.
+
+    Mapping them through unchanged is the outcome that must never happen
+    silently: the picture moves, the subtitle bitmaps do not, and the user is
+    handed subtitles that are simply wrong with nothing said about it.
+    """
+    if "bitmap_subtitle_drop_confirmed" in answers:
+        return bool(answers["bitmap_subtitle_drop_confirmed"])
+    listed = ", ".join(f"0:s:{index} ({codec or 'unknown'})" for index, codec in tracks)
     appio.note(
-        f"Joined subtitles: assembled one track from {extracted} input(s) "
-        "with each input's cues shifted onto the joined timeline.")
-    return merged
+        "Subtitles: this encode changes the timeline (cut/speed/reverse). Bitmap subtitle "
+        f"track(s) {listed} are pictures with no cue times to move, so they cannot be "
+        "retimed -- the only correct outcome is to drop them. Keeping them would mux "
+        "subtitles that no longer match the video.")
+    confirmed = appio.ask_yes_no(
+        appio.question_prompt(
+            answers,
+            "Drop the bitmap subtitle track(s) and continue?",
+            "y/n; text subtitle tracks are still retimed and kept",
+            "n",
+        ),
+        False,
+    )
+    answers["bitmap_subtitle_drop_confirmed"] = confirmed
+    log_info(f"User choice: bitmap_subtitle_drop_confirmed={confirmed}; tracks={listed}")
+    return confirmed
+
+
+def build_retimed_subtitle_inputs(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild every selected TEXT subtitle track on the processed timeline.
+
+    Returns [{"path", "source_index", "language", "title", "default", "forced"}]
+    for injection as extra inputs. Empty when nothing needs retiming, when the
+    selection holds no text track, or when every cue falls inside a removed
+    range.
+
+    Mapping the source streams straight through left their timestamps on the
+    source clock: a 2.5-3.5 s cue stayed put in a 2 s 2x output, and the stale
+    packet stretched the container to 3.5 s (R03).
+    """
+    if not (output_has_video(answers) and source_subtitles_keep_enabled(answers)):
+        return []
+    streams = list(answers.get("subtitle_streams") or [])
+    if not streams or not encode_subtitle_retiming_required(answers):
+        return []
+    selected = [index for index in selected_subtitle_streams(answers)
+                if 0 <= int(index) < len(streams)]
+    if not selected:
+        return []
+
+    bitmap = [(index, str(streams[index].get("codec_name") or ""))
+              for index in selected if not is_text_subtitle(streams[index])]
+    if bitmap and not confirm_bitmap_subtitle_drop(answers, bitmap):
+        raise RuntimeError(
+            "Bitmap subtitle tracks cannot be retimed for a cut/speed/reverse encode, and "
+            "dropping them was not confirmed. Deselect those tracks in the subtitle "
+            "question, or remove the cut/speed/reverse change.")
+
+    text_indices = [index for index in selected if is_text_subtitle(streams[index])]
+    if not text_indices:
+        return []
+    # A rebuilt track is SRT whatever the source was, so ask the target container
+    # about subrip. Mapping a stream the muxer cannot carry kills the whole
+    # output at header-write time, which is worse than losing the subtitles.
+    if subtitle_codec_for_container(answers.get("output_ext", ""), "subrip") is None:
+        appio.note(
+            f".{str(answers.get('output_ext') or '').lstrip('.')} cannot store text subtitles, "
+            "so the retimed track(s) were dropped.")
+        return []
+    timeline = encode_timeline_map(answers)
+    # Leased, not stored as a key: this builder is also called with a shallow
+    # copy of answers, and a key written on the copy never reaches cleanup (R06).
+    temp_dir = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_retimed_subs_")))
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    source = Path(answers["input_path"])
+    built: list[dict[str, Any]] = []
+    for index in text_indices:
+        raw = temp_dir / f"source{index:02d}.srt"
+        source_text = extract_subtitle_text(ffmpeg, source, index, raw, "Retimed subtitles")
+        cues = retime_cues(parse_srt(source_text), timeline) if source_text else []
+        if not cues:
+            appio.note(
+                f"Subtitles: track 0:s:{index} has no cue left on the processed timeline "
+                "and was dropped.")
+            continue
+        path = temp_dir / f"retimed{index:02d}.srt"
+        path.write_text(render_srt(cues), encoding="utf-8", newline="\n")
+        built.append({"path": path, "source_index": index,
+                      **subtitle_track_metadata(streams[index])})
+    if built:
+        appio.note(
+            f"Subtitles: {len(built)} text track(s) were retimed onto the processed "
+            f"timeline ({timeline.output_duration:.3f}s).")
+        log_info(
+            "Subtitles retimed: tracks="
+            + ",".join(str(track["source_index"]) for track in built)
+            + f"; keep_ranges={timeline.keep_ranges}; speed={timeline.speed:g}; "
+            f"reverse={timeline.reverse}; output_duration={timeline.output_duration:.6f}")
+    return built
 
 
 def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
@@ -461,14 +632,14 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             append_cuda_decode_args_for_input(cmd, join_answers)
         cmd.extend(["-i", str(item["path"])])
 
-    # The concat FILTER cannot carry subtitles, so a joined subtitle track has
+    # The concat FILTER cannot carry subtitles, so joined subtitle tracks have
     # to be assembled separately: each input's cues shifted by that input's
-    # start offset, merged, and fed back as one extra input.
-    joined_subtitle_path = build_joined_subtitle_file(join_answers, items)
-    joined_subtitle_input = None
-    if joined_subtitle_path is not None:
-        joined_subtitle_input = len(items)
-        cmd.extend(["-i", str(joined_subtitle_path)])
+    # start offset, merged, and fed back as extra inputs -- one per selected
+    # logical track, not one for the whole job.
+    joined_subtitle_tracks = build_joined_subtitle_files(join_answers, items)
+    joined_subtitle_input_base = len(items) if joined_subtitle_tracks else None
+    for track in joined_subtitle_tracks:
+        cmd.extend(["-i", str(track["path"])])
 
     selected_audio = selected_audio_streams(join_answers) if join_answers.get("audio_streams") else []
     if not selected_audio and any(item.get("audio_streams") for item in items):
@@ -625,20 +796,25 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         for audio_label in audio_outputs_by_part[part_idx]:
             cmd.extend(["-map", f"[{audio_label}]"])
         subtitle_args: list[str] = []
-        if joined_subtitle_input is not None:
+        mapped_subtitle_tracks: list[dict[str, Any]] = []
+        if joined_subtitle_input_base is not None:
             target, problems = subtitle_codec_args_for_container(
                 str(output_path.suffix), ["subrip"])
             for problem in problems:
                 log_warn(f"Joined subtitles: {problem}")
             if target:
-                cmd.extend(["-map", f"{joined_subtitle_input}:s:0"])
+                for offset, _track in enumerate(joined_subtitle_tracks):
+                    cmd.extend(["-map", f"{joined_subtitle_input_base + offset}:s:0"])
                 subtitle_args = target
+                mapped_subtitle_tracks = joined_subtitle_tracks
         attachments_mapped = append_embedded_attachment_maps(cmd, join_answers)
         data_mapped = append_source_data_maps(cmd, join_answers)
         append_source_metadata_chapter_options(cmd, join_answers)
         append_negative_stream_options(
-            cmd, join_answers, True, [0] if subtitle_args else [], data_mapped)
+            cmd, join_answers, True,
+            list(range(len(mapped_subtitle_tracks))), data_mapped)
         cmd.extend(subtitle_args)
+        append_subtitle_track_metadata(cmd, mapped_subtitle_tracks)
         wizard.append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
         if vfr_join and video_encoder != "copy":
             # Preserve variable timing across the joined segments instead of
@@ -678,5 +854,12 @@ __all__ = [
     'build_hardsub_command',
     'build_cut_filter_complex',
     'join_extras_outcome_notes',
+    'extract_subtitle_text',
+    'build_joined_subtitle_files',
+    'append_subtitle_track_metadata',
+    'encode_timeline_map',
+    'encode_subtitle_retiming_required',
+    'confirm_bitmap_subtitle_drop',
+    'build_retimed_subtitle_inputs',
     'build_join_encode_command',
 ]

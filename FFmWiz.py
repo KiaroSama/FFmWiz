@@ -499,7 +499,14 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
              f"estimated processed duration: {format_elapsed(processed_duration) if processed_duration else 'unknown'}; "
              f"progress duration: {format_elapsed(progress_duration) if progress_duration else 'unknown'}")
     if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
-        return run_segmented_reverse_main_encode(answers)
+        # Same finally as the two neighbouring paths: the segmented reverse
+        # builds its own per-segment files through the artifact lease, so
+        # returning straight out of here leaked every one of them.
+        try:
+            return run_segmented_reverse_main_encode(answers)
+        finally:
+            cleanup_join_concat_list(answers)
+            cleanup_encode_chapter_metadata(answers)
     try:
         split_progress_fps = None
         if answers.get("separator_points") and progress_duration > 0:
