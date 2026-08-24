@@ -294,10 +294,19 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
     if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
         answers["cmd"] = cmd
         return run_segmented_reverse_main_encode(answers)
+    if (answers.get("reverse_video") and answers.get("join_input_items")
+            and not answers.get("separator_points")):
+        # Bounded now, via a forward-joined intermediate. One pass across a
+        # join is not a memory characteristic to warn about -- it is 336 GiB of
+        # decoded frames for an hour of 1080p30, so it simply cannot finish.
+        answers["cmd"] = cmd
+        return run_bounded_join_reverse(answers)
     if answers.get("reverse_video") and answers.get("join_input_items"):
-        # Say so rather than let the UI imply a bounded plan it will not use.
-        appio.note("Reverse across a join is encoded in one pass; a very long "
-                   "joined timeline needs proportional memory.")
+        # Split + join + reverse still runs the joined graph in one pass: the
+        # bounded path produces a single intermediate, and the split graph that
+        # owns the part outputs lives in the join command itself.
+        appio.note("Reverse across a split join is encoded in one pass; a very "
+                   "long joined timeline needs proportional memory.")
     # The two-pass check lives here too, so no executor can quietly skip it.
     # The main dispatcher used to duplicate this whole selection and reach the
     # runner directly, which is how a retained cpu_two_pass was downgraded to
@@ -411,6 +420,72 @@ def reverse_segment_seconds(answers: dict[str, Any]) -> float:
     seconds = REVERSE_SEGMENT_BUDGET_BYTES / bytes_per_second
     return max(REVERSE_SEGMENT_MIN_SECONDS,
                min(float(REVERSE_SEGMENT_SECONDS), seconds))
+
+
+def run_bounded_join_reverse(answers: dict[str, Any]) -> tuple[int, float]:
+    """Reverse a join without holding the whole joined program in RAM.
+
+    `reverse` buffers every decoded frame of its input, and across a join that
+    is the sum of every input: an hour of joined 1080p30 is about 336 GiB of
+    frames, so the one-pass plan could not finish for any real content. The
+    segmented executor cannot be pointed at it directly either -- it rebuilds
+    each segment with the SINGLE-input builder, which would reverse input 1
+    alone (R01).
+
+    Joining FORWARD into a leased intermediate turns it back into the
+    single-input case the bounded executor already handles correctly. The
+    intermediate carries the plain joined program; every timeline edit (cuts,
+    speed, reverse) is then applied to it by the ordinary path, so the two
+    stages cannot double-apply anything.
+
+    Costs one extra encode of the joined material. That is the price of an
+    operation that otherwise cannot complete; the intermediate is written at a
+    high quality so the extra generation is not what the user notices.
+    """
+    items = join_items_from_answers(answers)
+    if not items:
+        return 1, 0.0
+    started_at = time.perf_counter()
+    workspace = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_join_reverse_")))
+    intermediate = workspace / f"joined_forward.{answers.get('output_ext') or 'mkv'}"
+
+    forward = dict(answers)
+    # The intermediate is the joined program and nothing else. Editing here as
+    # well would apply cuts and speed twice.
+    for key in ("cut_keep_ranges", "separator_points", "split_output_paths",
+                "split_part_intervals", "audio_cut_keep_ranges"):
+        forward.pop(key, None)
+    forward["reverse_video"] = False
+    forward["video_speed_enabled"] = False
+    forward["video_speed_factor"] = 1.0
+    forward["video_crf"] = JOIN_REVERSE_INTERMEDIATE_CRF
+    forward["output_path"] = intermediate
+    forward_cmd = wizard.build_join_encode_command(forward, items, intermediate)
+    appio.note("Reverse across a join: joining first, then reversing in bounded "
+               "segments so the whole joined timeline is never held in RAM.")
+    log_info(f"Bounded join reverse: forward join -> {intermediate}")
+    code, _elapsed = run_ffmpeg_with_progress(
+        forward_cmd,
+        total_duration=sum(float(item.get("duration") or 0.0) for item in items) or None,
+        label="Joining before reverse")
+    if code != 0 or not intermediate.exists():
+        return (code or 1), time.perf_counter() - started_at
+
+    probe = services.ffprobe_json(answers.get("ffprobe") or "ffprobe", intermediate)
+    streams = (probe or {}).get("streams") or []
+    reverse_answers = dict(answers)
+    reverse_answers.pop("join_input_items", None)
+    reverse_answers["input_path"] = intermediate
+    reverse_answers["probe"] = probe or {}
+    reverse_answers["format"] = (probe or {}).get("format") or {}
+    reverse_answers["video_streams"] = [s for s in streams if s.get("codec_type") == "video"]
+    reverse_answers["audio_streams"] = [s for s in streams if s.get("codec_type") == "audio"]
+    reverse_answers["subtitle_streams"] = [s for s in streams if s.get("codec_type") == "subtitle"]
+    reverse_answers["cmd"] = build_ffmpeg_command(dict(reverse_answers))
+    reverse_answers["output_path"] = answers["output_path"]
+    code, _elapsed = run_segmented_reverse_main_encode(reverse_answers)
+    return code, time.perf_counter() - started_at
 
 
 def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
@@ -576,6 +651,7 @@ __all__ = [
     'run_crop_only_prompt',
     'run_metadata_report_inspect',
     'reverse_segment_seconds',
+    'run_bounded_join_reverse',
     'run_segmented_reverse_main_encode',
     'execute_encode_plan',
     'run_separator_main_encode',
