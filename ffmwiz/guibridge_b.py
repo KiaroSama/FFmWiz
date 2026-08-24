@@ -372,7 +372,10 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "fps": float(services.get_video_fps(answers)),
         "source_w": int(source_w),
         "source_h": int(source_h),
-        "has_audio": bool(answers.get("audio_streams")),
+        # The whole join topology: an editor must offer its audio controls when
+        # ANY input is audible, not only when input 1 is (R02). Which segments
+        # actually carry audio is in join_segments below.
+        "has_audio": any_join_audio(answers),
         "audio_count": len(answers.get("audio_streams") or []),
         "chapters": chapters,
         "join_segments": join_segments,
@@ -397,7 +400,7 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "initial_speed": float(answers.get("_unified_video_speed") or 1.0),
         "initial_reverse": bool(answers.get("_unified_reverse_video")),
         "initial_include_audio": bool(
-            answers.get("_unified_include_audio", bool(answers.get("audio_streams")))
+            answers.get("_unified_include_audio", any_join_audio(answers))
         ),
     }
     if join_segments:

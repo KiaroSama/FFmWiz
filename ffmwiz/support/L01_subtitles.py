@@ -1,17 +1,21 @@
-"""FFmWiz joined-subtitle assembly (dependency level 1).
+"""FFmWiz subtitle timeline maths (dependency level 1).
 
-A joined re-encode concatenates several inputs onto one timeline. FFmpeg's
-`concat` filter handles video and audio but NOT subtitles, so the wizard used to
-ask which subtitle tracks to keep and then emit `-sn`, discarding them silently.
+Subtitle packets are not touched by the video/audio filter graph, so every
+timeline edit the encode performs has to be replayed on the cues by hand. Both
+users of that arithmetic live here:
 
-The workable route is to build one subtitle track for the joined timeline: take
-each input's selected text subtitle, shift its cues by that input's start offset,
-clip anything past the input's own duration, and concatenate. The result is fed
-back as an extra input and mapped into the output.
+* `TimelineMap` -- the single source->output transform for cuts, speed and
+  reverse. A cut collapses the retained ranges, reverse mirrors the retained
+  clock, speed divides it. Split reuses it unchanged, because a Split part is
+  rebuilt as its own single-input job with that part's keep ranges.
+* the joined-timeline assembly -- FFmpeg's `concat` filter handles video and
+  audio but NOT subtitles, so a joined track is built by shifting each input's
+  cues by the duration of everything before it and feeding the result back as
+  an extra input.
 
-Only TEXT subtitles can be assembled this way. A bitmap track (PGS, VobSub,
-DVB) is a picture stream with no cue text to shift, so it is reported as dropped
-rather than silently discarded.
+Only TEXT subtitles can be retimed or assembled. A bitmap track (PGS, VobSub,
+DVB) is a picture stream with no cue text to move, so it is reported explicitly
+rather than mapped with source timestamps that no longer match the picture.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ from typing import Any  # noqa: F401
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
+from ffmwiz.core.timeline import *  # noqa: F401,F403
 from ffmwiz.support.L00_misc import *  # noqa: F401,F403
 from ffmwiz.support.L00_streams import *  # noqa: F401,F403
 
@@ -96,6 +101,109 @@ def render_srt(cues: list[tuple[float, float, str]]) -> str:
     return "\n".join(parts)
 
 
+class TimelineMap:
+    """Source seconds -> processed-output seconds for one encode.
+
+    Cut, speed and reverse all move the same clock, and the picture, the
+    container duration and the cues have to agree on where it ended up. Keeping
+    the arithmetic in one object is what stops each of them growing its own
+    slightly different version.
+
+    Applied in the order FFmpeg applies it: the retained ranges are collapsed
+    first (`-ss`/`-t` or trim+concat), `reverse` then mirrors the retained
+    clock, and `setpts=PTS/speed` divides it.
+
+    Split needs nothing extra: a Split part is rebuilt as its own single-input
+    job whose `cut_keep_ranges` are that part's retained ranges, so it is
+    already just another set of keep ranges here.
+    """
+
+    def __init__(self, keep_ranges: Any = None, source_duration: float = 0.0,
+                 speed: float = 1.0, reverse: bool = False) -> None:
+        duration = max(0.0, float(source_duration or 0.0))
+        ranges = normalize_cut_ranges(list(keep_ranges or []), duration)
+        if not ranges:
+            ranges = [(0.0, duration)] if duration > 0 else []
+        try:
+            factor = float(speed)
+        except (TypeError, ValueError):
+            factor = 1.0
+        self.keep_ranges = ranges
+        self.source_duration = duration
+        self.speed = factor if factor > 0 else 1.0
+        self.reverse = bool(reverse)
+        self.kept_duration = total_keep_duration(ranges)
+        self.output_duration = self.kept_duration / self.speed
+
+    @property
+    def is_identity(self) -> bool:
+        return (not self.reverse
+                and abs(self.speed - 1.0) <= 1e-9
+                and len(self.keep_ranges) <= 1
+                and (not self.keep_ranges
+                     or (self.keep_ranges[0][0] <= 1e-6
+                         and self.keep_ranges[0][1] >= self.source_duration - 1e-6)))
+
+    def map_interval(self, start: float, end: float) -> list[tuple[float, float]]:
+        """Where [start, end) of the source lands in the output.
+
+        Zero, one or several pieces: a span crossing a removed range survives as
+        one piece per retained range it overlaps, rather than being stretched
+        across the hole.
+        """
+        pieces: list[tuple[float, float]] = []
+        offset = 0.0
+        for keep_start, keep_end in self.keep_ranges:
+            overlap_start = max(float(start), keep_start)
+            overlap_end = min(float(end), keep_end)
+            if overlap_end > overlap_start + 1e-6:
+                pieces.append((offset + overlap_start - keep_start,
+                               offset + overlap_end - keep_start))
+            offset += keep_end - keep_start
+        if self.reverse:
+            pieces = [(self.kept_duration - piece_end, self.kept_duration - piece_start)
+                      for piece_start, piece_end in reversed(pieces)]
+        if abs(self.speed - 1.0) > 1e-9:
+            pieces = [(piece_start / self.speed, piece_end / self.speed)
+                      for piece_start, piece_end in pieces]
+        return pieces
+
+
+def retime_cues(cues: list[tuple[float, float, str]],
+                timeline: TimelineMap) -> list[tuple[float, float, str]]:
+    """Move cues from the source timeline onto the processed one.
+
+    Reversing needs no special case for cue ORDER: mirrored boundaries plus
+    `render_srt`'s time sort renumber the track back to front on their own.
+    """
+    retimed: list[tuple[float, float, str]] = []
+    for start, end, body in cues:
+        for new_start, new_end in timeline.map_interval(start, end):
+            if new_end > new_start + 1e-6:
+                retimed.append((new_start, new_end, body))
+    return retimed
+
+
+def is_text_subtitle(stream: dict[str, Any]) -> bool:
+    return str((stream or {}).get("codec_name") or "").lower() in TEXT_SUBTITLE_CODECS
+
+
+def subtitle_track_metadata(stream: dict[str, Any]) -> dict[str, Any]:
+    """Language/title/disposition of a source track, so a rebuilt one keeps it.
+
+    A retimed or merged track is a NEW stream; without this it would arrive as
+    an untitled, language-less, never-default subtitle.
+    """
+    tags = {str(key).lower(): value for key, value in ((stream or {}).get("tags") or {}).items()}
+    disposition = (stream or {}).get("disposition") or {}
+    return {
+        "language": str(tags.get("language") or "").strip(),
+        "title": str(tags.get("title") or "").strip(),
+        "default": bool(disposition.get("default")),
+        "forced": bool(disposition.get("forced")),
+    }
+
+
 def merge_joined_srt(segments: list[tuple[str, float]]) -> str:
     """Merge per-input SRT text into one track for the joined timeline.
 
@@ -114,26 +222,93 @@ def merge_joined_srt(segments: list[tuple[str, float]]) -> str:
     return render_srt(merged)
 
 
+def item_subtitle_streams(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every subtitle stream of one join input, in file order.
+
+    The PRIMARY join input is assembled without a `subtitle_streams` key -- its
+    subtitles only appear inside `streams` -- so reading the key alone made
+    input 1 look subtitle-free and its tracks never reached the joined output.
+    """
+    streams = item.get("subtitle_streams")
+    if streams is None:
+        streams = [stream for stream in (item.get("streams") or [])
+                   if str(stream.get("codec_type") or "").lower() == "subtitle"]
+    return list(streams or [])
+
+
 def joinable_subtitle_streams(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Text subtitle streams of one join input; bitmap tracks are excluded."""
-    return [
-        stream for stream in (item.get("subtitle_streams") or [])
-        if str(stream.get("codec_name") or "").lower() in TEXT_SUBTITLE_CODECS
-    ]
+    return [stream for stream in item_subtitle_streams(item) if is_text_subtitle(stream)]
+
+
+def join_subtitle_track_count(items: list[dict[str, Any]]) -> int:
+    """How many logical subtitle tracks the joined set offers.
+
+    Taken across ALL inputs, not input 1: a first input without subtitles used
+    to hide a later input's tracks completely.
+    """
+    return max((len(item_subtitle_streams(item)) for item in items), default=0)
+
+
+def selected_join_subtitle_tracks(answers: dict[str, Any],
+                                  items: list[dict[str, Any]]) -> list[int]:
+    """Which logical (relative) subtitle tracks the join should merge.
+
+    `subtitle_tracks` was previously read as a yes/no flag and every input then
+    contributed its track 0, so asking for track 1 silently muxed track 0. The
+    indices are relative positions within each input's subtitle streams -- the
+    same numbering the wizard shows.
+    """
+    count = join_subtitle_track_count(items)
+    if not count:
+        return []
+    if "subtitle_tracks" in answers:
+        selected = answers.get("subtitle_tracks")
+        if selected == "all":
+            return list(range(count))
+        chosen: list[int] = []
+        for value in (selected or []):
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < count and index not in chosen:
+                chosen.append(index)
+        return sorted(chosen)
+    # The track question is only asked when input 1 has subtitles, so an absent
+    # key on a keep-subtitles job means it was never asked -- keep everything
+    # the joined set actually has instead of dropping the later inputs' tracks.
+    if source_subtitles_keep_enabled(answers):
+        return list(range(count))
+    return []
 
 
 def join_subtitle_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Whether the joined re-encode can carry a subtitle track, and why not.
+    """Which joined subtitle tracks can be assembled, and why the rest cannot.
 
-    Returns {"supported": bool, "reason": str, "segments": [(item, stream|None, duration)]}.
+    Returns {"supported", "reason", "tracks", "segments", "dropped_tracks"}.
+    `tracks` holds one merged output track per SELECTED logical track, each with
+    per-input segments; an input lacking that track contributes an empty segment
+    so the later inputs' cues stay aligned. `segments` remains the first track's
+    segment list for callers that only need one.
+
     Assembly is refused when the timeline is edited: cuts, a speed change or a
     split all move the joined clock, and the shifted cues would no longer line
     up with the picture. Saying so is better than shipping subtitles that drift.
     """
-    plan: dict[str, Any] = {"supported": False, "reason": "", "segments": []}
-    if not (answers.get("subtitle_tracks") or (
-            source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams"))):
-        plan["reason"] = "no subtitle track was selected"
+    plan: dict[str, Any] = {"supported": False, "reason": "", "segments": [],
+                            "tracks": [], "dropped_tracks": []}
+    selected = selected_join_subtitle_tracks(answers, items)
+    if not selected:
+        # "Nothing was asked for" and "nothing is there to give" are different
+        # answers, and the user who DID ask is owed the second one.
+        if not (answers.get("subtitle_tracks") or (
+                source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams"))):
+            plan["reason"] = "no subtitle track was selected"
+        elif not join_subtitle_track_count(items):
+            plan["reason"] = "none of the inputs has a subtitle track"
+        else:
+            plan["reason"] = "the selected subtitle track does not exist in any input"
         return plan
     if answers.get("cut_keep_ranges"):
         plan["reason"] = "cuts move the joined timeline, so shifted cues would drift"
@@ -145,24 +320,42 @@ def join_subtitle_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> 
         plan["reason"] = "a speed or reverse change rescales the timeline"
         return plan
 
-    segments: list[tuple[dict[str, Any], dict[str, Any] | None, float]] = []
-    bitmap_only = 0
-    for item in items:
-        text_streams = joinable_subtitle_streams(item)
-        if not text_streams and (item.get("subtitle_streams") or []):
-            bitmap_only += 1
-        duration = float(item.get("duration") or 0.0)
-        segments.append((item, text_streams[0] if text_streams else None, duration))
-    if not any(stream is not None for _item, stream, _d in segments):
+    durations = [float(item.get("duration") or 0.0) for item in items]
+    if any(duration <= 0 for duration in durations):
+        plan["reason"] = "an input has no known duration, so cue offsets cannot be computed"
+        return plan
+
+    bitmap_only = sum(1 for item in items
+                      if item_subtitle_streams(item) and not joinable_subtitle_streams(item))
+    tracks: list[dict[str, Any]] = []
+    dropped: list[int] = []
+    for relative in selected:
+        segments: list[tuple[dict[str, Any], dict[str, Any] | None, float]] = []
+        metadata: dict[str, Any] | None = None
+        for item, duration in zip(items, durations):
+            streams = item_subtitle_streams(item)
+            stream = streams[relative] if relative < len(streams) else None
+            if stream is not None and not is_text_subtitle(stream):
+                stream = None  # bitmap: this input contributes an empty segment
+            if stream is not None and metadata is None:
+                metadata = subtitle_track_metadata(stream)
+            segments.append((item, stream, duration))
+        if any(stream is not None for _item, stream, _duration in segments):
+            tracks.append({"index": relative, "segments": segments,
+                           **(metadata or subtitle_track_metadata({}))})
+        else:
+            dropped.append(relative)
+
+    if not tracks:
         plan["reason"] = (
             "the selected inputs carry only bitmap subtitles, which cannot be shifted onto a joined timeline"
             if bitmap_only else "none of the inputs has a text subtitle track")
-        return plan
-    if any(duration <= 0 for _item, _stream, duration in segments):
-        plan["reason"] = "an input has no known duration, so cue offsets cannot be computed"
+        plan["dropped_tracks"] = dropped
         return plan
     plan["supported"] = True
-    plan["segments"] = segments
+    plan["tracks"] = tracks
+    plan["segments"] = tracks[0]["segments"]
+    plan["dropped_tracks"] = dropped
     plan["bitmap_only_inputs"] = bitmap_only
     return plan
 
@@ -173,7 +366,14 @@ __all__ = [
     'parse_srt',
     'shift_cues',
     'render_srt',
+    'TimelineMap',
+    'retime_cues',
+    'is_text_subtitle',
+    'subtitle_track_metadata',
     'merge_joined_srt',
+    'item_subtitle_streams',
     'joinable_subtitle_streams',
+    'join_subtitle_track_count',
+    'selected_join_subtitle_tracks',
     'join_subtitle_plan',
 ]
