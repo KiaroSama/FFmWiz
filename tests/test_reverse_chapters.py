@@ -185,3 +185,35 @@ class RealReverseKeepsChapters(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AChapterSpanningACutHole(unittest.TestCase):
+    """A cut inside a chapter must shorten it, not truncate it at the hole.
+
+    Chapters and subtitle cues now share one `TimelineMap`, but they want
+    different things from it: a cue that crosses a removed range survives as
+    two separate cues, while a chapter is a single contiguous label and has to
+    keep the whole span it still covers.
+    """
+
+    def _plan(self, keep_ranges, **extra):
+        answers = _answers([_chapter(10, 50, "ACT ONE")], 100,
+                           cut_keep_ranges=keep_ranges, **extra)
+        return _plan_times(FFmWiz.remap_chapters_for_encode(answers))
+
+    def test_the_chapter_keeps_the_span_after_the_hole(self):
+        # keep 0-20 and 30-100: the chapter's 20-30 middle is removed, so it
+        # runs 10 -> 40 in the output, not 10 -> 20.
+        self.assertEqual([(10.0, 40.0, "ACT ONE")], self._plan([(0, 20), (30, 100)]))
+
+    def test_a_cut_before_the_chapter_shifts_it_earlier(self):
+        self.assertEqual([(5.0, 45.0, "ACT ONE")], self._plan([(0, 5), (10, 100)]))
+
+    def test_a_chapter_entirely_inside_a_removed_range_is_dropped(self):
+        self.assertEqual([], self._plan([(0, 5), (60, 100)]))
+
+    def test_the_hole_span_survives_reverse_too(self):
+        # kept duration 90; the chapter occupies 10-40 forward, so reversed it
+        # runs 90-40 -> 90-10.
+        self.assertEqual([(50.0, 80.0, "ACT ONE")],
+                         self._plan([(0, 20), (30, 100)], reverse_video=True))
