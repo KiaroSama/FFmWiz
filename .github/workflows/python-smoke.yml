@@ -67,6 +67,13 @@ jobs:
           # ffmpeg build, never on the Python version.
           - python-version: "3.13"
             ffmpeg: "7.1.1"
+          # The declared FLOOR. Subtitle cue times are the one area that has
+          # drifted between builds -- an external audit on 6.1.1 saw extraction
+          # rebase cues by the container start time, which the newest build does
+          # not do. Only a real 6.1 run proves the fix is version-independent
+          # rather than accidentally true on one build.
+          - python-version: "3.13"
+            ffmpeg: "6.1.1"
 
     steps:
       - name: Check out repository

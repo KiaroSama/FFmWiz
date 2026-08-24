@@ -24,7 +24,7 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 
 - Windows 11 is the primary target.
 - Python 3 available as `py -3` or `python`.
-- FFmpeg and ffprobe in PATH. On startup FFmWiz checks for them and can offer to install the full FFmpeg package with winget or Chocolatey.
+- FFmpeg and ffprobe in PATH, **6.1 or newer**. On startup FFmWiz checks for them and can offer to install the full FFmpeg package with winget or Chocolatey. CI runs the whole suite against 6.1.1, 7.1.1 and the current release; older builds are untested. Some conveniences need a newer build and fall back automatically when it is missing — the exact-stretch square-pixel path uses `scale`'s `reset_sar`, added in the 7.2/8.0 line.
 - NVIDIA GPU acceleration needs an FFmpeg build with CUDA/NVENC support.
 - **PySide6** for the graphical editors. Install the runtime dependencies once:
 
