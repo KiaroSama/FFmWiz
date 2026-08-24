@@ -373,6 +373,46 @@ def build_main_encode_reverse_segment_command(
     return build_ffmpeg_command(segment_answers)
 
 
+def reverse_segment_seconds(answers: dict[str, Any]) -> float:
+    """How many seconds of video one reverse segment may safely hold.
+
+    `reverse` keeps every decoded frame of its input in memory, so the safe
+    segment length is set by the frame SIZE, not by a clock. Measured here,
+    peak RSS tracks the decoded-frame total almost exactly: 720p30 buffered
+    300 frames at 878 MB against a 415 MB frame estimate, and 600 frames at
+    1306 MB -- 1.43 MB per frame against a theoretical 1.38.
+
+    The flat 60 s the executor used to pass is only safe at SD. It is 1.0 GiB
+    of frames at 480p30, 5.2 GiB at 1080p30, 10.4 GiB at 1080p60 and 20.9 GiB
+    at 4K30, so the "avoids buffering the full video in RAM" promise was
+    defeated by the segment size itself (F10).
+
+    Falls back to the flat value when the frame geometry is unknown, so an
+    unprobeable input behaves as before rather than failing here.
+    """
+    stream = (answers.get("video_streams") or [{}])[0]
+    try:
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    if width <= 0 or height <= 0:
+        return float(REVERSE_SEGMENT_SECONDS)
+    try:
+        fps = float(answers.get("fps") or services.get_video_fps(answers) or 0.0)
+    except Exception:
+        fps = 0.0
+    if fps <= 0:
+        fps = 30.0
+    # yuv420p: one luma byte plus half a byte of chroma per pixel.
+    bytes_per_second = width * height * 1.5 * fps
+    if bytes_per_second <= 0:
+        return float(REVERSE_SEGMENT_SECONDS)
+    seconds = REVERSE_SEGMENT_BUDGET_BYTES / bytes_per_second
+    return max(REVERSE_SEGMENT_MIN_SECONDS,
+               min(float(REVERSE_SEGMENT_SECONDS), seconds))
+
+
 def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     if duration <= 0:
@@ -382,13 +422,15 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
             label="FFmpeg encode",
         )
     original_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
-    chunks = split_ranges_for_reverse_segments(original_keep_ranges, duration)
+    segment_seconds = reverse_segment_seconds(answers)
+    chunks = split_ranges_for_reverse_segments(original_keep_ranges, duration,
+                                               segment_seconds)
     if not chunks:
         return 1, 0.0
     speed = encode_video_speed_factor(answers)
     output_path = Path(answers["output_path"])
     appio.note(
-        f"Reverse encode uses {len(chunks)} segment(s) of up to {int(REVERSE_SEGMENT_SECONDS)}s "
+        f"Reverse encode uses {len(chunks)} segment(s) of up to {segment_seconds:.0f}s "
         "to avoid buffering the full video in RAM."
     )
     started_at = time.perf_counter()
@@ -533,6 +575,7 @@ __all__ = [
     'load_answers_from_config',
     'run_crop_only_prompt',
     'run_metadata_report_inspect',
+    'reverse_segment_seconds',
     'run_segmented_reverse_main_encode',
     'execute_encode_plan',
     'run_separator_main_encode',
