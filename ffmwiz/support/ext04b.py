@@ -181,11 +181,21 @@ def run_segmented_reverse_video_speed(answers: dict[str, Any]) -> tuple[int, flo
         )
     output_path = Path(answers["output_path"])
     speed = clamp_speed_factor(answers.get("speed_factor", DEFAULT_SPEED_FACTOR))
-    chunks = split_ranges_for_reverse_segments([], duration)
+    # The SHARED budget, not a flat 60 s: this mode called the splitter with no
+    # size at all, and 60 s of 4K30 is 20.9 GiB of decoded frames -- the exact
+    # promise the message makes is the one it broke (B06).
+    stream = (answers.get("video_streams") or [{}])[0]
+    try:
+        segment_fps = float(answers.get("fps") or services.get_video_fps(answers) or 0.0)
+    except Exception:
+        segment_fps = 0.0
+    segment_seconds = reverse_segment_seconds_for(
+        stream.get("width"), stream.get("height"), segment_fps, stream.get("pix_fmt"))
+    chunks = split_ranges_for_reverse_segments([], duration, segment_seconds)
     if not chunks:
         return 1, 0.0
     appio.note(
-        f"Reverse mode uses {len(chunks)} segment(s) of up to {int(REVERSE_SEGMENT_SECONDS)}s "
+        f"Reverse mode uses {len(chunks)} segment(s) of up to {segment_seconds:.0f}s "
         "to avoid buffering the full video in RAM."
     )
     started_at = time.perf_counter()

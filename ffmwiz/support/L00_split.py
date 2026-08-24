@@ -26,9 +26,43 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.support.L00_probe import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
+
+
+def reverse_segment_seconds_for(width: int, height: int, fps: float,
+                                pix_fmt: Any = None) -> float:
+    """Seconds of video one reverse segment may hold within the peak budget.
+
+    Pure, and it lives here rather than in the executor so every reverse entry
+    point can share it: the standalone Video Speed / Reverse mode had its own
+    call with no budget at all and announced a flat 60 s window, which is
+    20.9 GiB of decoded frames at 4K30 (B06).
+
+    The budget is a PEAK -- reserved process overhead plus frames sized from
+    the real pixel format -- and the result is an integer frame count, so there
+    is no floor that can exceed the cap.
+    """
+    try:
+        width, height = int(width or 0), int(height or 0)
+        fps = float(fps or 0.0)
+    except (TypeError, ValueError):
+        width = height = 0
+        fps = 0.0
+    if fps <= 0:
+        fps = 30.0
+    if width <= 0 or height <= 0:
+        # Budget for a common demanding case rather than assuming the ceiling.
+        width, height, fps, pix_fmt = 1920, 1080, 60.0, "yuv420p10le"
+    per_frame = (width * height * decoded_bytes_per_pixel(pix_fmt)
+                 * REVERSE_FRAME_SAFETY)
+    if per_frame <= 0:
+        return float(REVERSE_SEGMENT_SECONDS)
+    allowance = REVERSE_PEAK_BUDGET_BYTES - REVERSE_FIXED_OVERHEAD_BYTES
+    frames = max(1, int(allowance // per_frame))
+    return max(1.0 / fps, min(float(REVERSE_SEGMENT_SECONDS), frames / fps))
 
 
 def split_ranges_for_reverse_segments(
@@ -180,6 +214,7 @@ def parse_split_timestamp(token: str, bare_unit: str = "s") -> float:
 
 
 __all__ = [
+    'reverse_segment_seconds_for',
     'split_ranges_for_reverse_segments',
     '_split_progress_seconds',
     'parse_split_timestamp',
