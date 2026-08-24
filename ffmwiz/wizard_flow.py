@@ -180,11 +180,16 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         wizard.Step("fps", video_reencode_options_applicable, wizard.step_fps),
         wizard.Step("video_speed_reverse", lambda a: output_has_video(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard.step_video_speed_reverse_for_encode),
         wizard.Step("cuts", lambda a: video_reencode_options_applicable(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard.step_cuts),
-        wizard.Step("audio_tracks", lambda a: bool(a.get("audio_streams")), step_audio_tracks),
+        # The track question itself gets the same treatment: it used to be
+        # gated by and sized from input 1's list, so a track only a LATER input
+        # carries could not be selected at all -- the prompt rejected the index
+        # as out of range and the builder then reported the track as missing
+        # from the output (F05).
+        wizard.Step("audio_tracks", lambda a: any_join_audio(a), with_join_audio_view(step_audio_tracks)),
         # any_join_audio, not a.get("audio_streams"): a join whose FIRST input is
         # silent still produces audio, and gating on input 1 hid every question
-        # that configures it (R02). with_join_audio_view lends the recovered
-        # track to the steps whose bodies index input 1's list directly.
+        # that configures it (R02). with_join_audio_view lends the joined track
+        # list to the steps whose bodies index input 1's list directly.
         wizard.Step("loudnorm", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_loudnorm)),
         wizard.Step("audio_cut", audio_only_transform_prompt_applicable, wizard.step_audio_cut_for_encode),
         wizard.Step("audio_speed_reverse", audio_only_transform_prompt_applicable, wizard.step_audio_speed_reverse_for_encode),

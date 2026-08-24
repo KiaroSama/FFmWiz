@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 
 import FFmWiz
+from ffmwiz.core import artifacts
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -96,6 +97,115 @@ class LeaseSemantics(unittest.TestCase):
         FFmWiz.artifact_lease(answers).register(self._file("h.txt"))
         FFmWiz.release_artifacts(answers)
         self.assertTrue(bystander.exists())
+
+
+class ReleaseNeverReportsWhatItDidNotRemove(unittest.TestCase):
+    """Regression: a locked directory was reported removed and forgotten (F12).
+
+    `release()` called `shutil.rmtree(path, ignore_errors=True)` and then dropped
+    the path unconditionally. `ignore_errors` swallows a Windows sharing
+    violation and returns normally, so a directory holding one open file
+    survived while `release()` answered "removed" -- and because the path had
+    left the lease, the retry its own comment promises could never happen.
+
+    Measured before the fix, with a real open handle inside the directory:
+
+        PATH_STILL_EXISTS                 true
+        LEASE_LENGTH_AFTER_FALSE_SUCCESS  0
+        REPORTED_REMOVED                  true
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="ffmwizlocked_"))
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _locked_directory(self):
+        """A directory with one file held open, which is what really happens
+        when a job is cancelled while ffmpeg still has an input mapped."""
+        directory = self._tmp / "artifact"
+        directory.mkdir()
+        inside = directory / "retimed00.srt"
+        inside.write_text("one cue", encoding="utf-8")
+        handle = inside.open("r", encoding="utf-8")
+        self.addCleanup(handle.close)
+        return directory, handle
+
+    def test_a_locked_directory_is_not_reported_as_removed(self):
+        directory, _handle = self._locked_directory()
+        lease = FFmWiz.ArtifactLease()
+        lease.register(directory)
+        removed = lease.release()
+        if not directory.exists():
+            self.skipTest("this platform deletes a directory holding an open file")
+        self.assertNotIn(directory, removed,
+                         "release() claimed a directory that is still there")
+
+    def test_a_locked_directory_stays_owned_for_the_retry(self):
+        directory, _handle = self._locked_directory()
+        lease = FFmWiz.ArtifactLease()
+        lease.register(directory)
+        lease.release()
+        if not directory.exists():
+            self.skipTest("this platform deletes a directory holding an open file")
+        self.assertEqual(1, len(lease),
+                         "a failed deletion dropped out of the lease, so nothing "
+                         "is left to retry")
+
+    def test_the_retry_finishes_the_job_once_the_handle_closes(self):
+        directory, handle = self._locked_directory()
+        lease = FFmWiz.ArtifactLease()
+        lease.register(directory)
+        lease.release()
+        if not directory.exists():
+            self.skipTest("this platform deletes a directory holding an open file")
+        handle.close()
+        self.assertIn(directory, lease.release())
+        self.assertFalse(directory.exists())
+        self.assertEqual(0, len(lease))
+
+    def test_one_stuck_path_does_not_strand_the_others(self):
+        directory, _handle = self._locked_directory()
+        loose = self._tmp / "loose.srt"
+        loose.write_text("x", encoding="utf-8")
+        lease = FFmWiz.ArtifactLease()
+        lease.register(directory)
+        lease.register(loose)
+        removed = lease.release()
+        self.assertIn(loose, removed)
+        self.assertFalse(loose.exists())
+
+    def test_a_deletion_that_silently_does_nothing_is_caught(self):
+        # The general shape, independent of what this OS locks: any rmtree that
+        # returns without deleting must not be believed.
+        directory = self._tmp / "noop"
+        directory.mkdir()
+        lease = FFmWiz.ArtifactLease()
+        lease.register(directory)
+        real_rmtree = artifacts.shutil.rmtree
+        artifacts.shutil.rmtree = lambda *args, **kwargs: None
+        try:
+            removed = lease.release()
+        finally:
+            artifacts.shutil.rmtree = real_rmtree
+        self.assertEqual([], removed)
+        self.assertEqual(1, len(lease))
+        self.assertTrue(directory.exists())
+
+    def test_an_unlinkable_file_is_kept_too(self):
+        path = self._tmp / "stuck.txt"
+        path.write_text("x", encoding="utf-8")
+        lease = FFmWiz.ArtifactLease()
+        lease.register(path)
+        real_unlink = Path.unlink
+        Path.unlink = lambda self, *a, **k: None
+        try:
+            removed = lease.release()
+        finally:
+            Path.unlink = real_unlink
+        self.assertEqual([], removed)
+        self.assertEqual(1, len(lease))
 
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe not on PATH")

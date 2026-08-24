@@ -197,19 +197,15 @@ def step_start_now(answers: dict[str, Any]) -> None:
             copy_compatible = True
             reasons = []
             appio.note("VFR join: using stream copy (concat) to preserve each file's frame rate.")
-        can_copy = (
-            copy_compatible
-            and str(answers.get("video_codec", "")).lower() == "copy"
-            and str(answers.get("audio_codec", "")).lower() == "copy"
-            and answers.get("audio_tracks") in (None, "all")
-            and source_metadata_keep_enabled(answers)
-            and source_chapters_keep_enabled(answers)
-            and source_subtitles_keep_enabled(answers)
-            and not video_filters_required(answers)
-            and not answers.get("cut_keep_ranges")
-            and not loudnorm_transform_enabled(answers)
-        )
-        print_join_summary(join_items, copy_compatible, reasons)
+        # Input compatibility is not the same question as "the selected plan
+        # stream-copies". This gate used to accept a selection only when it was
+        # literally None or the string "all", so the ordinary track question --
+        # which returns a LIST -- forced a one-track input answered `[0]` down
+        # the re-encode path while the summary still promised no re-encode
+        # (F06). join_copy_plan compares normalised index SETS instead.
+        copy_plan = join_copy_plan(answers, join_items)
+        can_copy = copy_compatible and copy_plan["supported"]
+        print_join_summary(join_items, copy_compatible, reasons, copy_plan)
         audio_only_join = all(not item.get("video_streams") for item in join_items)
         if audio_only_join:
             # Interactive-wizard audio join: stream-copy when compatible,

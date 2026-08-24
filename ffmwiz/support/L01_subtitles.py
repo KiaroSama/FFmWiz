@@ -184,6 +184,70 @@ def retime_cues(cues: list[tuple[float, float, str]],
     return retimed
 
 
+def video_timeline_origin(probe: dict[str, Any]) -> float | None:
+    """The source timestamp that the picture starts at, or None if unknowable.
+
+    Subtitle and video packets share one raw source clock, but FFmpeg's demuxer
+    rebases what it hands out by the CONTAINER start -- the minimum across every
+    stream. The two are not the same file: an MKV whose AAC track carries
+    negative priming reports a container start of -0.023 while the video starts
+    at 0, so a plainly extracted SRT arrives 23 ms late against the picture and
+    every later transform multiplies the error (0.5x turned a wanted 0.400 into
+    0.446). `TimelineMap` and the joined-timeline offsets both measure from the
+    first video frame, so that is the one origin the cues have to be on.
+
+    `probe` is `ffprobe -select_streams v:0 -show_entries
+    stream=start_time:format=start_time -of json` output. The container start is
+    the fallback because it reproduces the demuxer's own normalization, which is
+    right whenever the video is what starts the file. None means the probe said
+    nothing usable and the caller must leave the timestamps alone rather than
+    guess an origin.
+    """
+    values = [stream.get("start_time") for stream in ((probe or {}).get("streams") or [])]
+    values.append(((probe or {}).get("format") or {}).get("start_time"))
+    for value in values:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def subtitle_source_origin(answers: dict[str, Any], seeked: bool) -> float:
+    """The source timestamp this encode turns into output zero.
+
+    Extracted cues have to be measured from whatever the encode calls zero, and
+    that is not one value today. When the encode SEEKS -- `-ss` before the input,
+    or a `trim` range -- zero is the CONTAINER start, because FFmpeg adds the
+    file's own start_time to an input seek and hands the filter graph timestamps
+    it has already rebased by the same amount. When it does not, the video chain
+    rebases with `setpts=PTS-STARTPTS`, so zero is the SELECTED VIDEO's first
+    frame instead.
+
+    The two coincide for an ordinary file and diverge for one whose container
+    starts before its picture: an MKV whose AAC track carries negative priming
+    starts at -0.023 while the video starts at 0. Measured on FFmpeg 8.1.1
+    against a source flashing white over each cue, using the wrong one of the
+    two moves every cue by exactly that difference -- on a 0.545 s fixture a 2x
+    encode put the 0.100 s cue at 0.361 s, and a 0.5x one put 0.400 at 1.490.
+
+    ponytail: two origins because `-ss` and the filter rebase disagree in the
+    encoder, not because subtitles need two. One clock everywhere needs the seek
+    and the split intervals moved onto the video's, which is a change to the
+    command builders rather than to this arithmetic.
+    """
+    values: list[Any] = []
+    if not seeked:
+        values = [stream.get("start_time") for stream in (answers.get("video_streams") or [])]
+    values.append((answers.get("format") or {}).get("start_time"))
+    for value in values:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def is_text_subtitle(stream: dict[str, Any]) -> bool:
     return str((stream or {}).get("codec_name") or "").lower() in TEXT_SUBTITLE_CODECS
 
@@ -423,6 +487,8 @@ __all__ = [
     'render_srt',
     'TimelineMap',
     'retime_cues',
+    'video_timeline_origin',
+    'subtitle_source_origin',
     'is_text_subtitle',
     'subtitle_track_metadata',
     'merge_joined_srt',

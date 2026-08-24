@@ -30,7 +30,6 @@ def _answers(tmp, items, **extra):
         "subtitle_streams": [],
         "data_streams": [],
         "attachment_streams": [],
-        "audio_tracks": list(range(len(items[0]["audio_streams"]))),
         "subtitle_tracks": [],
         "video_codec": "H264",
         "use_gpu": False,
@@ -47,6 +46,11 @@ def _answers(tmp, items, **extra):
         "keep_source_extra_video_streams": False,
         "join_input_items": items[1:],
     }
+    # The key exists only when the track question was actually answered. A
+    # silent input 1 leaves it ABSENT; writing an empty list instead would say
+    # "the user asked for no audio", which is now honoured literally (F04).
+    if items[0]["audio_streams"]:
+        answers["audio_tracks"] = list(range(len(items[0]["audio_streams"])))
     answers.update(extra)
     return answers
 

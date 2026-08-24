@@ -350,13 +350,53 @@ def join_extras_outcome_notes(answers: dict[str, Any], items: list[dict[str, Any
 
 
 def extract_subtitle_text(ffmpeg: str, source: Path, relative_index: int,
-                          destination: Path, label: str) -> str:
-    """Pull one subtitle stream out as SRT text; "" when it cannot be read."""
+                          destination: Path, label: str,
+                          origin: float | None = None,
+                          ffprobe: str | None = None) -> str:
+    """Pull one subtitle stream out as SRT text measured from `origin`.
+
+    Returns "" when the stream cannot be read.
+
+    Extracting without `-copyts` hands back cues the demuxer has already rebased
+    by the CONTAINER start, which is the minimum across every stream and not
+    where the encode puts output zero. On an MKV whose AAC track carries
+    negative priming the container starts at -0.023 while the picture starts at
+    0, so a source packet at 0.200 came back as 0.223; a 0.5x retime turned that
+    into 0.446 instead of 0.400, and re-extracting the result added the same
+    23 ms again. `-copyts` keeps the source's own timestamps and `origin` -- see
+    `subtitle_source_origin` -- says which moment of them is zero.
+
+    `origin=None` means "the picture's own start", read from the file. That is
+    the joined-timeline rule: a join refuses any edited timeline, so its inputs
+    are never seeked and each one's cues belong to its first video frame.
+    """
+    if origin is None:
+        if not ffprobe:
+            # The join builder extracts without an ffprobe in hand; ffprobe ships
+            # beside ffmpeg, so a custom ffmpeg still finds its matching probe.
+            sibling = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+            ffprobe = str(sibling) if sibling.exists() else "ffprobe"
+        try:
+            probed = subprocess.run(
+                [str(ffprobe), "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=start_time:format=start_time",
+                 "-of", "json", str(source)],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                encoding="utf-8", errors="replace", timeout=60)
+            if probed.returncode == 0:
+                origin = video_timeline_origin(json.loads(probed.stdout or "{}"))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            log_warn(f"{label}: could not read the video origin of {source.name}: {exc}")
     # -nostdin: this runs inside a wizard/GUI/test process whose stdin is not a
     # terminal, and an FFmpeg left polling it can sit there until the timeout.
-    command = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-               "-i", str(source), "-map", f"0:s:{relative_index}",
-               "-c:s", "srt", str(destination)]
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
+    if origin is not None:
+        # Keep the source's own timestamps; the origin below is subtracted from
+        # them. Without an origin there is no way to tell the video clock from
+        # the container clock, so leave the demuxer's normalization in place.
+        command.append("-copyts")
+    command += ["-i", str(source), "-map", f"0:s:{relative_index}",
+                "-c:s", "srt", str(destination)]
     try:
         result = subprocess.run(command, capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL,
@@ -368,7 +408,13 @@ def extract_subtitle_text(ffmpeg: str, source: Path, relative_index: int,
         log_warn(f"{label}: could not extract stream {relative_index} from {source.name} "
                  f"(exit {result.returncode})")
         return ""
-    return destination.read_text(encoding="utf-8", errors="replace")
+    text = destination.read_text(encoding="utf-8", errors="replace")
+    if origin:
+        # A cue that ends before the first video frame has no picture to sit on.
+        text = render_srt([(start - origin, end - origin, body)
+                           for start, end, body in parse_srt(text)
+                           if end - origin > 0])
+    return text
 
 
 def build_joined_subtitle_files(answers: dict[str, Any], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -553,6 +599,9 @@ def build_retimed_subtitle_inputs(answers: dict[str, Any]) -> list[dict[str, Any
             "so the retimed track(s) were dropped.")
         return []
     timeline = encode_timeline_map(answers)
+    # Cut ranges reach FFmpeg as `-ss`/`trim`, which count from the container
+    # start; without them the filter chain rebases to the video's first frame.
+    origin = subtitle_source_origin(answers, bool(answers.get("cut_keep_ranges")))
     # Leased, not stored as a key: this builder is also called with a shallow
     # copy of answers, and a key written on the copy never reaches cleanup (R06).
     temp_dir = artifact_lease(answers).register(
@@ -562,7 +611,8 @@ def build_retimed_subtitle_inputs(answers: dict[str, Any]) -> list[dict[str, Any
     built: list[dict[str, Any]] = []
     for index in text_indices:
         raw = temp_dir / f"source{index:02d}.srt"
-        source_text = extract_subtitle_text(ffmpeg, source, index, raw, "Retimed subtitles")
+        source_text = extract_subtitle_text(ffmpeg, source, index, raw, "Retimed subtitles",
+                                            origin, answers.get("ffprobe"))
         cues = retime_cues(parse_srt(source_text), timeline) if source_text else []
         if not cues:
             appio.note(
@@ -655,7 +705,10 @@ def build_split_subtitle_inputs(
         source = Path(answers["input_path"])
         for index in text_indices:
             raw = temp_dir / f"source{index:02d}.srt"
-            text = extract_subtitle_text(ffmpeg, source, index, raw, "Split subtitles")
+            # Every Split part is trimmed, so its clock is the container's.
+            text = extract_subtitle_text(ffmpeg, source, index, raw, "Split subtitles",
+                                         subtitle_source_origin(answers, True),
+                                         answers.get("ffprobe"))
             cues = parse_srt(text) if text else []
             if cues:
                 sources.append((cues, {"source_index": index,
@@ -752,32 +805,31 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     for track in joined_subtitle_tracks:
         cmd.extend(["-i", str(track["path"])])
 
-    selected_audio = selected_audio_streams(join_answers) if join_answers.get("audio_streams") else []
-    if not selected_audio and any(item.get("audio_streams") for item in items):
-        # The track question is asked for input 1 only, so a silent input 1 left
-        # every LATER input's audio unmapped and unmentioned.
+    # The selection is an explicit STATE, not a truthy list. An empty
+    # `audio_tracks` used to be indistinguishable from a missing one, so an
+    # explicit "no audio tracks" answer was overwritten by the silent-first
+    # recovery below and the output arrived with an audio stream the user had
+    # said no to (F04).
+    audio_state, selected_audio = join_audio_selection(join_answers, items)
+    if audio_state == "unasked" and any(item_audio_streams(item) for item in items):
+        # The track question is gated on input 1 having audio, so an ABSENT key
+        # means it was never asked and every LATER input's audio would go
+        # unmapped and unmentioned. Only this state may recover a track.
         selected_audio = [0]
         appio.note(
-            "Join audio: input 1 has no audio, so track 0 of the other inputs is joined and "
-            "input 1's segment is silent."
+            "Join audio: input 1 has no audio, so the track question was never asked; track 0 "
+            "of the other inputs is joined and input 1's segment is silent."
         )
-    # How many tracks the question could reach: input 1's count, or the
-    # recovered track above when input 1 was silent.
-    offered_tracks = max(
-        len(join_answers.get("audio_streams") or []),
-        (max(selected_audio) + 1) if selected_audio else 0,
-    )
     silenced: list[str] = []
-    unreachable: list[str] = []
+    unselected: list[str] = []
     for item_pos, item in enumerate(items, start=1):
-        audio_count = len(item.get("audio_streams") or [])
+        audio_count = len(item_audio_streams(item))
         name = Path(item.get("path")).name
         if any(idx >= audio_count for idx in selected_audio):
             silenced.append(f"input {item_pos} ({name})")
-        if audio_count > offered_tracks:
-            unreachable.append(
-                f"input {item_pos} ({name}): track(s) {list(range(offered_tracks, audio_count))}"
-            )
+        skipped = [idx for idx in range(audio_count) if idx not in selected_audio]
+        if skipped and selected_audio:
+            unselected.append(f"input {item_pos} ({name}): track(s) {skipped}")
     if silenced:
         # The standalone join path has always synthesised silence here; the
         # wizard join used to refuse the very same set of files instead.
@@ -785,10 +837,12 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             "Join audio: silence is synthesised for the selected track(s) missing from "
             + ", ".join(silenced) + "."
         )
-    if unreachable:
+    if unselected:
+        # Every logical track IS reachable now, so this states what the answer
+        # left out rather than what the question could not offer.
         appio.note(
-            f"Join audio: the track question covers input 1's {offered_tracks} track(s), so these "
-            "are NOT in the joined output: " + "; ".join(unreachable) + "."
+            "Join audio: these source tracks were not selected, so they are NOT in the joined "
+            "output: " + "; ".join(unselected) + "."
         )
 
     filters: list[str] = []
@@ -833,7 +887,7 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         chain = [part for part in chain if part]
         filters.append(f"[{input_idx}:v:0]{','.join(chain)}[jv{input_idx}]")
         concat_inputs.append(f"[jv{input_idx}]")
-        item_audio_count = len(item.get("audio_streams") or [])
+        item_audio_count = len(item_audio_streams(item))
         for audio_pos, audio_index in enumerate(selected_audio):
             label = f"[ja{input_idx}_{audio_pos}]"
             if audio_index < item_audio_count:

@@ -25,9 +25,14 @@ from any tier, including the level-0 helpers.
 """
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Any, Iterator
+
+# Stdlib only, so the "no project imports" rule above still holds. The name is a
+# child of the logger appio configures, so this reaches the session log file.
+_LOG = logging.getLogger("ffmwiz.artifacts")
 
 ARTIFACT_LEASE_KEY = "_artifact_lease"
 EFFECTIVE_SETTINGS_KEY = "_effective_settings"
@@ -61,7 +66,15 @@ class ArtifactLease:
         self._paths = [item for item in self._paths if item != resolved]
 
     def release(self) -> list[Path]:
-        """Delete everything owned. Returns the paths that were removed."""
+        """Delete everything owned. Returns the paths that really went away.
+
+        Ownership is given up only once the path is GONE. `rmtree(ignore_errors)`
+        swallows a Windows sharing violation and returns normally, so the old
+        code reported a surviving directory as removed and dropped it from the
+        lease: with one file inside it held open, `release()` answered
+        "removed", the directory was still there, and the retry the comment
+        below promises could never happen because nothing was left to retry.
+        """
         removed: list[Path] = []
         for path in list(self._paths):
             try:
@@ -70,8 +83,12 @@ class ArtifactLease:
                 elif path.exists():
                     path.unlink()
             except OSError:
+                pass
+            if path.exists():
                 # A locked file must not stop the rest of the cleanup; it stays
                 # owned so a later release can retry it.
+                _LOG.warning("Leased temporary artifact %s could not be removed; "
+                             "it stays owned so a later release can retry it", path)
                 continue
             removed.append(path)
             self._paths = [item for item in self._paths if item != path]
