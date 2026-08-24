@@ -15,7 +15,7 @@ classifiers = [
     "Private :: Do Not Upload",
 ]
 dependencies = [
-    "PySide6==6.11.1",
+    "PySide6==6.11.2",
 ]
 
 [project.scripts]
