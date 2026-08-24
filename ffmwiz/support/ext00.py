@@ -504,11 +504,57 @@ def confirm_source_extra_stream_outcomes(answers: dict[str, Any]) -> None:
         raise Back()
 
 
+def item_audio_streams(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every audio stream of one join input, in file order.
+
+    Mirrors `item_subtitle_streams`: some paths assemble a join item without an
+    `audio_streams` key -- its audio only appears inside `streams` -- and
+    reading the key alone made such an input look silent.
+    """
+    streams = item.get("audio_streams")
+    if streams is None:
+        streams = [stream for stream in (item.get("streams") or [])
+                   if str(stream.get("codec_type") or "").lower() == "audio"]
+    return list(streams or [])
+
+
 def join_audio_segment_flags(answers: dict[str, Any]) -> list[bool]:
     """Audio presence per joined input, input 1 first."""
     flags = [bool(answers.get("audio_streams"))]
-    flags.extend(bool(item.get("audio_streams")) for item in (answers.get("join_input_items") or []))
+    flags.extend(bool(item_audio_streams(item)) for item in (answers.get("join_input_items") or []))
     return flags
+
+
+def join_audio_track_count(items: list[dict[str, Any]]) -> int:
+    """How many LOGICAL audio tracks the joined set offers.
+
+    Taken across ALL inputs, not input 1. Sizing the track question from input
+    1 is what made a track only a later input carries impossible to select, and
+    then reported it as "NOT in the joined output" (F05).
+    """
+    return max((len(item_audio_streams(item)) for item in items), default=0)
+
+
+def join_audio_streams_view(answers: dict[str, Any]) -> list[dict[str, Any]]:
+    """One representative stream per LOGICAL joined audio track.
+
+    The exact analogue of `join_subtitle_streams_view`. Track i is described by
+    the FIRST input that actually has an i-th audio stream, so the track,
+    codec, bitrate, sample-rate and LoudNorm questions describe the stream the
+    joined output really carries instead of input 1's list alone.
+    """
+    items = answers.get("join_input_items") or []
+    if not items:
+        return list(answers.get("audio_streams") or [])
+    all_items = [{"audio_streams": list(answers.get("audio_streams") or [])}, *items]
+    view: list[dict[str, Any]] = []
+    for index in range(join_audio_track_count(all_items)):
+        for item in all_items:
+            streams = item_audio_streams(item)
+            if index < len(streams):
+                view.append(streams[index])
+                break
+    return view
 
 
 def any_join_audio(answers: dict[str, Any]) -> bool:
@@ -519,20 +565,59 @@ def any_join_audio(answers: dict[str, Any]) -> bool:
     questions for a join whose later inputs are audible -- the joined audio then
     played at 1x under a 2x video and outlived it by its whole length (R02).
     """
-    return any(join_audio_segment_flags(answers))
+    return bool(join_audio_streams_view(answers))
+
+
+def join_audio_selection(answers: dict[str, Any],
+                         items: list[dict[str, Any]] | None = None) -> tuple[str, list[int]]:
+    """The audio-track answer as an explicit STATE, not a truthiness guess.
+
+    * `"unasked"` -- the key was never created. The track question is gated on
+      the primary input having audio, so an absent key is the ONLY case in
+      which a join may recover a later input's track.
+    * `"none"` -- the user answered with an empty selection. That is an
+      authoritative video-only request; the silent-first recovery used to
+      overwrite it because an empty list and a missing key both looked falsy
+      (F04). `selected_join_subtitle_tracks` already drew this line.
+    * `"all"` / `"indices"` -- normalised to a LOGICAL index list, so a
+      selection can be compared as a SET against the complete set instead of by
+      representation (`[0]` vs `"all"`, which is what F06 got wrong).
+    """
+    if "audio_tracks" not in answers:
+        return "unasked", []
+    selected = answers.get("audio_tracks")
+    count = (join_audio_track_count(items) if items is not None
+             else len(join_audio_streams_view(answers)))
+    if selected == "all":
+        return "all", list(range(count))
+    if not selected:
+        return "none", []
+    indices: list[int] = []
+    for value in selected:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < count and index not in indices:
+            indices.append(index)
+    return "indices", sorted(indices)
 
 
 def join_audio_recovery(answers: dict[str, Any]) -> tuple[list[dict[str, Any]], list[int]]:
-    """The audio the joined output really carries when input 1 is silent.
+    """The audio the joined output really carries when the question was never asked.
 
-    Mirrors what `build_join_encode_command` already does: track 0 of the first
-    audible input, with silence synthesised for the inputs that lack it.
-    Returns ([], []) when input 1 has audio or no input does.
+    Mirrors what `build_join_encode_command` does: track 0 of the first audible
+    input, with silence synthesised for the inputs that lack it. Returns
+    ([], []) when the user ANSWERED the track question -- an explicit answer,
+    including an empty one, is authoritative (F04) -- and when input 1 has audio
+    or no input does.
     """
+    if "audio_tracks" in answers:
+        return [], []
     if answers.get("audio_streams") or not answers.get("join_input_items"):
         return [], []
     for item in answers.get("join_input_items") or []:
-        streams = item.get("audio_streams") or []
+        streams = item_audio_streams(item)
         if streams:
             return [streams[0]], [0]
     return [], []
@@ -543,28 +628,38 @@ def with_join_audio_view(step: Callable[[dict[str, Any]], None]) -> Callable[[di
 
     The audio questions live behind `answers["audio_streams"]` -- input 1 alone
     -- so a join whose first input is silent lost LoudNorm and the codec/rate
-    questions for audio the output really carries. Lend the recovered track to
-    the step and take it straight back: nothing outside the step may see input 1
-    claiming a stream it does not have.
+    questions, and a track only a later input carries could not be reached at
+    all. Lend the joined view to the step and take it straight back: nothing
+    outside the step may see input 1 claiming a stream it does not have.
     """
 
     def run(answers: dict[str, Any]) -> None:
-        streams, tracks = join_audio_recovery(answers)
-        if not streams:
+        view = join_audio_streams_view(answers)
+        _streams, lent_tracks = join_audio_recovery(answers)
+        if not lent_tracks and view == list(answers.get("audio_streams") or []):
             step(answers)
             return
         missing = object()
-        saved = (answers.get("audio_streams", missing), answers.get("audio_tracks", missing))
-        answers["audio_streams"] = streams
-        answers["audio_tracks"] = tracks
+        saved_streams = answers.get("audio_streams", missing)
+        saved_tracks = answers.get("audio_tracks", missing)
+        answers["audio_streams"] = view
+        if lent_tracks:
+            answers["audio_tracks"] = lent_tracks
         try:
             step(answers)
         finally:
-            for key, value in zip(("audio_streams", "audio_tracks"), saved):
-                if value is missing:
-                    answers.pop(key, None)
+            if saved_streams is missing:
+                answers.pop("audio_streams", None)
+            else:
+                answers["audio_streams"] = saved_streams
+            # The TRACK question writes audio_tracks itself. Taking the lend
+            # back by position would throw the user's answer away, so only the
+            # object that was actually lent is reclaimed.
+            if lent_tracks and answers.get("audio_tracks") is lent_tracks:
+                if saved_tracks is missing:
+                    answers.pop("audio_tracks", None)
                 else:
-                    answers[key] = value
+                    answers["audio_tracks"] = saved_tracks
 
     return run
 
@@ -692,8 +787,12 @@ __all__ = [
     'can_map_additional_source_video_streams',
     'source_extra_stream_outcome_notes',
     'confirm_source_extra_stream_outcomes',
+    'item_audio_streams',
     'join_audio_segment_flags',
+    'join_audio_track_count',
+    'join_audio_streams_view',
     'any_join_audio',
+    'join_audio_selection',
     'join_audio_recovery',
     'with_join_audio_view',
     'build_loudnorm_filter',

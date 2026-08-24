@@ -62,6 +62,11 @@ from ffmwiz.support.L07 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # qualified primitives
 from ffmwiz.support.ext00 import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import (  # noqa: F401
+    item_subtitle_streams,
+    join_subtitle_track_count,
+    selected_join_subtitle_tracks,
+)
 
 from ffmwiz.support.ext01 import *  # sibling helpers  # noqa: F401,F403
 from ffmwiz.support.ext01b import *  # noqa: E402,F401,F403  (back-import)
@@ -349,6 +354,73 @@ def print_startup_banner(config_path: Path, launcher_path: Path, answers: dict[s
         startup_line("GPU", "not detected - video will be encoded on the CPU.", Color.RED, Color.RED)
 
 
+def join_copy_plan(answers: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Whether a concat-demuxer stream copy delivers EXACTLY the selected plan.
+
+    "The inputs are copy-compatible" and "the selected plan can be stream-
+    copied" are different questions, and conflating them cost the user both
+    ways: the summary announced "stream copy, no re-encode" for a plan the
+    builder then re-encoded, because the gate compared REPRESENTATIONS
+    (`audio_tracks in (None, "all")`) instead of sets -- an ordinary one-track
+    input answered `[0]`, which IS everything, and was pushed onto the encode
+    path anyway (F06).
+
+    `"supported"` answers the routing question. `"maps_everything"` answers the
+    narrower one `build_join_copy_command` needs: may a blanket `-map 0` be
+    used, or would it copy streams the user asked to drop? Codec and timeline
+    choices block the first but not the second -- they change how streams are
+    written, not which ones exist.
+    """
+    stream_reasons: list[str] = []
+    audio_state, audio_indices = join_audio_selection(answers, items)
+    audio_count = join_audio_track_count(items)
+    if audio_state != "unasked" and audio_indices != list(range(audio_count)):
+        stream_reasons.append(
+            "no audio track was selected" if not audio_indices
+            else f"only audio track(s) {audio_indices} of {audio_count} were selected")
+    subtitle_count = join_subtitle_track_count(items)
+    if subtitle_count:
+        if not source_subtitles_keep_enabled(answers):
+            stream_reasons.append("source subtitles are dropped")
+        elif ("subtitle_tracks" in answers
+                and selected_join_subtitle_tracks(answers, items) != list(range(subtitle_count))):
+            stream_reasons.append("only some subtitle tracks were selected")
+    if any(item.get("data_streams") for item in items) and not source_data_keep_enabled(answers):
+        stream_reasons.append("source data streams are dropped")
+    if (any(item.get("attachment_streams") for item in items)
+            and "keep_embedded_attachments" in answers
+            and not answers.get("keep_embedded_attachments")):
+        # Only an EXPLICIT answer counts: the standalone join never asks, and a
+        # missing key must not be read as "drop them".
+        stream_reasons.append("embedded attachments are dropped")
+    if (any(len(item.get("video_streams") or []) > 1 for item in items)
+            and not source_extra_video_keep_enabled(answers)):
+        stream_reasons.append("extra source video streams are dropped")
+
+    edit_reasons: list[str] = []
+    if (any(item.get("video_streams") for item in items)
+            and str(answers.get("video_codec", "")).lower() != "copy"):
+        edit_reasons.append("the selected video codec re-encodes")
+    if (any(item_audio_streams(item) for item in items)
+            and str(answers.get("audio_codec", "")).lower() != "copy"):
+        edit_reasons.append("the selected audio codec re-encodes")
+    if not source_metadata_keep_enabled(answers):
+        edit_reasons.append("source metadata is dropped")
+    if not source_chapters_keep_enabled(answers):
+        edit_reasons.append("source chapters are dropped")
+    if video_filters_required(answers) or answers.get("reverse_video"):
+        edit_reasons.append("the selected video edit rebuilds the timeline")
+    if (loudnorm_transform_enabled(answers)
+            or audio_speed_transform_enabled(answers)
+            or answers.get("audio_cut_keep_ranges")):
+        edit_reasons.append("the selected audio edit requires re-encoding")
+    return {
+        "supported": not (stream_reasons or edit_reasons),
+        "maps_everything": not stream_reasons,
+        "reasons": stream_reasons + edit_reasons,
+    }
+
+
 def build_join_copy_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
     output_path = resolve_output_collision_against_inputs(
         output_path,
@@ -358,25 +430,43 @@ def build_join_copy_command(answers: dict[str, Any], items: list[dict[str, Any]]
     answers["output_path"] = output_path
     list_path = write_join_concat_list(items, output_path)
     answers["_join_concat_list"] = list_path
-    return [
+    cmd = [
         answers["ffmpeg"],
         "-hide_banner",
         "-y" if OVERWRITE_OUTPUT else "-n",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-map",
-        "0",
-        "-c",
-        "copy",
-        str(output_path),
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(list_path),
     ]
+    if join_copy_plan(answers, items)["maps_everything"]:
+        cmd.extend(["-map", "0"])
+    else:
+        # `-map 0` copies whatever the concat input happens to carry, so a
+        # selective request was silently OVER-fulfilled: tracks the user asked
+        # to drop came through anyway (F06). Map exactly what was asked for.
+        if any(item.get("video_streams") for item in items):
+            cmd.extend(["-map", "0:v" if source_extra_video_keep_enabled(answers) else "0:v:0"])
+        for index in join_audio_selection(answers, items)[1]:
+            cmd.extend(["-map", f"0:a:{index}?"])
+        if source_subtitles_keep_enabled(answers):
+            for index in selected_join_subtitle_tracks(answers, items):
+                cmd.extend(["-map", f"0:s:{index}?"])
+        if source_data_keep_enabled(answers) and any(item.get("data_streams") for item in items):
+            cmd.extend(["-map", "0:d?"])
+        if answers.get("keep_embedded_attachments") and any(item.get("attachment_streams") for item in items):
+            cmd.extend(["-map", "0:t?"])
+    cmd.extend(["-c", "copy", str(output_path)])
+    return cmd
 
 
-def print_join_summary(items: list[dict[str, Any]], copy_compatible: bool, reasons: list[str]) -> None:
+def print_join_summary(items: list[dict[str, Any]], copy_compatible: bool, reasons: list[str],
+                       plan: dict[str, Any] | None = None) -> None:
+    """Join summary. `plan` is `join_copy_plan`'s verdict when the caller has one.
+
+    Without it the summary reported input COMPATIBILITY as if it were the join
+    mode, so a compatible pair whose selected plan needed re-encoding was told
+    "stream copy, no re-encode" while the command ran libx265 (F06).
+    """
     print()
     print(paint("Join summary:", Color.BOLD + Color.LIGHT_BLUE))
     for idx, item in enumerate(items, start=1):
@@ -398,11 +488,19 @@ def print_join_summary(items: list[dict[str, Any]], copy_compatible: bool, reaso
             )
         print("  " + field_text(f"input {idx}", detail, Color.WHITE))
     if copy_compatible:
+        print("  " + field_text("inputs", "stream-copy compatible", Color.GREEN))
+    else:
+        print("  " + field_text("inputs", "not stream-copy compatible", Color.ORANGE))
+        for reason in reasons:
+            print("    " + paint(reason, Color.YELLOW))
+    will_copy = copy_compatible and (plan is None or bool(plan.get("supported")))
+    if will_copy:
         print("  " + field_text("join mode", "stream copy, no re-encode", Color.GREEN))
     else:
         print("  " + field_text("join mode", "re-encode required", Color.ORANGE))
-        for reason in reasons:
-            print("    " + paint(reason, Color.YELLOW))
+        if copy_compatible and plan is not None:
+            for reason in plan.get("reasons") or []:
+                print("    " + paint(reason, Color.YELLOW))
 
 
 def ask_join_frame_rate_policy(answers: dict[str, Any], items: list[dict[str, Any]]) -> bool:
@@ -467,6 +565,7 @@ __all__ = [
     'step_hardsub_hdr_handling',
     'step_hardsub_audio_mode',
     'print_startup_banner',
+    'join_copy_plan',
     'build_join_copy_command',
     'print_join_summary',
     'ask_join_frame_rate_policy',

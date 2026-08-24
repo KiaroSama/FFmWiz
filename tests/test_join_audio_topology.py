@@ -44,11 +44,18 @@ def _answers(items, tracks=None, **extra):
         "streams": first["streams"], "format": first["format"],
         "output_ext": "mkv", "video_codec": "H264", "use_gpu": False,
         "audio_codec": "aac", "audio_bitrate_kbps": 128,
-        "audio_tracks": (list(range(len(first["audio_streams"]))) if tracks is None else tracks),
         "subtitle_tracks": [], "resolution": "n", "fps": 30,
         "video_bitrate_kbps": 400, "color_range_choice": "tv",
         "join_input_items": items[1:],
     }
+    # The key exists only when the track question was actually answered, and a
+    # silent input 1 leaves it ABSENT. An empty list is now the user's explicit
+    # "no audio tracks" answer and is honoured literally (F04), so a fixture
+    # must not use it to mean "never asked".
+    if tracks is not None:
+        answers["audio_tracks"] = tracks
+    elif first["audio_streams"]:
+        answers["audio_tracks"] = list(range(len(first["audio_streams"])))
     answers.update(extra)
     return answers
 
