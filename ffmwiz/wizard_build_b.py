@@ -469,6 +469,21 @@ def build_joined_subtitle_files(answers: dict[str, Any], items: list[dict[str, A
         if not merged_text.strip():
             appio.note(f"Joined subtitles: track {relative} contained no cues and was dropped.")
             continue
+        # The merge above sits on the UNEDITED joined clock. Replay whatever the
+        # video and audio graphs do to it, through the same TimelineMap, so an
+        # edited join keeps the tracks the user selected instead of dropping
+        # every one of them (F09).
+        timeline = joined_timeline_map(answers, items)
+        if not timeline.is_identity:
+            retimed = retime_cues(parse_srt(merged_text), timeline)
+            if not retimed:
+                appio.note(f"Joined subtitles: track {relative} has no cue left on the "
+                           "edited timeline and was dropped.")
+                continue
+            merged_text = render_srt(retimed)
+            log_info(f"Joined subtitles: track {relative} retimed onto the edited joined "
+                     f"timeline (keep_ranges={timeline.keep_ranges}; "
+                     f"speed={timeline.speed:g}; reverse={timeline.reverse})")
         merged = temp_dir / f"joined{relative:02d}.srt"
         merged.write_text(merged_text, encoding="utf-8", newline="\n")
         log_info(f"Joined subtitles: merged track {relative} from {extracted}/"
@@ -509,6 +524,60 @@ def encode_timeline_map(answers: dict[str, Any]) -> TimelineMap:
     return TimelineMap(
         keep_ranges=list(answers.get("cut_keep_ranges") or []),
         source_duration=source_duration,
+        speed=encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0,
+        reverse=bool(answers.get("reverse_video")),
+    )
+
+
+def slice_subtitle_tracks_into_parts(
+    answers: dict[str, Any],
+    sources: list[tuple[list[tuple[float, float, str]], dict[str, Any]]],
+    part_intervals: list[tuple[float, float]],
+) -> list[list[dict[str, Any]]]:
+    """Cut whole-timeline cues into one SRT per Split part, rebased to zero.
+
+    `sources` is [(cues, metadata), ...] already on the PROCESSED clock. Shared
+    by the single-input Split builder and the join builder: a joined Split has
+    exactly the same problem, and mapping the one merged track into every part
+    would put Part 2's cues at their full-timeline positions.
+
+    Returns one list of track dicts per interval, parallel to `part_intervals`.
+    """
+    if not sources or not part_intervals:
+        return []
+    part_dir = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_split_subs_parts_")))
+    per_part: list[list[dict[str, Any]]] = []
+    for part_idx, (part_start, part_end) in enumerate(part_intervals):
+        tracks: list[dict[str, Any]] = []
+        for order, (cues, meta) in enumerate(sources):
+            sliced = []
+            for start, end, text in cues:
+                clipped_start = max(float(start), float(part_start))
+                clipped_end = min(float(end), float(part_end))
+                if clipped_end > clipped_start + 1e-6:
+                    sliced.append((clipped_start - part_start,
+                                   clipped_end - part_start, text))
+            if not sliced:
+                continue
+            path = part_dir / f"part{part_idx + 1:02d}_track{order:02d}.srt"
+            path.write_text(render_srt(sliced), encoding="utf-8", newline="\n")
+            tracks.append({**meta, "path": path})
+        per_part.append(tracks)
+    return per_part
+
+
+def joined_timeline_map(answers: dict[str, Any],
+                        items: list[dict[str, Any]]) -> TimelineMap:
+    """The same transform, measured on the JOINED clock.
+
+    A join's source timeline is the sum of its inputs, so `encode_timeline_map`
+    -- which reads input 1's format duration -- describes the wrong axis for it.
+    Cuts, speed and reverse are the same answers either way.
+    """
+    return TimelineMap(
+        keep_ranges=list(answers.get("cut_keep_ranges") or []),
+        source_duration=sum(float(item.get("duration") or 0.0) for item in items),
         speed=encode_video_speed_factor(answers) if video_speed_transform_enabled(answers) else 1.0,
         reverse=bool(answers.get("reverse_video")),
     )
@@ -716,25 +785,7 @@ def build_split_subtitle_inputs(
     if not sources:
         return []
 
-    part_dir = artifact_lease(answers).register(
-        Path(tempfile.mkdtemp(prefix="ffmwiz_split_subs_parts_")))
-    per_part: list[list[dict[str, Any]]] = []
-    for part_idx, (part_start, part_end) in enumerate(part_intervals):
-        tracks: list[dict[str, Any]] = []
-        for order, (cues, meta) in enumerate(sources):
-            sliced = []
-            for start, end, text in cues:
-                clipped_start = max(float(start), float(part_start))
-                clipped_end = min(float(end), float(part_end))
-                if clipped_end > clipped_start + 1e-6:
-                    sliced.append((clipped_start - part_start,
-                                   clipped_end - part_start, text))
-            if not sliced:
-                continue
-            path = part_dir / f"part{part_idx + 1:02d}_track{order:02d}.srt"
-            path.write_text(render_srt(sliced), encoding="utf-8", newline="\n")
-            tracks.append({**meta, "path": path})
-        per_part.append(tracks)
+    per_part = slice_subtitle_tracks_into_parts(answers, sources, part_intervals)
 
     carried = sum(len(tracks) for tracks in per_part)
     if carried:
@@ -800,10 +851,11 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     # to be assembled separately: each input's cues shifted by that input's
     # start offset, merged, and fed back as extra inputs -- one per selected
     # logical track, not one for the whole job.
+    # Built here, but the `-i` entries are appended further down: a Split needs
+    # one sliced track PER PART, and the part intervals are not known until the
+    # final split filters are laid out. Everything before that point references
+    # inputs 0..len(items)-1, so appending later cannot disturb the graph.
     joined_subtitle_tracks = build_joined_subtitle_files(join_answers, items)
-    joined_subtitle_input_base = len(items) if joined_subtitle_tracks else None
-    for track in joined_subtitle_tracks:
-        cmd.extend(["-i", str(track["path"])])
 
     # The selection is an explicit STATE, not a truthy list. An empty
     # `audio_tracks` used to be indistinguishable from a missing one, so an
@@ -952,6 +1004,33 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         split_intervals = []
         output_paths = [output_path]
 
+    # Subtitle inputs go in now that the part intervals exist. Without the
+    # per-part slice every part mapped the same whole-timeline track, so Part 2
+    # carried its cues at their joined-timeline positions (F09).
+    subtitle_tracks_by_part: list[list[dict[str, Any]]] = []
+    subtitle_inputs_by_part: list[list[int]] = []
+    if joined_subtitle_tracks and split_active and split_intervals:
+        sources = []
+        for track in joined_subtitle_tracks:
+            try:
+                cues = parse_srt(Path(track["path"]).read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if cues:
+                sources.append((cues, track))
+        subtitle_tracks_by_part = slice_subtitle_tracks_into_parts(
+            join_answers, sources, split_intervals)
+    elif joined_subtitle_tracks:
+        subtitle_tracks_by_part = [list(joined_subtitle_tracks)]
+    next_subtitle_input = len(items)
+    for part_tracks in subtitle_tracks_by_part:
+        indices: list[int] = []
+        for track in part_tracks:
+            cmd.extend(["-i", str(track["path"])])
+            indices.append(next_subtitle_input)
+            next_subtitle_input += 1
+        subtitle_inputs_by_part.append(indices)
+
     cmd.extend(["-filter_complex", ";".join(filters)])
 
     if join_answers.get("use_gpu") and str(video_encoder).endswith("_nvenc"):
@@ -962,16 +1041,22 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             cmd.extend(["-map", f"[{audio_label}]"])
         subtitle_args: list[str] = []
         mapped_subtitle_tracks: list[dict[str, Any]] = []
-        if joined_subtitle_input_base is not None:
+        # This part's OWN tracks: one whole-timeline set when there is no
+        # Split, one sliced set per part when there is.
+        part_subtitle_tracks = (subtitle_tracks_by_part[part_idx]
+                                if part_idx < len(subtitle_tracks_by_part) else [])
+        part_subtitle_inputs = (subtitle_inputs_by_part[part_idx]
+                                if part_idx < len(subtitle_inputs_by_part) else [])
+        if part_subtitle_tracks:
             target, problems = subtitle_codec_args_for_container(
-                str(output_path.suffix), ["subrip"])
+                str(output_path.suffix), ["subrip"] * len(part_subtitle_tracks))
             for problem in problems:
                 log_warn(f"Joined subtitles: {problem}")
             if target:
-                for offset, _track in enumerate(joined_subtitle_tracks):
-                    cmd.extend(["-map", f"{joined_subtitle_input_base + offset}:s:0"])
+                for input_index in part_subtitle_inputs:
+                    cmd.extend(["-map", f"{input_index}:s:0"])
                 subtitle_args = target
-                mapped_subtitle_tracks = joined_subtitle_tracks
+                mapped_subtitle_tracks = part_subtitle_tracks
         attachments_mapped = append_embedded_attachment_maps(cmd, join_answers)
         data_mapped = append_source_data_maps(cmd, join_answers)
         append_source_metadata_chapter_options(cmd, join_answers)
