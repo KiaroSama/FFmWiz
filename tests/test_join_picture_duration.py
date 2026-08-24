@@ -158,6 +158,11 @@ class JoinedTimelineFollowsThePicture(NoLeakedArtifacts, unittest.TestCase):
         cls._build(cls.audio_tail, ["-i", str(picture), "-i", str(long_audio),
                                     "-i", str(on_picture),
                                     "-map", "0:v", "-map", "1:a", "-map", "2:s", "-c", "copy"])
+        # 2.000 s picture, NO audio at all, subtitle running to 3.000 s: the
+        # input that forces `concat` to be given synthesised silence.
+        cls.silent_tail = cls._root / "silent_tail.mkv"
+        cls._build(cls.silent_tail, ["-i", str(picture), "-i", str(over_the_end),
+                                     "-map", "0:v", "-map", "1:s", "-c", "copy"])
         cls.offset = cls._root / "offset.mkv"
         cls._build(cls.offset, ["-i", str(cls.plain), "-c", "copy",
                                 "-output_ts_offset", "1.0", "-avoid_negative_ts", "disabled"])
@@ -377,6 +382,90 @@ class JoinedTimelineFollowsThePicture(NoLeakedArtifacts, unittest.TestCase):
         plan = FFmWiz.join_subtitle_plan(self._answers(items), [items[0], blind])
         self.assertFalse(plan["supported"])
         self.assertIn("no known duration", plan["reason"])
+
+    # ---- silence stands in for a picture, not for a container -----------
+    def _silence_durations(self, cmd):
+        parts = [str(part) for part in cmd]
+        graph = parts[parts.index("-filter_complex") + 1]
+        return [float(chunk.split("d=")[1].split("[")[0])
+                for chunk in graph.split(";") if "anullsrc" in chunk]
+
+    def test_synthesised_silence_matches_the_picture_it_stands_in_for(self):
+        # d=3.000000 for a 2.000 s picture: the silence outlived every frame
+        # it was standing in for.
+        items = [self._item(self.plain), self._item(self.silent_tail)]
+        noise = StringIO()
+        with redirect_stdout(noise), redirect_stderr(noise):
+            cmd = FFmWiz.build_join_encode_command(
+                self._answers(items, keep_source_subtitles=False),
+                items, self._tmp / "silence.mkv")
+        self.assertEqual([PICTURE], [round(value, 3)
+                                     for value in self._silence_durations(cmd)])
+
+    def test_the_join_does_not_outlive_its_last_frame(self):
+        # Measured end to end: 5.044 s of container over a 4.000 s picture,
+        # the last second of it silence no frame covered.
+        items = [self._item(self.plain), self._item(self.silent_tail)]
+        joined = self._encode(items, keep_source_subtitles=False)
+        self._assert_close(PICTURE * 2, self._picture_seconds(joined), 0.06, "picture")
+        container = float(self._probe(joined, "-show_format")["format"]["duration"])
+        self._assert_close(PICTURE * 2, container, 0.12, "container")
+
+    def _wizard_join_items(self, items, **extra):
+        """The item list step_start_now really built, caught on its way out.
+
+        It is a local, so the only honest way to see it is to intercept a
+        consumer. `print_join_summary` receives the list itself.
+        """
+        from ffmwiz import wizard_b
+        answers = self._answers(items, **extra)
+        captured = []
+        real_summary = wizard_b.print_join_summary
+        real_ask = FFmWiz.appio.ask_yes_no
+        wizard_b.print_join_summary = lambda built, *a, **k: captured.append(built)
+        FFmWiz.appio.ask_yes_no = lambda *a, **k: False
+        noise = StringIO()
+        try:
+            with redirect_stdout(noise), redirect_stderr(noise):
+                wizard_b.step_start_now(answers)
+        finally:
+            wizard_b.print_join_summary = real_summary
+            FFmWiz.appio.ask_yes_no = real_ask
+        self.assertEqual(1, len(captured), "the join summary never ran")
+        return captured[0], answers
+
+    def test_the_wizard_measures_its_items_by_the_picture(self):
+        # step_start_now assembled its OWN item list and kept every CONTAINER
+        # duration, so the picture fix never reached the join it built.
+        items = [self._item(self.plain), self._item(self.silent_tail)]
+        built, _answers = self._wizard_join_items(items, keep_source_subtitles=False)
+        self.assertEqual([PICTURE, PICTURE],
+                         [round(float(item["duration"]), 3) for item in built])
+
+    def test_the_wizard_keeps_input_ones_subtitle_streams(self):
+        # The hand-rolled copy omitted the key, so every consumer that asked
+        # input 1 for its subtitles was told it had none (R04).
+        items = [self._item(self.subtitle_tail), self._item(self.plain)]
+        built, _answers = self._wizard_join_items(items)
+        self.assertEqual(len(items[0]["subtitle_streams"]),
+                         len(built[0].get("subtitle_streams") or []),
+                         "input 1 lost its subtitle streams on the way in")
+
+    def test_the_wizard_still_builds_a_command(self):
+        # Guard the guard: an item list nothing consumed would satisfy the two
+        # assertions above without the wizard ever producing a join.
+        items = [self._item(self.plain), self._item(self.silent_tail)]
+        _built, answers = self._wizard_join_items(items, keep_source_subtitles=False)
+        self.assertEqual([PICTURE], [round(value, 3) for value
+                                     in self._silence_durations(answers["cmd"])])
+
+    def test_the_shared_item_list_carries_input_ones_subtitles(self):
+        # The hand-rolled copy omitted this key entirely, so every consumer
+        # that asked input 1 for its subtitle streams was told it had none.
+        items = [self._item(self.subtitle_tail), self._item(self.plain)]
+        rebuilt = FFmWiz.join_items_from_answers(self._answers(items))
+        self.assertEqual(len(items[0]["subtitle_streams"]),
+                         len(rebuilt[0].get("subtitle_streams") or []))
 
 
 if __name__ == "__main__":
