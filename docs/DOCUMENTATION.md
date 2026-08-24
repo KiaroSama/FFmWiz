@@ -578,6 +578,16 @@ Add split points to cut one timeline into multiple output parts (`_Part01`, `_Pa
 Splitting is performed in a single FFmpeg command with a filter graph; progress is
 reconstructed per part (see §15).
 
+Each part is a complete file on its own clock, so the extras are rebuilt per part rather than
+copied whole:
+
+- **Subtitles** — text tracks are sliced to the part's interval and shifted back to zero, so a
+  cue that belonged to Part 2 starts where it should instead of at its whole-timeline position.
+  A cut or speed change is applied first, then the slice. Bitmap tracks (PGS, VobSub, DVB)
+  cannot be sliced and are dropped after you confirm.
+- **Chapters** — remapped per part and clipped to that part's interval, each part starting at
+  zero.
+
 ### Join (Mode 12 — "Join Audios and Videos")
 
 Join multiple inputs into one file. FFmWiz stream‑copies when the inputs are compatible,
@@ -602,10 +612,16 @@ Mode 5 (Add files to video) instead.
 #### Subtitles on a joined timeline
 
 FFmpeg's `concat` filter cannot carry subtitle streams, so when a join is re‑encoded FFmWiz
-builds **one** subtitle track for the joined timeline: each input's text subtitle is extracted,
-its cues are shifted by the total duration of the inputs before it, cues running past their own
-input are clipped, and the result is muxed back in. An input with no subtitle still advances the
-offset, so later cues stay aligned.
+rebuilds them: each input's text subtitle is extracted, its cues are shifted by the total
+duration of the inputs before it, cues running past their own input are clipped, and the result
+is muxed back in. An input with no subtitle still advances the offset, so later cues stay
+aligned.
+
+One merged track is produced **per selected logical track**, not one in total. Track numbering
+is the relative position within each input (track 0, track 1, ...), which is the numbering the
+subtitle question shows; an input that lacks a given track contributes an empty stretch so the
+other inputs' cues stay in place. The question itself counts tracks across **all** inputs, so a
+join whose first file has no subtitles still asks which of the later files' tracks to keep.
 
 It is refused, with the reason printed before you confirm, when:
 
