@@ -283,7 +283,7 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
     log_info(
         "Selected settings: input={}; output={}; format={}; video_codec={}; audio_codec={}; crop={}; fps={}; resolution={}".format(
             answers.get("input_path"), answers.get("output_path"), answers.get("output_ext"),
-            answers.get("video_codec"), answers.get("audio_codec"),
+            effective_value(answers, "video_codec"), effective_value(answers, "audio_codec"),
             format_crop_margins(answers) if answers.get("crop_enabled") else "no",
             answers.get("fps") or "source", format_resolution_summary(answers.get("resolution")),
         )
@@ -478,7 +478,10 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
             f"{_recovered_tracks} (input 1 is silent; taken from the other joined inputs)"
             if _recovered_streams else answers.get("audio_tracks"),
             Color.LIGHT_BLUE))
-        print("  " + field_text("audio codec", answers.get("audio_codec"), Color.CYAN))
+        # The resolved codec: a container fallback records its substitution
+        # in the effective map and leaves the requested key alone, so this
+        # line reported "copy" while -c:a said aac (F07).
+        print("  " + field_text("audio codec", effective_value(answers, "audio_codec"), Color.CYAN))
         print("  " + field_text("audio bitrate", str(answers.get("audio_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
         _sr = resolve_audio_sample_rate(answers)
         if answers.get("join_input_items"):
@@ -562,7 +565,7 @@ def _print_estimated_output_size(answers: dict[str, Any]) -> None:
         not na_reason
         and answers.get("audio_streams")
         and answers.get("audio_bitrate_kbps")
-        and str(answers.get("audio_codec")) != "copy"
+        and str(effective_value(answers, "audio_codec")) != "copy"
     ):
         total_kbps += float(answers["audio_bitrate_kbps"])
     if na_reason:
