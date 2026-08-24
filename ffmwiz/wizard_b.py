@@ -166,27 +166,11 @@ def step_start_now(answers: dict[str, Any]) -> None:
     if output_is_audio_only(answers) and not answers.get("audio_streams"):
         fail("Audio-only output was selected, but the input file has no audio stream.")
 
-    join_items = []
-    if answers.get("join_input_items"):
-        join_items = [
-            {
-                "path": answers["input_path"],
-                "probe": answers.get("probe") or {},
-                "format": answers.get("format") or {},
-                "streams": (
-                    list(answers.get("video_streams") or [])
-                    + list(answers.get("audio_streams") or [])
-                    + list(answers.get("subtitle_streams") or [])
-                    + list(answers.get("attachment_streams") or [])
-                    + list(answers.get("data_streams") or [])
-                ),
-                "video_streams": answers.get("video_streams") or [],
-                "audio_streams": answers.get("audio_streams") or [],
-                "data_streams": answers.get("data_streams") or [],
-                "duration": services.stream_duration_seconds({}, answers.get("format")) or 0.0,
-            },
-            *list(answers.get("join_input_items") or []),
-        ]
+    # The shared builder, not a hand-rolled copy. This one had already
+    # drifted -- it omitted input 1's `subtitle_streams` (R04) -- and it kept
+    # every item's CONTAINER duration, so a silent input padded the join past
+    # its own last frame (B07).
+    join_items = join_items_from_answers(answers)
     answers.pop("separator_jobs", None)
     if join_items:
         output_path = services.build_output_path(answers)

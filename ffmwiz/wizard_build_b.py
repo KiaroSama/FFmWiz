@@ -969,7 +969,12 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
                 filters.append(f"[{input_idx}:a:{audio_index}]"
                                f"{join_audio_prep_filter(join_rate, join_layout)}{label}")
             else:
-                silence = max(0.001, float(item.get("duration") or 0.001))
+                # The PICTURE span, not the container. `concat` splices the
+                # decoded picture, so silence sized from `format.duration`
+                # outlives the frames it stands in for: a 2.000 s picture in a
+                # 3.000 s MKV produced d=3.000000 and a 5.044 s join whose last
+                # 1.044 s had no frame at all (B07).
+                silence = max(0.001, join_item_picture_span(item) or 0.001)
                 filters.append(
                     f"anullsrc=channel_layout={join_layout}:sample_rate={join_rate}:d={silence:.6f}{label}"
                 )
