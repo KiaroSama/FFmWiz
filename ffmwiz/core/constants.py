@@ -97,10 +97,10 @@ REVERSE_SEGMENT_SECONDS = 60.0
 # safe at SD: it is 5.2 GiB of frames at 1080p30 and 20.9 GiB at 4K30.
 REVERSE_SEGMENT_BUDGET_BYTES = 1024 ** 3
 REVERSE_SEGMENT_MIN_SECONDS = 2.0
-# The joined intermediate a bounded join reverse writes is re-encoded once
-# more by the reverse pass, so it is kept visually lossless rather than at
-# the output quality: the user should not pay for the extra generation.
-JOIN_REVERSE_INTERMEDIATE_CRF = 14
+# Intermediates the bounded reverse pipeline writes are re-encoded once more
+# by a later stage, so they are kept visually lossless rather than at the
+# output quality: the user should not pay for the extra generation.
+REVERSE_INTERMEDIATE_CRF = 14
 
 # The Audio Cut / Speed / Reverse tools always re-encode, so they derive their
 # target bitrate from the SOURCE instead of pinning every output to 128 kbps.
@@ -747,7 +747,7 @@ __all__ = [
     'REVERSE_SEGMENT_SECONDS',
     'REVERSE_SEGMENT_BUDGET_BYTES',
     'REVERSE_SEGMENT_MIN_SECONDS',
-    'JOIN_REVERSE_INTERMEDIATE_CRF',
+    'REVERSE_INTERMEDIATE_CRF',
     'DEFAULT_VIDEO_CODEC',
     'H264_NVENC_ENCODER',
     'DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS',

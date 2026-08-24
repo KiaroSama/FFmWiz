@@ -1,4 +1,4 @@
-"""Regression: reversing a join must not buffer the joined program (F10).
+"""Regression: reverse must never be handed a whole timeline (F10).
 
 `reverse` holds every decoded frame of its input. Across a join that is the sum
 of every input, so the one-pass plan was not a memory characteristic to warn
@@ -46,11 +46,11 @@ class TheSelectorRoutesAJoinedReverse(unittest.TestCase):
         self.segmented = []
         self.one_shot = []
         self.notes = []
-        self._real_bounded = encoding.run_bounded_join_reverse
+        self._real_bounded = encoding.run_bounded_reverse_pipeline
         self._real_segmented = encoding.run_segmented_reverse_main_encode
         self._real_runner = encoding.run_ffmpeg_with_progress
         self._real_note = FFmWiz.appio.note
-        encoding.run_bounded_join_reverse = (
+        encoding.run_bounded_reverse_pipeline = (
             lambda answers: (self.bounded.append(answers) or (0, 0.0)))
         encoding.run_segmented_reverse_main_encode = (
             lambda answers: (self.segmented.append(answers) or (0, 0.0)))
@@ -59,7 +59,7 @@ class TheSelectorRoutesAJoinedReverse(unittest.TestCase):
         FFmWiz.appio.note = self.notes.append
 
     def tearDown(self):
-        encoding.run_bounded_join_reverse = self._real_bounded
+        encoding.run_bounded_reverse_pipeline = self._real_bounded
         encoding.run_segmented_reverse_main_encode = self._real_segmented
         encoding.run_ffmpeg_with_progress = self._real_runner
         FFmWiz.appio.note = self._real_note
@@ -87,13 +87,16 @@ class TheSelectorRoutesAJoinedReverse(unittest.TestCase):
         self.assertEqual(0, len(self.bounded))
         self.assertEqual(1, len(self.segmented))
 
-    def test_a_split_join_still_says_it_is_one_pass(self):
-        # The bounded path writes ONE intermediate; the split graph that owns
-        # the part outputs lives in the join command, so this case is honest
-        # about what it does rather than silently claiming a bounded plan.
+    def test_a_split_join_takes_the_pipeline_as_well(self):
         self._run(join_input_items=[{"path": "b.mkv"}], separator_points=[1.0])
-        self.assertEqual(0, len(self.bounded))
-        self.assertIn("one pass", " ".join(self.notes).lower())
+        self.assertEqual(1, len(self.bounded))
+        self.assertEqual(0, len(self.one_shot))
+
+    def test_a_plain_split_reverse_takes_it_too(self):
+        # No join: a Split alone still hands `reverse` the whole timeline.
+        self._run(separator_points=[1.0])
+        self.assertEqual(1, len(self.bounded))
+        self.assertEqual(0, len(self.one_shot))
 
     def test_a_non_reverse_join_is_untouched(self):
         self._run(join_input_items=[{"path": "b.mkv"}], reverse_video=False,
@@ -194,7 +197,7 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
                 answers["cmd"] = [str(part) for part in
                                   FFmWiz.build_join_encode_command(
                                       dict(answers), items, answers["output_path"])]
-                code, _elapsed = encoding.run_bounded_join_reverse(answers)
+                code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
         finally:
             encoding.split_ranges_for_reverse_segments = real_split
             encoding.run_ffmpeg_with_progress = real_runner
@@ -245,6 +248,70 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
         self.assertEqual("blue", self._colour_at(output, duration * 0.25))
         self.assertEqual("red", self._colour_at(output, duration * 0.9),
                          "the red second must survive; a doubled cut removes it")
+
+    def test_a_split_reverse_puts_the_end_of_the_source_in_part_one(self):
+        # Reversing each part on its own would return them in the ORIGINAL
+        # order; reversing the whole join at once is the unbounded plan. The
+        # pipeline reverses first, then cuts the parts out of the result.
+        out, _commands, _log = self._reverse_with("splitrev", separator_points=[2.0])
+        parts = sorted(Path(out).parent.glob("*Part*.mkv"))
+        self.assertEqual(2, len(parts), f"expected two parts, got {parts}")
+        self.assertEqual("blue", self._colour_at(parts[0], 0.5),
+                         "Part 1 must hold the END of the joined timeline")
+        self.assertEqual("red", self._colour_at(parts[1], 0.5))
+        # The part files keep the SOURCE's name, not the intermediate's. The
+        # summary already showed the user these paths before the run started.
+        expected = Path(self.inputs[0]).stem
+        for part in parts:
+            self.assertTrue(part.name.startswith(expected),
+                            f"{part.name} should be named after {expected}, "
+                            "not after the pipeline's scratch file")
+
+    def test_a_split_reverse_really_uses_the_bounded_executor(self):
+        # The whole point: the segmented executor has to run. Before this the
+        # split branch went straight to a one-shot `reverse` over everything.
+        seen = []
+        real = encoding.run_segmented_reverse_main_encode
+
+        def spy(answers):
+            seen.append(answers)
+            return real(answers)
+
+        encoding.run_segmented_reverse_main_encode = spy
+        try:
+            self._reverse_with("splitbounded", separator_points=[2.0])
+        finally:
+            encoding.run_segmented_reverse_main_encode = real
+        self.assertEqual(1, len(seen))
+        self.assertNotIn("separator_points", seen[0],
+                         "the reverse stage must not also try to split")
+
+    def test_cut_speed_reverse_and_split_are_each_applied_once(self):
+        # The stage-3 discriminator. Keeping 1-4 s of the 4 s join leaves 3 s
+        # (1 s red, 2 s blue); at 2x that is 1.5 s; reversed it is blue then
+        # red; split at 0.75 s gives two ~0.75 s parts.
+        #
+        #   correct                      ~1.5 s total
+        #   speed re-applied in stage 3  ~0.75 s
+        #   cut re-applied in stage 3    ~0.5 s   (1-4 s of a 1.5 s file)
+        #
+        # Every output file also carries two frames of container padding, which
+        # at 30 fps is 0.066 s each -- hence the tolerance rather than equality.
+        # audio_speed_from_video matters: without it the audio keeps its
+        # original length and the CONTAINER stays 3 s however short the video
+        # is, which measures like a missing speed change and is not one.
+        out, _commands, _log = self._reverse_with(
+            "composed", cut_keep_ranges=[(1.0, 4.0)],
+            video_speed_enabled=True, video_speed_factor=2.0,
+            audio_speed_from_video=True, separator_points=[0.75])
+        parts = sorted(Path(out).parent.glob("*Part*.mkv"))
+        self.assertEqual(2, len(parts), f"expected two parts, got {parts}")
+        total = sum(float(self._probe(part)["format"]["duration"]) for part in parts)
+        self.assertAlmostEqual(
+            total, 1.5, delta=0.4,
+            msg=f"expected ~1.5 s of output, got {total:.3f}s -- an edit ran twice")
+        self.assertEqual("blue", self._colour_at(parts[0], 0.3),
+                         "the reversed timeline starts at the blue tail")
 
     def test_the_user_is_told_which_plan_ran(self):
         _output, _commands, log = self._reverse("note")
