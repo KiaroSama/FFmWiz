@@ -30,12 +30,11 @@ planner builds its own retimed tracks from the sources -- which exist at plan
 time -- and hands them to the builder, instead of trying to extract them from
 an intermediate it has not written yet.
 
-KNOWN GAP, measured and deliberately not asserted as acceptable: a SPLIT stage
-slices its subtitles into per-part files (`part02_track00.srt`) by a different
-mechanism, which still reads the intermediate. So the split comparisons use the
-subtitle-free twins and the exported plan for a Split still omits the per-part
-subtitle inputs. Closing it needs the same treatment the reverse stage just
-received, applied to the per-part slicer.
+A SPLIT stage slices its subtitles into per-part files by a different
+mechanism, which also read the intermediate. `build_split_subtitle_inputs` now
+takes handed-in tracks ahead of anything it would extract, so the planner feeds
+it the same cues it built for the reverse stage and the split parts carry their
+subtitles too. Every comparison here runs on subtitle-carrying inputs.
 """
 import json
 import re
@@ -300,12 +299,11 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         for factor in (0.5, 0.75, 1.5, 2.0):
             with self.subTest(speed=factor):
                 self._compare(f"speed{factor}".replace(".", "_"),
-                              sources=self.plain_inputs[:2],
                               separator_points=[2.0], video_speed_factor=factor,
                               audio_speed_from_video=True)
 
     def test_a_single_input_reverse_split_plans_what_it_runs(self):
-        self._compare("solo", sources=self.plain_inputs[:1], separator_points=[1.0])
+        self._compare("solo", sources=self.inputs[:1], separator_points=[1.0])
 
     def test_the_descriptor_carries_the_subtitle_streams_it_is_given(self):
         # `described()` used to set `subtitle_streams = []`, so every later
@@ -333,8 +331,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
                          "the descriptor emptied the subtitle streams")
 
     def test_cuts_with_slow_motion_and_a_split_plan_what_they_run(self):
-        self._compare("cutslow", sources=self.plain_inputs[:2],
-                      separator_points=[1.5],
+        self._compare("cutslow", separator_points=[1.5],
                       cut_keep_ranges=[(0.0, 1.0), (2.0, 4.0)],
                       video_speed_factor=0.5, audio_speed_from_video=True)
 
@@ -379,7 +376,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
              "use_gpu": False}))
 
     def test_an_hevc_job_plans_what_it_runs(self):
-        self._compare("hevc", sources=self.plain_inputs[:2], separator_points=[2.0],
+        self._compare("hevc", separator_points=[2.0],
                       video_codec="H265", video_encoder="libx265")
 
     def test_the_descriptor_reports_hevc_for_an_hevc_job(self):

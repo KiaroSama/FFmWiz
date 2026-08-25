@@ -604,11 +604,13 @@ def bounded_reverse_plan(answers: dict[str, Any],
     if has_join:
         items = join_items_from_answers(answers)
         plan_items = items
+        subtitle_source_answers = forward_stage_answers = None
         if not items:
             return stages
         joined = workspace / f"joined_forward.{extension}"
         forward = intermediate_profile(encoding.stage_answers(answers, owns=forward_owns))
         forward["output_path"] = joined
+        subtitle_source_answers = forward
         stages.append(("Join the inputs forward",
                        [str(part) for part in
                         wizard.build_join_encode_command(forward, items, joined)]))
@@ -624,7 +626,17 @@ def bounded_reverse_plan(answers: dict[str, Any],
     # Hand the stage its subtitles instead of letting it try to extract them
     # from a file the plan has not written. Without this the planner emits
     # `-sn` and the exported plan silently drops tracks the run keeps.
-    plan_sources = plan_subtitle_sources(answers, plan_items, workspace)
+    # The FORWARD stage's answers, not the job's. `build_joined_subtitle_files`
+    # retimes by the timeline it is given, and the job's still says
+    # `reverse_video`, so the merged cues came back already mirrored and the
+    # reverse stage below mirrored them a second time -- a double reverse is
+    # the identity, and the plan sliced a cue into the wrong Split part.
+    # Traced: merged in [(2.2, 2.8, 'B'), (4.2, 4.8, 'A')], out
+    # [(0.2, 0.8, 'A'), (2.2, 2.8, 'B')] -- 'B' looked untouched only because
+    # it sits symmetrically on this fixture's 5 s timeline.
+    plan_sources = plan_subtitle_sources(
+        subtitle_source_answers if has_join and subtitle_source_answers else answers,
+        plan_items, workspace)
     reverse_tracks = planned_retimed_subtitles(reverse_answers, plan_sources, workspace)
     reverse_answers["_prebuilt_retimed_subtitles"] = reverse_tracks
     if split_points:

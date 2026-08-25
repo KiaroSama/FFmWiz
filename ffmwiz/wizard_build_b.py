@@ -765,10 +765,26 @@ def build_split_subtitle_inputs(
         return []
 
     sources: list[tuple[list[tuple[float, float, str]], dict[str, Any]]] = []
+    # Tracks handed in by the caller win outright, whatever the clock did. The
+    # exported staged plan is the case: its Split stage reads an intermediate
+    # that has not been written yet, so extraction below finds nothing and the
+    # part is emitted with `-sn` -- the plan silently dropped subtitles the
+    # automatic run keeps. The planner builds these from the SOURCES, which do
+    # exist at plan time, and the stage owns only the split, so its own clock
+    # is the identity and the cues arrive ready to slice.
+    prebuilt = answers.get("_prebuilt_retimed_subtitles")
+    if prebuilt:
+        for track in prebuilt:
+            try:
+                cues = parse_srt(Path(track["path"]).read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if cues:
+                sources.append((cues, track))
     # Branch on whether the clock MOVED, not on whether `retimed` is empty: a
     # cut can legitimately leave no cue at all, and reading the source track in
     # that case would slice cues that sit on a timeline the output does not use.
-    if encode_subtitle_retiming_required(answers):
+    elif encode_subtitle_retiming_required(answers):
         for track in (retimed or []):
             try:
                 text = Path(track["path"]).read_text(encoding="utf-8")
