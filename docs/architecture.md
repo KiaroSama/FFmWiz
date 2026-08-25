@@ -44,6 +44,9 @@ ffmwiz/                # the application package (all implementation lives here)
                        #   modes_join, modes_transform)
   guibridge*.py        # GUI subprocess bridge (+ legacy-Tk crop/cut siblings)
   metadata.py, trackmanager.py, runner.py, encoding.py
+  reverse_pipeline.py   # the staged reverse: plan it, export it, run it
+                       #   (`reverse` buffers every decoded frame, so a Join,
+                       #    a Split or a long input runs as bounded stages)
   muxcleanup/          # Stream Cleanup Remux subsystem (Mode 8, in-process)
   gui/                 # the bundled PySide6 / QtQuick GUI (subprocess)
     ffmwiz_gui.py      # classic GUI entry point (imports the modules below)
