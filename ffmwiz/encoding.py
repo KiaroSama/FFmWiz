@@ -424,7 +424,70 @@ STAGE_TRANSFORMATIONS: dict[str, tuple[str, ...]] = {
     "loudnorm": ("loudnorm_enabled", "loudnorm_mode", "loudnorm_measured",
                  "loudnorm_target_i"),
     "split": ("separator_points", "split_output_paths", "split_part_intervals"),
+    # GEOMETRY. `build_cpu_video_filter` orders crop -> fps -> scale/pad ->
+    # speed/reverse, so every one of these is a semantic transformation that a
+    # stage can apply a second time. They were missing, which is why a
+    # `stage_answers(..., owns=())` "neutral" stage still cropped: a real
+    # 160x120 Join + Reverse + Split asking for 10 px off each side produced
+    # 120x120 parts instead of 140x120, with `crop=` in joined_forward.mkv, in
+    # every reverse segment AND in the final Split graph (D01). FPS and resize
+    # leak the same way; a repeated scale is not free even when it is
+    # dimensionally idempotent, because it re-processes an already lossy
+    # intermediate and changes the frame layout the reverse budget is sized
+    # from (D02).
+    "crop": ("crop_enabled", "crop_top", "crop_left", "crop_right",
+             "crop_bottom", "crop_box_dimensions", "cropped_aspect_ratio"),
+    "fps": ("fps",),
+    "resize": ("resolution", "final_resolution"),
 }
+
+# Geometry travels together: cropping in one stage and resizing in another
+# would make the second stage scale a frame the first already changed.
+GEOMETRY_TRANSFORMATIONS: tuple[str, ...] = ("crop", "fps", "resize")
+
+
+def _requests_video_speed(answers: dict[str, Any]) -> bool:
+    return (bool(answers.get("video_speed_enabled"))
+            and float(answers.get("video_speed_factor") or 1.0) != 1.0)
+
+
+# What makes each transformation REQUESTED. Ownership is only meaningful
+# against this: a plan that owns nothing is valid for a job that asks for
+# nothing, and invalid for one that asks for a crop.
+_TRANSFORMATION_REQUESTED: dict[str, Any] = {
+    "cuts": lambda a: bool(a.get("cut_keep_ranges")),
+    "audio_cuts": lambda a: bool(a.get("audio_cut_keep_ranges")),
+    "video_speed": _requests_video_speed,
+    "audio_speed": lambda a: (
+        (bool(a.get("audio_speed_enabled"))
+         and float(a.get("audio_speed_factor") or 1.0) != 1.0)
+        or (bool(a.get("audio_speed_from_video")) and _requests_video_speed(a))),
+    "video_reverse": lambda a: bool(a.get("reverse_video")),
+    "audio_reverse": lambda a: bool(a.get("reverse_audio")),
+    "loudnorm": lambda a: (bool(a.get("loudnorm_enabled"))
+                           and str(a.get("loudnorm_mode") or "off") != "off"),
+    "split": lambda a: bool(a.get("separator_points")),
+    "crop": lambda a: (bool(a.get("crop_enabled"))
+                       and any(int(a.get(f"crop_{edge}", 0) or 0)
+                               for edge in ("top", "left", "right", "bottom"))),
+    "fps": lambda a: a.get("fps") is not None,
+    "resize": lambda a: a.get("resolution") not in (None, "n"),
+}
+
+
+def requested_transformations(answers: dict[str, Any]) -> set[str]:
+    """Every transformation this job actually asks for.
+
+    Declared per transformation rather than inferred, so a new key added to
+    `STAGE_TRANSFORMATIONS` without a matching predicate fails loudly here
+    instead of being silently treated as never requested.
+    """
+    missing = set(STAGE_TRANSFORMATIONS) - set(_TRANSFORMATION_REQUESTED)
+    if missing:
+        raise ValueError(
+            f"transformation(s) with no requested-predicate: {sorted(missing)}")
+    return {name for name, asked in _TRANSFORMATION_REQUESTED.items()
+            if asked(answers)}
 
 # Falsey neutral values, so a stage that reads a key without checking for its
 # absence still sees "no transformation" rather than a stale truth.
@@ -432,6 +495,10 @@ _NEUTRAL_VALUES: dict[str, Any] = {
     "video_speed_factor": 1.0,
     "audio_speed_factor": 1.0,
     "loudnorm_mode": "off",
+    # "n" is what the builders read as "keep the source size"; removing the key
+    # would make `answers.get("resolution", "n")` agree by accident, but a
+    # stage that reads it without a default would see nothing at all.
+    "resolution": "n",
 }
 
 
@@ -462,6 +529,88 @@ def intermediate_profile(staged: dict[str, Any]) -> dict[str, Any]:
     return scratch
 
 
+# Dispositions worth carrying, named explicitly. Echoing back every truthy key
+# ffprobe reports would eventually hand FFmpeg a flag name its `-disposition`
+# parser does not accept, and a rejected command loses more than a lost flag.
+_CARRIED_DISPOSITIONS = ("default", "forced", "hearing_impaired",
+                         "visual_impaired", "comment", "descriptions",
+                         "original", "dub")
+
+
+def _disposition_value(stream: dict[str, Any]) -> str:
+    flags = (stream or {}).get("disposition") or {}
+    kept = [name for name in _CARRIED_DISPOSITIONS if flags.get(name)]
+    return "+".join(kept) if kept else "0"
+
+
+def _selected_indices(streams: list[Any], chosen: Any) -> list[int]:
+    if chosen is None or chosen is True or chosen == "all":
+        return list(range(len(streams)))
+    try:
+        return [int(index) for index in chosen if 0 <= int(index) < len(streams)]
+    except TypeError:
+        return list(range(len(streams)))
+
+
+def reverse_mux_stream_policy(
+        answers: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """Which streams the video-only reverse mux keeps, and from which input.
+
+    Input 0 is the reversed picture, input 1 the forward audio. The whole
+    policy used to be `-map 0:v -map 1:a`, and once ANY explicit map is given
+    FFmpeg selects nothing else -- so every other stream type was dropped in
+    the last command of the pipeline, after the earlier stages had carried it
+    faithfully. A real source came out two streams short:
+
+        SOURCE topology  ['video', 'audio', 'subtitle', 'attachment']
+        OUTPUT topology  ['video', 'audio']
+
+    The subtitle had even been retimed onto the processed timeline and
+    announced to the user before being discarded (D03), and attachments and
+    data streams went the same way (D04).
+
+    The reversed picture is the authority for everything except audio: the
+    per-segment encodes already applied the user's stream selection, and the
+    concat copy preserves what they produced -- measured on segments carrying
+    video/audio/subtitle/attachment, `-map 0 -c copy -an` yielded
+    video/subtitle/attachment. So the policy is "everything input 0 still has,
+    minus its audio, plus input 1's audio", stated per type rather than by
+    negative mapping so it does not depend on the FFmpeg build's handling of
+    `-map -0:a`.
+
+    Dispositions come back too. The concat DEMUXER does not carry them, which
+    is invisible until you look: traced through one run, the segment held
+    `default=1 forced=1` and the concat copy that consumed it held
+    `default=0 forced=0`, so a subtitle the source marked default and forced
+    arrived marked neither. Only the ordinary encode paths were preserving
+    them, which is why nothing caught it. They are restored here, against the
+    SOURCE streams, at the one point where the final output order is known.
+
+    Returns (maps, dispositions, warnings). Attachments are only claimed when
+    the chosen container can actually hold one; when it cannot, the loss is
+    REPORTED rather than silent, which is the difference the brief asks for.
+    """
+    maps = ["-map", "0:v", "-map", "1:a", "-map", "0:s?", "-map", "0:d?"]
+    warnings: list[str] = []
+    has_attachments = bool(answers.get("attachment_streams"))
+    if output_supports_embedded_attachments(answers):
+        maps += ["-map", "0:t?"]
+    elif has_attachments and answers.get("keep_embedded_attachments"):
+        warnings.append(
+            f"{str(answers.get('output_ext') or '').upper()} cannot store embedded "
+            "attachments, so the source's attachment(s) are not carried into the "
+            "reversed output. Choose MKV to keep them.")
+
+    dispositions: list[str] = []
+    for kind, key, chosen in (("a", "audio_streams", answers.get("audio_tracks")),
+                              ("s", "subtitle_streams", answers.get("subtitle_tracks"))):
+        streams = list(answers.get(key) or [])
+        for position, index in enumerate(_selected_indices(streams, chosen)):
+            dispositions += [f"-disposition:{kind}:{position}",
+                             _disposition_value(streams[index])]
+    return maps, dispositions, warnings
+
+
 def stage_answers(answers: dict[str, Any], owns: tuple[str, ...]) -> dict[str, Any]:
     """A copy of `answers` carrying ONLY the transformations this stage owns.
 
@@ -486,20 +635,36 @@ def stage_answers(answers: dict[str, Any], owns: tuple[str, ...]) -> dict[str, A
     return staged
 
 
-def validate_stage_plan(stages: list[tuple[str, tuple[str, ...]]]) -> None:
-    """Every transformation the job requests is owned by exactly one stage.
+def validate_stage_plan(stages: list[tuple[str, tuple[str, ...]]],
+                       answers: dict[str, Any] | None = None) -> None:
+    """Every transformation the job requests is owned by EXACTLY one stage.
 
     Raises on a duplicate: applying a speed change twice is silent in the argv
     and only visible in the finished media, which is how B01 survived.
+
+    Pass `answers` and it also raises on a MISSING owner. Duplicate-only
+    checking could not see D01 at all -- crop was owned by no stage, so there
+    was nothing to be a duplicate OF, and it simply survived into all three.
+    An unowned transformation is not neutral; it is applied wherever the
+    filter builder happens to look.
     """
     seen: dict[str, str] = {}
     for label, owns in stages:
         for name in owns:
+            if name not in STAGE_TRANSFORMATIONS:
+                raise ValueError(f"unknown transformation: {name!r}")
             if name in seen:
                 raise ValueError(
                     f"transformation {name!r} is owned by both {seen[name]!r} "
                     f"and {label!r}")
             seen[name] = label
+    if answers is None:
+        return
+    unowned = sorted(requested_transformations(answers) - set(seen))
+    if unowned:
+        raise ValueError(
+            f"transformation(s) {unowned} are requested but owned by no stage; "
+            f"they would be applied in every stage that reads them")
 
 
 def _single_input_answers(answers: dict[str, Any], source: Path) -> dict[str, Any]:
@@ -556,20 +721,32 @@ def bounded_reverse_plan(answers: dict[str, Any],
         rebased["format"] = dict(source_answers.get("format") or {})
         return rebased
 
-    if answers.get("join_input_items"):
+    # The SAME ownership the executor uses. Two copies of this decision is how
+    # the exported plan drifted from the job it claimed to describe; keeping
+    # the split identical is the point of validating both against one schema.
+    has_join = bool(answers.get("join_input_items"))
+    forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
+                    "video_reverse", "audio_reverse", "loudnorm")
+    if not has_join:
+        reverse_owns = reverse_owns + GEOMETRY_TRANSFORMATIONS
+    validate_stage_plan([("forward join", forward_owns),
+                         ("reverse", reverse_owns),
+                         ("split", ("split",) if split_points else ())],
+                        answers)
+
+    if has_join:
         items = join_items_from_answers(answers)
         if not items:
             return stages
         joined = workspace / f"joined_forward.{extension}"
-        forward = intermediate_profile(stage_answers(answers, owns=()))
+        forward = intermediate_profile(stage_answers(answers, owns=forward_owns))
         forward["output_path"] = joined
         stages.append(("Join the inputs forward",
                        [str(part) for part in
                         wizard.build_join_encode_command(forward, items, joined)]))
         stage_source = described(answers, joined)
 
-    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
-                    "video_reverse", "audio_reverse", "loudnorm")
     reverse_answers = stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
     if split_points:
@@ -619,10 +796,14 @@ def bounded_reverse_plan(answers: dict[str, Any],
                        [str(part) for part in video_cmd]))
         stages.append(("Concatenate the audio in source order",
                        [str(part) for part in audio_cmd]))
+        # The SAME policy object the executor uses; two hand-written map lists
+        # is exactly how the exported plan drifted from the real job before.
+        plan_maps, plan_dispositions, _plan_warnings = reverse_mux_stream_policy(reverse_answers)
+        plan_maps = plan_maps + plan_dispositions
         stages.append(("Mux the reversed picture with its own audio", [
             str(ffmpeg), "-y", "-hide_banner",
             "-i", str(reversed_video), "-i", str(forward_audio),
-            "-map", "0:v", "-map", "1:a", "-c", "copy",
+            *plan_maps, "-c", "copy",
             "-avoid_negative_ts", "make_zero", str(reverse_target)]))
     elif segments:
         concat_list = workspace / "plan_concat.txt"
@@ -727,15 +908,33 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     planned_output_paths = list(answers.get("split_output_paths") or [])
     stage_source = answers
 
-    if answers.get("join_input_items"):
+    # Geometry is owned by the FIRST stage that writes a picture: the forward
+    # join when there is one, otherwise the reverse encode. Later stages read
+    # an already-cropped, already-resized intermediate, so re-applying would
+    # crop the crop (D01/D02).
+    has_join = bool(answers.get("join_input_items"))
+    forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
+                    "video_reverse", "audio_reverse", "loudnorm")
+    if not has_join:
+        reverse_owns = reverse_owns + GEOMETRY_TRANSFORMATIONS
+    # Before the join, not after: a plan that cannot be executed correctly must
+    # not spend a full forward encode first.
+    validate_stage_plan([("forward join", forward_owns),
+                         ("reverse", reverse_owns),
+                         ("split", ("split",) if split_points else ())],
+                        answers)
+
+    if has_join:
         items = join_items_from_answers(answers)
         if not items:
             return 1, time.perf_counter() - started_at
         joined = workspace / f"joined_forward.{INTERMEDIATE_CONTAINER_EXT}"
-        # Owns NOTHING: the intermediate is the joined program and nothing
-        # else. Clearing only the video edits left an independent audio speed
-        # to be applied here AND by the reverse stage AND by the split (B01).
-        forward = intermediate_profile(stage_answers(answers, owns=()))
+        # Owns the GEOMETRY and nothing else. Clearing only the video edits
+        # left an independent audio speed to be applied here AND by the reverse
+        # stage AND by the split (B01); leaving geometry unowned did the same
+        # to crop, fps and resize (D01/D02).
+        forward = intermediate_profile(stage_answers(answers, owns=forward_owns))
         forward["output_path"] = joined
         forward_cmd = wizard.build_join_encode_command(forward, items, joined)
         appio.note("Reverse across a join: joining first, then reversing in bounded "
@@ -749,12 +948,8 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
             return (code or 1), time.perf_counter() - started_at
         stage_source = _single_input_answers(answers, joined)
 
-    # Owns everything except the split: cuts, both speeds, both reverses and
-    # loudnorm are applied here, exactly once.
-    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
-                    "video_reverse", "audio_reverse", "loudnorm")
-    validate_stage_plan([("forward join", ()), ("reverse", reverse_owns),
-                         ("split", ("split",) if split_points else ())])
+    # Owns everything except the split -- and the geometry too when no forward
+    # join already applied it.
     reverse_answers = stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
     if split_points:
@@ -884,7 +1079,11 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
             appio.note("Video reverse only: the audio keeps its own order and is "
                        "muxed back onto the reversed picture.")
             mux_inputs = ["-i", str(reversed_video), "-i", str(forward_audio)]
-            mux_maps = ["-map", "0:v", "-map", "1:a"]
+            mux_maps, mux_dispositions, mux_warnings = reverse_mux_stream_policy(answers)
+            mux_maps = mux_maps + mux_dispositions
+            for warning in mux_warnings:
+                appio.note(warning)
+                log_warn(warning)
             metadata_input = 2
         else:
             write_concat_list(list(reversed(segment_paths)), concat_list)
@@ -1030,6 +1229,9 @@ __all__ = [
     'intermediate_profile',
     'stage_answers',
     'validate_stage_plan',
+    'reverse_mux_stream_policy',
+    'requested_transformations',
+    'GEOMETRY_TRANSFORMATIONS',
     'STAGE_TRANSFORMATIONS',
     'run_segmented_reverse_main_encode',
     'execute_encode_plan',

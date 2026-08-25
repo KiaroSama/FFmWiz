@@ -48,6 +48,15 @@ EVERY_EDIT = {
     "loudnorm_measured": {"input_i": "-20"}, "loudnorm_target_i": -16.0,
     "separator_points": [1.0], "split_output_paths": ["a.mkv"],
     "split_part_intervals": [(0.0, 1.0)],
+    # GEOMETRY. This fixture used to cover only time and audio, which is
+    # exactly why it could not see crop, fps or resize surviving into every
+    # stage (D01/D02): a transformation the fixture never sets cannot be
+    # observed leaking.
+    "crop_enabled": True, "crop_top": 4, "crop_left": 10,
+    "crop_right": 10, "crop_bottom": 4,
+    "crop_box_dimensions": (140, 112), "cropped_aspect_ratio": 1.25,
+    "fps": 15, "resolution": {"mode": "exact_stretch", "width": 320, "height": 180},
+    "final_resolution": (320, 180),
 }
 
 
@@ -55,7 +64,7 @@ class AStageCarriesOnlyWhatItOwns(unittest.TestCase):
     # Keys that must be NEUTRALISED rather than removed, so a caller that
     # reads them without checking the enabled flag sees "no transformation".
     NEUTRAL = {"video_speed_factor": 1.0, "audio_speed_factor": 1.0,
-               "loudnorm_mode": "off"}
+               "loudnorm_mode": "off", "resolution": "n"}
 
     def test_owning_nothing_clears_every_transformation(self):
         staged = FFmWiz.stage_answers(dict(EVERY_EDIT), owns=())
@@ -69,6 +78,14 @@ class AStageCarriesOnlyWhatItOwns(unittest.TestCase):
                         self.assertFalse(
                             staged.get(key),
                             f"{key} survived into a stage that owns nothing")
+
+    def test_the_fixture_requests_every_declared_transformation(self):
+        # Guard the guard, the other way round: the loop above proves a stage
+        # CLEARS what it does not own, and it only proves that for keys the
+        # fixture actually sets. A transformation missing from EVERY_EDIT is
+        # untested, which is how crop/fps/resize went unnoticed.
+        self.assertEqual(set(FFmWiz.STAGE_TRANSFORMATIONS),
+                         FFmWiz.requested_transformations(dict(EVERY_EDIT)))
 
     def test_the_neutral_set_covers_what_the_source_declares(self):
         # Guard the guard: if a new neutral key appeared in the product and not
