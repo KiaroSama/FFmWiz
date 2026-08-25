@@ -214,13 +214,30 @@ def _run_audio_speed_reverse_mode_impl(base_answers: dict[str, Any]) -> tuple[in
         return None
     if not answers.get("start_now", True):
         appio.note("FFmpeg was not started. The command above is ready to run manually.")
+        # The printed command is the ONE-SHOT one. For a track past the peak
+        # budget that is exactly the unbounded reverse the staged plan avoids,
+        # so say so rather than let it look equivalent.
+        warning = audio_reverse_one_shot_warning(answers)
+        if warning:
+            appio.note("Note: " + warning)
         return None
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    speed = max(0.001, float(answers.get("speed_factor", 1.0)))
+    if answers.get("reverse_audio"):
+        # `areverse` buffers its whole input, so a long track has to be reversed
+        # in bounded lossless chunks rather than in one shot (D13). The executor
+        # runs the one-shot command unchanged when the job already fits the
+        # budget, so a short clip costs nothing extra.
+        return run_bounded_audio_reverse(
+            answers, build_audio_speed_reverse_command,
+            label="Audio Speed / Reverse",
+            total_duration=(duration / speed if duration > 0 else None),
+        )
     return run_ffmpeg_with_progress(
         answers["cmd"],
-        total_duration=(duration / max(0.001, float(answers.get("speed_factor", 1.0))) if duration > 0 else None),
+        total_duration=(duration / speed if duration > 0 else None),
         label="Audio Speed / Reverse",
     )
 
@@ -254,6 +271,9 @@ def _run_audio_transform_mode_impl(base_answers: dict[str, Any]) -> tuple[int, f
         return None
     if not answers.get("start_now", True):
         appio.note("FFmpeg was not started. The command above is ready to run manually.")
+        warning = audio_reverse_one_shot_warning(answers)
+        if warning:
+            appio.note("Note: " + warning)
         return None
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
@@ -262,6 +282,15 @@ def _run_audio_transform_mode_impl(base_answers: dict[str, Any]) -> tuple[int, f
     if keep_duration <= 0:
         keep_duration = duration
     speed = max(0.001, float(answers.get("audio_speed_factor", DEFAULT_SPEED_FACTOR) or DEFAULT_SPEED_FACTOR))
+    if answers.get("reverse_audio"):
+        # Same bounded plan as the standalone Audio Speed / Reverse tool: the
+        # cuts are applied once on the forward pass, the reversal is chunked,
+        # and speed/LoudNorm stay continuous on the joined result (D13).
+        return run_bounded_audio_reverse(
+            answers, build_audio_transform_command,
+            label="Audio Cut / Speed / Reverse",
+            total_duration=(keep_duration / speed if keep_duration > 0 else None),
+        )
     return run_ffmpeg_with_progress(
         answers["cmd"],
         total_duration=(keep_duration / speed if keep_duration > 0 else None),
