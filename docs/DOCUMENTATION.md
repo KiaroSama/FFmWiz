@@ -1443,6 +1443,11 @@ Notes:    declining prints the final PowerShell command and the settings summary
           the whole timeline. For those jobs declining also writes the real
           multi-stage plan next to the output as <name>.plan.ps1, which stops on
           the first failure and names the scratch directory to remove afterwards.
+          If that file cannot be written the failure is reported with its reason
+          and the printed command is explicitly NOT offered as a substitute.
+          One known limitation: a Split's exported plan omits the per-part
+          subtitle inputs, because those are sliced from an intermediate the
+          plan has not produced yet. The reverse stage's subtitles ARE planned.
           The summary includes an "estimated
           output size" line computed from the TOTAL target bitrate (video + audio)
           over the output duration. It shows N/A when the size cannot be derived from
