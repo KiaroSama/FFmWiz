@@ -25,6 +25,7 @@ from any tier, including the level-0 helpers.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import shutil
 from pathlib import Path
@@ -36,6 +37,11 @@ _LOG = logging.getLogger("ffmwiz.artifacts")
 
 ARTIFACT_LEASE_KEY = "_artifact_lease"
 EFFECTIVE_SETTINGS_KEY = "_effective_settings"
+PLAN_REVISION_KEY = "_plan_revision"
+
+# Plan revisions are numbered per process, so a map can name the plan that owns
+# it and two plans can never share a number.
+_PLAN_REVISIONS = itertools.count(1)
 
 
 class ArtifactLease:
@@ -132,13 +138,111 @@ def release_artifacts(answers: dict[str, Any]) -> list[Path]:
 __all__ = [
     "ARTIFACT_LEASE_KEY",
     "EFFECTIVE_SETTINGS_KEY",
+    "PLAN_REVISION_KEY",
     "ArtifactLease",
+    "EffectiveSettings",
+    "PlanRevisionError",
     "artifact_lease",
     "release_artifacts",
     "effective_settings",
     "effective_value",
     "reset_effective_settings",
+    "begin_plan",
+    "plan_revision",
+    "require_plan_revision",
 ]
+
+
+class PlanRevisionError(RuntimeError):
+    """An effective map was used by a plan revision that does not own it."""
+
+
+class EffectiveSettings(dict):
+    """One plan revision's resolved values, tagged with the plan that owns them.
+
+    A plain dict could not say WHICH plan resolved it, so a map handed to a
+    later builder looked exactly like a fresh one and `resolve_video_encoder`
+    happily answered with the previous plan's fallback (B13/D14). The tag is an
+    attribute rather than a key so `effective_value()` and every existing
+    consumer still see only real settings.
+
+    `pending` marks a plan that was begun but has not been built yet. It is what
+    lets one boundary serve both callers: a step that calls `begin_plan()` and
+    then a builder gets ITS revision, while a direct or repeated builder call
+    -- which has no open plan -- gets a brand-new one instead of inheriting the
+    last build's resolutions.
+    """
+
+    __slots__ = ("revision", "pending")
+
+    def __init__(self, revision: int | None = None, pending: bool = False) -> None:
+        super().__init__()
+        self.revision = revision
+        self.pending = pending
+
+
+def begin_plan(answers: dict[str, Any]) -> int:
+    """Open a new plan revision on `answers`. Returns its number.
+
+    The explicit top-level boundary: everything the LAST build resolved is
+    forgotten and the new map is tagged with the new revision, so a map that
+    reaches a builder from anywhere else can be recognised and refused.
+
+    Call it on the OUTER answers dict, before any `dict(answers)` a builder
+    makes -- the same rule the lease has, and for the same reason.
+    """
+    return _install_plan(answers, pending=True)
+
+
+def _install_plan(answers: dict[str, Any], *, pending: bool) -> int:
+    revision = next(_PLAN_REVISIONS)
+    answers[EFFECTIVE_SETTINGS_KEY] = EffectiveSettings(revision, pending=pending)
+    answers[PLAN_REVISION_KEY] = revision
+    return revision
+
+
+def plan_revision(answers: dict[str, Any]) -> int | None:
+    """The plan revision `answers` belongs to, or None if none was begun."""
+    revision = answers.get(PLAN_REVISION_KEY)
+    return revision if isinstance(revision, int) else None
+
+
+def require_plan_revision(answers: dict[str, Any]) -> int:
+    """The revision this build resolves into. Every PUBLIC builder calls it first.
+
+    `reset_effective_settings()` was called by the interactive `step_start_now()`
+    and once per Folder item, but a public builder could still be called with an
+    older map -- directly, or a second time after Back -- and silently resolve
+    into it. Measured: a request of `copy` carrying a previous plan's effective
+    `libx265` built `-c:v libx265` (D14).
+
+    So the builder, not its callers, owns the boundary:
+
+    - an open plan (the caller just called `begin_plan()`) is consumed here and
+      keeps its map, so a step can resolve into the same revision it began;
+    - anything else -- no plan, or a plan already built -- gets a NEW revision
+      with an empty map, so no resolution can outlive the plan that made it;
+    - a map tagged with a DIFFERENT revision than the dict claims means two
+      plans were spliced together, which no correct caller does, so it raises.
+
+    Helper builders that work on `dict(answers)` must NOT call this: they have
+    to keep writing into the outer map, which is how the summary learns what
+    the command really does.
+    """
+    resolved = answers.get(EFFECTIVE_SETTINGS_KEY)
+    revision = plan_revision(answers)
+    if isinstance(resolved, EffectiveSettings) and revision is not None:
+        if resolved.revision != revision:
+            raise PlanRevisionError(
+                f"effective settings belong to plan revision {resolved.revision!r}, "
+                f"but the answers claim revision {revision!r}")
+        if resolved.pending:
+            resolved.pending = False
+            return revision
+    # Not pending: this call IS the build, so the new plan is consumed at once.
+    # Leaving it open let the NEXT build inherit this one's resolutions, which
+    # is the leak the boundary exists to close.
+    return _install_plan(answers, pending=False)
 
 
 def effective_settings(answers: dict[str, Any]) -> dict[str, Any]:
@@ -153,7 +257,7 @@ def effective_settings(answers: dict[str, Any]) -> dict[str, Any]:
     """
     resolved = answers.get(EFFECTIVE_SETTINGS_KEY)
     if not isinstance(resolved, dict):
-        resolved = {}
+        resolved = EffectiveSettings()
         answers[EFFECTIVE_SETTINGS_KEY] = resolved
     return resolved
 
@@ -175,10 +279,14 @@ def reset_effective_settings(answers: dict[str, Any]) -> dict[str, Any]:
     old one cleared, so copies taken for an EARLIER plan -- a folder
     representative, a previous revision -- keep their own and cannot write into
     this one.
+
+    Same operation as `begin_plan()`, which is the name to prefer: this one
+    kept its own map untagged, and an untagged map on a dict that still claimed
+    an older revision is exactly what `require_plan_revision()` refuses. One
+    implementation, so the two spellings cannot drift apart.
     """
-    resolved: dict[str, Any] = {}
-    answers[EFFECTIVE_SETTINGS_KEY] = resolved
-    return resolved
+    begin_plan(answers)
+    return answers[EFFECTIVE_SETTINGS_KEY]
 
 
 def effective_value(answers: dict[str, Any], name: str, default: Any = None) -> Any:
