@@ -28,6 +28,8 @@ from pathlib import Path
 
 import FFmWiz
 
+from cue_clock import read_cues
+
 from artifact_guard import NoLeakedArtifacts
 
 FFMPEG = shutil.which("ffmpeg")
@@ -122,15 +124,9 @@ class SplitOutputsCarrySubtitlesAndChapters(NoLeakedArtifacts, unittest.TestCase
         return sorted(out.glob("*.mkv"))
 
     def _cues_of(self, part):
-        dump = part.with_suffix(".out.srt")
-        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(part),
-                        "-map", "0:s:0", "-c:s", "srt", str(dump)],
-                       capture_output=True, timeout=120)
-        if not dump.exists() or not dump.stat().st_size:
-            return []
-        return [(round(start, 3), round(end, 3), text)
-                for start, end, text in FFmWiz.parse_srt(
-                    dump.read_text(encoding="utf-8"))]
+        # The picture clock, not the demuxer's rebased one -- see D16 and
+        # tests/cue_clock.py.
+        return read_cues(FFMPEG, FFPROBE, part)
 
     def _chapter_titles(self, part):
         out = subprocess.run([FFPROBE, "-v", "error", "-show_chapters",

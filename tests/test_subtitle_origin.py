@@ -45,6 +45,8 @@ from pathlib import Path
 
 import FFmWiz
 
+from cue_clock import read_cues
+
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 requires_ffmpeg = unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe not on PATH")
@@ -560,6 +562,43 @@ class JoinedSubtitlesUseTheSameOrigin(OriginFixtures):
         self._assert_span(cues[0], *EARLY[:2], delta=0.005)
         self._assert_span(cues[2], EARLY[0] + SOURCE_SECONDS, EARLY[1] + SOURCE_SECONDS,
                           delta=0.005)
+
+
+class ThePlainExtractionReallyRebases(OriginFixtures):
+    """The control behind D16: proof, not a comment.
+
+    Two suites read cues with a plain `ffmpeg -i out -map 0:s:0 out.srt` and
+    compared them against times written on the picture. If a future FFmpeg ever
+    stopped rebasing, that reading would start agreeing by accident and the
+    explicit clock would look like dead weight. This keeps the difference
+    visible on the fixture that actually has a container lead.
+    """
+
+    def test_reading_without_copyts_moves_every_cue_by_the_lead(self):
+        picture = read_cues(FFMPEG, FFPROBE, self.primed)
+        plain = read_cues(FFMPEG, FFPROBE, self.primed, rebase=False)
+        self.assertEqual(len(picture), len(plain), (picture, plain))
+        self.assertTrue(picture, "the fixture carries no readable cues")
+        for (want_start, want_end, body), (got_start, got_end, _body) in zip(
+                picture, plain):
+            self._assert_span((got_start, got_end),
+                              want_start + CONTAINER_LEAD,
+                              want_end + CONTAINER_LEAD, delta=0.05)
+        self.assertEqual([EARLY[:2], LATE[:2]],
+                         [(start, end) for start, end, _body in picture])
+
+    def test_the_picture_reading_needs_no_tolerance(self):
+        # The repair was NOT a widened tolerance: on the picture clock the cues
+        # are exact to the millisecond the fixture wrote.
+        self.assertEqual(
+            [(EARLY[0], EARLY[1], EARLY[2]), (LATE[0], LATE[1], LATE[2])],
+            read_cues(FFMPEG, FFPROBE, self.primed))
+
+    def test_a_source_with_no_lead_reads_the_same_either_way(self):
+        # Guard the guard: the difference above must come from the LEAD, not
+        # from the helper doing something else to the numbers.
+        self.assertEqual(read_cues(FFMPEG, FFPROBE, self.offset),
+                         read_cues(FFMPEG, FFPROBE, self.offset, rebase=False))
 
 
 if __name__ == "__main__":

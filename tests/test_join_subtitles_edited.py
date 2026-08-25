@@ -33,6 +33,8 @@ from pathlib import Path
 
 import FFmWiz
 
+from cue_clock import read_cues
+
 from artifact_guard import NoLeakedArtifacts
 
 FFMPEG = shutil.which("ffmpeg")
@@ -93,17 +95,11 @@ class EditedJoinsKeepTheirSubtitles(NoLeakedArtifacts, unittest.TestCase):
                 "data_streams": [], "duration": 2.0}
 
     def _cues(self, path):
-        dump = path.with_suffix(".dump.srt")
-        if dump.exists():
-            dump.unlink()
-        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(path),
-                        "-map", "0:s:0", "-c:s", "srt", str(dump)],
-                       capture_output=True, timeout=120)
-        if not dump.exists() or dump.stat().st_size == 0:
-            return []
-        return [(round(start, 3), round(end, 3), text)
-                for start, end, text in FFmWiz.parse_srt(
-                    dump.read_text(encoding="utf-8"))]
+        # Read on the PICTURE clock. A plain extraction hands back whatever the
+        # demuxer rebased by the container start, which on a primed output is
+        # every cue 23 ms late against times these tests write on the picture
+        # (D16). See tests/cue_clock.py for the measurement.
+        return read_cues(FFMPEG, FFPROBE, path)
 
     def _join(self, label, **extra):
         out = self._tmp / label
