@@ -10,6 +10,20 @@ from __future__ import annotations
 import os
 
 
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or str(default))
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)) or str(default))
+    except ValueError:
+        return default
+
+
 # ============================================================
 # Default FFmpeg options from the command you requested before.
 # Change these values here if you want different fixed defaults.
@@ -100,7 +114,10 @@ REVERSE_SEGMENT_SECONDS = 60.0
 # 2-second floor -- which on its own is 1.39 GiB at 4K60 8-bit, 2.78 GiB at
 # 4K60 10-bit and 5.56 GiB at 8K60, so the floor broke the cap it was meant to
 # respect (B05).
-REVERSE_PEAK_BUDGET_BYTES = 2 * 1024 ** 3
+# Configurable so an operator with a smaller or larger machine can move the
+# promise instead of silently exceeding it; the planner refuses outright
+# when the cap is zero, negative, or below the reserved overhead (D12).
+REVERSE_PEAK_BUDGET_BYTES = env_int("FFMWIZ_REVERSE_PEAK_BUDGET_MB", 2048) * 1024 ** 2
 # Decoder, encoder and muxer working set before a single frame is buffered.
 # Measured at ~450 MB for libx264 medium on this machine (720p30 peaked at
 # 878 MB holding 300 frames of a 415 MB estimate); rounded up.
@@ -347,20 +364,6 @@ ASSET_DIR_NAME = "assets"
 ICON_DIR_NAME = "icons"
 CURSOR_DIR_NAME = "cursors"
 DEFAULT_OUTPUT_LOCATION_TEXT = r"E:\output"
-
-
-def env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)) or str(default))
-    except ValueError:
-        return default
-
-
-def env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)) or str(default))
-    except ValueError:
-        return default
 
 
 EMPTY_AUDIO_MAX_BYTES = 4096

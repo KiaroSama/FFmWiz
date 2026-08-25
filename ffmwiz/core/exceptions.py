@@ -21,6 +21,16 @@ class FFprobeError(RuntimeError):
     pass
 
 
+class ReverseBudgetError(RuntimeError):
+    """Raised when a bounded reverse segment cannot be planned inside the peak
+    memory cap: geometry/frame rate/pixel format the plan needs is unknown, a
+    single decoded frame already exceeds the allowance, or the cap itself is
+    smaller than the reserved fixed overhead. The caller decides how to present
+    it -- the point is that a warning cannot turn an unbounded allocation into a
+    bound (D12)."""
+    pass
+
+
 class ColorRangeUnresolvedError(RuntimeError):
     """Raised when a production builder is asked to resolve an unknown source
     color range without an explicit workflow decision and without an opt-in
@@ -34,5 +44,6 @@ __all__ = [
     "ExitWizard",
     "RetryAdditionalFile",
     "FFprobeError",
+    "ReverseBudgetError",
     "ColorRangeUnresolvedError",
 ]

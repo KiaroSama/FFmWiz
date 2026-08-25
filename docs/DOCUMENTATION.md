@@ -707,15 +707,34 @@ in short segments and concatenates them in reverse order to avoid RAM spikes.
 
 **The segment length follows the frame size, not the clock.** What `reverse` holds is every
 decoded frame of its input, so a fixed number of seconds means wildly different amounts of
-memory. Each segment is sized against a 1 GiB budget:
+memory. Each segment is planned against a **2 GiB peak** — 512 MiB reserved for the
+decoder/encoder working set plus the decoded frames themselves, sized from the stream's real
+pixel format and carrying a 15% allowance for filter queues:
 
-| source | segment | frames held |
+| source | segment | peak |
 | --- | --- | --- |
-| 480p30 | ~58 s | 1.0 GiB |
-| 720p30 | ~26 s | 1.0 GiB |
-| 1080p30 | ~12 s | 1.0 GiB |
-| 1080p60 | ~6 s | 1.0 GiB |
-| 4K30 | ~3 s | 1.0 GiB |
+| 480p30 8-bit | 60.000 s (1800 frames, the ceiling) | 1.69 GiB |
+| 720p30 8-bit | 33.767 s (1013 frames) | 2.00 GiB |
+| 1080p30 8-bit | 15.000 s (450 frames) | 2.00 GiB |
+| 1080p60 8-bit | 7.500 s (450 frames) | 2.00 GiB |
+| 4K30 8-bit | 3.733 s (112 frames) | 1.99 GiB |
+| 4K60 10-bit | 933 ms (56 frames) | 1.99 GiB |
+| 8K60 10-bit | 233 ms (14 frames) | 1.99 GiB |
+
+A segment is a whole number of **frames**, and one frame is the smallest legal segment — there
+is no minimum expressed in seconds, because a one-second minimum is 2.10 GiB at 4K60 10-bit and
+6.90 GiB at 8K60 10-bit, which breaks the very cap it sits under. Large formats therefore get
+subsecond windows, and progress notices report them in milliseconds and frames.
+
+The size is measured at the **input of the `reverse` filter**, not at the source stream. The CPU
+filter chain is crop → fps → scale/pad → speed/reverse, so a 1080p30 clip upscaled to 8K is
+budgeted as 8K: sizing it from the source would hand it the 1080p window of 15 s, which is
+24.5 GiB of 8K frames.
+
+If the geometry, frame rate, or pixel format the budget needs cannot be read, FFmWiz **refuses**
+rather than assuming one — a warning cannot turn an unbounded allocation into a bound. The same
+applies when a single decoded frame plus the reserved overhead already exceeds the cap: raise
+the cap (see `FFMWIZ_REVERSE_PEAK_BUDGET_MB` in Appendix K) or reverse a smaller frame.
 
 Each segment is bounded **before** the filter sees it (`-ss`/`-t` on the source input), so the
 decoder stops at the segment boundary rather than reading the whole file and trimming after.
@@ -735,6 +754,43 @@ proportional to the whole timeline — roughly 336 GiB of decoded frames for an 
 extra encode; the temporary files are written at a visually lossless quality and removed with
 the rest of the job's temporary files, and the output parts keep the names the summary showed
 you before the run started.
+
+**Audio reverse is bounded the same way.** `areverse` buffers every decoded sample, so six
+hours of 48 kHz stereo is about 8.3 GiB. Audio shares the 2 GiB peak with video, sized from the
+stream's real sample rate, channel count and sample format:
+
+| track | segment |
+| --- | --- |
+| 44.1 kHz mono 16-bit | 4:24:39 |
+| 48 kHz stereo 24-bit | 1:00:47 |
+| 192 kHz 7.1 24-bit | 3:48 |
+
+There is no 60-second ceiling here: a second of 48 kHz stereo is about 0.4 MB against 250 MB
+for a second of 4K30, so capping audio at a minute would only multiply FFmpeg invocations
+without changing the bound. A track that already fits its budget runs the ordinary one-shot
+command, which is bounded by construction.
+
+A longer track is staged so that only the reversal is chunked:
+
+1. **Decode forward once** into lossless chunks, applying the cuts as it goes. The chunking is
+   done by the segment muxer rather than by seeking, so every packet lands in exactly one
+   chunk and the joined sample count matches a single decode to the sample.
+2. **Reverse each chunk**, lossless in and lossless out.
+3. **Concatenate in reverse order** — `reverse(A‖B)` is exactly `reverse(B)‖reverse(A)`.
+4. **Run the original job** against the joined result, applying only the filters whose
+   semantics stay continuous: `atempo`, LoudNorm and resampling. Splitting one of those per
+   chunk would renormalise or re-window every boundary, which is why the reversal is staged
+   and the filter graph is not.
+
+The scratch chunks are FLAC in Matroska, at 24 bits for a float-decoded source and at the
+source's own width for an integer one. An integer source therefore round-trips **bit-identically**
+against the one-shot reverse; a lossy source costs the 24-bit quantisation floor, measured at
+-138.5 dBFS peak and -143.7 dBFS RMS. Above eight channels the scratch becomes PCM, because
+FLAC cannot carry a wider layout. Cover art is carried into the final stage from the original
+file rather than replicated into every chunk.
+
+If the duration cannot be read, or the plan would need more than 512 segments, FFmWiz states
+the calculation and **refuses** rather than falling back to the unbounded one-shot.
 
 ---
 
@@ -2073,10 +2129,17 @@ from the environment.
 | `FFMWIZ_DUP_HASH_WORKERS` | 2 | Parallel workers for duplicate-audio hashing. |
 | `FFMWIZ_VOLUME_SCAN_WORKERS` | 3 | Parallel workers for audio mean/max volume scans. |
 | `FFMWIZ_FOLDER_PROBE_WORKERS` | 4 | Parallel workers for probing files in Folder Encode. |
+| `FFMWIZ_REVERSE_PEAK_BUDGET_MB` | 2048 | Peak megabytes one reverse segment may occupy: the reserved 512 MiB decoder/encoder working set plus its decoded frames. Lower it on a small machine, raise it to reverse a frame the default cannot hold. |
 
 Larger worker counts speed up scanning of many tracks/files on fast disks and CPUs; lower them
 on slow storage or to reduce load. The packet-scan cap balances size-estimate accuracy against
 probe time on very large files.
+
+`FFMWIZ_REVERSE_PEAK_BUDGET_MB` is a **hard cap**, not a hint: the reverse segment is planned as
+a whole number of decoded frames that fits inside it, and a plan that cannot fit is refused
+rather than shortened to something that does not. Setting it below the 512 MiB reserved overhead
+is rejected outright, since that leaves nothing for frames. Raising it to fit an unusually large
+frame is the supported way to reverse 12-bit 4:4:4 8K and above.
 
 ---
 

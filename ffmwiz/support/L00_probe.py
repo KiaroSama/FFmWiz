@@ -31,52 +31,120 @@ from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
 
 
-def decoded_bytes_per_pixel(pix_fmt: Any) -> float:
-    """Bytes one decoded pixel occupies in the named planar format.
+# Bytes one decoded pixel of each software pixel format really occupies,
+# measured against the installed FFmpeg rather than inferred from the name.
+#
+# The name-sniffing predecessor guessed the layout from substrings and fell back
+# to 1.5 B/px, which understated 26 of the 205 measurable formats on FFmpeg
+# 8.1.1 -- `vuya`/`ayuv`/`uyva`/`0rgb`/`0bgr`/`vuyx`/`v30xle` by 2.67x,
+# `nv24`/`nv42`/`xyz12*` and the eight `*msb*` formats by 2.00x, `nv16`/`rgb0`/
+# `bgr0`/`x2rgb10le`/`x2bgr10le` by 1.33x -- and it also read the "565" in
+# `rgb565le` as a 565-bit component depth, returning 213 B/px for a 2 B/px
+# format. Both directions break a hard budget: one overruns the cap, the other
+# collapses the segment to a single frame.
+#
+# Ground truth is `ffmpeg -f lavfi -i nullsrc=s=640x480 -vf format=<fmt>
+# -pix_fmt <fmt> -f rawvideo -` divided by the pixel count, i.e.
+# av_image_get_buffer_size(). Formats this build cannot convert to fall back to
+# their BE/LE twin's measurement, and the handful with no twin (bayer, a few
+# float layouts) to descriptor arithmetic over `ffprobe -show_pixel_formats`,
+# which over-states rather than under-states every one of them. `pal8` sits in
+# the nv12 class: the index plane is 1 B/px and its 1 KiB palette is fixed side
+# data, invisible beside the 512 MiB reserved overhead.
+#
+# The CLI cannot report component STEP, so `ffprobe`'s BITS_PER_PIXEL alone is
+# not enough: it says 24 for `0rgb` and `vuyx`, which really allocate 32, and 15
+# for `yuv420p10le`, which really allocates 24 (>8-bit components sit in whole
+# 16-bit words). Measuring sidesteps both gaps.
+_BYTES_PER_PIXEL_GROUPS: dict[float, str] = {
+    0.125: "monob monow",
+    0.5: "bgr4 rgb4",
+    1: "bgr4_byte bgr8 gray rgb4_byte rgb8",
+    1.125: "yuv410p",
+    1.5: "nv12 nv21 pal8 uyyvyy411 yuv411p yuv420p yuvj411p yuvj420p",
+    2: "bgr444be bgr444le bgr555be bgr555le bgr565be bgr565le gray10be"
+       " gray10le gray12be gray12le gray14be gray14le gray16be gray16le"
+       " gray9be gray9le grayf16be grayf16le nv16 rgb444be rgb444le rgb555be"
+       " rgb555le rgb565be rgb565le uyvy422 ya8 yuv422p yuv440p yuvj422p"
+       " yuvj440p yuyv422 yvyu422",
+    2.5: "yuva420p",
+    3: "bayer_bggr16be bayer_bggr16le bayer_bggr8 bayer_gbrg16be"
+       " bayer_gbrg16le bayer_gbrg8 bayer_grbg16be bayer_grbg16le bayer_grbg8"
+       " bayer_rggb16be bayer_rggb16le bayer_rggb8 bgr24 gbrp nv24 nv42 p010be"
+       " p010le p012be p012le p016be p016le rgb24 vyu444 yuv420p10be"
+       " yuv420p10le yuv420p12be yuv420p12le yuv420p14be yuv420p14le"
+       " yuv420p16be yuv420p16le yuv420p9be yuv420p9le yuv444p yuva422p"
+       " yuvj444p",
+    4: "0bgr 0rgb abgr argb ayuv bgr0 bgra gbrap gray32be gray32le grayf32be"
+       " grayf32le nv20be nv20le p210be p210le p212be p212le p216be p216le"
+       " rgb0 rgba uyva v30xbe v30xle vuya vuyx x2bgr10be x2bgr10le x2rgb10be"
+       " x2rgb10le xv30be xv30le y210be y210le y212be y212le y216be y216le"
+       " ya16be ya16le yaf16be yaf16le yuv422p10be yuv422p10le yuv422p12be"
+       " yuv422p12le yuv422p14be yuv422p14le yuv422p16be yuv422p16le"
+       " yuv422p9be yuv422p9le yuv440p10be yuv440p10le yuv440p12be yuv440p12le"
+       " yuva444p",
+    5: "yuva420p10be yuva420p10le yuva420p16be yuva420p16le yuva420p9be"
+       " yuva420p9le",
+    6: "bgr48be bgr48le gbrp10be gbrp10le gbrp10msbbe gbrp10msble gbrp12be"
+       " gbrp12le gbrp12msbbe gbrp12msble gbrp14be gbrp14le gbrp16be gbrp16le"
+       " gbrp9be gbrp9le gbrpf16be gbrpf16le p410be p410le p412be p412le"
+       " p416be p416le rgb48be rgb48le rgbf16be rgbf16le xyz12be xyz12le"
+       " yuv444p10be yuv444p10le yuv444p10msbbe yuv444p10msble yuv444p12be"
+       " yuv444p12le yuv444p12msbbe yuv444p12msble yuv444p14be yuv444p14le"
+       " yuv444p16be yuv444p16le yuv444p9be yuv444p9le yuva422p10be"
+       " yuva422p10le yuva422p12be yuva422p12le yuva422p16be yuva422p16le"
+       " yuva422p9be yuva422p9le",
+    8: "ayuv64be ayuv64le bgra64be bgra64le gbrap10be gbrap10le gbrap12be"
+       " gbrap12le gbrap14be gbrap14le gbrap16be gbrap16le gbrapf16be"
+       " gbrapf16le rgba64be rgba64le rgbaf16be rgbaf16le xv36be xv36le xv48be"
+       " xv48le yaf32be yaf32le yuva444p10be yuva444p10le yuva444p12be"
+       " yuva444p12le yuva444p16be yuva444p16le yuva444p9be yuva444p9le",
+    12: "gbrpf32be gbrpf32le rgb96be rgb96le rgbf32be rgbf32le",
+    16: "gbrap32be gbrap32le gbrapf32be gbrapf32le rgba128be rgba128le"
+        " rgbaf32be rgbaf32le",
+}
 
-    Derived from the format NAME rather than assumed: 8-bit `yuv420p` really is
-    1.5 bytes, but `yuv420p10le` is 3.0 and `yuv444p` is 3.0, so a flat 1.5
-    understated a 10-bit 4:4:4 source by four times. FFmpeg stores >8-bit
-    components in whole 16-bit words, which is why the depth rounds up to a
-    byte count rather than being used as a bit count.
+BYTES_PER_PIXEL_BY_FORMAT: dict[str, float] = {
+    name: size
+    for size, names in _BYTES_PER_PIXEL_GROUPS.items()
+    for name in names.split()
+}
 
-    Falls back to 8-bit 4:2:0 when the name is unknown, which is the smallest
-    common layout -- so callers that treat the result as a budget should apply
-    their own safety factor rather than trusting an unrecognised name.
+# Opaque driver surfaces. Their frames are not a plain byte block we can size,
+# so a budget must refuse rather than pretend, and `reverse` downloads them to
+# a software format we cannot name in advance.
+HARDWARE_PIXEL_FORMATS: frozenset[str] = frozenset(
+    "amf cuda d3d11 d3d11va_vld d3d12 drm_prime dxva2_vld mediacodec mmal"
+    " ohcodec opencl qsv vaapi vdpau videotoolbox_vld vulkan".split())
+
+# What an unrecognised name costs. The widest software layout FFmpeg 8.1.1 ships
+# is 16 B/px (rgba128/rgbaf32/gbrap32), so this is a real worst case rather than
+# an average. The old fallback was 1.5 -- the SMALLEST common layout -- which
+# turned "hard cap" into "hard cap unless we have not heard of the format".
+UNKNOWN_PIXEL_FORMAT_BYTES = 16.0
+
+
+def pixel_format_bytes_per_pixel(pix_fmt: Any) -> float | None:
+    """Measured bytes per decoded pixel, or None when the name is not known.
+
+    None is the signal a hard budget needs: the caller decides whether to refuse
+    (D12) or to fall back to the conservative worst case. Hardware surfaces are
+    deliberately absent from the table.
     """
     name = str(pix_fmt or "").strip().lower()
-    if not name:
-        return 1.5
-    depth = 8
-    match = re.search(r"p(\d+)(?:le|be)?$", name)
-    if match:
-        depth = int(match.group(1))
-    elif name.endswith(("le", "be")):
-        inner = re.search(r"(\d+)(?:le|be)$", name)
-        if inner:
-            depth = int(inner.group(1))
-    bytes_per_component = max(1, (depth + 7) // 8)
+    return BYTES_PER_PIXEL_BY_FORMAT.get(name)
 
-    if name.startswith("gray"):
-        planes = 1.0
-    elif name.startswith(("rgb", "bgr", "gbr", "argb", "abgr", "rgba", "bgra")):
-        planes = 4.0 if "a" in name[:5] else 3.0
-    else:
-        # Planar YUV: luma plus two chroma planes at the subsampling ratio.
-        if "444" in name:
-            chroma = 1.0
-        elif "422" in name:
-            chroma = 0.5
-        elif "440" in name:
-            chroma = 0.5
-        elif "411" in name or "410" in name:
-            chroma = 0.25
-        else:
-            chroma = 0.25  # 4:2:0 and NV12/NV21
-        planes = 1.0 + 2.0 * chroma
-        if name.startswith("yuva") or name.startswith("ya"):
-            planes += 1.0
-    return planes * bytes_per_component
+
+def decoded_bytes_per_pixel(pix_fmt: Any) -> float:
+    """Bytes one decoded pixel occupies, never below the real allocation.
+
+    Total by design -- an unknown or hardware format yields
+    UNKNOWN_PIXEL_FORMAT_BYTES rather than raising, so callers that only want a
+    number keep working. Callers that must REFUSE an unknown format ask
+    `pixel_format_bytes_per_pixel` for the None instead.
+    """
+    known = pixel_format_bytes_per_pixel(pix_fmt)
+    return UNKNOWN_PIXEL_FORMAT_BYTES if known is None else known
 
 
 def video_stream_span_seconds(stream: dict[str, Any],
@@ -239,6 +307,10 @@ def rational_to_float(value: str | None) -> float | None:
 
 
 __all__ = [
+    'BYTES_PER_PIXEL_BY_FORMAT',
+    'HARDWARE_PIXEL_FORMATS',
+    'UNKNOWN_PIXEL_FORMAT_BYTES',
+    'pixel_format_bytes_per_pixel',
     'decoded_bytes_per_pixel',
     'video_stream_span_seconds',
     'join_item_picture_span',
