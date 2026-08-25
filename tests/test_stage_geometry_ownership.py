@@ -363,5 +363,72 @@ class ThePlanRefusesWhatItCannotOwn(unittest.TestCase):
             FFmWiz.validate_stage_plan([("stage", ("colour_grade",))])
 
 
+@requires_ffmpeg
+class TheReverseBudgetSizesThePostFilterFrame(unittest.TestCase):
+    """The budget is taken at the `reverse` filter's INPUT, not from the probe.
+
+    The CPU chain is crop -> fps -> scale/pad -> speed/reverse -> format, and
+    `reverse` buffers what reaches it. Sizing from the source gave a 1080p30
+    clip upscaled to 8K a 15 s window whose real peak is 24.485 GiB against a
+    2 GiB cap (D11). This is the wiring `reverse_segment_plan_for` does; the
+    arithmetic itself is covered beside the splitter.
+    """
+
+    def _answers(self, **extra):
+        answers = {"video_streams": [{"width": 1920, "height": 1080,
+                                      "pix_fmt": "yuv420p"}],
+                   "fps": 30, "video_codec": "H264", "video_encoder": "libx264",
+                   "use_gpu": False, "output_ext": "mkv"}
+        answers.update(extra)
+        return answers
+
+    def test_an_upscale_shortens_the_window(self):
+        source = FFmWiz.reverse_segment_plan_for(self._answers())
+        upscaled = FFmWiz.reverse_segment_plan_for(self._answers(
+            resolution={"mode": "exact_stretch", "width": 7680, "height": 4320}))
+        self.assertLess(upscaled.seconds, source.seconds / 8,
+                        f"8K frames are 16x a 1080p frame; got {upscaled.seconds}s "
+                        f"against {source.seconds}s")
+
+    def test_a_downscale_lengthens_it(self):
+        source = FFmWiz.reverse_segment_plan_for(self._answers(
+            video_streams=[{"width": 7680, "height": 4320, "pix_fmt": "yuv420p"}]))
+        scaled = FFmWiz.reverse_segment_plan_for(self._answers(
+            video_streams=[{"width": 7680, "height": 4320, "pix_fmt": "yuv420p"}],
+            resolution={"mode": "exact_stretch", "width": 1280, "height": 720}))
+        self.assertGreater(scaled.seconds, source.seconds)
+
+    def test_a_crop_shortens_the_frame_it_buffers(self):
+        whole = FFmWiz.reverse_segment_plan_for(self._answers())
+        cropped = FFmWiz.reverse_segment_plan_for(self._answers(
+            crop_enabled=True, crop_left=480, crop_right=480,
+            crop_top=270, crop_bottom=270))
+        self.assertGreater(cropped.frames, whole.frames)
+
+    def test_a_higher_output_rate_shortens_it(self):
+        thirty = FFmWiz.reverse_segment_plan_for(self._answers())
+        sixty = FFmWiz.reverse_segment_plan_for(self._answers(fps=60))
+        self.assertAlmostEqual(thirty.seconds / 2, sixty.seconds, delta=0.05)
+
+    def test_a_wide_source_is_not_sized_as_the_narrow_output(self):
+        # The graph converts to the encoder's format AFTER `reverse`, and that
+        # negotiation usually reaches back up the chain -- but "usually" cannot
+        # underwrite a hard cap, so the wider of the two formats wins.
+        deep = FFmWiz.reverse_segment_plan_for(self._answers(
+            video_streams=[{"width": 1920, "height": 1080,
+                            "pix_fmt": "yuv444p12le"}]))
+        shallow = FFmWiz.reverse_segment_plan_for(self._answers())
+        self.assertLess(deep.seconds, shallow.seconds,
+                        "a 12-bit 4:4:4 source was sized as 8-bit 4:2:0")
+
+    def test_the_window_is_readable_when_it_is_subsecond(self):
+        plan = FFmWiz.reverse_segment_plan_for(self._answers(
+            video_streams=[{"width": 7680, "height": 4320, "pix_fmt": "yuv420p10le"}],
+            fps=60))
+        self.assertLess(plan.seconds, 1.0)
+        self.assertNotIn("0s", plan.window_text)
+        self.assertIn("ms", plan.window_text)
+
+
 if __name__ == "__main__":
     unittest.main()
