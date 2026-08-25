@@ -23,7 +23,7 @@ import threading
 import concurrent.futures
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
@@ -552,6 +552,35 @@ def _selected_indices(streams: list[Any], chosen: Any) -> list[int]:
         return list(range(len(streams)))
 
 
+# What an encoder actually writes, for describing a file that does not exist
+# yet. The planner hardcoded `h264` here, which is wrong the moment the job
+# selects HEVC, VP9 or AV1 and silently changes later container/codec
+# decisions taken against the descriptor (D07).
+_ENCODER_CODEC_NAMES: dict[str, str] = {
+    "libx264": "h264", "h264_nvenc": "h264", "h264_qsv": "h264",
+    "libx265": "hevc", "hevc_nvenc": "hevc", "hevc_qsv": "hevc",
+    "libvpx-vp9": "vp9", "vp9_qsv": "vp9",
+    "libaom-av1": "av1", "av1_nvenc": "av1", "libsvtav1": "av1",
+    "mpeg4": "mpeg4", "libxvid": "mpeg4",
+}
+
+
+def intermediate_video_codec_name(writer: dict[str, Any]) -> str:
+    """The codec_name the stage described by `writer` will actually produce.
+
+    Resolved through the SAME `resolve_video_encoder` the command builder uses,
+    so the descriptor cannot disagree with the command. An encoder this table
+    does not know returns its own name rather than a plausible substitute --
+    wrong-but-recognisable beats confidently wrong.
+    """
+    try:
+        encoder, _tag, _profile = resolve_video_encoder(writer)
+    except Exception:  # a descriptor must never break the plan it describes
+        encoder = ""
+    encoder = str(encoder or "").lower()
+    return _ENCODER_CODEC_NAMES.get(encoder, encoder or "h264")
+
+
 def reverse_mux_stream_policy(
         answers: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """Which streams the video-only reverse mux keeps, and from which input.
@@ -704,21 +733,66 @@ def bounded_reverse_plan(answers: dict[str, Any],
     planned_output_paths = list(answers.get("split_output_paths") or [])
     stage_source = answers
 
-    def described(source_answers: dict[str, Any], produced: Path) -> dict[str, Any]:
-        """The intermediate as it will be, built from what we know we write."""
+    def described(source_answers: dict[str, Any], produced: Path,
+                  duration: float, writer: dict[str, Any]) -> dict[str, Any]:
+        """The intermediate as the PRECEDING stage will actually write it.
+
+        This used to invent one. It hardcoded every video stream to `h264`,
+        emptied `subtitle_streams`, and -- the expensive part -- reused the
+        SOURCE `format` dict, so the descriptor carried input 1's duration no
+        matter what the stage before it had produced.
+
+        Two user-visible failures came out of that one line. After a forward
+        join of two 2 s inputs the plan reversed 2.023 s instead of 4.046, so
+        the exported plan processed about one input:
+
+            AUTO_DURATION   4.332   AUTO_COLORS   ['blue', 'red']
+            MANUAL_DURATION 2.3     MANUAL_COLORS ['red', 'missing']
+
+        And after a 0.5x speed change the reversed intermediate is twice as
+        long, but the Split still cut against the source timeline, losing the
+        second half:
+
+            AUTO_PARTS   [('slow_Part01.mkv', 2.023), ('slow_Part02.mkv', 5.9)]
+            MANUAL_PARTS [('slow_Part01.mkv', 2.023), ('slow_Part02.mkv', 2.04)]
+
+        `duration` is now supplied by the caller, which knows what its stage
+        does, and `writer` is the answers dict that WILL write the file, so the
+        codec comes from the same resolver the command does rather than from a
+        guess. An unknown duration is a planning error, not a value to invent:
+        a plan that cannot describe its own intermediate must not be exported
+        as if it could.
+        """
+        if not duration or duration <= 0:
+            raise ValueError(
+                f"cannot describe {produced.name}: the duration of the stage "
+                "that writes it is unknown, so every later stage would be "
+                "planned against the wrong timeline")
         rebased = dict(source_answers)
         rebased.pop("join_input_items", None)
         rebased["input_path"] = produced
+        codec = intermediate_video_codec_name(writer)
         streams = [dict(stream) for stream in (source_answers.get("video_streams") or [])]
         for stream in streams:
-            stream["codec_name"] = "h264"
+            stream["codec_name"] = codec
+            stream["duration"] = f"{duration:.6f}"
         rebased["video_streams"] = streams
-        rebased["audio_streams"] = [
-            {**dict(stream), "codec_name": INTERMEDIATE_AUDIO_CODEC}
-            for stream in (source_answers.get("audio_streams") or [])]
-        rebased["subtitle_streams"] = []
-        rebased["probe"] = {"streams": streams, "format": source_answers.get("format") or {}}
-        rebased["format"] = dict(source_answers.get("format") or {})
+        audio = [{**dict(stream), "codec_name": INTERMEDIATE_AUDIO_CODEC,
+                  "duration": f"{duration:.6f}"}
+                 for stream in (source_answers.get("audio_streams") or [])]
+        rebased["audio_streams"] = audio
+        # Carried, not emptied: the forward join merges and retimes the source
+        # subtitles into the intermediate, and the reverse stage carries them
+        # through. Declaring none made the plan's later stages blind to a
+        # track the file actually has.
+        subtitles = [dict(stream) for stream in
+                     (source_answers.get("subtitle_streams") or [])]
+        rebased["subtitle_streams"] = subtitles
+        fmt = dict(source_answers.get("format") or {})
+        fmt["duration"] = f"{duration:.6f}"
+        fmt["format_name"] = "matroska,webm"
+        rebased["format"] = fmt
+        rebased["probe"] = {"streams": streams + audio + subtitles, "format": fmt}
         return rebased
 
     # The SAME ownership the executor uses. Two copies of this decision is how
@@ -745,7 +819,12 @@ def bounded_reverse_plan(answers: dict[str, Any],
         stages.append(("Join the inputs forward",
                        [str(part) for part in
                         wizard.build_join_encode_command(forward, items, joined)]))
-        stage_source = described(answers, joined)
+        # The JOINED length, measured the way the executor measures it: the sum
+        # of the inputs' picture spans. Carrying input 1's `format.duration`
+        # forward is what made the exported plan reverse one input's worth of a
+        # multi-input timeline (D05).
+        joined_seconds = sum(join_item_picture_span(item) for item in items)
+        stage_source = described(answers, joined, joined_seconds, forward)
 
     reverse_answers = stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
@@ -759,7 +838,13 @@ def bounded_reverse_plan(answers: dict[str, Any],
     else:
         reverse_answers["output_path"] = answers["output_path"]
 
-    duration = services.stream_duration_seconds({}, reverse_answers.get("format")) or 0.0
+    duration = reverse_source_seconds(reverse_answers)
+    # What the reverse stage WRITES, not what it reads. Cuts shorten it and a
+    # speed change stretches or compresses it; `reverse` leaves it alone. The
+    # Split that follows must be planned against this, or a 0.5x job cuts the
+    # 8 s result against the 4 s source and loses the second half (D06). Same
+    # helper the real Split uses, so the two cannot drift.
+    reversed_seconds = final_processed_duration_for_splits(reverse_answers, duration)
     keep_ranges = normalize_cut_ranges(
         list(reverse_answers.get("cut_keep_ranges") or []), duration)
     chunks = split_ranges_for_reverse_segments(
@@ -774,47 +859,19 @@ def bounded_reverse_plan(answers: dict[str, Any],
             [str(part) for part in build_main_encode_reverse_segment_command(
                 reverse_answers, start, end, segment)]))
 
-    # The concat lists are written NOW so the exported script is runnable as
-    # it stands; the executor writes its own at run time from the same order.
-    ffmpeg = reverse_answers.get("ffmpeg") or "ffmpeg"
-    reverse_target = Path(reverse_answers["output_path"])
-    audio_follows = encode_audio_reverse_enabled(reverse_answers)
-    has_audio = bool(reverse_answers.get("audio_streams")) and bool(
-        reverse_answers.get("audio_tracks", True))
-    if segments and has_audio and not audio_follows:
-        video_list = workspace / "plan_concat_video.txt"
-        audio_list = workspace / "plan_concat_audio.txt"
-        write_concat_list(list(reversed(segments)), video_list)
-        write_concat_list(list(segments), audio_list)
-        reversed_video = workspace / f"video_reversed.{segment_ext}"
-        forward_audio = workspace / f"audio_forward.{segment_ext}"
-        video_cmd = build_concat_copy_command(ffmpeg, video_list, reversed_video)
-        video_cmd[video_cmd.index(str(reversed_video)):] = ["-an", str(reversed_video)]
-        audio_cmd = build_concat_copy_command(ffmpeg, audio_list, forward_audio)
-        audio_cmd[audio_cmd.index(str(forward_audio)):] = ["-vn", str(forward_audio)]
-        stages.append(("Concatenate the video in reversed order",
-                       [str(part) for part in video_cmd]))
-        stages.append(("Concatenate the audio in source order",
-                       [str(part) for part in audio_cmd]))
-        # The SAME policy object the executor uses; two hand-written map lists
-        # is exactly how the exported plan drifted from the real job before.
-        plan_maps, plan_dispositions, _plan_warnings = reverse_mux_stream_policy(reverse_answers)
-        plan_maps = plan_maps + plan_dispositions
-        stages.append(("Mux the reversed picture with its own audio", [
-            str(ffmpeg), "-y", "-hide_banner",
-            "-i", str(reversed_video), "-i", str(forward_audio),
-            *plan_maps, "-c", "copy",
-            "-avoid_negative_ts", "make_zero", str(reverse_target)]))
-    elif segments:
-        concat_list = workspace / "plan_concat.txt"
-        write_concat_list(list(reversed(segments)), concat_list)
-        stages.append(("Concatenate the reversed segments",
-                       [str(part) for part in build_concat_copy_command(
-                           ffmpeg, concat_list, reverse_target)]))
+    # The SAME builder the executor uses, so the exported plan cannot describe
+    # a different final mux. It writes its concat lists and chapter metadata
+    # into the workspace, which is what makes the exported script runnable as
+    # it stands.
+    concat_stages, _plan_warnings = reverse_concat_stages(
+        reverse_answers, segments, workspace, Path(reverse_answers["output_path"]),
+        encode_video_speed_factor(reverse_answers) or 1.0, segment_ext)
+    stages.extend((label, cmd) for label, cmd, _progress in concat_stages)
 
     if split_points:
         split_answers = stage_answers(
-            described(answers, Path(reverse_answers["output_path"])), owns=("split",))
+            described(answers, Path(reverse_answers["output_path"]),
+                      reversed_seconds, reverse_answers), owns=("split",))
         split_answers.pop("split_output_paths", None)
         split_answers.pop("split_part_intervals", None)
         split_answers["separator_points"] = split_points
@@ -829,13 +886,39 @@ def bounded_reverse_plan(answers: dict[str, Any],
     return stages
 
 
-def export_bounded_reverse_plan(answers: dict[str, Any], destination: Path) -> Path | None:
+class PlanExport(NamedTuple):
+    """The outcome of exporting a staged plan, with failure distinguishable.
+
+    It used to be `Path | None`, and `None` meant BOTH "this job is not staged"
+    and "the export failed". The caller could only tell them apart by guessing,
+    so a failed export fell through to the generic
+
+        FFmpeg was not started. The command above is ready to run manually.
+
+    which is false exactly when it matters: for a staged Join or Split reverse
+    the printed one-shot command is a readable reference that would buffer the
+    whole timeline, and the runnable thing was the plan file that had just
+    failed to be written (D08).
+    """
+    script: Path | None
+    error: str = ""
+
+    @property
+    def succeeded(self) -> bool:
+        return self.script is not None
+
+
+def export_bounded_reverse_plan(answers: dict[str, Any],
+                                destination: Path) -> PlanExport:
     """Write the staged plan as a runnable PowerShell script.
 
     A multi-stage job has no single "final command", so exporting one and
     labelling it that way is what made the manual path wrong. The script stops
     on the first failure and names the scratch directory the user has to remove
     afterwards, because the generated inputs are deliberately preserved.
+
+    Returns a `PlanExport`. A caller that only wants the path reads `.script`;
+    a caller that has to tell the user something truthful reads `.error` too.
     """
     stem = re.sub(r"_Part\d+$", "", Path(destination).stem)
     workspace = Path(destination).parent / f"{stem}_plan"
@@ -844,9 +927,9 @@ def export_bounded_reverse_plan(answers: dict[str, Any], destination: Path) -> P
         stages = bounded_reverse_plan(answers, workspace)
     except Exception as exc:  # a plan we cannot describe must not break the run
         log_warn(f"Could not export the staged reverse plan: {exc}")
-        return None
+        return PlanExport(None, str(exc) or exc.__class__.__name__)
     if not stages:
-        return None
+        return PlanExport(None, "the staged plan produced no commands")
     script = Path(destination).parent / f"{stem}.plan.ps1"
     lines = [
         "# FFmWiz staged reverse plan.",
@@ -870,9 +953,15 @@ def export_bounded_reverse_plan(answers: dict[str, Any], destination: Path) -> P
         lines.append("")
     lines.append(f"# Scratch files live in: {workspace}")
     lines.append("# Remove that directory once the outputs are correct.")
-    script.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    try:
+        script.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    except OSError as exc:
+        # A read-only directory or a locked file is the ordinary case here, and
+        # it must NOT be reported to the user as "not staged".
+        log_warn(f"Could not write the staged reverse plan to {script}: {exc}")
+        return PlanExport(None, f"could not write {script.name}: {exc}")
     log_info(f"Exported staged reverse plan with {len(stages)} stage(s) to {script}")
-    return script
+    return PlanExport(script)
 
 
 def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
@@ -1006,8 +1095,110 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     return code, time.perf_counter() - started_at
 
 
+def reverse_concat_stages(answers: dict[str, Any], segment_paths: list[Path],
+                          workdir: Path, output_path: Path, speed: float,
+                          segment_ext: str,
+                          progress_seconds: float | None = None,
+                          ) -> tuple[list[tuple[str, list[str], float | None]], list[str]]:
+    """Every command that turns finished reverse segments into the output.
+
+    ONE implementation, consumed twice: the executor runs these commands and
+    the exported plan writes them down. It used to be two -- the executor built
+    the final mux by hand with chapter arguments and mp4 flags, while the
+    planner reached for `build_concat_copy_command` -- so the exported plan
+    quietly omitted `-map_chapters` and could not have produced the same file.
+    A second implementation of a pipeline drifts; the only fix that stays fixed
+    is not having one.
+
+    Writes the concat lists and any chapter metadata into `workdir`, so the
+    exported script is runnable as it stands. Returns (stages, warnings) where
+    each stage is (label, argv, progress_seconds_or_None).
+    """
+    stages: list[tuple[str, list[str], float | None]] = []
+    warnings: list[str] = []
+    if not segment_paths:
+        return stages, warnings
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    audio_follows_reverse = encode_audio_reverse_enabled(answers)
+    has_audio = bool(answers.get("audio_streams")) and bool(answers.get("audio_tracks", True))
+    concat_list = workdir / "concat.txt"
+    if has_audio and not audio_follows_reverse:
+        video_ext = output_path.suffix.lstrip(".") or segment_ext
+        reversed_video = workdir / f"video_reversed.{video_ext}"
+        forward_audio = workdir / f"audio_forward.{video_ext}"
+        write_concat_list(list(reversed(segment_paths)), concat_list)
+        video_cmd = build_concat_copy_command(ffmpeg, concat_list, reversed_video)
+        video_cmd[video_cmd.index(str(reversed_video)):] = ["-an", str(reversed_video)]
+        audio_list = workdir / "concat_audio.txt"
+        write_concat_list(list(segment_paths), audio_list)
+        audio_cmd = build_concat_copy_command(ffmpeg, audio_list, forward_audio)
+        audio_cmd[audio_cmd.index(str(forward_audio)):] = ["-vn", str(forward_audio)]
+        stages.append(("Reverse encode concat video (reversed order)",
+                       [str(part) for part in video_cmd], progress_seconds))
+        stages.append(("Reverse encode concat audio (source order)",
+                       [str(part) for part in audio_cmd], progress_seconds))
+        mux_inputs = ["-i", str(reversed_video), "-i", str(forward_audio)]
+        mux_maps, mux_dispositions, warnings = reverse_mux_stream_policy(answers)
+        mux_maps = mux_maps + mux_dispositions
+        metadata_input = 2
+    else:
+        write_concat_list(list(reversed(segment_paths)), concat_list)
+        mux_inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
+        mux_maps = ["-map", "0"]
+        metadata_input = 1
+
+    # The per-segment encodes carry chapter metadata, but this final
+    # concat-copy did not restore any of it, so a reversed chaptered source
+    # came out with ZERO chapters (R05). Attach the remapped chapters here,
+    # where the output timeline finally exists. remap_chapters_for_encode
+    # applies the reverse flip itself.
+    chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed)
+    concat_cmd = [str(ffmpeg), "-y" if OVERWRITE_OUTPUT else "-n",
+                  "-hide_banner", *mux_inputs]
+    if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
+        chapter_metadata = write_encode_chapter_metadata(chapter_plan, workdir, "_reverse")
+        # Appended LAST so it is always the highest input index: the
+        # video-only branch already occupies 0 and 1, and inserting it
+        # earlier would renumber the audio input the maps depend on.
+        concat_cmd.extend(["-i", str(chapter_metadata)])
+        chapter_args = copy_cut_chapter_map_args(
+            chapter_plan, metadata_input_index=metadata_input)
+    else:
+        # Be explicit rather than leaving a silent gap: a source WITH
+        # chapters whose plan is not usable loses them here.
+        chapter_args = copy_cut_chapter_map_args(chapter_plan)
+    concat_cmd.extend([*mux_maps, "-c", "copy",
+                       "-avoid_negative_ts", "make_zero", *chapter_args])
+    if output_path.suffix.lstrip(".").lower() in MP4_LIKE_EXTS and MOVFLAGS:
+        concat_cmd.extend(["-movflags", MOVFLAGS])
+    concat_cmd.append(str(output_path))
+    stages.append(("Concatenating reversed encoded segments",
+                   [str(part) for part in concat_cmd], progress_seconds))
+    return stages, warnings
+
+
+def reverse_source_seconds(answers: dict[str, Any]) -> float:
+    """The PICTURE span of the file a reverse stage will decode.
+
+    The executor probes the intermediate it just wrote and read
+    `format.duration`; the planner describes the same file from the inputs'
+    picture spans. On a joined pair that is 5.039 against 5.000 -- the AAC tail
+    the container carries past the last frame -- so the two bounded their
+    reverse segments differently for the same job. Everything else in this
+    pipeline was moved onto the picture clock already (B07/B08); this is the
+    read that was left behind.
+    """
+    streams = list(answers.get("video_streams") or [])
+    fmt = answers.get("format") or {}
+    if streams:
+        span = video_stream_span_seconds(streams[0], fmt)
+        if span:
+            return span
+    return services.stream_duration_seconds({}, fmt) or 0.0
+
+
 def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    duration = reverse_source_seconds(answers)
     if duration <= 0:
         return run_ffmpeg_with_progress(
             answers["cmd"],
@@ -1054,77 +1245,24 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
         # So the two timelines are concatenated separately: video from the
         # reversed order, audio from the forward one, then muxed. Both passes
         # are stream copies, so this costs no extra encode.
-        audio_follows_reverse = encode_audio_reverse_enabled(answers)
-        has_audio = bool(answers.get("audio_streams")) and bool(answers.get("audio_tracks", True))
-        concat_list = tmpdir / "concat.txt"
-        if has_audio and not audio_follows_reverse:
-            video_ext = output_path.suffix.lstrip(".") or segment_ext
-            reversed_video = tmpdir / f"video_reversed.{video_ext}"
-            forward_audio = tmpdir / f"audio_forward.{video_ext}"
-            write_concat_list(list(reversed(segment_paths)), concat_list)
-            video_cmd = build_concat_copy_command(answers["ffmpeg"], concat_list, reversed_video)
-            video_cmd[video_cmd.index(str(reversed_video)):] = ["-an", str(reversed_video)]
-            audio_list = tmpdir / "concat_audio.txt"
-            write_concat_list(list(segment_paths), audio_list)
-            audio_cmd = build_concat_copy_command(answers["ffmpeg"], audio_list, forward_audio)
-            audio_cmd[audio_cmd.index(str(forward_audio)):] = ["-vn", str(forward_audio)]
-            for label, cmd in (("video (reversed order)", video_cmd),
-                               ("audio (source order)", audio_cmd)):
-                log_info(f"Reverse encode concat {label}: " + command_to_powershell(cmd))
-                rc, _ = run_ffmpeg_with_progress(
-                    cmd, total_duration=(total_keep_duration(chunks) / speed if chunks else None),
-                    label=f"Reverse encode concat {label}")
-                if rc != 0:
-                    return rc, time.perf_counter() - started_at
+        stages, mux_warnings = reverse_concat_stages(
+            answers, segment_paths, tmpdir, output_path, speed, segment_ext,
+            progress_seconds=(total_keep_duration(chunks) / speed if chunks else None))
+        if not stages:
+            return 1, time.perf_counter() - started_at
+        if len(stages) > 1:
             appio.note("Video reverse only: the audio keeps its own order and is "
                        "muxed back onto the reversed picture.")
-            mux_inputs = ["-i", str(reversed_video), "-i", str(forward_audio)]
-            mux_maps, mux_dispositions, mux_warnings = reverse_mux_stream_policy(answers)
-            mux_maps = mux_maps + mux_dispositions
-            for warning in mux_warnings:
-                appio.note(warning)
-                log_warn(warning)
-            metadata_input = 2
-        else:
-            write_concat_list(list(reversed(segment_paths)), concat_list)
-            mux_inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
-            mux_maps = ["-map", "0"]
-            metadata_input = 1
-        # The per-segment encodes carry chapter metadata, but this final
-        # concat-copy did not restore any of it, so a reversed chaptered source
-        # came out with ZERO chapters (R05). Attach the remapped chapters here,
-        # where the output timeline finally exists. remap_chapters_for_encode
-        # applies the reverse flip itself.
-        chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed)
-        concat_cmd = [answers["ffmpeg"], "-y" if OVERWRITE_OUTPUT else "-n",
-                      "-hide_banner", *mux_inputs]
-        chapter_args: list[str] = []
-        if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
-            chapter_metadata = write_encode_chapter_metadata(chapter_plan, tmpdir, "_reverse")
-            # Appended LAST so it is always the highest input index: the
-            # video-only branch already occupies 0 and 1, and inserting it
-            # earlier would renumber the audio input the maps depend on.
-            concat_cmd.extend(["-i", str(chapter_metadata)])
-            chapter_args = copy_cut_chapter_map_args(
-                chapter_plan, metadata_input_index=metadata_input)
-            log_info(f"Reverse encode: restored {len(chapter_plan['chapters'])} chapter(s) "
-                     "onto the reversed timeline")
-        else:
-            # Be explicit rather than leaving a silent gap: a source WITH
-            # chapters whose plan is not usable loses them here.
-            chapter_args = copy_cut_chapter_map_args(chapter_plan)
-        concat_cmd.extend([*mux_maps, "-c", "copy",
-                           "-avoid_negative_ts", "make_zero", *chapter_args])
-        if output_path.suffix.lstrip(".").lower() in MP4_LIKE_EXTS and MOVFLAGS:
-            concat_cmd.extend(["-movflags", MOVFLAGS])
-        concat_cmd.append(str(output_path))
-        log_info("Reverse encode concat command: " + command_to_powershell(concat_cmd))
-        appio.note("Concatenating reversed encoded segments...")
-        rc, _ = run_ffmpeg_with_progress(
-            concat_cmd,
-            total_duration=(total_keep_duration(chunks) / speed if chunks else None),
-            label="Reverse encode concat",
-        )
+        for warning in mux_warnings:
+            appio.note(warning)
+            log_warn(warning)
+        rc = 0
+        for label, cmd, progress in stages:
+            log_info(f"{label}: " + command_to_powershell(cmd))
+            appio.note(f"{label}...")
+            rc, _ = run_ffmpeg_with_progress(cmd, total_duration=progress, label=label)
+            if rc != 0:
+                return rc, time.perf_counter() - started_at
         return rc, time.perf_counter() - started_at
 
 
@@ -1226,10 +1364,13 @@ __all__ = [
     'run_bounded_reverse_pipeline',
     'bounded_reverse_plan',
     'export_bounded_reverse_plan',
+    'PlanExport',
     'intermediate_profile',
     'stage_answers',
     'validate_stage_plan',
     'reverse_mux_stream_policy',
+    'reverse_source_seconds',
+    'intermediate_video_codec_name',
     'requested_transformations',
     'GEOMETRY_TRANSFORMATIONS',
     'STAGE_TRANSFORMATIONS',

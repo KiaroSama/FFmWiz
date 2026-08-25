@@ -169,9 +169,10 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         manual.mkdir()
         declined = self._build(manual)
         with redirect_stdout(noise), redirect_stderr(noise):
-            script = encoding.export_bounded_reverse_plan(
+            export = encoding.export_bounded_reverse_plan(
                 declined, Path(declined["output_path"]))
-        self.assertIsNotNone(script, "no plan was exported")
+        self.assertTrue(export.succeeded, f"no plan was exported: {export.error}")
+        script = export.script
         result = subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(script)],
@@ -189,9 +190,9 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         answers = self._build(out)
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            script = encoding.export_bounded_reverse_plan(
+            export = encoding.export_bounded_reverse_plan(
                 answers, Path(answers["output_path"]))
-        text = Path(script).read_text(encoding="utf-8")
+        text = Path(export.script).read_text(encoding="utf-8")
         self.assertIn("$ErrorActionPreference = 'Stop'", text)
         self.assertIn("if ($LASTEXITCODE -ne 0)", text)
 
@@ -202,9 +203,9 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         answers = self._build(out)
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            script = encoding.export_bounded_reverse_plan(
+            export = encoding.export_bounded_reverse_plan(
                 answers, Path(answers["output_path"]))
-        text = Path(script).read_text(encoding="utf-8")
+        text = Path(export.script).read_text(encoding="utf-8")
         self.assertIn("Scratch files live in:", text)
 
     def _plan_with_segments(self, out, **extra):
@@ -241,10 +242,10 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         # Audio left forward: the planner splits into a video list and an
         # audio list, and only the video one is reversed.
         scratch = self._plan_with_segments(self._tmp / "order_split")
-        order = self._listed_order(scratch / "plan_concat_video.txt")
+        order = self._listed_order(scratch / "concat.txt")
         self.assertEqual(sorted(order, reverse=True), order,
                          "the video concat list must run back to front")
-        forward = self._listed_order(scratch / "plan_concat_audio.txt")
+        forward = self._listed_order(scratch / "concat_audio.txt")
         self.assertEqual(sorted(forward), forward,
                          "the audio list must stay in source order")
 
@@ -254,11 +255,13 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         scratch = self._plan_with_segments(self._tmp / "order_single",
                                            audio_speed_from_video=True,
                                            reverse_audio=True)
-        order = self._listed_order(scratch / "plan_concat.txt")
+        order = self._listed_order(scratch / "concat.txt")
         self.assertEqual(sorted(order, reverse=True), order,
                          "the concat list must run back to front")
-        self.assertFalse((scratch / "plan_concat_video.txt").exists(),
-                         "a reversed-audio job needs no split lists")
+        # The two branches share `concat.txt`; the separate AUDIO list is what
+        # only the video-reversed-audio-forward branch writes.
+        self.assertFalse((scratch / "concat_audio.txt").exists(),
+                         "a reversed-audio job needs no separate audio list")
 
     def test_declining_a_staged_job_writes_the_plan(self):
         # Through the PUBLIC dispatcher. Every other test here calls the

@@ -468,16 +468,30 @@ def run_one_job(base_answers: dict[str, Any], config_path: Path) -> tuple[int, f
                   and (answers.get("join_input_items")
                        or answers.get("separator_points"))
                   and answers.get("output_path"))
-        plan_script = (export_bounded_reverse_plan(answers, Path(answers["output_path"]))
-                       if staged else None)
-        if plan_script:
+        # Three outcomes, not two. `None` used to mean both "not staged" and
+        # "the export failed", so a failed export was told the printed one-shot
+        # command was ready to run -- the one case where that sentence is
+        # actively dangerous, because for a staged job that command buffers the
+        # whole timeline the staging exists to avoid (D08).
+        export = (export_bounded_reverse_plan(answers, Path(answers["output_path"]))
+                  if staged else None)
+        if export is None:
+            appio.note("FFmpeg was not started. The command above is ready to run manually.")
+        elif export.succeeded:
             appio.note(
                 "FFmpeg was not started. This job runs as SEVERAL commands, so the "
                 "single command above is a readable reference, not the plan: running "
                 "it would buffer the whole timeline. The runnable plan was written to:")
-            appio.note(f"    {plan_script}")
+            appio.note(f"    {export.script}")
         else:
-            appio.note("FFmpeg was not started. The command above is ready to run manually.")
+            appio.error(
+                "FFmpeg was not started, and the staged plan could NOT be written: "
+                f"{export.error}")
+            appio.note(
+                "This job runs as SEVERAL commands. The single command above is a "
+                "readable reference only -- do NOT run it as a substitute: it would "
+                "buffer the whole timeline, which is exactly what the staged plan "
+                "avoids. The generated inputs it names have been kept.")
         # Keep, do not clean. This is the PRIMARY dispatcher; only the
         # standalone Mode 12 branch had been fixed, so declining here still
         # deleted the generated concat list, retimed/split subtitles and

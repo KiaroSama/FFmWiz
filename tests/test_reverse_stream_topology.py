@@ -288,7 +288,8 @@ class RichSource(NoLeakedArtifacts, unittest.TestCase):
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
             stages = encoding.bounded_reverse_plan(answers, workspace)
-        muxes = [cmd for label, cmd in stages if label.startswith("Mux")]
+        muxes = [cmd for label, cmd in stages
+                 if label.startswith("Concatenating reversed")]
         self.assertEqual(1, len(muxes), [label for label, _cmd in stages])
         expected_maps, expected_dispositions, _warnings = \
             FFmWiz.reverse_mux_stream_policy(answers)
