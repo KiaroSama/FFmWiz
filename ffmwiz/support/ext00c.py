@@ -20,6 +20,7 @@ import uuid
 import hashlib
 import html
 import csv
+import traceback
 import concurrent.futures
 from fractions import Fraction
 from pathlib import Path
