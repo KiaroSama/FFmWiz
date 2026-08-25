@@ -20,6 +20,7 @@ import uuid
 import hashlib
 import html
 import csv
+import traceback
 import logging
 import atexit
 import queue
