@@ -1,6 +1,6 @@
-"""Regression: the reverse segment must fit a PEAK budget (B05, F10).
+"""Regression: the reverse segment must fit a PEAK budget (B05, F10, D09-D12).
 
-Two rounds of the same defect.
+Three rounds of the same defect.
 
 First the executor chunked a reverse into fixed 60-second pieces and told the
 user that avoided buffering the whole video. `reverse` holds every decoded
@@ -16,15 +16,22 @@ and clamped the result to a 2-second floor. Neither holds up.
                           8K60 8-bit    5.56 GiB
     flat 1.5 bytes/pixel  understates yuv420p10le by 2x and yuv444p12le by 4x
 
-So the budget is now a PEAK: decoded bytes derived from the real `pix_fmt`,
-a measured safety factor for filter queues, and a reserved fixed overhead for
-the decoder/encoder working set. The segment is an integer frame count, and
-there is no floor that can exceed the cap.
+So the budget became a PEAK: decoded bytes derived from the real `pix_fmt`, a
+measured safety factor for filter queues, and a reserved fixed overhead for the
+decoder/encoder working set.
+
+The third round is that the peak was still not a cap. The floor moved from the
+calculator into the SPLITTER (`max(1.0, segment_seconds)`), the pixel-format
+estimate was inferred from the format name, the geometry came from the source
+rather than from the `reverse` filter's input, and an unknown geometry was
+assumed rather than refused. Those four live in `test_reverse_budget_policy.py`
+and `test_pixel_format_bytes.py`; this module keeps the peak arithmetic honest.
 
 The overhead figure is measured, not guessed: 720p30 buffering 300 frames
 peaked at 878 MB against a 415 MB frame estimate, and 600 frames at 1306 MB --
 1.43 MB per frame against a theoretical 1.38, on a ~450 MB baseline.
 """
+import math
 import unittest
 
 import FFmWiz
@@ -39,12 +46,17 @@ def _answers(width, height, fps, pix_fmt="yuv420p"):
 def _peak_bytes(width, height, fps, pix_fmt, seconds):
     per_frame = (width * height * FFmWiz.decoded_bytes_per_pixel(pix_fmt)
                  * FFmWiz.REVERSE_FRAME_SAFETY)
-    frames = round(seconds * fps)
+    frames = math.ceil(seconds * fps - 1e-9)
     return FFmWiz.REVERSE_FIXED_OVERHEAD_BYTES + per_frame * frames
 
 
 class DecodedPixelSize(unittest.TestCase):
-    """The flat 1.5 bytes/pixel assumption, replaced by the format name."""
+    """The flat 1.5 bytes/pixel assumption, replaced by a measured table.
+
+    The full sweep over every format the installed FFmpeg reports lives in
+    `test_pixel_format_bytes.py`; these are the layouts the budget cases below
+    depend on.
+    """
 
     def test_eight_bit_layouts(self):
         self.assertEqual(1.5, FFmWiz.decoded_bytes_per_pixel("yuv420p"))
@@ -61,9 +73,17 @@ class DecodedPixelSize(unittest.TestCase):
         self.assertEqual(1.0, FFmWiz.decoded_bytes_per_pixel("gray"))
         self.assertEqual(2.5, FFmWiz.decoded_bytes_per_pixel("yuva420p"))
 
-    def test_an_unknown_name_does_not_raise(self):
-        self.assertEqual(1.5, FFmWiz.decoded_bytes_per_pixel("something_new"))
-        self.assertEqual(1.5, FFmWiz.decoded_bytes_per_pixel(None))
+    def test_an_unknown_name_is_conservative_rather_than_smallest(self):
+        # It used to answer 1.5 -- the SMALLEST common layout -- so the cap held
+        # only for formats the name reader had heard of. A number is still
+        # returned so callers that only want an estimate keep working; callers
+        # that must refuse ask `pixel_format_bytes_per_pixel` for the None.
+        for unknown in ("something_new", None):
+            with self.subTest(pix_fmt=unknown):
+                self.assertEqual(FFmWiz.UNKNOWN_PIXEL_FORMAT_BYTES,
+                                 FFmWiz.decoded_bytes_per_pixel(unknown))
+                self.assertIsNone(FFmWiz.pixel_format_bytes_per_pixel(unknown))
+        self.assertGreater(FFmWiz.UNKNOWN_PIXEL_FORMAT_BYTES, 1.5)
 
 
 class TheSegmentFitsThePeakBudget(unittest.TestCase):
@@ -87,7 +107,7 @@ class TheSegmentFitsThePeakBudget(unittest.TestCase):
                     _answers(width, height, fps, pix_fmt))
                 peak = _peak_bytes(width, height, fps, pix_fmt, seconds)
                 self.assertLessEqual(
-                    peak, FFmWiz.REVERSE_PEAK_BUDGET_BYTES * 1.02,
+                    peak, FFmWiz.REVERSE_PEAK_BUDGET_BYTES,
                     f"{label}: peak {peak / 1024 ** 3:.2f} GiB against a "
                     f"{FFmWiz.REVERSE_PEAK_BUDGET_BYTES / 1024 ** 3:.2f} GiB cap")
 
@@ -131,7 +151,7 @@ class TheSegmentFitsThePeakBudget(unittest.TestCase):
             _answers(15360, 8640, 120, "yuv444p12le"))
         peak = _peak_bytes(15360, 8640, 120, "yuv444p12le", seconds)
         self.assertLess(seconds, 1.0)
-        self.assertLessEqual(peak, FFmWiz.REVERSE_PEAK_BUDGET_BYTES * 1.5,
+        self.assertLessEqual(peak, FFmWiz.REVERSE_PEAK_BUDGET_BYTES,
                              "even one frame of this is huge; it must not be "
                              "multiplied by a floor")
 
@@ -143,24 +163,44 @@ class TheSegmentFitsThePeakBudget(unittest.TestCase):
                         FFmWiz.REVERSE_PEAK_BUDGET_BYTES)
 
 
-class UnknownGeometryIsBudgetedNotAssumed(unittest.TestCase):
-    def test_it_does_not_fall_back_to_the_ceiling(self):
-        # Silently returning 60 s is 20.9 GiB of frames at 4K30 and the caller
-        # cannot tell it was a guess.
-        seconds = FFmWiz.reverse_segment_seconds({})
-        self.assertLess(seconds, FFmWiz.REVERSE_SEGMENT_SECONDS)
-        self.assertGreater(seconds, 0.0)
+class UnknownGeometryIsRefusedNotAssumed(unittest.TestCase):
+    """The assumption that replaced the 60 s fallback was still not a bound.
+
+    Returning 60 s for an unknown source is 20.9 GiB of frames at 4K30, and the
+    caller cannot tell it was a guess. Assuming 1080p60 10-bit instead answers
+    a smaller number and is exactly as unbounded: nothing stops the real source
+    being 8K. The plan now refuses, and the refusal names what is missing.
+    """
+
+    def test_an_unknown_geometry_is_a_planning_error(self):
+        with self.assertRaises(FFmWiz.ReverseBudgetError) as caught:
+            FFmWiz.reverse_segment_seconds({})
+        self.assertIn("geometry", str(caught.exception))
 
     def test_zero_dimensions_are_treated_the_same(self):
-        self.assertEqual(
-            FFmWiz.reverse_segment_seconds({}),
+        with self.assertRaises(FFmWiz.ReverseBudgetError):
             FFmWiz.reverse_segment_seconds(
-                {"video_streams": [{"width": 0, "height": 0}]}))
+                {"video_streams": [{"width": 0, "height": 0}]})
 
-    def test_the_assumption_it_makes_fits_the_cap(self):
-        seconds = FFmWiz.reverse_segment_seconds({})
-        peak = _peak_bytes(1920, 1080, 60, "yuv420p10le", seconds)
-        self.assertLessEqual(peak, FFmWiz.REVERSE_PEAK_BUDGET_BYTES * 1.02)
+    def test_it_does_not_quietly_fall_back_to_the_ceiling(self):
+        # The failure mode this replaces: a number that looks planned but is
+        # really REVERSE_SEGMENT_SECONDS wearing a hat.
+        with self.assertRaises(FFmWiz.ReverseBudgetError):
+            FFmWiz.reverse_segment_seconds_for(None, None, None, None)
+
+    def test_the_explicit_override_says_it_is_no_longer_hard_capped(self):
+        plan = FFmWiz.reverse_segment_plan(None, None, None, None,
+                                           best_effort=True)
+        self.assertFalse(plan.hard_capped)
+        self.assertTrue(plan.assumptions)
+        self.assertLess(plan.seconds, FFmWiz.REVERSE_SEGMENT_SECONDS)
+
+    def test_the_override_assumption_still_fits_the_cap_it_assumed(self):
+        plan = FFmWiz.reverse_segment_plan(None, None, None, None,
+                                           best_effort=True)
+        peak = _peak_bytes(plan.width, plan.height, plan.fps, plan.pix_fmt,
+                           plan.seconds)
+        self.assertLessEqual(peak, FFmWiz.REVERSE_PEAK_BUDGET_BYTES)
 
 
 class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
@@ -186,10 +226,13 @@ class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
                       source)
         self.assertNotIn("split_ranges_for_reverse_segments([], duration)", source)
 
-    def test_the_standalone_notice_reports_the_real_size(self):
+    def test_the_standalone_notice_does_not_reuse_the_flat_ceiling(self):
+        # The notice must report the size actually planned. Whether it prints
+        # seconds or milliseconds is the caller's call -- but see
+        # `test_reverse_budget_policy.TheWindowIsPrintable`: a `:.0f}s` format
+        # announces every legitimate subsecond window as `0s`.
         source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
                   / "ffmwiz" / "support" / "ext04b.py").read_text(encoding="utf-8")
-        self.assertIn("{segment_seconds:.0f}s", source)
         self.assertNotIn("{int(REVERSE_SEGMENT_SECONDS)}s", source)
 
     def test_both_entry_points_agree_on_the_same_geometry(self):
@@ -208,15 +251,17 @@ class TheExecutorUsesIt(unittest.TestCase):
         source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
                   / "ffmwiz" / "encoding.py").read_text(encoding="utf-8")
         block = source.split("def run_segmented_reverse_main_encode")[1][:1500]
-        self.assertIn("reverse_segment_seconds(answers)", block)
+        self.assertIn("reverse_segment_plan_for(answers)", block)
+        # Renamed when the plan gained its calculation and its
+        # refusals; the old wrapper still exists for callers that only
+        # want the number.
         self.assertIn("split_ranges_for_reverse_segments(original_keep_ranges, duration,",
                       block)
 
-    def test_the_notice_reports_the_size_actually_used(self):
+    def test_the_notice_does_not_reuse_the_flat_ceiling(self):
         source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
                   / "ffmwiz" / "encoding.py").read_text(encoding="utf-8")
         block = source.split("def run_segmented_reverse_main_encode")[1][:2000]
-        self.assertIn("{segment_seconds:.0f}s", block)
         self.assertNotIn("{int(REVERSE_SEGMENT_SECONDS)}s", block)
 
 

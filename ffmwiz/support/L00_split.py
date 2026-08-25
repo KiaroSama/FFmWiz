@@ -22,7 +22,7 @@ import csv
 import concurrent.futures
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
@@ -32,46 +32,319 @@ from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
 
 
-def reverse_segment_seconds_for(width: int, height: int, fps: float,
-                                pix_fmt: Any = None) -> float:
-    """Seconds of video one reverse segment may hold within the peak budget.
+# FFmpeg time arguments are emitted as `f"{value:.6f}"` (wizard_build.py -> -t,
+# ext04b.py -> -ss/-t), which ROUNDS. A 28-frame window at 60 fps is 0.4666666 s
+# and prints as `-t 0.466667`, two microseconds past frame 28, so FFmpeg reads a
+# 29th frame into the reverse buffer and the plan is one frame over its own cap.
+# Planning on the same grid, downwards, keeps the emitted window inside the plan.
+COMMAND_TIME_DECIMALS = 6
+_COMMAND_TIME_GRID = 10.0 ** COMMAND_TIME_DECIMALS
+
+
+def _floor_to_command_grid(seconds: float) -> float:
+    return math.floor(seconds * _COMMAND_TIME_GRID) / _COMMAND_TIME_GRID
+
+
+class ReverseFilterInput(NamedTuple):
+    """Geometry, rate and format at the INPUT of the `reverse` filter."""
+
+    width: int
+    height: int
+    fps: float
+    pix_fmt: Any
+
+
+class ReverseSegmentPlan(NamedTuple):
+    """One bounded reverse segment, with the whole calculation attached.
+
+    `hard_capped` is the honest half: it is False when the plan had to assume
+    something it could not read, or when a single frame already exceeds the
+    allowance, because a plan built on an assumption is best-effort and must
+    not be advertised as a cap (D12).
+    """
+
+    width: int
+    height: int
+    fps: float
+    pix_fmt: Any
+    bytes_per_pixel: float
+    bytes_per_frame: float
+    frames: int
+    seconds: float
+    overhead_bytes: int
+    cap_bytes: int
+    peak_bytes: float
+    hard_capped: bool
+    assumptions: tuple[str, ...]
+
+    @property
+    def window_text(self) -> str:
+        """The window as a caller should PRINT it.
+
+        `f"{seconds:.0f}s"` renders every legitimate subsecond budget as `0s`,
+        which is how a 233 ms window came to be announced as if it were nothing
+        (D09). Milliseconds plus the frame count say what was actually planned.
+        """
+        return format_reverse_segment_window(self.seconds, self.fps, self.frames)
+
+    def describe(self) -> str:
+        """The full calculation, for the log the caller owns."""
+        return (
+            f"{self.width}x{self.height} {self.pix_fmt} at {self.fps:.6g} fps -> "
+            f"{self.bytes_per_pixel:g} B/px, "
+            f"{self.bytes_per_frame / 1024 ** 2:.2f} MiB/frame (incl. "
+            f"{(REVERSE_FRAME_SAFETY - 1) * 100:.0f}% safety), "
+            f"{self.frames} frame(s) = {self.window_text}; peak "
+            f"{self.peak_bytes / 1024 ** 3:.3f} GiB = "
+            f"{self.overhead_bytes / 1024 ** 3:.3f} GiB overhead + frames, cap "
+            f"{self.cap_bytes / 1024 ** 3:.3f} GiB"
+            + (f"; ASSUMED: {'; '.join(self.assumptions)}" if self.assumptions else "")
+        )
+
+
+def format_reverse_segment_window(seconds: float, fps: float = 0.0,
+                                  frames: int = 0) -> str:
+    """Render a segment window so a subsecond value is still readable.
+
+    `f"{seconds:.0f}s"` prints every legitimate subsecond budget as `0s` (D09).
+    """
+    seconds = max(0.0, float(seconds or 0.0))
+    if not frames and fps and fps > 0:
+        frames = max(1, int(round(seconds * fps)))
+    text = f"{seconds * 1000:.0f} ms" if seconds < 1.0 else f"{seconds:.3f} s"
+    return f"{text} ({frames} frame{'' if frames == 1 else 's'})" if frames else text
+
+
+def reverse_filter_input_descriptor(
+    source_width: Any,
+    source_height: Any,
+    source_fps: Any,
+    source_pix_fmt: Any = None,
+    *,
+    crop_size: tuple[Any, Any] | None = None,
+    scale_size: tuple[Any, Any] | None = None,
+    output_fps: Any = None,
+    graph_pix_fmt: Any = None,
+) -> ReverseFilterInput:
+    """Resolve what the `reverse` filter actually buffers.
+
+    `reverse` holds POST-filter frames, and the CPU graph is
+    crop -> fps -> scale/pad -> speed/reverse -> format, so the last geometry
+    before `reverse` wins, not the probe. Sizing from the source handed a
+    1080p30 clip upscaled to 8K a 15 s window whose real peak is over 24 GiB
+    against a 2 GiB cap (D11).
+
+    `scale_size` is the padded TARGET canvas: the aspect-preserving chain is
+    `scale=W:H:force_original_aspect_ratio=decrease` followed by `pad=W:H`, so
+    the frame entering `reverse` is the full canvas even when the picture
+    inside it is letterboxed.
+
+    `graph_pix_fmt` is the format the graph converts to. It matters because the
+    trailing `format=` filter sits DOWNSTREAM of `reverse`, and `reverse` passes
+    formats through, so FFmpeg negotiates that format back up the chain -- the
+    frames in the buffer carry the encoder's format, not the source's.
+    """
+    def _size(pair):
+        if not pair:
+            return None
+        try:
+            width, height = int(pair[0] or 0), int(pair[1] or 0)
+        except (TypeError, ValueError, IndexError):
+            return None
+        return (width, height) if width > 0 and height > 0 else None
+
+    def _rate(value):
+        try:
+            rate = float(value or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return rate if rate > 0 and math.isfinite(rate) else None
+
+    width, height = (_size(scale_size) or _size(crop_size)
+                     or _size((source_width, source_height)) or (0, 0))
+    fps = _rate(output_fps) or _rate(source_fps) or 0.0
+    return ReverseFilterInput(width, height, fps, graph_pix_fmt or source_pix_fmt)
+
+
+def reverse_segment_plan(
+    width: Any,
+    height: Any,
+    fps: Any,
+    pix_fmt: Any = None,
+    *,
+    cap_bytes: int | None = None,
+    overhead_bytes: int | None = None,
+    frame_safety: float | None = None,
+    max_seconds: float | None = None,
+    best_effort: bool = False,
+) -> ReverseSegmentPlan:
+    """Plan one reverse segment that fits the peak budget, or refuse.
 
     Pure, and it lives here rather than in the executor so every reverse entry
-    point can share it: the standalone Video Speed / Reverse mode had its own
-    call with no budget at all and announced a flat 60 s window, which is
-    20.9 GiB of decoded frames at 4K30 (B06).
+    point shares it: the standalone Video Speed / Reverse mode had its own call
+    with no budget at all and announced a flat 60 s window, which is 20.9 GiB of
+    decoded frames at 4K30 (B06).
 
-    The budget is a PEAK -- reserved process overhead plus frames sized from
-    the real pixel format -- and the result is an integer frame count, so there
-    is no floor that can exceed the cap.
+    The budget is a PEAK -- reserved process overhead plus frames sized from the
+    real pixel format -- and the result is an integer FRAME count, so nothing
+    can round it back up past the cap.
+
+    Anything the plan needs but cannot read is a planning error, not a warning:
+    the old code assumed 1080p60 10-bit for unknown geometry and carried on,
+    which leaves an unknown 8K source completely unbounded (D12). `best_effort`
+    is the explicit override, and it returns `hard_capped=False` so the caller
+    cannot keep advertising a cap it no longer has.
+
+    An invalid cap always raises. A cap of zero, a negative cap, or a cap at or
+    below the reserved overhead is a configuration mistake rather than an
+    unknown, and there is no honest segment to return for it.
     """
+    cap_bytes = int(REVERSE_PEAK_BUDGET_BYTES if cap_bytes is None else cap_bytes)
+    overhead_bytes = int(REVERSE_FIXED_OVERHEAD_BYTES if overhead_bytes is None
+                         else overhead_bytes)
+    frame_safety = float(REVERSE_FRAME_SAFETY if frame_safety is None else frame_safety)
+    max_seconds = float(REVERSE_SEGMENT_SECONDS if max_seconds is None else max_seconds)
+    if cap_bytes <= 0:
+        raise ReverseBudgetError(
+            f"Reverse memory cap must be positive; got {cap_bytes} bytes. "
+            "Set FFMWIZ_REVERSE_PEAK_BUDGET_MB to a usable value.")
+    if overhead_bytes < 0:
+        raise ReverseBudgetError(
+            f"Reverse fixed overhead must not be negative; got {overhead_bytes} bytes.")
+    allowance = cap_bytes - overhead_bytes
+    if allowance <= 0:
+        raise ReverseBudgetError(
+            f"Reverse memory cap {cap_bytes / 1024 ** 2:.0f} MiB leaves nothing for "
+            f"frames: the decoder/encoder working set alone reserves "
+            f"{overhead_bytes / 1024 ** 2:.0f} MiB. Raise "
+            "FFMWIZ_REVERSE_PEAK_BUDGET_MB above that.")
+
+    assumptions: list[str] = []
+
+    def _unknown(what: str, message: str, fallback):
+        if not best_effort:
+            raise ReverseBudgetError(message)
+        assumptions.append(what)
+        return fallback
+
     try:
         width, height = int(width or 0), int(height or 0)
-        fps = float(fps or 0.0)
     except (TypeError, ValueError):
         width = height = 0
-        fps = 0.0
-    if fps <= 0:
-        fps = 30.0
     if width <= 0 or height <= 0:
-        # Budget for a common demanding case rather than assuming the ceiling.
-        width, height, fps, pix_fmt = 1920, 1080, 60.0, "yuv420p10le"
-    per_frame = (width * height * decoded_bytes_per_pixel(pix_fmt)
-                 * REVERSE_FRAME_SAFETY)
-    if per_frame <= 0:
-        return float(REVERSE_SEGMENT_SECONDS)
-    allowance = REVERSE_PEAK_BUDGET_BYTES - REVERSE_FIXED_OVERHEAD_BYTES
-    frames = max(1, int(allowance // per_frame))
-    return max(1.0 / fps, min(float(REVERSE_SEGMENT_SECONDS), frames / fps))
+        # 4K, not the old 1080p: if we are guessing at all, guess at something
+        # demanding enough that the guess is unlikely to be exceeded.
+        width, height = _unknown(
+            "frame geometry (assumed 3840x2160)",
+            "Reverse memory cap needs the frame geometry and the probe did not "
+            "report it. Probe the input before planning a reverse, or accept a "
+            "best-effort segment that is no longer hard-capped.",
+            (3840, 2160))
+    try:
+        fps = float(fps or 0.0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    if not (fps > 0 and math.isfinite(fps)):
+        fps = _unknown(
+            "frame rate (assumed 60 fps)",
+            "Reverse memory cap needs the frame rate and the probe did not "
+            "report it. Probe the input before planning a reverse, or accept a "
+            "best-effort segment that is no longer hard-capped.",
+            60.0)
+
+    bytes_per_pixel = pixel_format_bytes_per_pixel(pix_fmt)
+    if bytes_per_pixel is None:
+        name = str(pix_fmt or "").strip().lower() or "<missing>"
+        hardware = name in HARDWARE_PIXEL_FORMATS
+        bytes_per_pixel = _unknown(
+            f"pixel format {name} (assumed {UNKNOWN_PIXEL_FORMAT_BYTES:g} B/px)",
+            (f"Reverse memory cap cannot size frames in {name!r}: it is "
+             + ("a hardware surface, whose frames are not a byte block this "
+                "budget can measure. Decode to a software format first"
+                if hardware else
+                "not a pixel format this FFmpeg build reports. Probe the input")
+             + ", or accept a best-effort segment that is no longer hard-capped."),
+            UNKNOWN_PIXEL_FORMAT_BYTES)
+
+    bytes_per_frame = width * height * bytes_per_pixel * frame_safety
+    frames = int(allowance // bytes_per_frame) if bytes_per_frame > 0 else 0
+    hard_capped = not assumptions
+    if frames < 1:
+        # `max(1, ...)` used to hide this: a frame that does not fit was still
+        # returned, so the cap was broken by the only chunk the plan can make.
+        if not best_effort:
+            raise ReverseBudgetError(
+                f"One decoded {width}x{height} {str(pix_fmt or 'unknown')} frame is "
+                f"{bytes_per_frame / 1024 ** 2:.0f} MiB and the reverse budget only "
+                f"allows {allowance / 1024 ** 2:.0f} MiB "
+                f"({cap_bytes / 1024 ** 2:.0f} MiB cap less "
+                f"{overhead_bytes / 1024 ** 2:.0f} MiB reserved overhead). Raise "
+                "FFMWIZ_REVERSE_PEAK_BUDGET_MB or reverse a smaller frame.")
+        assumptions.append("a single frame exceeds the allowance")
+        hard_capped = False
+        frames = 1
+    frames = min(frames, max(1, int(max_seconds * fps)))
+    return ReverseSegmentPlan(
+        width=width, height=height, fps=fps, pix_fmt=pix_fmt,
+        bytes_per_pixel=bytes_per_pixel, bytes_per_frame=bytes_per_frame,
+        frames=frames, seconds=_floor_to_command_grid(frames / fps),
+        overhead_bytes=overhead_bytes, cap_bytes=cap_bytes,
+        peak_bytes=overhead_bytes + bytes_per_frame * frames,
+        hard_capped=hard_capped, assumptions=tuple(assumptions))
+
+
+def reverse_segment_seconds_for(width: int, height: int, fps: float,
+                                pix_fmt: Any = None, **kwargs: Any) -> float:
+    """Seconds of video one reverse segment may hold within the peak budget.
+
+    Thin float view of `reverse_segment_plan` for callers that only want the
+    window; it raises the same `ReverseBudgetError` and takes the same keyword
+    options. Callers that need the frame count, the peak, or the
+    hard-capped/best-effort distinction ask for the plan instead.
+    """
+    return reverse_segment_plan(width, height, fps, pix_fmt, **kwargs).seconds
 
 
 def split_ranges_for_reverse_segments(
     ranges: list[tuple[float, float]],
     duration: float,
     segment_seconds: float = REVERSE_SEGMENT_SECONDS,
+    fps: float | None = None,
 ) -> list[tuple[float, float]]:
+    """Tile the kept ranges into chunks no longer than `segment_seconds`.
+
+    There is no one-second floor. The floor that used to sit here threw away
+    every subsecond budget the calculator produced, so the executor always ran
+    at least a second of frames: 2.10 GiB at 4K60 10-bit, 3.70 GiB at 8K60
+    8-bit, 6.90 GiB at 8K60 10-bit and 102.8 GiB at 16K120 12-bit 4:4:4 against
+    a 2 GiB cap (D09). The smallest legal chunk is ONE FRAME.
+
+    Pass `fps` to cut on the frame grid: the chunk becomes a whole number of
+    frames, so a boundary cannot land mid-frame and pull an extra frame into
+    the buffer.
+    """
     duration = max(0.0, float(duration or 0.0))
-    segment_seconds = max(1.0, float(segment_seconds or REVERSE_SEGMENT_SECONDS))
+    try:
+        step = float(segment_seconds or 0.0)
+    except (TypeError, ValueError):
+        step = 0.0
+    if step <= 0:
+        step = float(REVERSE_SEGMENT_SECONDS)
+    try:
+        rate = float(fps or 0.0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    if rate > 0 and math.isfinite(rate):
+        # 1e-3 of a frame of tolerance: the incoming budget has already been
+        # floored to the command grid, so 28 frames arrives as 27.99996 and a
+        # bare int() would silently drop a frame from every chunk.
+        step = max(1, math.floor(step * rate + 1e-3)) / rate
+    step = _floor_to_command_grid(step)
+    # A step of zero would not terminate the tiling loop, and below the command
+    # grid it prints as `-t 0.000000`. With a known rate the frame count already
+    # bounds the chunk, so only the rate-less path needs the coarser floor --
+    # raising it there too would hand back more than one frame above 1000 fps.
+    step = max(step, 1e-6 if rate > 0 else 1e-3)
     source_ranges = normalize_cut_ranges(ranges, duration) if ranges else []
     if not source_ranges and duration > 0:
         source_ranges = [(0.0, duration)]
@@ -80,7 +353,7 @@ def split_ranges_for_reverse_segments(
         cursor = max(0.0, start)
         end = min(duration, end) if duration > 0 else end
         while cursor < end - 1e-6:
-            next_end = min(end, cursor + segment_seconds)
+            next_end = min(end, cursor + step)
             if next_end > cursor:
                 chunks.append((cursor, next_end))
             cursor = next_end
@@ -214,6 +487,12 @@ def parse_split_timestamp(token: str, bare_unit: str = "s") -> float:
 
 
 __all__ = [
+    'COMMAND_TIME_DECIMALS',
+    'ReverseFilterInput',
+    'ReverseSegmentPlan',
+    'format_reverse_segment_window',
+    'reverse_filter_input_descriptor',
+    'reverse_segment_plan',
     'reverse_segment_seconds_for',
     'split_ranges_for_reverse_segments',
     '_split_progress_seconds',
