@@ -311,8 +311,14 @@ def append_single_input_split_outputs(
         for subtitle_input in (subtitle_input_indices[part_idx]
                                if part_idx < len(subtitle_input_indices) else []):
             cmd.extend(["-map", f"{subtitle_input}:s:0"])
-        attachments_mapped = append_embedded_attachment_maps(cmd, answers)
+        # Data streams carry packets, so they are mapped BEFORE the
+        # attachment, keeping the rule uniform across this builder. It cannot
+        # be reached today -- Matroska is the only container FFmWiz maps an
+        # attachment into and it refuses a data stream outright ("Only audio,
+        # video, and subtitles are supported for Matroska") -- so this is
+        # ordering hygiene, not a fix for an observed failure.
         data_mapped = append_source_data_maps(cmd, answers)
+        attachments_mapped = append_embedded_attachment_maps(cmd, answers)
 
         # Per-part chapter handling for splits.
         if not output_has_video(answers):
@@ -368,6 +374,14 @@ def append_single_input_split_outputs(
 
 
 def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
+    # A build is a PLAN BOUNDARY, and this is the only place every caller of
+    # this builder shares. `step_start_now()` reset the resolved map and the
+    # Folder loop did it per item, but `step_start_folder_now()` did not and a
+    # direct call never could, so a request of `copy` carrying a previous
+    # plan's effective `libx265` still built `-c:v libx265` (D14). Deciding it
+    # here means the caller cannot forget: an open plan is adopted, anything
+    # else gets a fresh revision with an empty map.
+    require_plan_revision(answers)
     # Open the lease FIRST. `dict()` copies the key but shares the object, so a
     # lease opened here is still the outer job's lease when a Split part or a
     # reverse segment rebuilds from `dict(answers)`; opened later, the copy gets
@@ -422,14 +436,18 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             "mpeg4",
         }:
             appio.note("WebM does not support that video codec safely here. VP9 was selected for this output.")
-            answers["video_codec"] = "VP9"
+            # The RESOLVED codec, never the requested one. Overwriting the
+            # request made Back show the fallback instead of the user's own
+            # answer, and left no record that a substitution had happened at
+            # all -- the effective map came out empty (D15).
+            effective_settings(answers)["video_codec"] = "VP9"
         video_encoder, tag, profile = resolve_video_encoder(answers)
         if video_encoder == "copy" and video_filters_required(answers):
             appio.note(
                 "\nWarning: video copy cannot be used with crop/fps/scale/setparams or cuts. "
                 "H265 was selected so filters/cuts can be applied."
             )
-            answers["video_codec"] = DEFAULT_VIDEO_CODEC
+            effective_settings(answers)["video_codec"] = DEFAULT_VIDEO_CODEC
             video_encoder, tag, profile = resolve_video_encoder(answers)
         video_encoder, tag, profile = enforce_bit_depth_compatible_video_encoder(answers, video_encoder, tag, profile)
 
@@ -515,7 +533,25 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     # stretched the container to 3.521 s (R03). The rebuilt tracks arrive as
     # their own inputs, added AFTER the chapter metadata so its index 1 holds.
     subtitle_retiming = encode_subtitle_retiming_required(answers)
-    retimed_subtitles = wizard.build_retimed_subtitle_inputs(answers) if subtitle_retiming else []
+    # `build_retimed_subtitle_inputs()` EXTRACTS the tracks from
+    # `answers["input_path"]`, which is fine while that path is the user's file
+    # and wrong the moment a staged plan describes a command whose input has
+    # not been written yet: extraction from `joined_forward.mkv` or
+    # `reversed_whole.mkv` found nothing, so the exported plan emitted `-sn`
+    # where the automatic run mapped the retimed track. Measured, planned
+    # against executed reverse segment:
+    #     only in PLAN: ['-sn']
+    #     only in RUN : ['-c:s', '-disposition:s:0', '-metadata:s:s',
+    #                    '1:s:0', 'copy', 'retimed00.srt']
+    # A planner that already built the tracks from the SOURCE files hands them
+    # over here instead; the shape is the same list of dicts, so nothing
+    # downstream changes.
+    prebuilt_retimed = answers.get("_prebuilt_retimed_subtitles")
+    if subtitle_retiming and prebuilt_retimed is not None:
+        retimed_subtitles = list(prebuilt_retimed)
+        log_info(f"Retimed subtitles supplied by the caller: {len(retimed_subtitles)} track(s)")
+    else:
+        retimed_subtitles = wizard.build_retimed_subtitle_inputs(answers) if subtitle_retiming else []
     retimed_subtitle_base = 1 + chapter_metadata_inputs
     for retimed_track in retimed_subtitles:
         cmd.extend(["-i", str(retimed_track["path"])])
@@ -626,7 +662,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         cmd.extend(["-map", f"0:s:{subtitle_index}"])
     for offset in range(len(retimed_subtitles)):
         cmd.extend(["-map", f"{retimed_subtitle_base + offset}:s:0"])
-    attachments_mapped = embedded_attachment_keep_enabled(answers) if full_source_map else append_embedded_attachment_maps(cmd, answers)
+    # The attachment map is NOT emitted here. It has to come after every
+    # packet-bearing map, and the filter-complex audio outputs are mapped
+    # further down -- see the attachment block near the end of this builder.
     data_mapped = bool(source_data_streams(answers) and source_data_keep_enabled(answers)) if full_source_map else append_source_data_maps(cmd, answers)
     append_source_metadata_chapter_options(cmd, answers)
 
@@ -711,12 +749,10 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             answers.get("audio_codec"),
             default_audio_codec_for_ext(answers.get("output_ext", "")),
         )
-        answers["audio_codec"] = audio_codec
         audio_codec_for_stats = audio_codec
         if audio_transform_active and audio_codec == "copy":
             appio.note("Audio copy cannot be used with audio filters such as speed/reverse, waveform cuts, or LoudNorm. AAC was selected for audio.")
             audio_codec = DEFAULT_AUDIO_CODEC
-            answers["audio_codec"] = audio_codec
             audio_codec_for_stats = audio_codec
         # Every constrained container, not just WebM: aac into .flac/.ogg/.opus
         # was emitted happily and then rejected by the muxer.
@@ -729,8 +765,11 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
                 f"{replacement} was selected for container compatibility."
             )
             audio_codec = replacement
-            answers["audio_codec"] = audio_codec
             audio_codec_for_stats = audio_codec
+        # One write, at the end, of whatever the chain settled on -- the
+        # normalization AND every fallback. `answers["audio_codec"]` stays the
+        # user's request so Back can still show it (D15).
+        effective_settings(answers)["audio_codec"] = audio_codec
         if audio_codec == "copy":
             cmd.extend(["-c:a", "copy"])
         else:
@@ -790,6 +829,19 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         if subtitle_args:
             cmd.extend(subtitle_args)
         append_subtitle_track_metadata(cmd, retimed_subtitles)
+    # Attachments LAST, after every packet-bearing map -- including the
+    # filter-complex audio outputs, which are mapped long after the source
+    # maps. Matroska refuses a packet stream that arrives at a higher output
+    # index than an attachment, so a synchronised reverse of a source carrying
+    # an attachment AND a subtitle emitted
+    #     -map 0:v:0 -map 1:s:0 -map 0:t? ... -filter_complex ... -map [aout0]
+    # and died at the muxer:
+    #     [aost#0:2/copy] Error submitting a packet to the muxer: Invalid argument
+    #     [out#0/matroska] Task finished with error code: -22
+    # The non-synchronised case survived only because its audio is mapped
+    # inline, before the attachment.
+    attachments_mapped = (embedded_attachment_keep_enabled(answers) if full_source_map
+                          else append_embedded_attachment_maps(cmd, answers))
     if attachments_mapped:
         append_embedded_attachment_codec_options(cmd, answers)
     if data_mapped:

@@ -276,14 +276,14 @@ def append_audio_encode_options(cmd: list[str], answers: dict[str, Any], has_aud
         answers.get("audio_codec"),
         default_audio_codec_for_ext(answers.get("output_ext", "")),
     )
-    answers["audio_codec"] = audio_codec
     if audio_codec == "copy":
         appio.note("Audio copy cannot be used after Split/filter processing. AAC was selected for audio.")
         audio_codec = DEFAULT_AUDIO_CODEC
-        answers["audio_codec"] = audio_codec
-    # `answers` here is often a shallow copy the caller made, so the write above
-    # never reaches the dict the summary reads. Record it where a copy cannot
-    # hide it (R10).
+    # `answers` here is often a shallow copy the caller made, so a write to the
+    # requested key would never reach the dict the summary reads -- and the
+    # requested key is the wrong place anyway, because Back has to show the
+    # user their own answer. The effective map is both visible through a copy
+    # and the right home for a resolution (R10/D15).
     effective_settings(answers)["audio_codec"] = audio_codec
     cmd.extend(["-c:a", audio_codec])
     audio_bitrate = answers.get("audio_bitrate_kbps")
@@ -367,11 +367,19 @@ def cpu_encoder_for_high_bit_depth(answers: dict[str, Any], video_encoder: str) 
     if cpu_encoder == "libx264" and output_video_bit_depth(answers) > 10:
         appio.note("H.264/NVENC cannot safely preserve source bit depth above 10-bit here. H.265 CPU encoding was selected to preserve high bit depth.")
         cpu_encoder, tag, profile = "libx265", "hvc1", NVENC_HEVC_PROFILE
-        answers["video_codec"] = "H265"
+        effective_settings(answers)["video_codec"] = "H265"
     return cpu_encoder, tag, profile
 
 
 def append_embedded_attachment_maps(cmd: list[str], answers: dict[str, Any]) -> bool:
+    """Map the source's attachment streams. Call this AFTER every other map.
+
+    Matroska will not accept a packet-bearing stream at a higher output index
+    than an attachment, and `-map` order IS output-index order, so an
+    attachment mapped early poisons every map that follows it -- including the
+    filter-complex audio outputs, which a builder appends much later.
+    Callers must therefore treat this as the last map they emit.
+    """
     if not answers.get("keep_embedded_attachments"):
         return False
     streams = embedded_attachment_streams(answers)
