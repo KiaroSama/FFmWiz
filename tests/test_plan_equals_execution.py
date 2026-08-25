@@ -25,16 +25,17 @@ commands the executor actually issues, argument for argument, with scratch
 paths normalised to their basenames. Anything the two decide differently shows
 up as a diff instead of as a wrong file six months later.
 
-KNOWN GAP, measured here and deliberately not asserted as acceptable: the
-comparisons use subtitle-free inputs. Any stage whose input is an INTERMEDIATE
-retimes subtitles by extracting them from that file, and the plan has not
-written it yet, so the planner emits `-sn` where the run emits
-`-i retimed00.srt -map 1:s:0 -c:s copy` plus the track's metadata and
-disposition. The exported plan therefore drops subtitles a staged reverse
-keeps. It needs `build_ffmpeg_command` to accept pre-built retimed tracks so
-the planner can build them from the sources, which do exist. Until then this
-module proves everything except the subtitle block, and the descriptor test
-below proves the descriptor itself carries the tracks.
+Subtitles: the REVERSE stage is compared with subtitle-carrying inputs. The
+planner builds its own retimed tracks from the sources -- which exist at plan
+time -- and hands them to the builder, instead of trying to extract them from
+an intermediate it has not written yet.
+
+KNOWN GAP, measured and deliberately not asserted as acceptable: a SPLIT stage
+slices its subtitles into per-part files (`part02_track00.srt`) by a different
+mechanism, which still reads the intermediate. So the split comparisons use the
+subtitle-free twins and the exported plan for a Split still omits the per-part
+subtitle inputs. Closing it needs the same treatment the reverse stage just
+received, applied to the per-part slicer.
 """
 import json
 import re
@@ -204,7 +205,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
 
     def _compare(self, label, sources=None, **extra):
         """Plan one job and execute an identical one; the argv must agree."""
-        sources = sources or self.plain_inputs[:2]
+        sources = sources or self.inputs[:2]
         planning = self._tmp / f"{label}_plan"
         planning.mkdir(parents=True, exist_ok=True)
         planned = self._planned(self._answers(planning, sources, **extra))
@@ -267,10 +268,10 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
     def test_a_three_input_join_reverse_plans_what_it_runs(self):
         planning = self._tmp / "join3_plan"
         planning.mkdir(parents=True, exist_ok=True)
-        planned = self._planned(self._answers(planning, self.plain_inputs))
+        planned = self._planned(self._answers(planning, self.inputs))
         running = self._tmp / "join3_run"
         running.mkdir(parents=True, exist_ok=True)
-        executed = self._executed(self._answers(running, self.plain_inputs))
+        executed = self._executed(self._answers(running, self.inputs))
         self.assertEqual(len(planned), len(executed))
         for index, (want, got) in enumerate(zip(planned, executed)):
             self._assert_same_command(self._normalise(want), self._normalise(got),
@@ -299,6 +300,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         for factor in (0.5, 0.75, 1.5, 2.0):
             with self.subTest(speed=factor):
                 self._compare(f"speed{factor}".replace(".", "_"),
+                              sources=self.plain_inputs[:2],
                               separator_points=[2.0], video_speed_factor=factor,
                               audio_speed_from_video=True)
 
@@ -331,7 +333,8 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
                          "the descriptor emptied the subtitle streams")
 
     def test_cuts_with_slow_motion_and_a_split_plan_what_they_run(self):
-        self._compare("cutslow", separator_points=[1.5],
+        self._compare("cutslow", sources=self.plain_inputs[:2],
+                      separator_points=[1.5],
                       cut_keep_ranges=[(0.0, 1.0), (2.0, 4.0)],
                       video_speed_factor=0.5, audio_speed_from_video=True)
 
@@ -376,7 +379,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
              "use_gpu": False}))
 
     def test_an_hevc_job_plans_what_it_runs(self):
-        self._compare("hevc", separator_points=[2.0],
+        self._compare("hevc", sources=self.plain_inputs[:2], separator_points=[2.0],
                       video_codec="H265", video_encoder="libx265")
 
     def test_the_descriptor_reports_hevc_for_an_hevc_job(self):

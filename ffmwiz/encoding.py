@@ -49,6 +49,7 @@ from ffmwiz.support.L01_encode_opts import *  # noqa: F401,F403
 from ffmwiz.support.L01_filters import *  # noqa: F401,F403
 from ffmwiz.support.L01_metadata import *  # noqa: F401,F403
 from ffmwiz.support.L01_misc import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import *  # noqa: F401,F403
 from ffmwiz.support.L01_naming import *  # noqa: F401,F403
 from ffmwiz.support.L01_paths import *  # noqa: F401,F403
 from ffmwiz.support.L01_split import *  # noqa: F401,F403
@@ -302,6 +303,18 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
         # through the staged pipeline instead of being warned about.
         answers["cmd"] = cmd
         return run_bounded_reverse_pipeline(answers)
+    if answers.get("reverse_audio") and not answers.get("reverse_video"):
+        # `areverse` buffers its WHOLE input, so an audio reverse is unbounded
+        # for exactly the same reason a video one is -- and only the two
+        # standalone audio tools had a bounded plan. The main encode, a join
+        # reversing audio alone and every Folder Encode item reached the
+        # one-shot command directly (D13). The executor runs that same command
+        # unchanged when the job already fits the budget, so a short clip costs
+        # nothing extra.
+        answers["cmd"] = cmd
+        return run_bounded_audio_reverse(
+            answers, build_ffmpeg_command, label=label,
+            total_duration=total_duration)
     # The two-pass check lives here too, so no executor can quietly skip it.
     # The main dispatcher used to duplicate this whole selection and reach the
     # runner directly, which is how a retained cpu_two_pass was downgraded to
@@ -850,8 +863,10 @@ def bounded_reverse_plan(answers: dict[str, Any],
                          ("split", ("split",) if split_points else ())],
                         answers)
 
+    plan_items: list[dict[str, Any]] = []
     if has_join:
         items = join_items_from_answers(answers)
+        plan_items = items
         if not items:
             return stages
         joined = workspace / f"joined_forward.{extension}"
@@ -869,6 +884,12 @@ def bounded_reverse_plan(answers: dict[str, Any],
 
     reverse_answers = stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
+    # Hand the stage its subtitles instead of letting it try to extract them
+    # from a file the plan has not written. Without this the planner emits
+    # `-sn` and the exported plan silently drops tracks the run keeps.
+    plan_sources = plan_subtitle_sources(answers, plan_items, workspace)
+    reverse_tracks = planned_retimed_subtitles(reverse_answers, plan_sources, workspace)
+    reverse_answers["_prebuilt_retimed_subtitles"] = reverse_tracks
     if split_points:
         reversed_whole = workspace / f"reversed_whole.{extension}"
         reverse_answers = intermediate_profile(reverse_answers)
@@ -913,6 +934,17 @@ def bounded_reverse_plan(answers: dict[str, Any],
         split_answers = stage_answers(
             described(answers, Path(reverse_answers["output_path"]),
                       reversed_seconds, reverse_answers), owns=("split",))
+        # The split reads the REVERSED intermediate, whose subtitle track is
+        # what the stage above just wrote. Feed those cues forward rather than
+        # extracting from a file that does not exist yet.
+        split_answers["_prebuilt_retimed_subtitles"] = planned_retimed_subtitles(
+            split_answers,
+            [{"text": Path(track["path"]).read_text(encoding="utf-8"),
+              "index": track["source_index"], "language": track.get("language", ""),
+              "title": track.get("title", ""), "default": track.get("default"),
+              "forced": track.get("forced")}
+             for track in reverse_tracks if Path(track["path"]).exists()],
+            workspace / "split")
         split_answers.pop("split_output_paths", None)
         split_answers.pop("split_part_intervals", None)
         split_answers["separator_points"] = split_points
@@ -1218,6 +1250,90 @@ def reverse_concat_stages(answers: dict[str, Any], segment_paths: list[Path],
     return stages, warnings
 
 
+def plan_subtitle_sources(answers: dict[str, Any], items: list[dict[str, Any]],
+                          workspace: Path) -> list[dict[str, Any]]:
+    """The cue TEXT of every selected track, read from files that exist NOW.
+
+    For a join that is the merged track the forward stage will write, built
+    here from the sources with the same helper the join builder uses; for a
+    single input it is the source's own track. Either way the plan never has to
+    read a file it has not produced.
+    """
+    if not (source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")):
+        return []
+    sources: list[dict[str, Any]] = []
+    try:
+        # The planner may be called with a workspace nobody has created yet.
+        workspace.mkdir(parents=True, exist_ok=True)
+        if items:
+            for merged in wizard.build_joined_subtitle_files(answers, items):
+                path = Path(merged["path"])
+                if path.exists():
+                    sources.append({"text": path.read_text(encoding="utf-8"),
+                                    "index": int(merged.get("index") or 0),
+                                    "language": merged.get("language", ""),
+                                    "title": merged.get("title", ""),
+                                    "default": bool(merged.get("default")),
+                                    "forced": bool(merged.get("forced"))})
+            return sources
+        streams = list(answers.get("subtitle_streams") or [])
+        origin = subtitle_source_origin(answers)
+        for index in selected_subtitle_streams(answers):
+            index = int(index)
+            if not (0 <= index < len(streams)) or not is_text_subtitle(streams[index]):
+                continue
+            raw = workspace / f"plan_source{index:02d}.srt"
+            text = extract_subtitle_text(
+                answers.get("ffmpeg") or "ffmpeg", Path(answers["input_path"]),
+                index, raw, "Planned subtitles", origin, answers.get("ffprobe"))
+            if text:
+                sources.append({"text": text, "index": index,
+                                **subtitle_track_metadata(streams[index])})
+    except Exception as exc:  # a plan must not fail over a subtitle it cannot read
+        log_warn(f"Planned subtitles: could not read the source tracks: {exc}")
+    return sources
+
+
+def planned_retimed_subtitles(stage: dict[str, Any], sources: list[dict[str, Any]],
+                              workspace: Path) -> list[dict[str, Any]]:
+    """Retimed subtitle tracks for a stage whose INPUT does not exist yet.
+
+    `build_retimed_subtitle_inputs()` extracts the cues from the file the stage
+    will read. That works for the executor, which has just written it, and not
+    at all for the exported plan: the planner's reverse stage reads
+    `joined_forward.mkv` and its split stage reads `reversed_whole.mkv`, so
+    extraction found nothing and the stage was emitted with `-sn`. The plan
+    therefore DROPPED subtitles a staged reverse keeps -- planned against
+    executed, that is `['-sn']` where the run has
+    `['-c:s', '-disposition:s:0', '-metadata:s:s', '1:s:0', 'copy',
+    'retimed00.srt']`.
+
+    The cues themselves are never in doubt: the SOURCES exist at plan time.
+    `sources` is [{"text", "index", metadata...}] already merged for a join,
+    and this applies the stage's own `TimelineMap` to them and writes the
+    result into the workspace, which is also what makes the exported script
+    runnable as it stands.
+    """
+    if not sources:
+        return []
+    workspace.mkdir(parents=True, exist_ok=True)
+    timeline = encode_timeline_map(stage)
+    built: list[dict[str, Any]] = []
+    for source in sources:
+        cues = retime_cues(parse_srt(source.get("text") or ""), timeline)
+        if not cues:
+            continue
+        index = int(source.get("index") or 0)
+        path = workspace / f"retimed{index:02d}.srt"
+        path.write_text(render_srt(cues), encoding="utf-8", newline="\n")
+        built.append({"path": path, "source_index": index,
+                      "language": source.get("language", ""),
+                      "title": source.get("title", ""),
+                      "default": bool(source.get("default")),
+                      "forced": bool(source.get("forced"))})
+    return built
+
+
 def reverse_source_seconds(answers: dict[str, Any]) -> float:
     """The PICTURE span of the file a reverse stage will decode.
 
@@ -1418,6 +1534,8 @@ __all__ = [
     'validate_stage_plan',
     'reverse_mux_stream_policy',
     'reverse_source_seconds',
+    'plan_subtitle_sources',
+    'planned_retimed_subtitles',
     'reverse_filter_input_for',
     'reverse_segment_plan_for',
     'intermediate_video_codec_name',
