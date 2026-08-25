@@ -90,7 +90,8 @@ class AStageCarriesOnlyWhatItOwns(unittest.TestCase):
     def test_the_neutral_set_covers_what_the_source_declares(self):
         # Guard the guard: if a new neutral key appeared in the product and not
         # here, the loop above would silently stop checking it properly.
-        self.assertEqual(set(self.NEUTRAL), set(encoding._NEUTRAL_VALUES))
+        from ffmwiz import reverse_pipeline
+        self.assertEqual(set(self.NEUTRAL), set(reverse_pipeline._NEUTRAL_VALUES))
 
     def test_an_owned_transformation_is_kept_intact(self):
         staged = FFmWiz.stage_answers(dict(EVERY_EDIT), owns=("audio_speed",))

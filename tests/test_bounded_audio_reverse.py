@@ -56,7 +56,7 @@ import FFmWiz
 
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import modes_transform
-from ffmwiz.support import ext04b
+from ffmwiz.support import ext04b, ext04c
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -227,9 +227,12 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
         per_second = (rate * channels
                       * ext04b.decoded_bytes_per_sample(sample_fmt)
                       * FFmWiz.REVERSE_FRAME_SAFETY)
-        return [mock.patch.object(ext04b, "REVERSE_PEAK_BUDGET_BYTES",
+        # `ext04c` owns the bounded-reverse arithmetic since the split; the
+        # constants it reads are its OWN module globals, so patching `ext04b`
+        # -- which merely re-exports it -- reaches nothing.
+        return [mock.patch.object(ext04c, "REVERSE_PEAK_BUDGET_BYTES",
                                   int(per_second * seconds)),
-                mock.patch.object(ext04b, "REVERSE_FIXED_OVERHEAD_BYTES", 0)]
+                mock.patch.object(ext04c, "REVERSE_FIXED_OVERHEAD_BYTES", 0)]
 
     def _execute(self, answers, builder, patches=()):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -529,7 +532,7 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
             for patch in patches:
                 stack.enter_context(patch)
             stack.enter_context(mock.patch.object(
-                ext04b, "run_ffmpeg_with_progress", failing))
+                ext04c, "run_ffmpeg_with_progress", failing))
             stack.enter_context(contextlib.redirect_stdout(noise))
             code, _elapsed = FFmWiz.run_bounded_audio_reverse(
                 answers, FFmWiz.build_audio_speed_reverse_command, label="check")
@@ -553,7 +556,7 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
             for patch in patches:
                 stack.enter_context(patch)
             stack.enter_context(mock.patch.object(
-                ext04b, "run_ffmpeg_with_progress", cancelled))
+                ext04c, "run_ffmpeg_with_progress", cancelled))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             with self.assertRaises(KeyboardInterrupt):
                 FFmWiz.run_bounded_audio_reverse(

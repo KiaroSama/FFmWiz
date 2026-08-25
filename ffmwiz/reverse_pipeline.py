@@ -1,0 +1,1192 @@
+"""The staged reverse pipeline: plan it, export it, run it.
+
+Split out of `encoding` as its own responsibility. Everything here exists
+because `reverse` buffers every decoded frame it is given, so a Join, a Split
+or a long single input cannot be reversed in one command -- the job is planned
+as stages, the same plan is exported for manual use, and the executor runs it.
+
+Facade names the tests monkeypatch are called through `encoding.<name>` rather
+than resolved from this module's own globals, so a patch on the facade still
+reaches the code that runs. `encoding` re-exports this module at its end, so
+every existing `from ffmwiz.encoding import *` keeps working unchanged.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import re
+import math
+import json
+import time
+import shutil
+import subprocess
+import tempfile
+import platform
+import datetime
+import uuid
+import hashlib
+import html
+import csv
+import logging
+import atexit
+import queue
+import threading
+import concurrent.futures
+from fractions import Fraction
+from pathlib import Path
+from typing import Any, Callable, NamedTuple
+from urllib.parse import unquote, urlparse
+
+from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.core.artifacts import *  # noqa: F401,F403
+from ffmwiz.core.colors import *  # noqa: F401,F403
+from ffmwiz.core.exceptions import *  # noqa: F401,F403
+from ffmwiz.core.timeline import *  # noqa: F401,F403
+from ffmwiz.support.L00_audio import *  # noqa: F401,F403
+from ffmwiz.support.L00_color_range import *  # noqa: F401,F403
+from ffmwiz.support.L00_encode_opts import *  # noqa: F401,F403
+from ffmwiz.support.L00_filters import *  # noqa: F401,F403
+from ffmwiz.support.L00_metadata import *  # noqa: F401,F403
+from ffmwiz.support.L00_misc import *  # noqa: F401,F403
+from ffmwiz.support.L00_naming import *  # noqa: F401,F403
+from ffmwiz.support.L00_paths import *  # noqa: F401,F403
+from ffmwiz.support.L00_probe import *  # noqa: F401,F403
+from ffmwiz.support.L00_split import *  # noqa: F401,F403
+from ffmwiz.support.L00_streams import *  # noqa: F401,F403
+from ffmwiz.support.L00_text import *  # noqa: F401,F403
+from ffmwiz.support.L01_audio import *  # noqa: F401,F403
+from ffmwiz.support.L01_color_range import *  # noqa: F401,F403
+from ffmwiz.support.L01_encode_opts import *  # noqa: F401,F403
+from ffmwiz.support.L01_filters import *  # noqa: F401,F403
+from ffmwiz.support.L01_metadata import *  # noqa: F401,F403
+from ffmwiz.support.L01_misc import *  # noqa: F401,F403
+from ffmwiz.support.L01_subtitles import *  # noqa: F401,F403
+from ffmwiz.support.L01_naming import *  # noqa: F401,F403
+from ffmwiz.support.L01_paths import *  # noqa: F401,F403
+from ffmwiz.support.L01_split import *  # noqa: F401,F403
+from ffmwiz.support.L01_streams import *  # noqa: F401,F403
+from ffmwiz.support.L01_text import *  # noqa: F401,F403
+from ffmwiz.support.L02 import *  # noqa: F401,F403
+from ffmwiz.support.L03 import *  # noqa: F401,F403
+from ffmwiz.support.L04 import *  # noqa: F401,F403
+from ffmwiz.support.L05 import *  # noqa: F401,F403
+from ffmwiz.support.L06 import *  # noqa: F401,F403
+from ffmwiz.support.L07 import *  # noqa: F401,F403
+from ffmwiz.support.ext00 import *  # noqa: F401,F403
+from ffmwiz.support.ext01 import *  # noqa: F401,F403
+from ffmwiz.support.ext02 import *  # noqa: F401,F403
+from ffmwiz.support.ext03 import *  # noqa: F401,F403
+from ffmwiz.support.ext04 import *  # noqa: F401,F403
+from ffmwiz.support.ext05 import *  # noqa: F401,F403
+from ffmwiz.support.ext06 import *  # noqa: F401,F403
+from ffmwiz.support.ext07 import *  # noqa: F401,F403
+from ffmwiz.support.ext08 import *  # noqa: F401,F403
+from ffmwiz.support.ext09 import *  # noqa: F401,F403
+from ffmwiz.support.ext10 import *  # noqa: F401,F403
+from ffmwiz.support.ext11 import *  # noqa: F401,F403
+from ffmwiz.support.ext12 import *  # noqa: F401,F403
+from ffmwiz.appio import *  # noqa: F401,F403
+from ffmwiz import appio  # noqa: F401
+from ffmwiz.guibridge import *  # noqa: F401,F403
+from ffmwiz import guibridge  # noqa: F401
+from ffmwiz.metadata import *  # noqa: F401,F403
+from ffmwiz import metadata  # noqa: F401
+from ffmwiz.modes import *  # noqa: F401,F403
+from ffmwiz import modes  # noqa: F401
+from ffmwiz.runner import *  # noqa: F401,F403
+from ffmwiz import runner  # noqa: F401
+from ffmwiz.runtime import *  # noqa: F401,F403
+from ffmwiz import runtime  # noqa: F401
+from ffmwiz.services import *  # noqa: F401,F403
+from ffmwiz import services  # noqa: F401
+from ffmwiz.trackmanager import *  # noqa: F401,F403
+from ffmwiz import trackmanager  # noqa: F401
+from ffmwiz.wizard import *  # noqa: F401,F403
+from ffmwiz import wizard  # noqa: F401
+from ffmwiz import encoding  # facade for monkeypatched names  # noqa: E402
+
+
+def build_main_encode_reverse_segment_command(
+    answers: dict[str, Any],
+    start: float,
+    end: float,
+    output_path: Path,
+) -> list[str]:
+    # Open the lease BEFORE the shallow copy. dict() shares the container only
+    # if the key is already there, so without this each segment got a lease of
+    # its own and every per-segment retimed-subtitle and chapter directory
+    # leaked -- the R06 trap, on the one path that makes the most copies.
+    artifact_lease(answers)
+    segment_answers = dict(answers)
+    segment_answers["cut_keep_ranges"] = [(start, end)]
+    segment_answers["output_location"] = output_path.parent
+    segment_answers["output_name_stem"] = output_path.stem
+    segment_answers["output_ext"] = output_path.suffix.lstrip(".") or str(answers.get("output_ext") or "mp4")
+    segment_answers["output_collision_suffix"] = ""
+    segment_answers.pop("output_path", None)
+    return encoding.build_ffmpeg_command(segment_answers)
+
+
+def reverse_filter_input_for(answers: dict[str, Any]):
+    """What the `reverse` filter will actually buffer for this job.
+
+    `reverse` holds POST-filter frames and the CPU chain runs
+    crop -> fps -> scale/pad -> speed/reverse -> format, so sizing the budget
+    from the probe is sizing it from the wrong picture. A 1080p30 source
+    upscaled to 8K received a 15 s window whose real peak is 24.485 GiB against
+    a 2 GiB cap (D11). This resolves the geometry, rate and pixel format at the
+    filter's input and hands them to the shared planner.
+    """
+    stream = (answers.get("video_streams") or [{}])[0]
+    try:
+        source_fps = float(services.get_video_fps(answers) or 0.0)
+    except Exception:
+        source_fps = 0.0
+    crop_size = cropped_source_size(answers) if answers.get("crop_enabled") else None
+    try:
+        scale_size = resolve_scale_dimensions(answers, answers.get("resolution", "n"))
+    except Exception:
+        scale_size = None
+    try:
+        encoder, _tag, _profile = resolve_video_encoder(answers)
+        graph_pix_fmt = cpu_graph_pixel_format_for_encoder(answers, encoder)
+    except Exception:
+        graph_pix_fmt = None
+    # The LARGER of the two, not simply the graph's. `format=` sits downstream
+    # of `reverse`, and FFmpeg negotiates that format back up the chain, so the
+    # buffered frames usually carry the encoder's format -- but "usually" is
+    # not a basis for a HARD cap. If the negotiation does not reach this far the
+    # buffer holds source frames, and sizing a 12-bit 4:4:4 source as 8-bit
+    # 4:2:0 under-counts it four to one. Taking the wider format costs a
+    # shorter segment and never an overrun.
+    source_pix_fmt = stream.get("pix_fmt")
+    if graph_pix_fmt and source_pix_fmt:
+        if decoded_bytes_per_pixel(source_pix_fmt) > decoded_bytes_per_pixel(graph_pix_fmt):
+            graph_pix_fmt = source_pix_fmt
+    return reverse_filter_input_descriptor(
+        stream.get("width"), stream.get("height"), source_fps, source_pix_fmt,
+        crop_size=crop_size, scale_size=scale_size,
+        output_fps=answers.get("fps"), graph_pix_fmt=graph_pix_fmt)
+
+
+def reverse_segment_plan_for(answers: dict[str, Any], best_effort: bool = False):
+    """The bounded plan for one reverse segment, with its whole calculation.
+
+    Raises `ReverseBudgetError` when the geometry it needs is unreadable or one
+    frame already exceeds the allowance. That is the point: a warning cannot
+    turn an unbounded allocation into a bound, and the old code assumed
+    1080p60 10-bit and carried on (D12).
+    """
+    resolved = reverse_filter_input_for(answers)
+    plan = reverse_segment_plan(resolved.width, resolved.height, resolved.fps,
+                                resolved.pix_fmt, best_effort=best_effort)
+    log_info("Reverse budget: " + plan.describe())
+    if not plan.hard_capped:
+        log_warn("Reverse budget: NOT hard-capped -- " + "; ".join(plan.assumptions))
+    return plan
+
+
+def reverse_segment_seconds(answers: dict[str, Any]) -> float:
+    """How many seconds of video one reverse segment may safely hold.
+
+    Thin wrapper for callers that only want the number; anything that has to
+    PRINT the window should use `reverse_segment_plan_for` and its
+    `window_text`, because `f"{seconds:.0f}s"` renders a legitimate 233 ms
+    budget as `0s` (D09).
+    """
+    return encoding.reverse_segment_plan_for(answers).seconds
+
+
+# Every user edit the staged reverse pipeline can apply, grouped by the
+# transformation that owns it. A stage that does not own a transformation must
+# not carry its keys: the pipeline used to clear only the VIDEO edits, so an
+# independent 2x audio speed was applied by the forward-join stage, again by
+# the segmented reverse and again by the final split. Measured on two joined
+# 2 s clips: 4.100 s of video against 1.111 s of audio, where one application
+# owes about 2 s (B01).
+STAGE_TRANSFORMATIONS: dict[str, tuple[str, ...]] = {
+    "cuts": ("cut_keep_ranges",),
+    "audio_cuts": ("audio_cut_keep_ranges", "audio_cut_stream_copy"),
+    "video_speed": ("video_speed_enabled", "video_speed_factor"),
+    "audio_speed": ("audio_speed_enabled", "audio_speed_factor",
+                    "audio_speed_from_video"),
+    "video_reverse": ("reverse_video",),
+    "audio_reverse": ("reverse_audio",),
+    "loudnorm": ("loudnorm_enabled", "loudnorm_mode", "loudnorm_measured",
+                 "loudnorm_target_i"),
+    "split": ("separator_points", "split_output_paths", "split_part_intervals"),
+    # GEOMETRY. `build_cpu_video_filter` orders crop -> fps -> scale/pad ->
+    # speed/reverse, so every one of these is a semantic transformation that a
+    # stage can apply a second time. They were missing, which is why a
+    # `encoding.stage_answers(..., owns=())` "neutral" stage still cropped: a real
+    # 160x120 Join + Reverse + Split asking for 10 px off each side produced
+    # 120x120 parts instead of 140x120, with `crop=` in joined_forward.mkv, in
+    # every reverse segment AND in the final Split graph (D01). FPS and resize
+    # leak the same way; a repeated scale is not free even when it is
+    # dimensionally idempotent, because it re-processes an already lossy
+    # intermediate and changes the frame layout the reverse budget is sized
+    # from (D02).
+    "crop": ("crop_enabled", "crop_top", "crop_left", "crop_right",
+             "crop_bottom", "crop_box_dimensions", "cropped_aspect_ratio"),
+    "fps": ("fps",),
+    "resize": ("resolution", "final_resolution"),
+}
+
+# Geometry travels together: cropping in one stage and resizing in another
+# would make the second stage scale a frame the first already changed.
+GEOMETRY_TRANSFORMATIONS: tuple[str, ...] = ("crop", "fps", "resize")
+
+
+def _requests_video_speed(answers: dict[str, Any]) -> bool:
+    return (bool(answers.get("video_speed_enabled"))
+            and float(answers.get("video_speed_factor") or 1.0) != 1.0)
+
+
+# What makes each transformation REQUESTED. Ownership is only meaningful
+# against this: a plan that owns nothing is valid for a job that asks for
+# nothing, and invalid for one that asks for a crop.
+_TRANSFORMATION_REQUESTED: dict[str, Any] = {
+    "cuts": lambda a: bool(a.get("cut_keep_ranges")),
+    "audio_cuts": lambda a: bool(a.get("audio_cut_keep_ranges")),
+    "video_speed": _requests_video_speed,
+    "audio_speed": lambda a: (
+        (bool(a.get("audio_speed_enabled"))
+         and float(a.get("audio_speed_factor") or 1.0) != 1.0)
+        or (bool(a.get("audio_speed_from_video")) and _requests_video_speed(a))),
+    "video_reverse": lambda a: bool(a.get("reverse_video")),
+    "audio_reverse": lambda a: bool(a.get("reverse_audio")),
+    "loudnorm": lambda a: (bool(a.get("loudnorm_enabled"))
+                           and str(a.get("loudnorm_mode") or "off") != "off"),
+    "split": lambda a: bool(a.get("separator_points")),
+    "crop": lambda a: (bool(a.get("crop_enabled"))
+                       and any(int(a.get(f"crop_{edge}", 0) or 0)
+                               for edge in ("top", "left", "right", "bottom"))),
+    "fps": lambda a: a.get("fps") is not None,
+    "resize": lambda a: a.get("resolution") not in (None, "n"),
+}
+
+
+def requested_transformations(answers: dict[str, Any]) -> set[str]:
+    """Every transformation this job actually asks for.
+
+    Declared per transformation rather than inferred, so a new key added to
+    `STAGE_TRANSFORMATIONS` without a matching predicate fails loudly here
+    instead of being silently treated as never requested.
+    """
+    missing = set(STAGE_TRANSFORMATIONS) - set(_TRANSFORMATION_REQUESTED)
+    if missing:
+        raise ValueError(
+            f"transformation(s) with no requested-predicate: {sorted(missing)}")
+    return {name for name, asked in _TRANSFORMATION_REQUESTED.items()
+            if asked(answers)}
+
+# Falsey neutral values, so a stage that reads a key without checking for its
+# absence still sees "no transformation" rather than a stale truth.
+_NEUTRAL_VALUES: dict[str, Any] = {
+    "video_speed_factor": 1.0,
+    "audio_speed_factor": 1.0,
+    "loudnorm_mode": "off",
+    # "n" is what the builders read as "keep the source size"; removing the key
+    # would make `answers.get("resolution", "n")` agree by accident, but a
+    # stage that reads it without a default would see nothing at all.
+    "resolution": "n",
+}
+
+
+def intermediate_profile(staged: dict[str, Any]) -> dict[str, Any]:
+    """Retune a pipeline stage that writes a SCRATCH file, not the user's output.
+
+    An intermediate is re-encoded again by a later stage, so it must not carry
+    the final output's rate control. Setting `video_crf` alone did nothing: the
+    encoder builder prefers a bitrate when one is present, so a job targeting
+    250 kbps wrote `joined_forward.mkv` AND the reverse segments at `-b:v 250k`
+    with no effective CRF -- several low-bitrate generations before the encode
+    the user actually asked for, and the same again for `-b:a 32k` (B03).
+
+    Video becomes near-lossless CRF, audio becomes lossless FLAC, and the
+    container becomes Matroska so both are always legal. Pixel format, bit
+    depth and colour metadata are left alone: they are the properties the
+    later stage has to preserve.
+    """
+    scratch = dict(staged)
+    for key in ("video_bitrate_kbps", "video_bitrate_mode", "cpu_two_pass",
+                "nvenc_multipass", "nvenc_multipass_skip_reason",
+                "audio_bitrate_kbps"):
+        scratch.pop(key, None)
+    scratch["video_crf"] = REVERSE_INTERMEDIATE_CRF
+    scratch["crf"] = REVERSE_INTERMEDIATE_CRF
+    scratch["audio_codec"] = INTERMEDIATE_AUDIO_CODEC
+    scratch["output_ext"] = INTERMEDIATE_CONTAINER_EXT
+    return scratch
+
+
+# Dispositions worth carrying, named explicitly. Echoing back every truthy key
+# ffprobe reports would eventually hand FFmpeg a flag name its `-disposition`
+# parser does not accept, and a rejected command loses more than a lost flag.
+_CARRIED_DISPOSITIONS = ("default", "forced", "hearing_impaired",
+                         "visual_impaired", "comment", "descriptions",
+                         "original", "dub")
+
+
+def _disposition_value(stream: dict[str, Any]) -> str:
+    flags = (stream or {}).get("disposition") or {}
+    kept = [name for name in _CARRIED_DISPOSITIONS if flags.get(name)]
+    return "+".join(kept) if kept else "0"
+
+
+def _selected_indices(streams: list[Any], chosen: Any) -> list[int]:
+    if chosen is None or chosen is True or chosen == "all":
+        return list(range(len(streams)))
+    try:
+        return [int(index) for index in chosen if 0 <= int(index) < len(streams)]
+    except TypeError:
+        return list(range(len(streams)))
+
+
+# What an encoder actually writes, for describing a file that does not exist
+# yet. The planner hardcoded `h264` here, which is wrong the moment the job
+# selects HEVC, VP9 or AV1 and silently changes later container/codec
+# decisions taken against the descriptor (D07).
+_ENCODER_CODEC_NAMES: dict[str, str] = {
+    "libx264": "h264", "h264_nvenc": "h264", "h264_qsv": "h264",
+    "libx265": "hevc", "hevc_nvenc": "hevc", "hevc_qsv": "hevc",
+    "libvpx-vp9": "vp9", "vp9_qsv": "vp9",
+    "libaom-av1": "av1", "av1_nvenc": "av1", "libsvtav1": "av1",
+    "mpeg4": "mpeg4", "libxvid": "mpeg4",
+}
+
+
+def intermediate_video_codec_name(writer: dict[str, Any]) -> str:
+    """The codec_name the stage described by `writer` will actually produce.
+
+    Resolved through the SAME `resolve_video_encoder` the command builder uses,
+    so the descriptor cannot disagree with the command. An encoder this table
+    does not know returns its own name rather than a plausible substitute --
+    wrong-but-recognisable beats confidently wrong.
+    """
+    try:
+        encoder, _tag, _profile = resolve_video_encoder(writer)
+    except Exception:  # a descriptor must never break the plan it describes
+        encoder = ""
+    encoder = str(encoder or "").lower()
+    return _ENCODER_CODEC_NAMES.get(encoder, encoder or "h264")
+
+
+def reverse_mux_stream_policy(
+        answers: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+    """Which streams the video-only reverse mux keeps, and from which input.
+
+    Input 0 is the reversed picture, input 1 the forward audio. The whole
+    policy used to be `-map 0:v -map 1:a`, and once ANY explicit map is given
+    FFmpeg selects nothing else -- so every other stream type was dropped in
+    the last command of the pipeline, after the earlier stages had carried it
+    faithfully. A real source came out two streams short:
+
+        SOURCE topology  ['video', 'audio', 'subtitle', 'attachment']
+        OUTPUT topology  ['video', 'audio']
+
+    The subtitle had even been retimed onto the processed timeline and
+    announced to the user before being discarded (D03), and attachments and
+    data streams went the same way (D04).
+
+    The reversed picture is the authority for everything except audio: the
+    per-segment encodes already applied the user's stream selection, and the
+    concat copy preserves what they produced -- measured on segments carrying
+    video/audio/subtitle/attachment, `-map 0 -c copy -an` yielded
+    video/subtitle/attachment. So the policy is "everything input 0 still has,
+    minus its audio, plus input 1's audio", stated per type rather than by
+    negative mapping so it does not depend on the FFmpeg build's handling of
+    `-map -0:a`.
+
+    Dispositions come back too. The concat DEMUXER does not carry them, which
+    is invisible until you look: traced through one run, the segment held
+    `default=1 forced=1` and the concat copy that consumed it held
+    `default=0 forced=0`, so a subtitle the source marked default and forced
+    arrived marked neither. Only the ordinary encode paths were preserving
+    them, which is why nothing caught it. They are restored here, against the
+    SOURCE streams, at the one point where the final output order is known.
+
+    Returns (maps, dispositions, warnings). Attachments are only claimed when
+    the chosen container can actually hold one; when it cannot, the loss is
+    REPORTED rather than silent, which is the difference the brief asks for.
+    """
+    maps = ["-map", "0:v", "-map", "1:a", "-map", "0:s?", "-map", "0:d?"]
+    warnings: list[str] = []
+    has_attachments = bool(answers.get("attachment_streams"))
+    if output_supports_embedded_attachments(answers):
+        maps += ["-map", "0:t?"]
+    elif has_attachments and answers.get("keep_embedded_attachments"):
+        warnings.append(
+            f"{str(answers.get('output_ext') or '').upper()} cannot store embedded "
+            "attachments, so the source's attachment(s) are not carried into the "
+            "reversed output. Choose MKV to keep them.")
+
+    dispositions: list[str] = []
+    for kind, key, chosen in (("a", "audio_streams", answers.get("audio_tracks")),
+                              ("s", "subtitle_streams", answers.get("subtitle_tracks"))):
+        streams = list(answers.get(key) or [])
+        for position, index in enumerate(_selected_indices(streams, chosen)):
+            dispositions += [f"-disposition:{kind}:{position}",
+                             _disposition_value(streams[index])]
+    return maps, dispositions, warnings
+
+
+def stage_answers(answers: dict[str, Any], owns: tuple[str, ...]) -> dict[str, Any]:
+    """A copy of `answers` carrying ONLY the transformations this stage owns.
+
+    Ownership is declared, never inferred from what happens to be in a copied
+    dictionary. Anything the stage does not own is removed, and the effective
+    map is dropped with it so a resolution made for another stage cannot leak
+    in (the same map is what let a Join's libx265 fallback survive a rebuild).
+    """
+    unknown = set(owns) - set(STAGE_TRANSFORMATIONS)
+    if unknown:
+        raise ValueError(f"unknown transformation(s): {sorted(unknown)}")
+    staged = dict(answers)
+    staged.pop(EFFECTIVE_SETTINGS_KEY, None)
+    for name, keys in STAGE_TRANSFORMATIONS.items():
+        if name in owns:
+            continue
+        for key in keys:
+            if key in _NEUTRAL_VALUES:
+                staged[key] = _NEUTRAL_VALUES[key]
+            else:
+                staged.pop(key, None)
+    return staged
+
+
+def validate_stage_plan(stages: list[tuple[str, tuple[str, ...]]],
+                       answers: dict[str, Any] | None = None) -> None:
+    """Every transformation the job requests is owned by EXACTLY one stage.
+
+    Raises on a duplicate: applying a speed change twice is silent in the argv
+    and only visible in the finished media, which is how B01 survived.
+
+    Pass `answers` and it also raises on a MISSING owner. Duplicate-only
+    checking could not see D01 at all -- crop was owned by no stage, so there
+    was nothing to be a duplicate OF, and it simply survived into all three.
+    An unowned transformation is not neutral; it is applied wherever the
+    filter builder happens to look.
+    """
+    seen: dict[str, str] = {}
+    for label, owns in stages:
+        for name in owns:
+            if name not in STAGE_TRANSFORMATIONS:
+                raise ValueError(f"unknown transformation: {name!r}")
+            if name in seen:
+                raise ValueError(
+                    f"transformation {name!r} is owned by both {seen[name]!r} "
+                    f"and {label!r}")
+            seen[name] = label
+    if answers is None:
+        return
+    unowned = sorted(requested_transformations(answers) - set(seen))
+    if unowned:
+        raise ValueError(
+            f"transformation(s) {unowned} are requested but owned by no stage; "
+            f"they would be applied in every stage that reads them")
+
+
+def _single_input_answers(answers: dict[str, Any], source: Path) -> dict[str, Any]:
+    """Re-point a job at one already-produced file, keeping its output settings."""
+    probe = services.ffprobe_json(answers.get("ffprobe") or "ffprobe", source)
+    streams = (probe or {}).get("streams") or []
+    rebased = dict(answers)
+    rebased.pop("join_input_items", None)
+    rebased["input_path"] = source
+    rebased["probe"] = probe or {}
+    rebased["format"] = (probe or {}).get("format") or {}
+    rebased["video_streams"] = [s for s in streams if s.get("codec_type") == "video"]
+    rebased["audio_streams"] = [s for s in streams if s.get("codec_type") == "audio"]
+    rebased["subtitle_streams"] = [s for s in streams if s.get("codec_type") == "subtitle"]
+    return rebased
+
+
+def bounded_reverse_plan(answers: dict[str, Any],
+                        workspace: Path) -> list[tuple[str, list[str]]]:
+    """The staged commands this job WILL run, without running any of them.
+
+    The summary printed the ordinary one-shot command, which for a Join or
+    Split reverse carries a full-timeline `reverse` filter that execution never
+    uses. Running it by hand buffers the whole timeline -- exactly what the
+    staged plan exists to avoid -- so the printed command described a different
+    job from the one that would run (B04).
+
+    The intermediates are DESCRIBED rather than probed, because they do not
+    exist yet: their geometry comes from the source and their codec/container
+    from `intermediate_profile`, which is what actually produces them. The
+    regression that keeps the two honest runs the exported plan in a fresh
+    process and compares its media to the automatic path.
+    """
+    stages: list[tuple[str, list[str]]] = []
+    extension = INTERMEDIATE_CONTAINER_EXT
+    split_points = list(answers.get("separator_points") or [])
+    planned_output_paths = list(answers.get("split_output_paths") or [])
+    stage_source = answers
+
+    def described(source_answers: dict[str, Any], produced: Path,
+                  duration: float, writer: dict[str, Any]) -> dict[str, Any]:
+        """The intermediate as the PRECEDING stage will actually write it.
+
+        This used to invent one. It hardcoded every video stream to `h264`,
+        emptied `subtitle_streams`, and -- the expensive part -- reused the
+        SOURCE `format` dict, so the descriptor carried input 1's duration no
+        matter what the stage before it had produced.
+
+        Two user-visible failures came out of that one line. After a forward
+        join of two 2 s inputs the plan reversed 2.023 s instead of 4.046, so
+        the exported plan processed about one input:
+
+            AUTO_DURATION   4.332   AUTO_COLORS   ['blue', 'red']
+            MANUAL_DURATION 2.3     MANUAL_COLORS ['red', 'missing']
+
+        And after a 0.5x speed change the reversed intermediate is twice as
+        long, but the Split still cut against the source timeline, losing the
+        second half:
+
+            AUTO_PARTS   [('slow_Part01.mkv', 2.023), ('slow_Part02.mkv', 5.9)]
+            MANUAL_PARTS [('slow_Part01.mkv', 2.023), ('slow_Part02.mkv', 2.04)]
+
+        `duration` is now supplied by the caller, which knows what its stage
+        does, and `writer` is the answers dict that WILL write the file, so the
+        codec comes from the same resolver the command does rather than from a
+        guess. An unknown duration is a planning error, not a value to invent:
+        a plan that cannot describe its own intermediate must not be exported
+        as if it could.
+        """
+        if not duration or duration <= 0:
+            raise ValueError(
+                f"cannot describe {produced.name}: the duration of the stage "
+                "that writes it is unknown, so every later stage would be "
+                "planned against the wrong timeline")
+        rebased = dict(source_answers)
+        rebased.pop("join_input_items", None)
+        rebased["input_path"] = produced
+        codec = encoding.intermediate_video_codec_name(writer)
+        streams = [dict(stream) for stream in (source_answers.get("video_streams") or [])]
+        for stream in streams:
+            stream["codec_name"] = codec
+            stream["duration"] = f"{duration:.6f}"
+        rebased["video_streams"] = streams
+        audio = [{**dict(stream), "codec_name": INTERMEDIATE_AUDIO_CODEC,
+                  "duration": f"{duration:.6f}"}
+                 for stream in (source_answers.get("audio_streams") or [])]
+        rebased["audio_streams"] = audio
+        # Carried, not emptied: the forward join merges and retimes the source
+        # subtitles into the intermediate, and the reverse stage carries them
+        # through. Declaring none made the plan's later stages blind to a
+        # track the file actually has.
+        subtitles = [dict(stream) for stream in
+                     (source_answers.get("subtitle_streams") or [])]
+        rebased["subtitle_streams"] = subtitles
+        fmt = dict(source_answers.get("format") or {})
+        fmt["duration"] = f"{duration:.6f}"
+        fmt["format_name"] = "matroska,webm"
+        rebased["format"] = fmt
+        rebased["probe"] = {"streams": streams + audio + subtitles, "format": fmt}
+        return rebased
+
+    # The SAME ownership the executor uses. Two copies of this decision is how
+    # the exported plan drifted from the job it claimed to describe; keeping
+    # the split identical is the point of validating both against one schema.
+    has_join = bool(answers.get("join_input_items"))
+    forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
+                    "video_reverse", "audio_reverse", "loudnorm")
+    if not has_join:
+        reverse_owns = reverse_owns + GEOMETRY_TRANSFORMATIONS
+    validate_stage_plan([("forward join", forward_owns),
+                         ("reverse", reverse_owns),
+                         ("split", ("split",) if split_points else ())],
+                        answers)
+
+    plan_items: list[dict[str, Any]] = []
+    if has_join:
+        items = join_items_from_answers(answers)
+        plan_items = items
+        if not items:
+            return stages
+        joined = workspace / f"joined_forward.{extension}"
+        forward = intermediate_profile(encoding.stage_answers(answers, owns=forward_owns))
+        forward["output_path"] = joined
+        stages.append(("Join the inputs forward",
+                       [str(part) for part in
+                        wizard.build_join_encode_command(forward, items, joined)]))
+        # The JOINED length, measured the way the executor measures it: the sum
+        # of the inputs' picture spans. Carrying input 1's `format.duration`
+        # forward is what made the exported plan reverse one input's worth of a
+        # multi-input timeline (D05).
+        joined_seconds = sum(encoding.join_item_picture_span(item) for item in items)
+        stage_source = described(answers, joined, joined_seconds, forward)
+
+    reverse_answers = encoding.stage_answers(stage_source, owns=reverse_owns)
+    reverse_answers.pop("join_input_items", None)
+    # Hand the stage its subtitles instead of letting it try to extract them
+    # from a file the plan has not written. Without this the planner emits
+    # `-sn` and the exported plan silently drops tracks the run keeps.
+    plan_sources = plan_subtitle_sources(answers, plan_items, workspace)
+    reverse_tracks = planned_retimed_subtitles(reverse_answers, plan_sources, workspace)
+    reverse_answers["_prebuilt_retimed_subtitles"] = reverse_tracks
+    if split_points:
+        reversed_whole = workspace / f"reversed_whole.{extension}"
+        reverse_answers = intermediate_profile(reverse_answers)
+        reverse_answers["output_path"] = reversed_whole
+        reverse_answers["output_location"] = workspace
+        reverse_answers["output_name_stem"] = reversed_whole.stem
+        reverse_answers["output_collision_suffix"] = ""
+    else:
+        reverse_answers["output_path"] = answers["output_path"]
+
+    duration = reverse_source_seconds(reverse_answers)
+    # What the reverse stage WRITES, not what it reads. Cuts shorten it and a
+    # speed change stretches or compresses it; `reverse` leaves it alone. The
+    # Split that follows must be planned against this, or a 0.5x job cuts the
+    # 8 s result against the 4 s source and loses the second half (D06). Same
+    # helper the real Split uses, so the two cannot drift.
+    reversed_seconds = final_processed_duration_for_splits(reverse_answers, duration)
+    keep_ranges = normalize_cut_ranges(
+        list(reverse_answers.get("cut_keep_ranges") or []), duration)
+    chunks = encoding.split_ranges_for_reverse_segments(
+        keep_ranges, duration, encoding.reverse_segment_seconds(reverse_answers))
+    segment_ext = Path(reverse_answers["output_path"]).suffix.lstrip(".") or extension
+    segments: list[Path] = []
+    for index, (start, end) in enumerate(chunks, start=1):
+        segment = workspace / f"reverse_encode_seg_{index:04d}.{segment_ext}"
+        segments.append(segment)
+        stages.append((
+            f"Reverse segment {index}/{len(chunks)}",
+            [str(part) for part in encoding.build_main_encode_reverse_segment_command(
+                reverse_answers, start, end, segment)]))
+
+    # The SAME builder the executor uses, so the exported plan cannot describe
+    # a different final mux. It writes its concat lists and chapter metadata
+    # into the workspace, which is what makes the exported script runnable as
+    # it stands.
+    concat_stages, _plan_warnings = encoding.reverse_concat_stages(
+        reverse_answers, segments, workspace, Path(reverse_answers["output_path"]),
+        encode_video_speed_factor(reverse_answers) or 1.0, segment_ext)
+    stages.extend((label, cmd) for label, cmd, _progress in concat_stages)
+
+    if split_points:
+        split_answers = encoding.stage_answers(
+            described(answers, Path(reverse_answers["output_path"]),
+                      reversed_seconds, reverse_answers), owns=("split",))
+        # The split reads the REVERSED intermediate, whose subtitle track is
+        # what the stage above just wrote. Feed those cues forward rather than
+        # extracting from a file that does not exist yet.
+        split_answers["_prebuilt_retimed_subtitles"] = planned_retimed_subtitles(
+            split_answers,
+            [{"text": Path(track["path"]).read_text(encoding="utf-8"),
+              "index": track["source_index"], "language": track.get("language", ""),
+              "title": track.get("title", ""), "default": track.get("default"),
+              "forced": track.get("forced")}
+             for track in reverse_tracks if Path(track["path"]).exists()],
+            workspace / "split")
+        split_answers.pop("split_output_paths", None)
+        split_answers.pop("split_part_intervals", None)
+        split_answers["separator_points"] = split_points
+        resolved_stem = str(answers.get("output_name_stem") or "").strip()
+        if not resolved_stem and planned_output_paths:
+            resolved_stem = re.sub(r"_Part\d+$", "", Path(planned_output_paths[0]).stem)
+        if not resolved_stem:
+            resolved_stem = Path(answers["input_path"]).stem
+        split_answers["output_name_stem"] = resolved_stem
+        stages.append(("Split the reversed result",
+                       [str(part) for part in encoding.build_ffmpeg_command(split_answers)]))
+    return stages
+
+
+class PlanExport(NamedTuple):
+    """The outcome of exporting a staged plan, with failure distinguishable.
+
+    It used to be `Path | None`, and `None` meant BOTH "this job is not staged"
+    and "the export failed". The caller could only tell them apart by guessing,
+    so a failed export fell through to the generic
+
+        FFmpeg was not started. The command above is ready to run manually.
+
+    which is false exactly when it matters: for a staged Join or Split reverse
+    the printed one-shot command is a readable reference that would buffer the
+    whole timeline, and the runnable thing was the plan file that had just
+    failed to be written (D08).
+    """
+    script: Path | None
+    error: str = ""
+
+    @property
+    def succeeded(self) -> bool:
+        return self.script is not None
+
+
+def export_bounded_reverse_plan(answers: dict[str, Any],
+                                destination: Path) -> PlanExport:
+    """Write the staged plan as a runnable PowerShell script.
+
+    A multi-stage job has no single "final command", so exporting one and
+    labelling it that way is what made the manual path wrong. The script stops
+    on the first failure and names the scratch directory the user has to remove
+    afterwards, because the generated inputs are deliberately preserved.
+
+    Returns a `PlanExport`. A caller that only wants the path reads `.script`;
+    a caller that has to tell the user something truthful reads `.error` too.
+    """
+    stem = re.sub(r"_Part\d+$", "", Path(destination).stem)
+    workspace = Path(destination).parent / f"{stem}_plan"
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        stages = encoding.bounded_reverse_plan(answers, workspace)
+    except Exception as exc:  # a plan we cannot describe must not break the run
+        log_warn(f"Could not export the staged reverse plan: {exc}")
+        return PlanExport(None, str(exc) or exc.__class__.__name__)
+    if not stages:
+        return PlanExport(None, "the staged plan produced no commands")
+    script = Path(destination).parent / f"{stem}.plan.ps1"
+    lines = [
+        "# FFmWiz staged reverse plan.",
+        "# This job runs as several FFmpeg commands, in this order. The single",
+        "# command shown in the summary is a readable reference only: running it",
+        "# would buffer the whole timeline, which is what the staged plan avoids.",
+        "$ErrorActionPreference = 'Stop'",
+        "",
+    ]
+    for label, cmd in stages:
+        lines.append(f"# {label}")
+        if cmd and cmd[0].startswith("<"):
+            lines.append(f"#   {cmd[0]} -- FFmWiz writes this list at run time")
+        else:
+            # `&` is required: command_to_powershell quotes the executable for
+            # DISPLAY, and PowerShell parses a bare quoted string followed by
+            # arguments as an expression, not a command.
+            lines.append("& " + command_to_powershell(cmd))
+            lines.append("if ($LASTEXITCODE -ne 0) { throw '"
+                         + label.replace("'", "''") + " failed' }")
+        lines.append("")
+    lines.append(f"# Scratch files live in: {workspace}")
+    lines.append("# Remove that directory once the outputs are correct.")
+    try:
+        script.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    except OSError as exc:
+        # A read-only directory or a locked file is the ordinary case here, and
+        # it must NOT be reported to the user as "not staged".
+        log_warn(f"Could not write the staged reverse plan to {script}: {exc}")
+        return PlanExport(None, f"could not write {script.name}: {exc}")
+    log_info(f"Exported staged reverse plan with {len(stages)} stage(s) to {script}")
+    return PlanExport(script)
+
+
+def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
+    """Reverse without ever handing the filter a whole timeline (F10).
+
+    `reverse` cannot emit a frame until it has buffered every decoded frame of
+    its input, so the only safe shape is to give it one bounded segment at a
+    time -- never a joined program, never a to-be-split one. Three stages, each
+    skipped when it does not apply:
+
+      1. JOIN the inputs forward into a leased intermediate. The segmented
+         executor cannot be aimed at a join directly: it rebuilds each segment
+         with the SINGLE-input builder, which reverses input 1 alone (R01).
+      2. REVERSE that single input in segments sized against the frame budget,
+         applying the cuts and speed along with it.
+      3. SPLIT the reversed result. Split points are chosen on the final
+         processed timeline, which is exactly what stage 2 produced, so the
+         parts fall where the summary said they would.
+
+    Measured: an hour of joined 1080p30 is roughly 336 GiB of decoded frames in
+    one pass, and ten minutes of single-input 1080p30 with a split is about
+    56 GiB -- neither can finish. Each intermediate costs one extra encode and
+    is written at a visually lossless quality, then removed with the rest of the
+    job's temporary files.
+    """
+    started_at = time.perf_counter()
+    extension = str(answers.get("output_ext") or "mkv").lstrip(".")
+    workspace = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_reverse_pipeline_")))
+    split_points = list(answers.get("separator_points") or [])
+    # Captured BEFORE any stage rewrites them: these are the paths the summary
+    # showed and the user confirmed.
+    planned_output_paths = list(answers.get("split_output_paths") or [])
+    stage_source = answers
+
+    # Geometry is owned by the FIRST stage that writes a picture: the forward
+    # join when there is one, otherwise the reverse encode. Later stages read
+    # an already-cropped, already-resized intermediate, so re-applying would
+    # crop the crop (D01/D02).
+    has_join = bool(answers.get("join_input_items"))
+    forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
+                    "video_reverse", "audio_reverse", "loudnorm")
+    if not has_join:
+        reverse_owns = reverse_owns + GEOMETRY_TRANSFORMATIONS
+    # Before the join, not after: a plan that cannot be executed correctly must
+    # not spend a full forward encode first.
+    validate_stage_plan([("forward join", forward_owns),
+                         ("reverse", reverse_owns),
+                         ("split", ("split",) if split_points else ())],
+                        answers)
+
+    if has_join:
+        items = join_items_from_answers(answers)
+        if not items:
+            return 1, time.perf_counter() - started_at
+        joined = workspace / f"joined_forward.{INTERMEDIATE_CONTAINER_EXT}"
+        # Owns the GEOMETRY and nothing else. Clearing only the video edits
+        # left an independent audio speed to be applied here AND by the reverse
+        # stage AND by the split (B01); leaving geometry unowned did the same
+        # to crop, fps and resize (D01/D02).
+        forward = intermediate_profile(encoding.stage_answers(answers, owns=forward_owns))
+        forward["output_path"] = joined
+        forward_cmd = wizard.build_join_encode_command(forward, items, joined)
+        appio.note("Reverse across a join: joining first, then reversing in bounded "
+                   "segments so the whole joined timeline is never held in RAM.")
+        log_info(f"Bounded reverse pipeline: forward join -> {joined}")
+        code, _elapsed = encoding.run_ffmpeg_with_progress(
+            forward_cmd,
+            total_duration=sum(float(item.get("duration") or 0.0) for item in items) or None,
+            label="Joining before reverse")
+        if code != 0 or not joined.exists():
+            return (code or 1), time.perf_counter() - started_at
+        stage_source = _single_input_answers(answers, joined)
+
+    # Owns everything except the split -- and the geometry too when no forward
+    # join already applied it.
+    reverse_answers = encoding.stage_answers(stage_source, owns=reverse_owns)
+    reverse_answers.pop("join_input_items", None)
+    if split_points:
+        # Split AFTER the reverse: reversing each part separately would return
+        # the parts in their original order, and reversing the whole thing at
+        # once is the unbounded plan this exists to avoid.
+        pass
+        reversed_whole = workspace / f"reversed_whole.{INTERMEDIATE_CONTAINER_EXT}"
+        reverse_answers = intermediate_profile(reverse_answers)
+        reverse_answers["output_path"] = reversed_whole
+        reverse_answers["output_location"] = workspace
+        reverse_answers["output_name_stem"] = reversed_whole.stem
+        reverse_answers["output_collision_suffix"] = ""
+        appio.note("Reverse with Split: reversing the whole timeline in bounded "
+                   "segments first, then cutting the parts out of the result.")
+    else:
+        reverse_answers["output_path"] = answers["output_path"]
+    reverse_answers["cmd"] = encoding.build_ffmpeg_command(dict(reverse_answers))
+    code, _elapsed = encoding.run_segmented_reverse_main_encode(reverse_answers)
+    if code != 0 or not split_points:
+        return code, time.perf_counter() - started_at
+
+    reversed_whole = Path(reverse_answers["output_path"])
+    if not reversed_whole.exists():
+        return 1, time.perf_counter() - started_at
+    # Owns the split alone. Stage 2 already applied every other edit; leaving
+    # any of them here would apply it a second (or third) time.
+    split_answers = encoding.stage_answers(
+        _single_input_answers(answers, reversed_whole), owns=("split",))
+    split_answers.pop("split_output_paths", None)
+    split_answers.pop("split_part_intervals", None)
+    split_answers["separator_points"] = split_points
+    # Keep the part filenames the summary already showed the user. Taking the
+    # stem from input_path instead promised CustomMovie_Part01.mkv and wrote
+    # a_Part01.mkv, because by this point input_path is the pipeline's own
+    # scratch file (B14). Prefer the user's stem, then the stem the first build
+    # already resolved, and only then the source name.
+    resolved_stem = str(answers.get("output_name_stem") or "").strip()
+    if not resolved_stem:
+        planned = [Path(part) for part in (planned_output_paths or [])]
+        if planned:
+            resolved_stem = re.sub(r"_Part\d+$", "", planned[0].stem)
+    if not resolved_stem:
+        resolved_stem = Path(answers["input_path"]).stem
+    split_answers["output_name_stem"] = resolved_stem
+    split_cmd = encoding.build_ffmpeg_command(split_answers)
+    log_info(f"Bounded reverse pipeline: splitting {reversed_whole} into "
+             f"{len(split_answers.get('split_output_paths') or [])} part(s)")
+    code, _elapsed = encoding.run_ffmpeg_with_progress(
+        split_cmd,
+        total_duration=services.stream_duration_seconds({}, split_answers.get("format")),
+        label="Splitting the reversed result")
+    answers["split_output_paths"] = split_answers.get("split_output_paths")
+    return code, time.perf_counter() - started_at
+
+
+def reverse_concat_stages(answers: dict[str, Any], segment_paths: list[Path],
+                          workdir: Path, output_path: Path, speed: float,
+                          segment_ext: str,
+                          progress_seconds: float | None = None,
+                          ) -> tuple[list[tuple[str, list[str], float | None]], list[str]]:
+    """Every command that turns finished reverse segments into the output.
+
+    ONE implementation, consumed twice: the executor runs these commands and
+    the exported plan writes them down. It used to be two -- the executor built
+    the final mux by hand with chapter arguments and mp4 flags, while the
+    planner reached for `build_concat_copy_command` -- so the exported plan
+    quietly omitted `-map_chapters` and could not have produced the same file.
+    A second implementation of a pipeline drifts; the only fix that stays fixed
+    is not having one.
+
+    Writes the concat lists and any chapter metadata into `workdir`, so the
+    exported script is runnable as it stands. Returns (stages, warnings) where
+    each stage is (label, argv, progress_seconds_or_None).
+    """
+    stages: list[tuple[str, list[str], float | None]] = []
+    warnings: list[str] = []
+    if not segment_paths:
+        return stages, warnings
+    ffmpeg = answers.get("ffmpeg") or "ffmpeg"
+    audio_follows_reverse = encode_audio_reverse_enabled(answers)
+    has_audio = bool(answers.get("audio_streams")) and bool(answers.get("audio_tracks", True))
+    concat_list = workdir / "concat.txt"
+    if has_audio and not audio_follows_reverse:
+        video_ext = output_path.suffix.lstrip(".") or segment_ext
+        reversed_video = workdir / f"video_reversed.{video_ext}"
+        forward_audio = workdir / f"audio_forward.{video_ext}"
+        write_concat_list(list(reversed(segment_paths)), concat_list)
+        video_cmd = build_concat_copy_command(ffmpeg, concat_list, reversed_video)
+        video_cmd[video_cmd.index(str(reversed_video)):] = ["-an", str(reversed_video)]
+        audio_list = workdir / "concat_audio.txt"
+        write_concat_list(list(segment_paths), audio_list)
+        audio_cmd = build_concat_copy_command(ffmpeg, audio_list, forward_audio)
+        audio_cmd[audio_cmd.index(str(forward_audio)):] = ["-vn", str(forward_audio)]
+        stages.append(("Reverse encode concat video (reversed order)",
+                       [str(part) for part in video_cmd], progress_seconds))
+        stages.append(("Reverse encode concat audio (source order)",
+                       [str(part) for part in audio_cmd], progress_seconds))
+        mux_inputs = ["-i", str(reversed_video), "-i", str(forward_audio)]
+        mux_maps, mux_dispositions, warnings = encoding.reverse_mux_stream_policy(answers)
+        mux_maps = mux_maps + mux_dispositions
+        metadata_input = 2
+    else:
+        write_concat_list(list(reversed(segment_paths)), concat_list)
+        mux_inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
+        mux_maps = ["-map", "0"]
+        metadata_input = 1
+
+    # The per-segment encodes carry chapter metadata, but this final
+    # concat-copy did not restore any of it, so a reversed chaptered source
+    # came out with ZERO chapters (R05). Attach the remapped chapters here,
+    # where the output timeline finally exists. remap_chapters_for_encode
+    # applies the reverse flip itself.
+    chapter_plan = remap_chapters_for_encode(answers, speed_factor=speed)
+    concat_cmd = [str(ffmpeg), "-y" if OVERWRITE_OUTPUT else "-n",
+                  "-hide_banner", *mux_inputs]
+    if chapter_plan.get("mode") == "metadata" and chapter_plan.get("chapters"):
+        chapter_metadata = write_encode_chapter_metadata(chapter_plan, workdir, "_reverse")
+        # Appended LAST so it is always the highest input index: the
+        # video-only branch already occupies 0 and 1, and inserting it
+        # earlier would renumber the audio input the maps depend on.
+        concat_cmd.extend(["-i", str(chapter_metadata)])
+        chapter_args = copy_cut_chapter_map_args(
+            chapter_plan, metadata_input_index=metadata_input)
+    else:
+        # Be explicit rather than leaving a silent gap: a source WITH
+        # chapters whose plan is not usable loses them here.
+        chapter_args = copy_cut_chapter_map_args(chapter_plan)
+    concat_cmd.extend([*mux_maps, "-c", "copy",
+                       "-avoid_negative_ts", "make_zero", *chapter_args])
+    if output_path.suffix.lstrip(".").lower() in MP4_LIKE_EXTS and MOVFLAGS:
+        concat_cmd.extend(["-movflags", MOVFLAGS])
+    concat_cmd.append(str(output_path))
+    stages.append(("Concatenating reversed encoded segments",
+                   [str(part) for part in concat_cmd], progress_seconds))
+    return stages, warnings
+
+
+def plan_subtitle_sources(answers: dict[str, Any], items: list[dict[str, Any]],
+                          workspace: Path) -> list[dict[str, Any]]:
+    """The cue TEXT of every selected track, read from files that exist NOW.
+
+    For a join that is the merged track the forward stage will write, built
+    here from the sources with the same helper the join builder uses; for a
+    single input it is the source's own track. Either way the plan never has to
+    read a file it has not produced.
+    """
+    if not (source_subtitles_keep_enabled(answers) and answers.get("subtitle_streams")):
+        return []
+    sources: list[dict[str, Any]] = []
+    try:
+        # The planner may be called with a workspace nobody has created yet.
+        workspace.mkdir(parents=True, exist_ok=True)
+        if items:
+            for merged in wizard.build_joined_subtitle_files(answers, items):
+                path = Path(merged["path"])
+                if path.exists():
+                    sources.append({"text": path.read_text(encoding="utf-8"),
+                                    "index": int(merged.get("index") or 0),
+                                    "language": merged.get("language", ""),
+                                    "title": merged.get("title", ""),
+                                    "default": bool(merged.get("default")),
+                                    "forced": bool(merged.get("forced"))})
+            return sources
+        streams = list(answers.get("subtitle_streams") or [])
+        origin = subtitle_source_origin(answers)
+        for index in selected_subtitle_streams(answers):
+            index = int(index)
+            if not (0 <= index < len(streams)) or not is_text_subtitle(streams[index]):
+                continue
+            raw = workspace / f"plan_source{index:02d}.srt"
+            text = extract_subtitle_text(
+                answers.get("ffmpeg") or "ffmpeg", Path(answers["input_path"]),
+                index, raw, "Planned subtitles", origin, answers.get("ffprobe"))
+            if text:
+                sources.append({"text": text, "index": index,
+                                **subtitle_track_metadata(streams[index])})
+    except Exception as exc:  # a plan must not fail over a subtitle it cannot read
+        log_warn(f"Planned subtitles: could not read the source tracks: {exc}")
+    return sources
+
+
+def planned_retimed_subtitles(stage: dict[str, Any], sources: list[dict[str, Any]],
+                              workspace: Path) -> list[dict[str, Any]]:
+    """Retimed subtitle tracks for a stage whose INPUT does not exist yet.
+
+    `build_retimed_subtitle_inputs()` extracts the cues from the file the stage
+    will read. That works for the executor, which has just written it, and not
+    at all for the exported plan: the planner's reverse stage reads
+    `joined_forward.mkv` and its split stage reads `reversed_whole.mkv`, so
+    extraction found nothing and the stage was emitted with `-sn`. The plan
+    therefore DROPPED subtitles a staged reverse keeps -- planned against
+    executed, that is `['-sn']` where the run has
+    `['-c:s', '-disposition:s:0', '-metadata:s:s', '1:s:0', 'copy',
+    'retimed00.srt']`.
+
+    The cues themselves are never in doubt: the SOURCES exist at plan time.
+    `sources` is [{"text", "index", metadata...}] already merged for a join,
+    and this applies the stage's own `TimelineMap` to them and writes the
+    result into the workspace, which is also what makes the exported script
+    runnable as it stands.
+    """
+    if not sources:
+        return []
+    workspace.mkdir(parents=True, exist_ok=True)
+    timeline = encode_timeline_map(stage)
+    built: list[dict[str, Any]] = []
+    for source in sources:
+        cues = retime_cues(parse_srt(source.get("text") or ""), timeline)
+        if not cues:
+            continue
+        index = int(source.get("index") or 0)
+        path = workspace / f"retimed{index:02d}.srt"
+        path.write_text(render_srt(cues), encoding="utf-8", newline="\n")
+        built.append({"path": path, "source_index": index,
+                      "language": source.get("language", ""),
+                      "title": source.get("title", ""),
+                      "default": bool(source.get("default")),
+                      "forced": bool(source.get("forced"))})
+    return built
+
+
+def reverse_source_seconds(answers: dict[str, Any]) -> float:
+    """The PICTURE span of the file a reverse stage will decode.
+
+    The executor probes the intermediate it just wrote and read
+    `format.duration`; the planner describes the same file from the inputs'
+    picture spans. On a joined pair that is 5.039 against 5.000 -- the AAC tail
+    the container carries past the last frame -- so the two bounded their
+    reverse segments differently for the same job. Everything else in this
+    pipeline was moved onto the picture clock already (B07/B08); this is the
+    read that was left behind.
+    """
+    streams = list(answers.get("video_streams") or [])
+    fmt = answers.get("format") or {}
+    if streams:
+        span = video_stream_span_seconds(streams[0], fmt)
+        if span:
+            return span
+    return services.stream_duration_seconds({}, fmt) or 0.0
+
+
+def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
+    duration = reverse_source_seconds(answers)
+    if duration <= 0:
+        return encoding.run_ffmpeg_with_progress(
+            answers["cmd"],
+            total_duration=None,
+            label="FFmpeg encode",
+        )
+    original_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
+    budget = encoding.reverse_segment_plan_for(answers)
+    segment_seconds = budget.seconds
+    chunks = encoding.split_ranges_for_reverse_segments(original_keep_ranges, duration,
+                                               segment_seconds)
+    if not chunks:
+        return 1, 0.0
+    speed = encode_video_speed_factor(answers)
+    output_path = Path(answers["output_path"])
+    # `{segment_seconds:.0f}s` printed every legitimate subsecond budget as
+    # `0s` -- a 233 ms window at 8K60 10-bit announced as if it were nothing
+    # (D09). `window_text` gives milliseconds and the frame count.
+    appio.note(
+        f"Reverse encode uses {len(chunks)} segment(s) of up to "
+        f"{budget.window_text} to avoid buffering the full video in RAM."
+    )
+    if not budget.hard_capped:
+        appio.note("This reverse is BEST-EFFORT, not hard-capped: "
+                   + "; ".join(budget.assumptions))
+    started_at = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="ffmwiz_reverse_encode_") as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        segment_ext = output_path.suffix.lstrip(".") or str(answers.get("output_ext") or "mp4")
+        segment_paths: list[Path] = []
+        for idx, (start, end) in enumerate(chunks, start=1):
+            segment_path = tmpdir / f"reverse_encode_seg_{idx:04d}.{segment_ext}"
+            segment_paths.append(segment_path)
+            cmd = encoding.build_main_encode_reverse_segment_command(answers, start, end, segment_path)
+            log_info(f"Reverse encode segment {idx}/{len(chunks)} command: {command_to_powershell(cmd)}")
+            appio.note(f"Reverse encode segment {idx}/{len(chunks)}: {seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}")
+            rc, _ = encoding.run_ffmpeg_with_progress(
+                cmd,
+                total_duration=max(0.001, (end - start) / speed),
+                label=f"Reverse encode segment {idx}/{len(chunks)}",
+            )
+            if rc != 0:
+                return rc, time.perf_counter() - started_at
+        # Concatenating reversed(segments) reverses the order of their AUDIO
+        # blocks too. That is right when the audio follows the video reverse and
+        # wrong when the user declined it: measured on 440 Hz for 0-2 s and
+        # 880 Hz for 2-4 s with reverse_audio=False, the output played 880 Hz at
+        # 0.4 s and 440 Hz at 3.2 s -- chunk-reordered without a single
+        # `areverse` in any command (B02).
+        #
+        # So the two timelines are concatenated separately: video from the
+        # reversed order, audio from the forward one, then muxed. Both passes
+        # are stream copies, so this costs no extra encode.
+        stages, mux_warnings = encoding.reverse_concat_stages(
+            answers, segment_paths, tmpdir, output_path, speed, segment_ext,
+            progress_seconds=(total_keep_duration(chunks) / speed if chunks else None))
+        if not stages:
+            return 1, time.perf_counter() - started_at
+        if len(stages) > 1:
+            appio.note("Video reverse only: the audio keeps its own order and is "
+                       "muxed back onto the reversed picture.")
+        for warning in mux_warnings:
+            appio.note(warning)
+            log_warn(warning)
+        rc = 0
+        for label, cmd, progress in stages:
+            log_info(f"{label}: " + command_to_powershell(cmd))
+            appio.note(f"{label}...")
+            rc, _ = encoding.run_ffmpeg_with_progress(cmd, total_duration=progress, label=label)
+            if rc != 0:
+                return rc, time.perf_counter() - started_at
+        return rc, time.perf_counter() - started_at
+
+
+__all__ = [
+    'GEOMETRY_TRANSFORMATIONS',
+    'PlanExport',
+    'STAGE_TRANSFORMATIONS',
+    'bounded_reverse_plan',
+    'build_main_encode_reverse_segment_command',
+    'export_bounded_reverse_plan',
+    'intermediate_profile',
+    'intermediate_video_codec_name',
+    'plan_subtitle_sources',
+    'planned_retimed_subtitles',
+    'requested_transformations',
+    'reverse_concat_stages',
+    'reverse_filter_input_for',
+    'reverse_mux_stream_policy',
+    'reverse_segment_plan_for',
+    'reverse_segment_seconds',
+    'reverse_source_seconds',
+    'run_bounded_reverse_pipeline',
+    'run_segmented_reverse_main_encode',
+    'stage_answers',
+    'validate_stage_plan',
+]
