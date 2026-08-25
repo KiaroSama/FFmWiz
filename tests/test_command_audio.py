@@ -320,7 +320,10 @@ class CommandAudioTests(CommandGenBase):
             text = self.command_text(answers)
         self.assertIn("-c:a libopus", text)
         self.assertNotIn("-c:a opus", text)
-        self.assertEqual(answers["audio_codec"], "libopus")
+        # The alias is RESOLVED, not written back over the request: Back has to
+        # show the user the answer they gave (D15).
+        self.assertEqual(answers["audio_codec"], "opus")
+        self.assertEqual("libopus", FFmWiz.effective_value(answers, "audio_codec"))
 
     def test_main_encode_libopus_keeps_requested_audio_bitrate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -351,7 +354,8 @@ class CommandAudioTests(CommandGenBase):
             text = self.command_text(answers)
         self.assertIn("-c:a libopus", text)
         self.assertNotIn("-c:a opus", text)
-        self.assertEqual(answers["audio_codec"], "libopus")
+        self.assertEqual(answers["audio_codec"], "opus")
+        self.assertEqual("libopus", FFmWiz.effective_value(answers, "audio_codec"))
 
     def test_audio_speed_reverse_command_outputs_audio_only_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
