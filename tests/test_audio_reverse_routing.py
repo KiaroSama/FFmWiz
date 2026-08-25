@@ -219,9 +219,12 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
         out = self._tmp / "content"
         out.mkdir(parents=True, exist_ok=True)
         answers = self._answers(out)
-        real_budget = FFmWiz.audio_reverse_segment_seconds
-        FFmWiz.audio_reverse_segment_seconds = lambda _a, _i=None: 1.0
-        encoding.audio_reverse_segment_seconds = FFmWiz.audio_reverse_segment_seconds
+        # Patch the module that DEFINES it: `run_bounded_audio_reverse` resolves
+        # the name from its own globals, and both `FFmWiz` and `encoding` only
+        # re-export it.
+        from ffmwiz.support import ext04c
+        real_budget = ext04c.audio_reverse_segment_seconds
+        ext04c.audio_reverse_segment_seconds = lambda _a, _i=None: 1.0
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
@@ -232,8 +235,7 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
                 code, _elapsed = encoding.execute_encode_plan(
                     answers, cmd, total_duration=SECONDS, label="content")
         finally:
-            FFmWiz.audio_reverse_segment_seconds = real_budget
-            encoding.audio_reverse_segment_seconds = real_budget
+            ext04c.audio_reverse_segment_seconds = real_budget
         self.assertEqual(0, code, noise.getvalue()[-1500:])
         produced = Path(answers["output_path"])
         heard = [self._tone_at(produced, at) for at in (0.35, 1.35, 2.35, 3.35)]

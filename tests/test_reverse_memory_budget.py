@@ -249,7 +249,7 @@ class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
 class TheExecutorUsesIt(unittest.TestCase):
     def test_the_chunk_planner_receives_the_measured_size(self):
         source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
-                  / "ffmwiz" / "encoding.py").read_text(encoding="utf-8")
+                  / "ffmwiz" / "reverse_pipeline.py").read_text(encoding="utf-8")
         block = source.split("def run_segmented_reverse_main_encode")[1][:1500]
         self.assertIn("reverse_segment_plan_for(answers)", block)
         # Renamed when the plan gained its calculation and its
@@ -260,7 +260,7 @@ class TheExecutorUsesIt(unittest.TestCase):
 
     def test_the_notice_does_not_reuse_the_flat_ceiling(self):
         source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
-                  / "ffmwiz" / "encoding.py").read_text(encoding="utf-8")
+                  / "ffmwiz" / "reverse_pipeline.py").read_text(encoding="utf-8")
         block = source.split("def run_segmented_reverse_main_encode")[1][:2000]
         self.assertNotIn("{int(REVERSE_SEGMENT_SECONDS)}s", block)
 
