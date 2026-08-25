@@ -864,8 +864,13 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     if target_dimensions:
         target_w, target_h = target_dimensions
     else:
-        target_w = int(first_video.get("width") or 1280)
-        target_h = int(first_video.get("height") or 720)
+        # The size AFTER the crop this same graph applies, not the raw source.
+        # Normalising back to the source dimensions scaled a 140x120 crop of a
+        # 160x120 input straight back up to 160x120, so the join undid its own
+        # crop and the next stage cropped the result again (D01).
+        target_w, target_h = cropped_source_size(join_answers)
+        target_w = int(target_w or first_video.get("width") or 1280)
+        target_h = int(target_h or first_video.get("height") or 720)
         join_answers["final_resolution"] = (target_w, target_h)
     target_fps = float(join_answers.get("fps") or rational_to_float(first_video.get("avg_frame_rate")) or rational_to_float(first_video.get("r_frame_rate")) or 30.0)
 
