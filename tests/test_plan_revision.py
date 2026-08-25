@@ -17,6 +17,22 @@ the GPU switched off, kept a container fallback's `libx265`/`aac` in force after
 the container changed back, and left `cpu_two_pass=False` -- recorded because a
 join cannot two-pass -- in force for a plain encode that can.
 
+`reset_effective_settings()` closed that for the interactive step and for each
+Folder item, but not for the BUILDER, which any caller can reach directly and
+which `step_start_folder_now()` reaches without resetting anything. Measured on
+the audited tree:
+
+    a direct build carrying a previous plan's effective libx265
+        requested  video_codec=copy
+        command    -c:v libx265
+    step_start_folder_now() contains reset_effective_settings   False
+
+`begin_plan()` / `require_plan_revision()` move the boundary into the builder,
+where every caller shares it: an OPEN plan (one the caller just began) is
+adopted so a step and its builder resolve into the same revision, and anything
+else -- a direct call, a rebuild after Back -- gets a new revision with an empty
+map. A map tagged with a revision the answers do not claim is refused outright.
+
 These tests drive the public wizard step and check the ENCODED FILE wherever a
 file can settle the question: probe codec names and per-stream packet hashes,
 not command substrings.
@@ -78,6 +94,60 @@ class EffectiveMapLifetime(unittest.TestCase):
         lease = FFmWiz.artifact_lease(answers)
         FFmWiz.reset_effective_settings(answers)
         self.assertIs(lease, FFmWiz.artifact_lease(dict(answers)))
+
+
+class PlanRevisionOwnership(unittest.TestCase):
+    """The boundary itself, without ffmpeg."""
+
+    def test_begin_plan_numbers_the_revision_and_tags_its_map(self):
+        answers = {"video_codec": "copy"}
+        first = FFmWiz.begin_plan(answers)
+        self.assertEqual(first, FFmWiz.plan_revision(answers))
+        self.assertEqual(first, answers[FFmWiz.EFFECTIVE_SETTINGS_KEY].revision)
+        second = FFmWiz.begin_plan(answers)
+        self.assertNotEqual(first, second, "two plans must not share a number")
+        self.assertEqual({}, dict(answers[FFmWiz.EFFECTIVE_SETTINGS_KEY]))
+
+    def test_a_builder_adopts_the_plan_its_caller_just_began(self):
+        # A step resolves into the same map its builder writes, which is what
+        # lets the summary describe the command that will actually run.
+        answers = {"video_codec": "copy"}
+        begun = FFmWiz.begin_plan(answers)
+        opened = answers[FFmWiz.EFFECTIVE_SETTINGS_KEY]
+        self.assertEqual(begun, FFmWiz.require_plan_revision(answers))
+        self.assertIs(opened, answers[FFmWiz.EFFECTIVE_SETTINGS_KEY])
+
+    def test_a_second_build_cannot_inherit_the_first_ones_resolutions(self):
+        answers = {"video_codec": "copy"}
+        FFmWiz.begin_plan(answers)
+        first = FFmWiz.require_plan_revision(answers)
+        FFmWiz.effective_settings(answers)["video_codec"] = "libx265"
+        second = FFmWiz.require_plan_revision(answers)
+        self.assertNotEqual(first, second)
+        self.assertEqual("copy", FFmWiz.effective_value(answers, "video_codec"))
+
+    def test_a_direct_call_with_no_plan_gets_a_fresh_one(self):
+        answers = {"video_codec": "copy"}
+        FFmWiz.effective_settings(answers)["video_codec"] = "libx265"
+        FFmWiz.require_plan_revision(answers)
+        self.assertEqual("copy", FFmWiz.effective_value(answers, "video_codec"))
+
+    def test_a_map_owned_by_another_revision_is_refused(self):
+        # Two plans spliced together. No correct caller does this, so it is a
+        # defect report rather than a silent recovery.
+        answers = {"video_codec": "copy"}
+        FFmWiz.begin_plan(answers)
+        answers[FFmWiz.EFFECTIVE_SETTINGS_KEY] = FFmWiz.EffectiveSettings(-1)
+        with self.assertRaises(FFmWiz.PlanRevisionError):
+            FFmWiz.require_plan_revision(answers)
+
+    def test_the_lease_still_survives_a_new_plan(self):
+        # Same rule as reset_effective_settings: a lease outlives revisions so
+        # its temporary files can still be deleted.
+        answers = {}
+        lease = FFmWiz.artifact_lease(answers)
+        FFmWiz.begin_plan(answers)
+        self.assertIs(lease, FFmWiz.artifact_lease(answers))
 
 
 @requires_ffmpeg
@@ -265,6 +335,48 @@ class RebuiltPlansForgetTheLastOne(NoLeakedArtifacts, unittest.TestCase):
         _cmd, summary = self._start_now(answers)
         self.assertIs(True, FFmWiz.effective_value(answers, "cpu_two_pass"))
         self.assertIn("CPU two-pass: yes", summary)
+
+    def test_a_direct_builder_call_does_not_inherit_a_previous_plans_codec(self):
+        # The D14 reproduction: no wizard step, just the public builder handed
+        # an answers dict that still carries an older plan's resolution.
+        primary = self._clip("a")
+        answers = self._answers(primary)
+        FFmWiz.effective_settings(answers)["video_codec"] = "libx265"
+        FFmWiz.effective_settings(answers)["audio_codec"] = "aac"
+        silent = mock.patch.object(FFmWiz.appio, "note", lambda *a, **k: None)
+        with contextlib.redirect_stdout(io.StringIO()), silent:
+            answers["cmd"] = [str(part) for part in FFmWiz.build_ffmpeg_command(answers)]
+        self.assertEqual("copy", answers["video_codec"])
+        self.assertEqual("copy", FFmWiz.effective_value(answers, "video_codec"))
+        output = self._execute(answers)
+        self.assertEqual([("video", "h264"), ("audio", "aac")], self._codecs(output))
+        self.assertEqual(self._packet_hash(primary, "0:v:0"),
+                         self._packet_hash(output, "0:v:0"),
+                         "a stale effective codec must not re-encode a copy job")
+
+    def test_the_folder_representative_step_forgets_its_previous_build(self):
+        # step_start_folder_now() calls the builder and resets nothing itself,
+        # which is the gap D14 names, so the builder has to be the boundary.
+        primary = self._clip("a")
+        answers = self._answers(primary, crop_enabled=True, crop_top=10,
+                                crop_left=0, crop_right=0, crop_bottom=10)
+        decline = mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=False)
+        silent = mock.patch.object(FFmWiz.appio, "note", lambda *a, **k: None)
+        with contextlib.redirect_stdout(io.StringIO()), decline, silent:
+            FFmWiz.step_start_folder_now(answers)
+            first = FFmWiz.plan_revision(answers)
+            self.assertEqual("H265", FFmWiz.effective_value(answers, "video_codec"),
+                             "crop really does force an encoder over a copy request")
+            self._go_back(answers, crop_enabled=False)
+            FFmWiz.step_start_folder_now(answers)
+        self.assertNotEqual(first, FFmWiz.plan_revision(answers))
+        self.assertEqual("copy", FFmWiz.effective_value(answers, "video_codec"))
+        answers["cmd"] = [str(part) for part in answers["cmd"]]
+        output = self._execute(answers)
+        self.assertEqual([("video", "h264"), ("audio", "aac")], self._codecs(output))
+        self.assertEqual(self._packet_hash(primary, "0:v:0"),
+                         self._packet_hash(output, "0:v:0"),
+                         "the crop fallback must not survive the crop")
 
 
 if __name__ == "__main__":

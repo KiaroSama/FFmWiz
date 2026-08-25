@@ -160,9 +160,11 @@ def step_start_now(answers: dict[str, Any]) -> None:
     # A rebuild is a NEW plan revision. Back leaves the REQUESTED answers alone
     # -- which is the point -- but the RESOLVED map used to survive with them,
     # so a Join's forced libx265/aac stayed in force after the Join was removed
-    # and the rebuilt copy/copy job was re-encoded to HEVC (B13). Reset here,
-    # on the outer dict, before any builder takes its shallow copy.
-    reset_effective_settings(answers)
+    # and the rebuilt copy/copy job was re-encoded to HEVC (B13). Open the plan
+    # here, on the outer dict, before any builder takes its shallow copy: the
+    # join builders resolve into THIS revision's map rather than one of their
+    # own, so the summary still describes the command that will run.
+    begin_plan(answers)
     if output_is_audio_only(answers) and not answers.get("audio_streams"):
         fail("Audio-only output was selected, but the input file has no audio stream.")
 

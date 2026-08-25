@@ -550,7 +550,7 @@ def _run_folder_encode_mode_impl(base_answers: dict[str, Any]) -> tuple[int, flo
         item_settings = dict(answers)
         item_settings.pop(ARTIFACT_LEASE_KEY, None)
         artifact_lease(item_settings)
-        reset_effective_settings(item_settings)
+        begin_plan(item_settings)
         try:
             try:
                 job_answers = prepare_folder_job_answers(item_settings, item)
