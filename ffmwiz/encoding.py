@@ -377,33 +377,74 @@ def build_main_encode_reverse_segment_command(
     return build_ffmpeg_command(segment_answers)
 
 
-def reverse_segment_seconds(answers: dict[str, Any]) -> float:
-    """How many seconds of video one reverse segment may safely hold.
+def reverse_filter_input_for(answers: dict[str, Any]):
+    """What the `reverse` filter will actually buffer for this job.
 
-    Reads the geometry out of `answers` and defers the arithmetic to
-    `reverse_segment_seconds_for`, which lives beside the chunk splitter so the
-    standalone Video Speed / Reverse mode shares the same budget instead of
-    calling the splitter with no size at all (B06).
+    `reverse` holds POST-filter frames and the CPU chain runs
+    crop -> fps -> scale/pad -> speed/reverse -> format, so sizing the budget
+    from the probe is sizing it from the wrong picture. A 1080p30 source
+    upscaled to 8K received a 15 s window whose real peak is 24.485 GiB against
+    a 2 GiB cap (D11). This resolves the geometry, rate and pixel format at the
+    filter's input and hands them to the shared planner.
     """
     stream = (answers.get("video_streams") or [{}])[0]
     try:
-        fps = float(answers.get("fps") or services.get_video_fps(answers) or 0.0)
+        source_fps = float(services.get_video_fps(answers) or 0.0)
     except Exception:
-        fps = 0.0
-    seconds = reverse_segment_seconds_for(
-        stream.get("width"), stream.get("height"), fps, stream.get("pix_fmt"))
-    log_info(
-        "Reverse budget: %sx%s %s at %.3f fps -> %.3f s/segment (peak cap "
-        "%.2f GiB incl. %.2f GiB overhead, %.0f%% frame safety)"
-        % (stream.get("width") or "?", stream.get("height") or "?",
-           stream.get("pix_fmt") or "unknown", fps or 0.0, seconds,
-           REVERSE_PEAK_BUDGET_BYTES / 1024 ** 3,
-           REVERSE_FIXED_OVERHEAD_BYTES / 1024 ** 3,
-           (REVERSE_FRAME_SAFETY - 1) * 100))
-    if not (stream.get("width") and stream.get("height")):
-        log_warn("Reverse budget: frame geometry unknown; the segment length "
-                 "assumes 1080p60 10-bit. Probe the input for a real bound.")
-    return seconds
+        source_fps = 0.0
+    crop_size = cropped_source_size(answers) if answers.get("crop_enabled") else None
+    try:
+        scale_size = resolve_scale_dimensions(answers, answers.get("resolution", "n"))
+    except Exception:
+        scale_size = None
+    try:
+        encoder, _tag, _profile = resolve_video_encoder(answers)
+        graph_pix_fmt = cpu_graph_pixel_format_for_encoder(answers, encoder)
+    except Exception:
+        graph_pix_fmt = None
+    # The LARGER of the two, not simply the graph's. `format=` sits downstream
+    # of `reverse`, and FFmpeg negotiates that format back up the chain, so the
+    # buffered frames usually carry the encoder's format -- but "usually" is
+    # not a basis for a HARD cap. If the negotiation does not reach this far the
+    # buffer holds source frames, and sizing a 12-bit 4:4:4 source as 8-bit
+    # 4:2:0 under-counts it four to one. Taking the wider format costs a
+    # shorter segment and never an overrun.
+    source_pix_fmt = stream.get("pix_fmt")
+    if graph_pix_fmt and source_pix_fmt:
+        if decoded_bytes_per_pixel(source_pix_fmt) > decoded_bytes_per_pixel(graph_pix_fmt):
+            graph_pix_fmt = source_pix_fmt
+    return reverse_filter_input_descriptor(
+        stream.get("width"), stream.get("height"), source_fps, source_pix_fmt,
+        crop_size=crop_size, scale_size=scale_size,
+        output_fps=answers.get("fps"), graph_pix_fmt=graph_pix_fmt)
+
+
+def reverse_segment_plan_for(answers: dict[str, Any], best_effort: bool = False):
+    """The bounded plan for one reverse segment, with its whole calculation.
+
+    Raises `ReverseBudgetError` when the geometry it needs is unreadable or one
+    frame already exceeds the allowance. That is the point: a warning cannot
+    turn an unbounded allocation into a bound, and the old code assumed
+    1080p60 10-bit and carried on (D12).
+    """
+    resolved = reverse_filter_input_for(answers)
+    plan = reverse_segment_plan(resolved.width, resolved.height, resolved.fps,
+                                resolved.pix_fmt, best_effort=best_effort)
+    log_info("Reverse budget: " + plan.describe())
+    if not plan.hard_capped:
+        log_warn("Reverse budget: NOT hard-capped -- " + "; ".join(plan.assumptions))
+    return plan
+
+
+def reverse_segment_seconds(answers: dict[str, Any]) -> float:
+    """How many seconds of video one reverse segment may safely hold.
+
+    Thin wrapper for callers that only want the number; anything that has to
+    PRINT the window should use `reverse_segment_plan_for` and its
+    `window_text`, because `f"{seconds:.0f}s"` renders a legitimate 233 ms
+    budget as `0s` (D09).
+    """
+    return reverse_segment_plan_for(answers).seconds
 
 
 # Every user edit the staged reverse pipeline can apply, grouped by the
@@ -1206,17 +1247,24 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
             label="FFmpeg encode",
         )
     original_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
-    segment_seconds = reverse_segment_seconds(answers)
+    budget = reverse_segment_plan_for(answers)
+    segment_seconds = budget.seconds
     chunks = split_ranges_for_reverse_segments(original_keep_ranges, duration,
                                                segment_seconds)
     if not chunks:
         return 1, 0.0
     speed = encode_video_speed_factor(answers)
     output_path = Path(answers["output_path"])
+    # `{segment_seconds:.0f}s` printed every legitimate subsecond budget as
+    # `0s` -- a 233 ms window at 8K60 10-bit announced as if it were nothing
+    # (D09). `window_text` gives milliseconds and the frame count.
     appio.note(
-        f"Reverse encode uses {len(chunks)} segment(s) of up to {segment_seconds:.0f}s "
-        "to avoid buffering the full video in RAM."
+        f"Reverse encode uses {len(chunks)} segment(s) of up to "
+        f"{budget.window_text} to avoid buffering the full video in RAM."
     )
+    if not budget.hard_capped:
+        appio.note("This reverse is BEST-EFFORT, not hard-capped: "
+                   + "; ".join(budget.assumptions))
     started_at = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="ffmwiz_reverse_encode_") as tmpdir_str:
         tmpdir = Path(tmpdir_str)
@@ -1370,6 +1418,8 @@ __all__ = [
     'validate_stage_plan',
     'reverse_mux_stream_policy',
     'reverse_source_seconds',
+    'reverse_filter_input_for',
+    'reverse_segment_plan_for',
     'intermediate_video_codec_name',
     'requested_transformations',
     'GEOMETRY_TRANSFORMATIONS',
