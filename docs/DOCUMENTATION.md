@@ -276,6 +276,7 @@ Every key is also documented inline in `config.env.example`.
 | `video_bitrate_mode` | quality_vbr / strict_size | `quality_vbr` | VBR shape (see §8). |
 | `resolution` | preset / `w1280` / `720h` / `WxH` / `stretch:WxH` / `n` | `n` | Output scale. |
 | `fps` | integer or `n` | `n` | Output frame rate. |
+| `video_look` | filter list or `n` | `n` | Rotate, mirror, colour, denoise, sharpen/blur, fades. |
 | `audio_tracks` | 0 / 0,1,2 / all / d / e / de | `de` | Which audio streams to keep. |
 | `audio_codec` | aac, libopus, opus, libmp3lame, flac, pcm_s16le, copy, ... | `aac` | Audio encoder. |
 | `audio_bitrate_kbps` | integer or `n` | `n` | Audio bitrate per stream (kbps). |
@@ -1503,6 +1504,27 @@ source rate. You are warned before exceeding the source.
 (`1280x720`), `stretch:1280x720` to force distortion, or `n` to keep the source size.
 
 **`fps`** — Output frame rate as an integer, or `n` to keep the source rate.
+
+**`video_look`** — Extra picture filters as a comma-separated list, or `n` for none.
+Accepted tokens: `90cw` / `90ccw` / `180`; `hflip`, `vflip`; `gray`; `bright=N`,
+`contrast=N`, `sat=N`; `denoise`, `sharpen`, `blur`, each optionally `=light`,
+`=medium` or `=heavy`; `fadein=SECONDS`, `fadeout=SECONDS`. Example:
+`video_look=90cw,gray,denoise,fadein=1.5`.
+
+They join the same filter chain as crop, resize, speed and reverse, in this
+order: crop, rotate/mirror, frame rate, scale/pad, colour, denoise,
+sharpen/blur, speed/reverse, fade, pixel format. Two consequences worth knowing:
+a rotation is applied before the resize, so a portrait target of a landscape
+source fills the canvas instead of letterboxing it; and fade seconds are
+measured on the OUTPUT, so a one-second fade lasts one second even alongside a
+speed change. `sharpen` and `blur` cancel each other and are rejected together.
+A fade-out longer than the output is dropped with a warning rather than
+producing an invalid start time. The fade applies to picture and sound
+together.
+
+Omit the key entirely and Mode 2 never asks about it. In the interactive
+wizard the same question is offered once, after the crop questions, and is
+skipped on the unified-editor path.
 
 ### B.3 Audio
 
