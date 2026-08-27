@@ -75,7 +75,6 @@ from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 
@@ -184,21 +183,67 @@ def selected_audio_reverse_streams(answers: dict[str, Any],
     return [streams[index] for index in audio_indices if index < len(streams)]
 
 
+def reverse_audio_segment_seconds_for_streams(streams: list[dict[str, Any]]) -> float:
+    """Seconds all selected tracks may hold TOGETHER within the peak budget.
+
+    `areverse` buffers every selected stream in ONE process, so their decoded
+    buffers coexist and the budget is the SUM of their per-second cost -- not
+    the widest of them. Taking the widest is what the previous
+    `min(per-stream window)` did, and it is wrong by the track count: eight
+    192 kHz 8-channel float tracks reversed together were planned at
+
+        PLANNED_SEGMENT_SECONDS 227.951302
+        ESTIMATED_AGGREGATE_PEAK_GIB 12.5   against a 2.00 GiB cap  (6.25x)
+
+    The window is rounded DOWN onto the highest selected sample rate, so every
+    track lands on or before a whole sample and no rounding can push the
+    aggregate over the cap. A track whose rate or channel count is unreadable
+    is budgeted as the demanding case, the same policy the video splitter uses
+    for unknown geometry.
+
+    Raises `ReverseBudgetError` when a single sample of the aggregate does not
+    fit: that is a planning error, and restoring an arbitrary minimum duration
+    would be exactly the floor this budget exists to remove.
+    """
+    rates: list[int] = []
+    per_second = 0.0
+    for stream in streams:
+        try:
+            rate = int(stream.get("sample_rate") or 0)
+            channels = int(stream.get("channels") or 0)
+        except (TypeError, ValueError):
+            rate = channels = 0
+        sample_fmt = intermediate_audio_sample_fmt(stream.get("sample_fmt"))
+        if rate <= 0 or channels <= 0:
+            rate, channels, sample_fmt = 192000, 8, "s32"
+        rates.append(rate)
+        per_second += (rate * channels * decoded_bytes_per_sample(sample_fmt)
+                       * REVERSE_FRAME_SAFETY)
+    if not rates:
+        return reverse_audio_segment_seconds_for(0, 0)
+    allowance = REVERSE_PEAK_BUDGET_BYTES - REVERSE_FIXED_OVERHEAD_BYTES
+    grid = max(rates)
+    if per_second <= 0 or allowance <= 0:
+        raise ReverseBudgetError(
+            f"the reverse peak budget leaves {allowance} byte(s) for "
+            f"{len(streams)} audio track(s); nothing can be planned inside it")
+    samples = int(allowance // (per_second / grid))
+    if samples < 1:
+        raise ReverseBudgetError(
+            f"one sample of the {len(streams)} selected audio track(s) needs "
+            f"{per_second / grid:.0f} bytes, more than the "
+            f"{allowance / 1024 ** 2:.0f} MiB the peak budget allows; reduce "
+            "the selection or raise FFMWIZ_REVERSE_PEAK_BUDGET_MB")
+    return samples / grid
+
+
 def audio_reverse_segment_seconds(answers: dict[str, Any],
                                   audio_indices: list[int]) -> float:
-    """The segment length for this job: the WIDEST selected track decides.
-
-    Several tracks are reversed in one pass, so the budget belongs to the
-    heaviest of them, not to the first.
-    """
+    """The segment length for this job, summed over every selected track."""
     selected = selected_audio_reverse_streams(answers, audio_indices)
     if not selected:
         return reverse_audio_segment_seconds_for(0, 0)
-    return min(
-        reverse_audio_segment_seconds_for(
-            stream.get("sample_rate"), stream.get("channels"),
-            intermediate_audio_sample_fmt(stream.get("sample_fmt")))
-        for stream in selected)
+    return reverse_audio_segment_seconds_for_streams(selected)
 
 
 def lossless_scratch_audio_args(streams: list[dict[str, Any]]) -> list[str]:
@@ -392,10 +437,50 @@ def staged_audio_reverse_answers(answers: dict[str, Any],
 
 def audio_reverse_indices(answers: dict[str, Any],
                           audio_indices: list[int] | None = None) -> list[int]:
-    """The source audio streams this reverse covers."""
+    """The source audio streams this reverse covers, in output order.
+
+    `audio_index` alone was the whole answer, so the MAIN executor -- which
+    passes no explicit indices and expresses its selection as `audio_tracks` --
+    silently reversed track 0 and dropped the rest: a two-track selection
+    returned success with one audio stream in the output (D04).
+
+    `audio_tracks` is the selection every encode path uses; `audio_index` is
+    the single-track answer the standalone audio tools ask for, and stays as
+    the fallback rather than as an override. Duplicates are dropped and
+    out-of-range indices are refused deterministically instead of silently
+    changing what the user selected.
+    """
+    missing = object()
     if audio_indices is not None:
-        return list(audio_indices)
-    return [int(answers.get("audio_index", 0) or 0)]
+        chosen = list(audio_indices)
+    else:
+        tracks = answers.get("audio_tracks", missing)
+        if tracks is missing:
+            # The key ABSENT is not the same as "keep them all": the standalone
+            # audio tools never set it and mean the one track they asked about.
+            chosen = [answers.get("audio_index", 0)]
+        elif tracks in (None, True, "all"):
+            chosen = list(range(len(answers.get("audio_streams") or []))) or [0]
+        elif isinstance(tracks, (list, tuple, set)):
+            chosen = list(tracks)
+        else:
+            chosen = [tracks]
+        if not chosen:
+            chosen = [answers.get("audio_index", 0)]
+    available = len(answers.get("audio_streams") or [])
+    resolved: list[int] = []
+    for value in chosen:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"audio track selection is not an index: {value!r}")
+        if available and not 0 <= index < available:
+            raise ValueError(
+                f"audio track {index} was selected but the source has "
+                f"{available} audio stream(s)")
+        if index not in resolved:
+            resolved.append(index)
+    return resolved or [0]
 
 
 def audio_reverse_content_seconds(answers: dict[str, Any]) -> tuple[float, float,
@@ -628,6 +713,7 @@ __all__ = [
     'decoded_bytes_per_sample',
     'intermediate_audio_sample_fmt',
     'reverse_audio_segment_seconds_for',
+    'reverse_audio_segment_seconds_for_streams',
     'selected_audio_reverse_streams',
     'audio_reverse_segment_seconds',
     'audio_reverse_indices',

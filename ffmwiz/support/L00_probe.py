@@ -113,9 +113,17 @@ BYTES_PER_PIXEL_BY_FORMAT: dict[str, float] = {
 # Opaque driver surfaces. Their frames are not a plain byte block we can size,
 # so a budget must refuse rather than pretend, and `reverse` downloads them to
 # a software format we cannot name in advance.
+#
+# The UNION across the FFmpeg versions this project supports, not one build's
+# `-pix_fmts` output. A name a build has never heard of costs nothing here,
+# while a name this list is missing is misclassified on the build that does
+# report it: `xvmc` was carried as a hardware surface until FFmpeg 7.0 removed
+# it, so 6.1.1 reports it and 8.1.1 does not, and leaving it out made the
+# classification wrong on 6.x while the sweep on 8.x could not see the gap at
+# all (D14). Add a retired name rather than removing it when a build drops it.
 HARDWARE_PIXEL_FORMATS: frozenset[str] = frozenset(
     "amf cuda d3d11 d3d11va_vld d3d12 drm_prime dxva2_vld mediacodec mmal"
-    " ohcodec opencl qsv vaapi vdpau videotoolbox_vld vulkan".split())
+    " ohcodec opencl qsv vaapi vdpau videotoolbox_vld vulkan xvmc".split())
 
 # What an unrecognised name costs. The widest software layout FFmpeg 8.1.1 ships
 # is 16 B/px (rgba128/rgbaf32/gbrap32), so this is a real worst case rather than

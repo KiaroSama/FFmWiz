@@ -59,6 +59,15 @@ requires_ffmpeg = unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe not on
 # right by coincidence.
 CLIPS = (("red", 440, 2.0), ("blue", 880, 3.0), ("green", 1320, 1.0))
 
+# How far the primed twins' audio starts BEFORE their picture. The descriptor
+# copied the source's container start onto an intermediate that is written
+# without `-copyts` and therefore always starts at zero, and `-ss` is built
+# from exactly that skew -- so the plan seeked into a file the run reads from
+# the top. FFmpeg 8 writes a zero start for the fixtures above, which hides the
+# defect completely; `-itsoffset` reproduces the negative-priming shape an
+# FFmpeg 6 MKV has, on any build.
+CONTAINER_LEAD = 0.5
+
 
 def _run(args, timeout=600):
     return subprocess.run([str(part) for part in args], capture_output=True,
@@ -75,6 +84,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         cls._root = Path(tempfile.mkdtemp(prefix="ffmwiz_planexec_"))
         cls.inputs = []
         cls.plain_inputs = []
+        cls.primed_inputs = []
         for name, (colour, tone, seconds) in zip("abc", CLIPS):
             path = cls._root / f"{name}.mkv"
             # Each input carries a subtitle. Without one, a descriptor that
@@ -110,6 +120,20 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
             _run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
                   "-i", path, "-map", "0:v", "-map", "0:a", "-c", "copy", plain])
             cls.plain_inputs.append(plain)
+            # A twin whose CONTAINER clock leads its picture: audio at
+            # -CONTAINER_LEAD, video at 0. See CONTAINER_LEAD. Measured on the
+            # two-input join of these, before the descriptor stopped inventing
+            # the intermediate's clock:
+            #     plan  -ss 0.522000 -t 5.000000
+            #     run   no -ss,      -t 5.033000
+            # and the media the two wrote: 134 frames against 150, durations
+            # 4.664 against 5.129, frame hashes and audio MD5 both unequal.
+            primed = cls._root / f"{name}_primed.mkv"
+            _run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                  "-i", plain, "-itsoffset", f"-{CONTAINER_LEAD}", "-i", plain,
+                  "-map", "0:v", "-map", "1:a", "-c", "copy",
+                  "-copyts", "-avoid_negative_ts", "disabled", primed])
+            cls.primed_inputs.append(primed)
 
     @classmethod
     def tearDownClass(cls):
@@ -137,6 +161,27 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
                 "subtitle_streams": [s for s in info["streams"] if s["codec_type"] == "subtitle"],
                 "data_streams": [],
                 "duration": float(info["format"]["duration"])}
+
+    # Decoded audio is compared as PCM at one canonical rate, so a byte offset
+    # is a known number of seconds.
+    PCM_BYTES_PER_SECOND = 48000 * 2
+
+    def _media_facts(self, path):
+        """What a finished file IS, rather than what produced it."""
+        info = self._probe(path, "-show_format", "-show_streams", "-count_frames")
+        video = [s for s in info["streams"] if s["codec_type"] == "video"][0]
+        pcm = subprocess.run(
+            [str(part) for part in
+             [FFMPEG, "-v", "error", "-i", path, "-map", "0:a", "-ar", "48000",
+              "-ac", "1", "-f", "s16le", "-"]],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=600)
+        return {
+            "duration": float(info["format"]["duration"]),
+            "frames": int(video["nb_read_frames"]),
+            "frame_hashes": _run([FFMPEG, "-v", "error", "-i", path, "-map", "0:v",
+                                  "-f", "framehash", "-"]).stdout,
+            "audio_pcm": pcm.stdout,
+        }
 
     def _answers(self, out, inputs, **extra):
         items = [self._item(path) for path in inputs]
@@ -232,12 +277,19 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
 
         The numbers themselves get a tolerance, because one of them the plan
         genuinely cannot reproduce. The executor probes the intermediate it has
-        just written and reads the span its container reports; on a
-        concat-produced file that is one frame past the frames it actually
-        holds -- 5.033 for 150 frames at 30 fps, against the 5.000 the plan
-        computes from the inputs' picture spans. A speed change scales the gap
-        with it: at 0.5x the split trims read 10.113 against 10.000. Both cover
-        the whole picture.
+        just written and reads the span its container reports; the plan
+        computes one from the inputs' spans and the frame rate, and the two
+        agree only to the millisecond Matroska stores -- 5.033000 against
+        5.033333 for the joined pair here.
+
+        An earlier version of this note had that backwards: it read the probe's
+        5.033 as "one frame past the frames the file actually holds" and the
+        plan's 5.000 as right. Measured, the joined file's frames run
+        0.000..5.000 INCLUSIVE, so 5.033 is its true exclusive span and a plan
+        that stopped at 5.000 stopped on the last frame and dropped it -- 149
+        frames against 150, hidden here by this very tolerance until the media
+        oracle above went looking. The plan now counts the concat's seam frame,
+        and the residue really is a rounding difference.
 
         The tolerance is the larger of a couple of frames and 3%, which still
         fails the defect this replaced by a wide margin: 2.023 against 5.039 is
@@ -293,6 +345,69 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         self.assertAlmostEqual(joined, sum(windows), delta=0.2,
                                msg=f"segments cover {sum(windows)}s of a {joined}s "
                                    "joined timeline")
+
+    def test_a_primed_container_join_plans_what_it_runs(self):
+        # The clock the descriptor could not know. An intermediate is written
+        # without `-copyts`, so the muxer rebases it to zero however skewed its
+        # source was; copying the source's `format.start_time` onto it made the
+        # plan seek 522 ms into a file the run reads from the top.
+        self._compare("primed", sources=self.primed_inputs[:2])
+
+    def test_the_exported_plan_writes_the_media_the_run_writes(self):
+        """The argv comparison's oracle: run both, compare the FILES.
+
+        Equal-looking commands are not the contract -- the frames are. This
+        executes the exported stage list exactly as the PowerShell script would
+        and compares its output with the automatic pipeline's, on the primed
+        fixture where the two used to disagree:
+
+            MANUAL_DURATION 4.664   AUTOMATIC_DURATION 5.129
+            MANUAL_FRAMES   134     AUTOMATIC_FRAMES   150
+            FRAME_HASHES_EQUAL false   AUDIO_MD5_EQUAL false
+
+        The picture is compared exactly, hash for hash. The audio is compared as
+        decoded PCM, not as encoded bytes, because the plan's window is an
+        ESTIMATE of a length only a probe can know: the run reads the
+        millisecond span Matroska stores, 5.033000, and the plan computes
+        5.033333 from the inputs' spans and the frame rate. Those 333
+        microseconds re-encode the final AAC frame and nothing else -- measured,
+        the decoded PCM of the two is byte-identical up to 4.9 s and the
+        containers agree to the millisecond. So the last 200 ms is excluded from
+        the content comparison and the LENGTH is asserted separately: a plan
+        that lost real content, as this one did, moves both.
+        """
+        planning = self._tmp / "primedmedia_plan"
+        planning.mkdir(parents=True, exist_ok=True)
+        noise = StringIO()
+        with redirect_stdout(noise), redirect_stderr(noise):
+            stages = encoding.bounded_reverse_plan(
+                self._answers(planning, self.primed_inputs[:2]), planning / "ws")
+        for label, cmd in stages:
+            result = _run(cmd)
+            self.assertEqual(0, result.returncode,
+                             f"exported stage {label!r} failed: {result.stderr[-600:]}")
+
+        running = self._tmp / "primedmedia_run"
+        running.mkdir(parents=True, exist_ok=True)
+        self._executed(self._answers(running, self.primed_inputs[:2]))
+
+        manual = self._media_facts(planning / "result.mkv")
+        automatic = self._media_facts(running / "result.mkv")
+        self.assertEqual(automatic["frames"], manual["frames"],
+                         "the exported plan wrote a different number of frames")
+        self.assertAlmostEqual(automatic["duration"], manual["duration"], delta=0.05,
+                               msg="the exported plan wrote a different duration")
+        self.assertEqual(automatic["frame_hashes"], manual["frame_hashes"],
+                         "the exported plan wrote different pictures")
+
+        want, got = automatic["audio_pcm"], manual["audio_pcm"]
+        self.assertAlmostEqual(
+            len(want) / self.PCM_BYTES_PER_SECOND, len(got) / self.PCM_BYTES_PER_SECOND,
+            delta=0.05, msg="the exported plan wrote a different length of audio")
+        shared = min(len(want), len(got)) - int(0.2 * self.PCM_BYTES_PER_SECOND)
+        self.assertGreater(shared, 0, "there is no audio to compare")
+        self.assertEqual(want[:shared], got[:shared],
+                         "the exported plan wrote different audio")
 
     # ---- D06 -------------------------------------------------------------
     def test_every_speed_change_plans_what_it_runs(self):

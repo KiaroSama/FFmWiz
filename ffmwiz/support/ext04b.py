@@ -118,7 +118,9 @@ def build_audio_transform_filter_complex(
             else:
                 current_label = f"acut{pos}_0"
         out_label = f"aout{pos}"
-        if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
+        if (audio_speed_transform_enabled(answers)
+                or loudnorm_transform_enabled(answers)
+                or any(requested_fade_seconds(answers))):
             parts.append(f"[{current_label}]{build_encode_audio_speed_filter(answers)}[{out_label}]")
         elif current_label.startswith("0:"):
             parts.append(f"[{current_label}]anull[{out_label}]")
@@ -189,20 +191,30 @@ def run_segmented_reverse_video_speed(answers: dict[str, Any]) -> tuple[int, flo
     # The SHARED budget, not a flat 60 s: this mode called the splitter with no
     # size at all, and 60 s of 4K30 is 20.9 GiB of decoded frames -- the exact
     # promise the message makes is the one it broke (B06).
-    stream = (answers.get("video_streams") or [{}])[0]
-    try:
-        segment_fps = float(answers.get("fps") or services.get_video_fps(answers) or 0.0)
-    except Exception:
-        segment_fps = 0.0
-    segment_seconds = reverse_segment_seconds_for(
-        stream.get("width"), stream.get("height"), segment_fps, stream.get("pix_fmt"))
-    chunks = split_ranges_for_reverse_segments([], duration, segment_seconds)
+    #
+    # The shared PLAN OBJECT, not a second calculation from the probe. The local
+    # copy resolved its own descriptor and printed the result with
+    # `f"{seconds:.0f}s"`, which renders every legitimate subsecond window as
+    # nothing: 233 ms at 8K60 10-bit and 8 ms at 16K120 12-bit 4:4:4 were both
+    # announced as `0s` (D15). It also dropped the RATE on the way to the
+    # splitter, and the splitter's rate-less 1 ms floor is coarser than one
+    # frame above 1000 fps -- 15360x8640 at 1200 fps yuv444p12le measured
+    # 0.001 s = 2 frames = 2.206 GiB against the 2 GiB cap, where the plan's own
+    # single frame is 0.000833 s = 1.353 GiB (D08). Passing the whole plan keeps
+    # its seconds and its fps from drifting apart.
+    from ffmwiz import encoding  # higher tier: deferred to avoid a cycle
+    budget = encoding.reverse_segment_plan_for(answers)
+    chunks = split_ranges_for_reverse_segments([], duration, budget.seconds,
+                                               fps=budget.fps)
     if not chunks:
         return 1, 0.0
     appio.note(
-        f"Reverse mode uses {len(chunks)} segment(s) of up to {segment_seconds:.0f}s "
-        "to avoid buffering the full video in RAM."
+        f"Reverse mode uses {len(chunks)} segment(s) of up to "
+        f"{budget.window_text} to avoid buffering the full video in RAM."
     )
+    if not budget.hard_capped:
+        appio.note("This reverse is BEST-EFFORT, not hard-capped: "
+                   + "; ".join(budget.assumptions))
     started_at = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="ffmwiz_reverse_") as tmpdir_str:
         tmpdir = Path(tmpdir_str)

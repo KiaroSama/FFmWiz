@@ -43,6 +43,45 @@ from ffmwiz.support.L00_streams import *  # noqa: F401,F403
 from ffmwiz.support.L00_text import *  # noqa: F401,F403
 
 
+def fade_filter_parts(prefix: str, output_seconds: float,
+                      fade_in: float, fade_out: float) -> list[str]:
+    """Fade filters measured on the OUTPUT timeline.
+
+    `prefix` is "" for the picture (`fade`) and "a" for the sound (`afade`).
+    One function rather than two so the two chains cannot drift: a picture
+    that fades to black over a second while the sound stays at full volume is
+    the bug this shape prevents.
+
+    Both fades belong LAST in their chain, after the speed change and the
+    reversal, because "one second" means one second of the file the user gets.
+    A fade-out also has to know where that file ends, so an unknown or too
+    short duration drops it with a warning instead of emitting a negative
+    start time, which FFmpeg rejects outright.
+    """
+    parts: list[str] = []
+    if fade_in > 0:
+        parts.append(f"{prefix}fade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        if output_seconds > fade_out:
+            parts.append(f"{prefix}fade=t=out:"
+                         f"st={output_seconds - fade_out:.3f}:d={fade_out:.3f}")
+        else:
+            from ffmwiz.appio import log_warn  # higher tier: deferred to avoid a cycle
+            log_warn(
+                f"Fade out of {fade_out:.3f}s was dropped: the output is "
+                f"{output_seconds:.3f}s, so there is nothing to fade from.")
+    return parts
+
+
+def requested_fade_seconds(answers: dict[str, Any]) -> tuple[float, float]:
+    """(in, out) from the answers, or (0, 0) when they are not numbers."""
+    try:
+        return (max(0.0, float(answers.get("fade_in_seconds") or 0.0)),
+                max(0.0, float(answers.get("fade_out_seconds") or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
 def atempo_filter_chain(speed: float) -> str:
     """Build an atempo chain with each stage kept in FFmpeg's safe 0.5..2.0
     range. This avoids the artifacts/skipped-sample behavior of very large
@@ -182,6 +221,8 @@ def hardsub_subtitle_filter(answers: dict[str, Any]) -> str:
 
 __all__ = [
     'atempo_filter_chain',
+    'fade_filter_parts',
+    'requested_fade_seconds',
     'build_video_speed_filter',
     'VIDEO_SPEED_OUTPUT_TIMING_ARGS',
     'loudnorm_analysis_filter',

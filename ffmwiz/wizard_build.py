@@ -78,20 +78,84 @@ from ffmwiz.support.ext12 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.guibridge import *  # noqa: F401,F403
-from ffmwiz import guibridge  # noqa: F401
 from ffmwiz.metadata import *  # noqa: F401,F403
 from ffmwiz import metadata  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
-from ffmwiz import runner  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
-from ffmwiz import trackmanager  # noqa: F401
 
 from ffmwiz import wizard  # facade for monkeypatch-stable cross-module calls  # noqa: F401
 from ffmwiz.wizard import *  # sibling helpers  # noqa: F401,F403
+
+
+def build_orientation_filters(answers: dict[str, Any]) -> list[str]:
+    """Rotation and flips, which change the FRAME the rest of the chain sees.
+
+    They belong straight after the crop and before the frame rate and the
+    scale: a 90-degree rotation swaps width and height, so a resize target
+    asked for afterwards applies to the rotated picture, which is what the user
+    means by it. Putting them later would size the canvas against the source
+    orientation and letterbox the result.
+    """
+    out: list[str] = []
+    rotation = str(answers.get("rotate_choice") or "none").strip().lower()
+    if rotation in ROTATE_FILTERS:
+        out.append(ROTATE_FILTERS[rotation])
+    if answers.get("flip_horizontal"):
+        out.append("hflip")
+    if answers.get("flip_vertical"):
+        out.append("vflip")
+    return out
+
+
+def build_look_filters(answers: dict[str, Any]) -> list[str]:
+    """Colour, denoise and sharpen/blur, in the order they have to run.
+
+    All three leave the geometry alone, so they sit after the scale and before
+    the speed/reverse -- which matters, because `reverse` buffers whatever
+    reaches it and the memory budget is computed from the frame at ITS input.
+    A filter placed after `reverse` would also be applied to a buffered frame
+    for no benefit.
+
+    Denoise before sharpen is deliberate: sharpening first amplifies exactly
+    the grain the denoiser is about to remove.
+    """
+    out: list[str] = []
+    settings = []
+    for key, (low, high, neutral) in ADJUST_RANGES.items():
+        try:
+            value = float(answers.get(key, neutral))
+        except (TypeError, ValueError):
+            continue
+        if value != neutral:
+            settings.append(f"{key[len('adjust_'):]}={max(low, min(high, value)):g}")
+    if answers.get("adjust_grayscale"):
+        # Saturation wins over any explicit value: the user asked for no colour.
+        settings = [s for s in settings if not s.startswith("saturation=")]
+        settings.append("saturation=0")
+    if settings:
+        out.append("eq=" + ":".join(settings))
+
+    denoise = str(answers.get("denoise_level") or "off").strip().lower()
+    if denoise in DENOISE_FILTERS:
+        out.append(DENOISE_FILTERS[denoise])
+
+    sharpen = str(answers.get("sharpen_level") or "off").strip().lower()
+    blur = str(answers.get("blur_level") or "off").strip().lower()
+    if sharpen in SHARPEN_FILTERS:
+        out.append(SHARPEN_FILTERS[sharpen])
+    elif blur in BLUR_FILTERS:
+        # Only one of the two: sharpening a blur back is not a thing a user
+        # means, and emitting both would silently make the pair meaningless.
+        out.append(BLUR_FILTERS[blur])
+    return out
+
+
+def build_fade_filters(answers: dict[str, Any], output_seconds: float) -> list[str]:
+    """The picture's half of the shared fade rule (see `fade_filter_parts`)."""
+    return fade_filter_parts("", output_seconds, *requested_fade_seconds(answers))
 
 
 def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
@@ -99,6 +163,8 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
     if answers.get("crop_enabled"):
         left, right, top, bottom = normalized_crop_margins(answers)
         filters.append(f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1")
+
+    filters.extend(build_orientation_filters(answers))
 
     if answers.get("fps") is not None:
         filters.append(f"fps={answers['fps']}")
@@ -141,8 +207,19 @@ def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
                 f"upscaling={'yes' if max(width, height) > max(display_w, display_h) else 'no'}"
             )
 
+    filters.extend(build_look_filters(answers))
+
     if video_speed_transform_enabled(answers):
         filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
+
+    try:
+        output_seconds = encode_timeline_map(answers).output_duration
+    except (KeyError, ValueError, TypeError, ZeroDivisionError):
+        # Only a genuinely unknown duration. A bare `except Exception` here
+        # would also swallow a NameError or an ImportError and silently drop
+        # every fade-out, which is how the audio side broke.
+        output_seconds = 0.0
+    filters.extend(build_fade_filters(answers, output_seconds))
 
     # Crop dimensions are normalized to the output encoder grid by
     # normalized_crop_margins, so no black compatibility padding is added here.
@@ -857,6 +934,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 __all__ = [
     'append_single_input_split_outputs',
     'build_cpu_video_filter',
+    'build_orientation_filters',
+    'build_look_filters',
+    'build_fade_filters',
     'build_ffmpeg_command',
     'build_video_filter',
 ]

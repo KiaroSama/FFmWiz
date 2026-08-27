@@ -68,7 +68,6 @@ from ffmwiz.support.ext01 import *  # noqa: F401,F403
 from ffmwiz.support.ext02 import *  # noqa: F401,F403
 from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
-from ffmwiz import appio  # noqa: F401
 from ffmwiz.runtime import *  # noqa: E402,F401,F403  (back-import)
 
 

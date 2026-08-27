@@ -728,6 +728,11 @@ from ffmwiz.core.constants_tables import *  # noqa: E402,F401,F403
 
 
 __all__ = [
+    'ROTATE_FILTERS',
+    'DENOISE_FILTERS',
+    'SHARPEN_FILTERS',
+    'BLUR_FILTERS',
+    'ADJUST_RANGES',
     'GPU_DEVICE_INDEX',
     'OVERWRITE_OUTPUT',
     'COLOR_RANGE',
@@ -867,3 +872,49 @@ __all__ = [
     'EXTRACT_COPY_CONTAINERS_VIDEO',
     'EXTRACT_COPY_CONTAINERS_SUBTITLE',
 ]
+
+
+# --- Look filters (rotate/flip, colour, denoise, sharpen/blur, fade) --------
+# Added after a review of the ffmpeg-webCLI tool, which offers these as one-click
+# operations. They all fit the existing CPU filter chain, so they are wizard
+# questions rather than a separate mode: one composed command, the way the rest
+# of FFmWiz already works.
+
+# `transpose` values, plus the flips. 180 is two 90s rather than hflip,vflip so
+# a source with non-square pixels keeps its geometry.
+ROTATE_FILTERS: dict[str, str] = {
+    "90cw": "transpose=1",
+    "90ccw": "transpose=2",
+    "180": "transpose=1,transpose=1",
+}
+
+# hqdn3d luma/chroma spatial and temporal strengths. The middle row is FFmpeg's
+# own default; the others are half and double it.
+DENOISE_FILTERS: dict[str, str] = {
+    "light": "hqdn3d=2:1.5:3:2.25",
+    "medium": "hqdn3d=4:3:6:4.5",
+    "heavy": "hqdn3d=8:6:12:9",
+}
+
+# `unsharp=lx:ly:la:cx:cy:ca` -- luma amount only, chroma left alone so colour
+# fringing is not amplified along with detail.
+SHARPEN_FILTERS: dict[str, str] = {
+    "light": "unsharp=5:5:0.5:5:5:0.0",
+    "medium": "unsharp=5:5:1.0:5:5:0.0",
+    "heavy": "unsharp=5:5:1.5:5:5:0.0",
+}
+
+BLUR_FILTERS: dict[str, str] = {
+    "light": "boxblur=2:1",
+    "medium": "boxblur=5:1",
+    "heavy": "boxblur=10:1",
+}
+
+# `eq` ranges FFmpeg accepts, used to validate the wizard's answers.
+ADJUST_RANGES: dict[str, tuple[float, float, float]] = {
+    # key: (minimum, maximum, neutral)
+    "adjust_brightness": (-1.0, 1.0, 0.0),
+    "adjust_contrast": (0.0, 3.0, 1.0),
+    "adjust_saturation": (0.0, 3.0, 1.0),
+    "adjust_gamma": (0.1, 10.0, 1.0),
+}

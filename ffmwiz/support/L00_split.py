@@ -341,10 +341,19 @@ def split_ranges_for_reverse_segments(
         step = max(1, math.floor(step * rate + 1e-3)) / rate
     step = _floor_to_command_grid(step)
     # A step of zero would not terminate the tiling loop, and below the command
-    # grid it prints as `-t 0.000000`. With a known rate the frame count already
-    # bounds the chunk, so only the rate-less path needs the coarser floor --
-    # raising it there too would hand back more than one frame above 1000 fps.
-    step = max(step, 1e-6 if rate > 0 else 1e-3)
+    # grid it prints as `-t 0.000000`. That is the ONLY job this floor has, so
+    # it is the command grid and nothing coarser.
+    #
+    # It used to be 1 ms whenever no rate was given, which quietly OVERRODE a
+    # smaller window the caller had already measured -- and above 1000 fps a
+    # millisecond is more than one frame. Every production caller hands over a
+    # window that is already an exact frame count, and two of them had no rate
+    # to give: measured at 15360x8640, 1200 fps, yuv444p12le, the budget's own
+    # unit is one frame of 0.000833 s and 1.353 GiB, and the floor turned each
+    # chunk into 0.001 s -- two frames, 2.206 GiB, against a 2 GiB cap (D08).
+    # Raising a window the caller measured is not a floor's business; the
+    # caller refuses when a single frame cannot fit.
+    step = max(step, 1e-6)
     source_ranges = normalize_cut_ranges(ranges, duration) if ranges else []
     if not source_ranges and duration > 0:
         source_ranges = [(0.0, duration)]

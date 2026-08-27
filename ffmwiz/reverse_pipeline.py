@@ -88,19 +88,14 @@ from ffmwiz.support.ext12 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.guibridge import *  # noqa: F401,F403
-from ffmwiz import guibridge  # noqa: F401
 from ffmwiz.metadata import *  # noqa: F401,F403
 from ffmwiz import metadata  # noqa: F401
 from ffmwiz.modes import *  # noqa: F401,F403
-from ffmwiz import modes  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
-from ffmwiz import runner  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
-from ffmwiz import trackmanager  # noqa: F401
 from ffmwiz.wizard import *  # noqa: F401,F403
 from ffmwiz import wizard  # noqa: F401
 from ffmwiz import encoding  # facade for monkeypatched names  # noqa: E402
@@ -154,11 +149,29 @@ def bounded_reverse_plan(answers: dict[str, Any],
             MANUAL_PARTS [('slow_Part01.mkv', 2.023), ('slow_Part02.mkv', 2.04)]
 
         `duration` is now supplied by the caller, which knows what its stage
-        does, and `writer` is the answers dict that WILL write the file, so the
-        codec comes from the same resolver the command does rather than from a
-        guess. An unknown duration is a planning error, not a value to invent:
-        a plan that cannot describe its own intermediate must not be exported
-        as if it could.
+        does, and `writer` is the answers dict that WILL write the file, so
+        every property comes from the same resolvers the command does rather
+        than from a guess. An unknown duration is a planning error, not a value
+        to invent: a plan that cannot describe its own intermediate must not be
+        exported as if it could.
+
+        Two properties used to be copied straight off the source and were
+        wrong for the file being described.
+
+        The CLOCK. An intermediate is written without `-copyts`, so the muxer
+        rebases it to zero however skewed its source was -- but the source's
+        `format.start_time` was carried onto it, and `-ss` is built from
+        exactly that skew. On an MKV whose audio leads its picture by 522 ms:
+
+            plan  -ss 0.522000 -t 5.000000
+            run   no -ss,      -t 5.033000
+
+        and the media the two wrote, 134 frames against 150, durations 4.664
+        against 5.129, frame hashes and audio MD5 both unequal (D06). FFmpeg 8
+        writes a zero start for ordinary fixtures, which hid it entirely on a
+        modern build.
+
+        The GEOMETRY, which `intermediate_video_descriptor` now owns (D07).
         """
         if not duration or duration <= 0:
             raise ValueError(
@@ -168,14 +181,29 @@ def bounded_reverse_plan(answers: dict[str, Any],
         rebased = dict(source_answers)
         rebased.pop("join_input_items", None)
         rebased["input_path"] = produced
-        codec = encoding.intermediate_video_codec_name(writer)
+        writes = encoding.intermediate_video_descriptor(writer)
+        rate = (str(Fraction(writes["fps"]).limit_denominator(1000000))
+                if writes["fps"] else "")
         streams = [dict(stream) for stream in (source_answers.get("video_streams") or [])]
         for stream in streams:
-            stream["codec_name"] = codec
-            stream["duration"] = f"{duration:.6f}"
+            stream.update({"codec_name": writes["codec_name"],
+                           "width": writes["width"], "height": writes["height"],
+                           "pix_fmt": writes["pix_fmt"],
+                           "duration": f"{duration:.6f}",
+                           "start_time": "0.000000"})
+            if rate:
+                stream["avg_frame_rate"] = stream["r_frame_rate"] = rate
+            # Both are duration-derived and now stale -- an fps change alone
+            # invalidates the frame count. The stream duration above is the one
+            # answer; a leftover count or Matroska DURATION tag would shadow it
+            # the moment that answer went missing.
+            stream.pop("nb_frames", None)
+            if isinstance(stream.get("tags"), dict):
+                stream["tags"] = {key: value for key, value in stream["tags"].items()
+                                  if key.upper() != "DURATION"}
         rebased["video_streams"] = streams
         audio = [{**dict(stream), "codec_name": INTERMEDIATE_AUDIO_CODEC,
-                  "duration": f"{duration:.6f}"}
+                  "duration": f"{duration:.6f}", "start_time": "0.000000"}
                  for stream in (source_answers.get("audio_streams") or [])]
         rebased["audio_streams"] = audio
         # Carried, not emptied: the forward join merges and retimes the source
@@ -187,6 +215,7 @@ def bounded_reverse_plan(answers: dict[str, Any],
         rebased["subtitle_streams"] = subtitles
         fmt = dict(source_answers.get("format") or {})
         fmt["duration"] = f"{duration:.6f}"
+        fmt["start_time"] = "0.000000"
         fmt["format_name"] = "matroska,webm"
         rebased["format"] = fmt
         rebased["probe"] = {"streams": streams + audio + subtitles, "format": fmt}
@@ -220,11 +249,33 @@ def bounded_reverse_plan(answers: dict[str, Any],
         stages.append(("Join the inputs forward",
                        [str(part) for part in
                         wizard.build_join_encode_command(forward, items, joined)]))
-        # The JOINED length, measured the way the executor measures it: the sum
-        # of the inputs' picture spans. Carrying input 1's `format.duration`
-        # forward is what made the exported plan reverse one input's worth of a
-        # multi-input timeline (D05).
+        # The JOINED length. The sum of the inputs' picture spans, PLUS the one
+        # frame period the concat leaves at its first seam. Carrying input 1's
+        # `format.duration` forward is what made the exported plan reverse one
+        # input's worth of a multi-input timeline (D05); the seam is what made
+        # it lose the last frame of whatever it did reverse (D06).
+        #
+        # The seam is measurable and it is exactly one frame, however many
+        # inputs there are. Traced on 2 s + 3 s and on 2 s + 3 s + 1 s at
+        # 30 fps, the joined picture runs to the summed span INCLUSIVE:
+        #
+        #     2+3  150 frames, pts 0.000..5.000, span tag 5.033
+        #     2+3+1 180 frames, pts 0.000..6.000, span tag 6.033
+        #     seam  ..., 1.933, 1.967, 2.033, ...   <- the 2.000 slot is empty
+        #
+        # `-t` is a half-open window, so a plan that stops at the summed span
+        # stops ON the last frame's timestamp and drops it. The executor never
+        # saw this because it probes the file and reads the span the container
+        # reports, which already counts that frame: measured 150 frames against
+        # the exported plan's 149.
         joined_seconds = sum(encoding.join_item_picture_span(item) for item in items)
+        joined_fps = encoding.intermediate_video_descriptor(forward)["fps"]
+        # Only ever a correction to a length that is known. Adding it to an
+        # unreadable timeline would turn "I cannot describe this" into a
+        # confident one-frame plan, and `described()` refuses on zero for a
+        # reason.
+        if joined_seconds > 0 and joined_fps:
+            joined_seconds += 1.0 / joined_fps
         stage_source = described(answers, joined, joined_seconds, forward)
 
     reverse_answers = encoding.stage_answers(stage_source, owns=reverse_owns)
@@ -264,6 +315,11 @@ def bounded_reverse_plan(answers: dict[str, Any],
     reversed_seconds = final_processed_duration_for_splits(reverse_answers, duration)
     keep_ranges = normalize_cut_ranges(
         list(reverse_answers.get("cut_keep_ranges") or []), duration)
+    # The window the budget measured, tiled as measured. It used to be widened
+    # on the way in: the splitter floored a rate-less step at 1 ms, which is
+    # more than one frame above 1000 fps, so a plan whose own unit was one
+    # 0.000833 s frame emitted 0.001 s chunks -- two frames, 2.206 GiB against
+    # the 2 GiB cap (D08). The floor now stops at the command grid.
     chunks = encoding.split_ranges_for_reverse_segments(
         keep_ranges, duration, encoding.reverse_segment_seconds(reverse_answers))
     segment_ext = Path(reverse_answers["output_path"]).suffix.lstrip(".") or extension
@@ -638,6 +694,11 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
     original_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
     budget = encoding.reverse_segment_plan_for(answers)
     segment_seconds = budget.seconds
+    # Tiled at the size the budget measured. The splitter used to floor a
+    # rate-less step at 1 ms, which is more than one frame above 1000 fps: at
+    # 15360x8640, 1200 fps, yuv444p12le this tiled a 1 s timeline into 1000
+    # chunks of two frames -- 2.206 GiB against the 2 GiB cap -- where the
+    # budget's own unit is one frame of 0.000833 s and 1.353 GiB (D08).
     chunks = encoding.split_ranges_for_reverse_segments(original_keep_ranges, duration,
                                                segment_seconds)
     if not chunks:

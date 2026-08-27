@@ -22,18 +22,26 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Run as a SCRIPT (the GUI is launched as a subprocess) the package root
+# has to be importable, because the sibling modules are now addressed as
+# `ffmwiz.gui.<name>` rather than as bare top-level modules. Bare imports
+# only ever worked from this directory, so the installed package could not
+# import a single GUI module (D10).
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
 
-import gui_common
-import gui_style
-import gui_geometry
-import gui_editor_cut
-import gui_editor_crop
-import gui_editor_speed
-import gui_editor_audio
-import gui_editor_unified
-import gui_editor_unified_canvas
-import gui_editor_unified_timeline
+from ffmwiz.gui import gui_common
+from ffmwiz.gui import gui_style
+from ffmwiz.gui import gui_geometry
+from ffmwiz.gui import gui_editor_cut
+from ffmwiz.gui import gui_editor_crop
+from ffmwiz.gui import gui_editor_speed
+from ffmwiz.gui import gui_editor_audio
+from ffmwiz.gui import gui_editor_unified
+from ffmwiz.gui import gui_editor_unified_canvas
+from ffmwiz.gui import gui_editor_unified_timeline
 
 _MODULES = [
     gui_common,
@@ -72,7 +80,7 @@ for _m in _MODULES:
     for _k, _v in _ASSEMBLED.items():
         setattr(_m, _k, _v)
 
-from gui_common import main  # noqa: E402
+from ffmwiz.gui.gui_common import main  # noqa: E402
 
 
 if __name__ == "__main__":
