@@ -438,3 +438,67 @@ class ThePictureAndTheSoundFadeTogether(unittest.TestCase):
                     self._answers(fade_out_seconds=2.0))
         finally:
             wbb.encode_timeline_map = real
+
+
+class TheConfigKeyReachesTheSameFilters(unittest.TestCase):
+    """`video_look` in config.env, documented in Appendix B.
+
+    Mode 2 never asks the question, so the config key is the ONLY way a
+    non-interactive run reaches these filters. A key that is documented but not
+    read is worse than one that does not exist.
+    """
+
+    def _applied(self, settings):
+        # `config_value` reads `config["settings"]`, not the top level.
+        config = {"settings": settings}
+        from ffmwiz.support import ext08
+        answers = {
+            "video_streams": [{"codec_type": "video", "width": 640,
+                               "height": 480, "pix_fmt": "yuv420p"}],
+            "audio_streams": [], "format": {"duration": "10.0"},
+            "input_path": FFmWiz.Path("x.mkv"), "packet_sizes": {},
+        }
+        real = FFmWiz.services.get_packet_sizes
+        FFmWiz.services.get_packet_sizes = lambda _a: {}
+        try:
+            ext08.apply_config_video_options(answers, config,
+                                             force_video_options=True)
+        finally:
+            FFmWiz.services.get_packet_sizes = real
+        return answers
+
+    def test_the_key_is_parsed_into_the_same_answers_the_prompt_writes(self):
+        from ffmwiz.wizard_look import parse_look_tokens
+        text = "180,gray,denoise=heavy,fadeout=2"
+        applied = self._applied({"video_look": text})
+        for key, value in parse_look_tokens(text).items():
+            self.assertEqual(value, applied.get(key), key)
+
+    def test_an_absent_key_leaves_the_chain_alone(self):
+        applied = self._applied({})
+        for key in FFmWiz.LOOK_ANSWER_KEYS:
+            self.assertNotIn(key, applied)
+
+    def test_n_means_none(self):
+        self.assertNotIn("rotate_choice", self._applied({"video_look": "n"}))
+
+    def test_a_stale_answer_is_cleared_by_a_config_that_omits_the_key(self):
+        # The applier runs on a dict that may already carry a previous job's
+        # answers. Leaving them would silently rotate an unrelated encode.
+        from ffmwiz.support import ext08
+        answers = self._applied({"video_look": "90cw"})
+        real = FFmWiz.services.get_packet_sizes
+        FFmWiz.services.get_packet_sizes = lambda _a: {}
+        try:
+            ext08.apply_config_video_options(answers, {"settings": {}},
+                                             force_video_options=True)
+        finally:
+            FFmWiz.services.get_packet_sizes = real
+        self.assertNotIn("rotate_choice", answers)
+
+    def test_a_bad_value_is_rejected_not_ignored(self):
+        # `fail()` prints before it exits; keep that off the suite's console.
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()),                 contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self._applied({"video_look": "sideways"})

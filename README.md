@@ -14,6 +14,7 @@ It is designed for repeated local encoding work with NVIDIA/NVENC support, confi
 
 - Fifteen menu modes covering encoding, lossless cutting, remuxing, joining, hard-subbing, stream extraction, media reports, metadata editing, and track management.
 - A unified graphical video editor: preview with crop overlay, waveform, multi-range cuts, split points, timeline zoom/pan, and speed/reverse in one window.
+- One-line picture filters in the encode wizard: rotate, mirror, brightness/contrast/saturation, grayscale, denoise, sharpen or blur, and fades that apply to picture and sound together.
 - CUDA/NVENC acceleration when the chosen encoder and your FFmpeg build support it, with automatic CPU fallback.
 - Real per-stream size detection via ffprobe packet scanning, plus empty, near-empty, and duplicate audio-track detection.
 - Config-driven repeatable jobs, EBU R128 loudness normalization, and estimated output size before you start.

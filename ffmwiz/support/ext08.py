@@ -431,6 +431,18 @@ def apply_config_video_options(
     else:
         parse_crop_config_value(answers, config_value(config, "crop"), config)
 
+    # The picture filters. Absent or `n` means none, which is also what every
+    # one of them defaults to, so a config that does not mention them leaves
+    # the chain exactly as it was.
+    look = (config_value(config, "video_look") or "").strip()
+    for key in LOOK_ANSWER_KEYS:
+        answers.pop(key, None)
+    if look and look.lower() not in {"n", "no"}:
+        try:
+            answers.update(parse_look_tokens(look))
+        except ValueError as error:
+            fail(f"video_look in config.env is not valid: {error}")
+
     if not force_video_options and not video_reencode_options_applicable(answers):
         return
 
