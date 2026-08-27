@@ -82,17 +82,13 @@ from ffmwiz.support.ext12 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.guibridge import *  # noqa: F401,F403
-from ffmwiz import guibridge  # noqa: F401
 from ffmwiz.metadata import *  # noqa: F401,F403
 from ffmwiz import metadata  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
-from ffmwiz import runner  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
-from ffmwiz import trackmanager  # noqa: F401
 
 from ffmwiz import wizard  # facade for monkeypatch-stable cross-module calls  # noqa: F401
 from ffmwiz.wizard import *  # sibling helpers  # noqa: F401,F403
@@ -145,6 +141,13 @@ def build_hardsub_video_filter(answers: dict[str, Any], video_encoder: str) -> s
 
 
 def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
+    # A build is a PLAN BOUNDARY, and this builder is the only place its callers
+    # share. Without it a map left over from an earlier plan still decided what
+    # HardSub encoded: a fresh H264 request carrying a previous plan's effective
+    # VP9 built `-c:v libvpx-vp9`, and the revision never moved (D12). Before
+    # ANY effective-value lookup, so nothing resolves into a map it does not
+    # own, and on the OUTER dict, before any shallow copy below it.
+    require_plan_revision(answers)
     answers["_hardsub_mode"] = True
     ffmpeg = answers["ffmpeg"]
     input_path: Path = answers["input_path"]
@@ -166,10 +169,23 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
     container_codec, codec_note = container_video_codec(output_ext, requested_codec)
     if codec_note:
         appio.note(codec_note)
-        answers["video_codec"] = container_codec
+        # The RESOLVED codec, never the requested one. Writing the fallback back
+        # into `answers["video_codec"]` left Back, the summary and the retained
+        # config unable to tell a one-plan container fallback from the user's
+        # own answer: a .webm HardSub of an H264 request came back reading VP9,
+        # and the effective map stayed EMPTY, so nothing recorded that a
+        # substitution had happened at all (D11). `resolve_video_encoder` reads
+        # the effective map first and falls back to the request, so recording it
+        # here is the whole fix.
+        effective_settings(answers)["video_codec"] = container_codec
     video_encoder, tag, _profile = resolve_video_encoder(answers)
     if video_encoder == "copy":
+        # HardSub burns the subtitles into the picture, so a copy request can
+        # never stand. The summary prints `effective_value(answers,
+        # "video_codec")`, which would otherwise announce a copy over a
+        # `-c:v libx265` command.
         video_encoder = "libx265"
+        effective_settings(answers)["video_codec"] = "H265"
     video_encoder, tag, _profile = enforce_bit_depth_compatible_video_encoder(answers, video_encoder, tag, _profile)
     cmd: list[str] = [ffmpeg, "-y" if OVERWRITE_OUTPUT else "-n", "-i", str(input_path)]
 
@@ -843,6 +859,15 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         answers.get("output_collision_suffix", "_Encode"),
     )
     answers["output_path"] = output_path
+    # A build is a PLAN BOUNDARY. The lease and the effective map were opened
+    # here but the revision was not, so a map from an earlier plan still decided
+    # what the join encoded: a fresh H264 request carrying a previous plan's
+    # effective VP9 built `-c:v libvpx-vp9` with the revision at None throughout
+    # (D13). It must come BEFORE `effective_settings()` below -- an untagged map
+    # on a dict that already claims a revision is exactly what the boundary
+    # refuses -- and before the shallow copy, so a reverse-pipeline stage gets
+    # its own revision instead of resolving into the job's.
+    require_plan_revision(answers)
     # Open the lease BEFORE the shallow copy. dict() copies the key but shares
     # the object, so anything the copy leases below is still owned out here --
     # but only if the lease already exists at copy time.

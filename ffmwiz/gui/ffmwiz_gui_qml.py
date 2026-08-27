@@ -45,8 +45,13 @@ from pathlib import Path
 
 # Reuse the classic engine's palette and logging so colors/log format match.
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+# The PACKAGE ROOT, not this directory: the sibling modules are addressed as
+# `ffmwiz.gui.<name>` now, so a bare `sys.path` entry for this folder would
+# import them a second time under different names. Bare imports were also why
+# the installed package could not import a single GUI module (D10).
+_PACKAGE_ROOT = _THIS_DIR.parent.parent
+if str(_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PACKAGE_ROOT))
 
 # Import the palette/log writer from the modules that DEFINE them. ffmwiz_gui
 # is only a wrapper: it injects the assembled namespace INTO its siblings and
@@ -54,9 +59,9 @@ if str(_THIS_DIR) not in sys.path:
 # silently dropped the QML engine onto a stale 26-key fallback palette with no
 # shared-log output (D23). gui_style/gui_common have no top-level Qt import, so
 # this stays cheap and keeps the module importable without PySide6.
-import gui_geometry  # type: ignore
-from gui_style import PALETTE as _PALETTE  # type: ignore
-from gui_common import _gui_write_log as _classic_write_log  # type: ignore
+from ffmwiz.gui import gui_geometry  # type: ignore
+from ffmwiz.gui.gui_style import PALETTE as _PALETTE  # type: ignore
+from ffmwiz.gui.gui_common import _gui_write_log as _classic_write_log  # type: ignore
 
 
 def _log(level: str, message: str) -> None:
@@ -287,7 +292,7 @@ def main() -> int:
     # Set the log path so _gui_write_log targets the shared FFmWiz log file.
     # The global it reads lives in gui_common and must be a Path, not a str.
     try:
-        import gui_common  # type: ignore
+        from ffmwiz.gui import gui_common  # type: ignore
         log_path = request.get("log_path")
         if log_path:
             gui_common._GUI_LOG_PATH = Path(log_path)  # noqa: SLF001
@@ -581,7 +586,7 @@ def main() -> int:
     # parent watchdog so the editor dies with the FFmWiz CLI that launched it
     # instead of outliving it with its ffmpeg proxies (D15).
     try:
-        import gui_common  # type: ignore
+        from ffmwiz.gui import gui_common  # type: ignore
         gui_common._set_windows_app_id()  # noqa: SLF001
         gui_common._set_qt_application_icon(app)  # noqa: SLF001
         app.setDesktopFileName(gui_common.APP_ID)
@@ -607,7 +612,7 @@ def main() -> int:
     # QQuickWindow exposes winId() just like QWidget, which is all the native
     # WM_SETICON path needs (USER-2-2).
     try:
-        import gui_common  # type: ignore
+        from ffmwiz.gui import gui_common  # type: ignore
         gui_common._apply_native_windows_icon(engine.rootObjects()[0])  # noqa: SLF001
     except Exception as exc:  # noqa: BLE001
         _log("DEBUG", f"Could not apply the native window icon: {exc}")

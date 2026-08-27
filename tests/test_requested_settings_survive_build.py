@@ -63,6 +63,11 @@ requires_ffmpeg = unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe not on
 #   cropped_aspect_ratio   colour-range logging
 #   resolution_scale_axis
 #   _resolution_warning_emitted  once-only guard so one note is not printed twice
+#   _hardsub_mode          which BUILDER was called, not anything the user
+#                          answered. `can_use_cuda_fast_path()` reads it to keep
+#                          the libass chain off the CUDA fast path, and the flag
+#                          is only true because `build_hardsub_command` is the
+#                          function that ran
 #   _artifact_lease        the plan containers themselves. They are opened on the
 #   _effective_settings    OUTER dict before any shallow copy and mutated in
 #   _plan_revision         place, so a correct caller never sees them replaced.
@@ -77,6 +82,7 @@ ALLOWED_BUILDER_WRITES = frozenset({
     "cropped_aspect_ratio",
     "resolution_scale_axis",
     "_resolution_warning_emitted",
+    "_hardsub_mode",
     FFmWiz.ARTIFACT_LEASE_KEY,
     FFmWiz.EFFECTIVE_SETTINGS_KEY,
     FFmWiz.PLAN_REVISION_KEY,
@@ -119,6 +125,9 @@ class RequestedSettingsSurviveTheBuild(NoLeakedArtifacts, unittest.TestCase):
         if result.returncode != 0:
             raise unittest.SkipTest("could not build the fixture: " + (result.stderr or "")[-300:])
         cls.probe = FFmWiz.ffprobe_full_json(FFPROBE, cls.source)
+        cls.subtitle = cls._class_tmp / "s.srt"
+        cls.subtitle.write_text("1\n00:00:00,000 --> 00:00:02,000\nhi\n\n",
+                                encoding="utf-8")
 
     @classmethod
     def tearDownClass(cls):
@@ -260,6 +269,83 @@ class RequestedSettingsSurviveTheBuild(NoLeakedArtifacts, unittest.TestCase):
                 before = dict(answers)
                 self._build(builder, answers)
                 self.assertEqual([], self._unexpected_writes(before, answers))
+
+    def _hardsub_answers(self, **extra):
+        extra.setdefault("video_codec", "H264")
+        answers = self._answers(
+            hardsub_subtitle_source="external",
+            hardsub_subtitle_path=self.subtitle,
+            hardsub_audio_mode="copy-all",
+            hardsub_audio_container_policy="aac",
+            hardsub_audio_bitrate_kbps=128,
+            hardsub_quality="balanced",
+            **extra)
+        return answers
+
+    def test_the_hardsub_container_fallback_is_recorded_and_not_written_back(self):
+        # Measured on the audited tree, through the public HardSub builder:
+        #     REQUEST_BEFORE H264   REQUEST_AFTER VP9
+        #     EFFECTIVE_CODEC None  ENCODER libvpx-vp9
+        # The fallback is right for .webm; overwriting the request is not, and
+        # it left the effective map EMPTY so nothing recorded the substitution
+        # at all (D11).
+        answers = self._hardsub_answers(output_ext="webm")
+        before = dict(answers)
+        cmd = self._build(FFmWiz.build_hardsub_command, answers)
+        self.assertEqual("libvpx-vp9", self._option(cmd, "-c:v", "-c:v:0"),
+                         ".webm really does force VP9 over an H264 request")
+        self.assertEqual("H264", answers["video_codec"],
+                         "Back must still see the codec the user asked for")
+        self.assertEqual("VP9", FFmWiz.effective_value(answers, "video_codec"),
+                         "and the substitution has to be recorded somewhere")
+        self.assertEqual([], self._unexpected_writes(before, answers))
+
+    def test_a_hardsub_container_that_allows_the_request_records_nothing(self):
+        # The effective map is for SUBSTITUTIONS. Writing to it unconditionally
+        # would make every build look like a fallback.
+        answers = self._hardsub_answers(output_ext="mkv")
+        before = dict(answers)
+        cmd = self._build(FFmWiz.build_hardsub_command, answers)
+        self.assertEqual("libx264", self._option(cmd, "-c:v", "-c:v:0"))
+        self.assertEqual("H264", answers["video_codec"])
+        self.assertNotIn("video_codec", FFmWiz.effective_settings(answers))
+        self.assertEqual([], self._unexpected_writes(before, answers))
+
+    def test_a_hardsub_copy_request_records_the_encoder_it_really_uses(self):
+        # HardSub burns the subtitles in, so `copy` can never stand. The
+        # summary line prints `effective_value(answers, "video_codec")`, so
+        # leaving the request in place there would have it announce a copy over
+        # a `-c:v libx265` command.
+        answers = self._hardsub_answers(video_codec="copy", output_ext="mkv")
+        before = dict(answers)
+        cmd = self._build(FFmWiz.build_hardsub_command, answers)
+        self.assertEqual("libx265", self._option(cmd, "-c:v", "-c:v:0"))
+        self.assertEqual("copy", answers["video_codec"])
+        self.assertEqual("H265", FFmWiz.effective_value(answers, "video_codec"))
+        self.assertEqual([], self._unexpected_writes(before, answers))
+
+    def test_the_join_builder_only_writes_its_documented_keys(self):
+        item = self._join_item(self.source)
+        answers = self._answers(join_input_items=[item, item])
+        before = dict(answers)
+        self._build(FFmWiz.build_join_encode_command, answers, [item, item],
+                    self._tmp / "joined.mkv")
+        self.assertEqual("copy", answers["video_codec"])
+        self.assertEqual("libx265", FFmWiz.effective_value(answers, "video_codec"),
+                         "a join across the concat filter really does re-encode")
+        self.assertEqual([], self._unexpected_writes(before, answers))
+
+    def _join_item(self, path):
+        probe = FFmWiz.ffprobe_full_json(FFPROBE, path)
+        streams = probe.get("streams", [])
+        return {
+            "path": path, "probe": probe, "format": probe.get("format", {}),
+            "streams": streams,
+            "video_streams": [s for s in streams if s.get("codec_type") == "video"],
+            "audio_streams": [s for s in streams if s.get("codec_type") == "audio"],
+            "subtitle_streams": [], "attachment_streams": [], "data_streams": [],
+            "duration": float(probe.get("format", {}).get("duration") or 0.0),
+        }
 
     def test_the_two_known_normalizations_are_not_quietly_inside_the_allowed_set(self):
         # The exception list is only honest while it stays an exception.

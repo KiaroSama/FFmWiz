@@ -379,5 +379,163 @@ class RebuiltPlansForgetTheLastOne(NoLeakedArtifacts, unittest.TestCase):
                          "the crop fallback must not survive the crop")
 
 
+@requires_ffmpeg
+class EveryPublicBuilderOwnsTheBoundary(RebuiltPlansForgetTheLastOne):
+    """HardSub and Join reached the encoder without entering a plan revision.
+
+    `build_ffmpeg_command` took the boundary in D14; the other two public
+    builders did not, so a map left over from an earlier plan still decided
+    what they encoded. Measured on the audited tree, by direct call:
+
+        HardSub  FRESH_REQUEST H264  STALE_EFFECTIVE VP9  ENCODER libvpx-vp9
+                 PLAN_REVISION 2 -> 2        (an already-built revision reused)
+        Join     FRESH_REQUEST H264  STALE_EFFECTIVE VP9  ENCODER libvpx-vp9
+                 PLAN_REVISION None -> None  (no revision was ever opened)
+
+    A direct public-builder call has to be as safe as a complete wizard flow,
+    because Folder items, Back/rebuild and the reverse pipeline's stages all
+    reach these builders without a step in between.
+    """
+
+    def _subtitle(self):
+        path = self._tmp / "s.srt"
+        path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n\n", encoding="utf-8")
+        return path
+
+    def _hardsub_answers(self, primary, **extra):
+        return self._answers(
+            primary, video_codec="H264",
+            hardsub_subtitle_source="external", hardsub_subtitle_path=self._subtitle(),
+            hardsub_audio_mode="copy-all", hardsub_audio_container_policy="aac",
+            hardsub_audio_bitrate_kbps=128, hardsub_quality="balanced", **extra)
+
+    def _build(self, builder, answers, *args):
+        silent = mock.patch.object(FFmWiz.appio, "note", lambda *a, **k: None)
+        with contextlib.redirect_stdout(io.StringIO()), silent:
+            return [str(part) for part in builder(answers, *args)]
+
+    def _encoder(self, cmd):
+        for name in ("-c:v", "-c:v:0"):
+            if name in cmd:
+                return cmd[cmd.index(name) + 1]
+        return None
+
+    # ---- D12 ----
+    def test_the_hardsub_builder_does_not_inherit_a_previous_plans_codec(self):
+        answers = self._hardsub_answers(self._clip("a"))
+        stale = FFmWiz.begin_plan(answers)
+        FFmWiz.effective_settings(answers)["video_codec"] = "VP9"
+        FFmWiz.require_plan_revision(answers)      # that plan was BUILT
+
+        cmd = self._build(FFmWiz.build_hardsub_command, answers)
+        self.assertEqual("libx264", self._encoder(cmd),
+                         "the fresh H264 request must control the resolution")
+        self.assertNotEqual(stale, FFmWiz.plan_revision(answers))
+        self.assertEqual("H264", answers["video_codec"])
+        answers["cmd"] = cmd
+        self.assertEqual("h264", dict(self._codecs(self._execute(answers))).get("video"))
+
+    # ---- D13 ----
+    def test_the_join_builder_does_not_inherit_a_previous_plans_codec(self):
+        primary, other = self._clip("a"), self._clip("b", size="320x180")
+        items = [self._item(primary), self._item(other)]
+        answers = self._answers(primary, video_codec="H264",
+                                join_input_items=items[1:])
+        FFmWiz.effective_settings(answers)["video_codec"] = "VP9"
+
+        joined = self._tmp / "joined.mkv"
+        cmd = self._build(FFmWiz.build_join_encode_command, answers, items, joined)
+        self.assertEqual("libx264", self._encoder(cmd))
+        self.assertIsNotNone(FFmWiz.plan_revision(answers),
+                             "the builder has to OPEN a revision, not skip one")
+        self.assertEqual("H264", answers["video_codec"])
+        answers["cmd"] = cmd
+        self.assertEqual("h264", dict(self._codecs(self._execute(answers))).get("video"))
+
+    def test_a_second_direct_build_gets_its_own_revision(self):
+        # Back, change the container, rebuild -- with nothing but the builder
+        # in between. The webm fallback must not survive into the .mkv rebuild.
+        answers = self._hardsub_answers(self._clip("a"), output_ext="webm")
+        first_cmd = self._build(FFmWiz.build_hardsub_command, answers)
+        first = FFmWiz.plan_revision(answers)
+        self.assertEqual("libvpx-vp9", self._encoder(first_cmd))
+        self.assertEqual("VP9", FFmWiz.effective_value(answers, "video_codec"))
+
+        self._go_back(answers, output_ext="mkv")
+        second_cmd = self._build(FFmWiz.build_hardsub_command, answers)
+        self.assertNotEqual(first, FFmWiz.plan_revision(answers))
+        self.assertEqual("libx264", self._encoder(second_cmd))
+        answers["cmd"] = second_cmd
+        self.assertEqual("h264", dict(self._codecs(self._execute(answers))).get("video"))
+
+    def test_a_stage_copy_still_shares_the_lease_it_was_handed(self):
+        # The boundary must not cost the reverse pipeline its cleanup: a stage
+        # copy carries the OUTER lease object, and taking a fresh revision on
+        # the copy may not replace it.
+        primary, other = self._clip("a"), self._clip("b", size="320x180")
+        items = [self._item(primary), self._item(other)]
+        answers = self._answers(primary, video_codec="H264")
+        lease = FFmWiz.artifact_lease(answers)
+        stage = dict(answers)
+        self._build(FFmWiz.build_join_encode_command, stage, items,
+                    self._tmp / "staged.mkv")
+        self.assertIs(lease, FFmWiz.artifact_lease(stage))
+        self.assertIsNot(FFmWiz.effective_settings(stage),
+                         FFmWiz.effective_settings(answers),
+                         "a stage's resolutions belong to the stage, not the job")
+
+    def test_no_public_builder_lets_a_stale_map_change_its_command(self):
+        """The audit D13 asks for, as an assertion rather than a claim.
+
+        Every builder below is called twice with identical requested answers --
+        once from a clean dict, once from one carrying another plan's resolved
+        codecs. A builder that reads the effective map without opening its own
+        revision produces a different command for the second call.
+        """
+        primary = self._clip("a")
+        cases = (
+            ("main encode", FFmWiz.build_ffmpeg_command, dict(), ()),
+            ("hardsub", FFmWiz.build_hardsub_command, "hardsub", ()),
+            ("video speed/reverse", FFmWiz.build_video_speed_reverse_command,
+             dict(reverse_video=True, speed_factor=1.0, include_audio=True), ()),
+            ("audio speed/reverse", FFmWiz.build_audio_speed_reverse_command,
+             dict(audio_index=0, reverse_audio=True, speed_factor=2.0,
+                  audio_tool_output_ext="flac"), ()),
+            ("audio cut", FFmWiz.build_audio_cut_command,
+             dict(audio_index=0, audio_keep_ranges=[(0.0, 0.5)],
+                  audio_tool_output_ext="flac"), ()),
+            ("audio transform", FFmWiz.build_audio_transform_command,
+             dict(audio_index=0, reverse_audio=True, audio_speed_enabled=True,
+                  audio_speed_factor=1.5, audio_cut_keep_ranges=[(0.0, 0.5)],
+                  audio_tool_output_ext="flac"), ()),
+        )
+        for label, builder, extra, args in cases:
+            with self.subTest(builder=label):
+                def make(stale):
+                    answers = (self._hardsub_answers(primary) if extra == "hardsub"
+                               else self._answers(primary, **extra))
+                    if stale:
+                        FFmWiz.effective_settings(answers)["video_codec"] = "VP9"
+                        FFmWiz.effective_settings(answers)["audio_codec"] = "libopus"
+                    return self._build(builder, answers, *args)
+                self.assertEqual(make(False), make(True),
+                                 f"{label} resolved into a map it does not own")
+
+    def test_the_join_builder_is_covered_by_the_same_audit(self):
+        # Separate only because it needs the join items the others do not.
+        primary, other = self._clip("a"), self._clip("b", size="320x180")
+        items = [self._item(primary), self._item(other)]
+
+        def make(stale):
+            answers = self._answers(primary, video_codec="H264",
+                                    join_input_items=items[1:])
+            if stale:
+                FFmWiz.effective_settings(answers)["video_codec"] = "VP9"
+                FFmWiz.effective_settings(answers)["audio_codec"] = "libopus"
+            return self._build(FFmWiz.build_join_encode_command, answers, items,
+                               self._tmp / "audit.mkv")
+        self.assertEqual(make(False), make(True))
+
+
 if __name__ == "__main__":
     unittest.main()

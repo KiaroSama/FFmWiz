@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz.wizard_look import step_video_look
 from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
@@ -82,13 +83,10 @@ from ffmwiz.support.ext12 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.guibridge import *  # noqa: F401,F403
-from ffmwiz import guibridge  # noqa: F401
 from ffmwiz.metadata import *  # noqa: F401,F403
 from ffmwiz import metadata  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
-from ffmwiz import runner  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
@@ -119,6 +117,7 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         "use_gpu": ("use_gpu",),
         "crop_enabled": ("crop",),
         "crop_top": ("crop",), "crop_left": ("crop",), "crop_right": ("crop",), "crop_bottom": ("crop",),
+        "video_look": ("video_look",),
         "video_bitrate": ("video_bitrate_kbps",),
         "nvenc_multipass": ("nvenc_multipass",),
         "cpu_two_pass": ("cpu_two_pass",),
@@ -173,6 +172,20 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         wizard.Step("crop_left", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_left),
         wizard.Step("crop_right", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_right),
         wizard.Step("crop_bottom", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_bottom),
+        # Filters need a re-encode, so this rides the same gate as the
+        # bitrate and resolution questions rather than crop's. In config
+        # mode it is skipped entirely unless the config names it: every
+        # one of these filters is off by default, so a config that does
+        # not mention them is asking for none -- and a non-interactive
+        # run has no one to answer the prompt. The unified editor path is
+        # contractually prompt-free, so it is skipped there too, exactly
+        # like the crop questions above.
+        wizard.Step("video_look",
+                    lambda a: (video_reencode_options_applicable(a)
+                               and not a.get("_unified_video_editor_used")
+                               and not a.get("_unified_video_editor_declined")
+                               and (not config_mode or cfg_has("video_look"))),
+                    step_video_look),
         wizard.Step("video_bitrate", video_reencode_options_applicable, wizard.step_video_bitrate),
         wizard.Step("nvenc_multipass", wizard.nvenc_multipass_prompt_applicable, wizard.step_nvenc_multipass),
         wizard.Step("cpu_two_pass", cpu_two_pass_applicable, wizard.step_cpu_two_pass),

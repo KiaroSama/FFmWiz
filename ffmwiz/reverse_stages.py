@@ -86,23 +86,16 @@ from ffmwiz.support.ext10 import *  # noqa: F401,F403
 from ffmwiz.support.ext11 import *  # noqa: F401,F403
 from ffmwiz.support.ext12 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
-from ffmwiz import appio  # noqa: F401
 from ffmwiz.guibridge import *  # noqa: F401,F403
-from ffmwiz import guibridge  # noqa: F401
 from ffmwiz.metadata import *  # noqa: F401,F403
 from ffmwiz import metadata  # noqa: F401
 from ffmwiz.modes import *  # noqa: F401,F403
-from ffmwiz import modes  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
-from ffmwiz import runner  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
-from ffmwiz import trackmanager  # noqa: F401
 from ffmwiz.wizard import *  # noqa: F401,F403
-from ffmwiz import wizard  # noqa: F401
 from ffmwiz import encoding  # facade for monkeypatched names  # noqa: E402
 
 
@@ -139,8 +132,15 @@ def reverse_filter_input_for(answers: dict[str, Any]):
     """
     stream = (answers.get("video_streams") or [{}])[0]
     try:
-        source_fps = float(services.get_video_fps(answers) or 0.0)
-    except Exception:
+        # `default=0.0`, NOT the helper's 25.0. A stream whose rate the probe
+        # cannot read was budgeted at 25 fps and still reported hard_capped:
+        # 7680x4320 yuv420p10le with `avg_frame_rate=0/0` planned a 560 ms
+        # window of 14 frames, which at a real 120 fps decodes 68 frames =
+        # 7.749 GiB against the 2 GiB cap. Zero is what makes the planner's
+        # "rate unknown" branch fire, so an unknown rate is refused or marked
+        # best-effort instead of silently promised.
+        source_fps = float(services.get_video_fps(answers, default=0.0) or 0.0)
+    except (KeyError, ValueError, TypeError):
         source_fps = 0.0
     crop_size = cropped_source_size(answers) if answers.get("crop_enabled") else None
     try:
@@ -372,6 +372,49 @@ def intermediate_video_codec_name(writer: dict[str, Any]) -> str:
     return _ENCODER_CODEC_NAMES.get(encoder, encoder or "h264")
 
 
+def intermediate_video_descriptor(writer: dict[str, Any]) -> dict[str, Any]:
+    """The video properties of the file the stage described by `writer` WRITES.
+
+    Not the properties of the file it reads. A forward join owns crop, fps and
+    resize, so the picture it hands the reverse stage can be nothing like the
+    one it started from -- and the reverse memory budget is computed from
+    exactly these numbers. Measured on two 160x120 sources joined and scaled to
+    1920x1080 at 60 fps, against a 640 MiB cap over 512 MiB of overhead:
+
+        EXPORTED_SEGMENTS 1, -t 5.000000  (300 frames of 1920x1080)
+        SAFE_POST_TRANSFORM 37 frames = 0.616666 s
+        ESTIMATED_PEAK 1.499 GiB   CAP 0.625 GiB   EXCESS 2.40x
+
+    The automatic executor probes the intermediate it has just written and is
+    safe; only the exported plan, which describes a file that does not exist
+    yet, could be this wrong (D07).
+
+    Every value comes from the SAME helper the command builder uses --
+    `reverse_filter_input_for` for the geometry and rate at the end of the
+    filter chain, `target_pixel_format_for_answers` for the format the resolved
+    encoder writes -- so a descriptor cannot disagree with the command that
+    produces it. What a stage cannot know until it has run is deliberately
+    absent: the written duration is supplied by the caller that planned it, and
+    the frame count is not guessed at all.
+
+    `width`/`height` come back as 0 when the source geometry is unreadable,
+    which is what makes the reverse budget REFUSE rather than plan against an
+    invented picture.
+    """
+    resolved = encoding.reverse_filter_input_for(dict(writer))
+    try:
+        # The format the file will hold, not the wider one the reverse BUFFER
+        # may hold: `reverse_filter_input_for` deliberately takes the larger of
+        # the source and the graph format when sizing memory, and that
+        # conservatism belongs to the budget, not to a description of a file.
+        pix_fmt = target_pixel_format_for_answers(writer) or resolved.pix_fmt
+    except Exception:  # a descriptor must never break the plan it describes
+        pix_fmt = resolved.pix_fmt
+    return {"codec_name": encoding.intermediate_video_codec_name(writer),
+            "width": resolved.width, "height": resolved.height,
+            "pix_fmt": pix_fmt, "fps": resolved.fps}
+
+
 def reverse_mux_stream_policy(
         answers: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """Which streams the video-only reverse mux keeps, and from which input.
@@ -594,6 +637,7 @@ __all__ = [
     'build_main_encode_reverse_segment_command',
     'intermediate_profile',
     'intermediate_video_codec_name',
+    'intermediate_video_descriptor',
     'requested_transformations',
     'reverse_concat_stages',
     'reverse_filter_input_for',

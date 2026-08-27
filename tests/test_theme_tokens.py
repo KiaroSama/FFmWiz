@@ -85,9 +85,16 @@ class SinglePaletteTests(unittest.TestCase):
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}", body), [])
 
     def test_qml_declares_no_fallback_palette_of_its_own(self):
-        src = (_GUI_DIR / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
-        self.assertIn("from gui_style import PALETTE", src)
+        # Checked on the LOADED module rather than the source text. The text
+        # form pinned `from gui_style import PALETTE`, which only ever resolved
+        # because the GUI was launched as a script from its own folder; making
+        # the editors addressable as `ffmwiz.gui.<name>` (D10) changed the
+        # spelling and failed a test whose actual subject -- one shared palette
+        # -- was untouched.
+        from ffmwiz.gui import ffmwiz_gui_qml, gui_style
+        self.assertIs(ffmwiz_gui_qml._PALETTE, gui_style.PALETTE)
         # The old hand-copied 26-key dict is gone.
+        src = (_GUI_DIR / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
         self.assertNotIn('"panel_alt": "#1a1f2a"', src)
 
 

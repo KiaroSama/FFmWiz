@@ -70,7 +70,6 @@ from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz import runtime  # noqa: F401
 from ffmwiz.services import *  # noqa: E402,F401,F403  (back-import)
 from ffmwiz import services  # noqa: E402,F401  (qualified self-ref for patched names)
 

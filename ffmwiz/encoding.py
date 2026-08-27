@@ -268,6 +268,120 @@ def build_separator_job_specs(answers: dict[str, Any]) -> list[dict[str, Any]]:
     return specs
 
 
+def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
+                                     total_duration: float | None,
+                                     label: str) -> tuple[int, float]:
+    """Reverse an ENCODE job's audio without disturbing anything else about it.
+
+    `run_bounded_audio_reverse` was written for the standalone AUDIO TOOLS,
+    whose source is a track plus an optional cover image. Wiring the main
+    executor into it applied those semantics to jobs that are nothing like it,
+    and three separate kinds of silent data loss followed. All three returned
+    exit code 0:
+
+        D01  a video + audio job came back audio-only
+             OUTPUT_STREAM_TYPES ['audio']
+        D02  a two-input Join produced only the first input
+             EXPECTED_DURATION 4.0   ACTUAL_DURATION 2.0   ACTUAL_STREAMS ['audio']
+        D03  a Split wrote one unsplit audio-only Part01 and no Part02
+             EXISTS [true, false]
+
+    The shape that keeps the workflow is the one the video side already uses:
+    reverse in its own stage, then let the ORIGINAL job run over the result.
+
+      1. JOIN forward, when there is a join, so the reversal sees the whole
+         timeline rather than input 1 (D02).
+      2. REVERSE the selected audio of that source into a lossless scratch, in
+         bounded chunks. `bounded_audio_reverse_to_file` is the same reversal
+         the standalone tools run; there is no second implementation of it.
+      3. MUX that audio back onto the source's own picture and every other
+         stream it carries, through the SAME stream policy the video reverse
+         mux uses (D01).
+      4. REBUILD the original job on that file with the reversal already spent.
+         Cuts, speed, subtitles, chapters and Split all run exactly as they
+         would have, because nothing else about the job was touched (D03).
+    """
+    started_at = time.perf_counter()
+    indices = audio_reverse_indices(answers)
+    if not audio_reverse_needs_staging(answers, indices):
+        return run_ffmpeg_with_progress(
+            cmd, total_duration=total_duration, label=label)
+
+    output_path = Path(answers["output_path"])
+    # Captured BEFORE any stage rewrites them: these are the paths the summary
+    # showed and the user confirmed.
+    planned_output_paths = list(answers.get("split_output_paths") or [])
+    workspace = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_audio_reverse_")))
+    source_answers = answers
+
+    if answers.get("join_input_items"):
+        items = join_items_from_answers(answers)
+        if not items:
+            return 1, time.perf_counter() - started_at
+        joined = workspace / f"joined_forward.{INTERMEDIATE_CONTAINER_EXT}"
+        # Owns the geometry and nothing else, exactly as the video pipeline's
+        # forward stage does: the reversal and every later edit belong to the
+        # stages after it.
+        forward = intermediate_profile(
+            stage_answers(answers, owns=GEOMETRY_TRANSFORMATIONS))
+        forward["output_path"] = joined
+        appio.note("Audio reverse across a join: joining first, so the whole "
+                   "joined timeline is reversed rather than the first input.")
+        code, _elapsed = run_ffmpeg_with_progress(
+            wizard.build_join_encode_command(forward, items, joined),
+            total_duration=sum(join_item_picture_span(item) for item in items) or None,
+            label="Joining before audio reverse")
+        if code != 0 or not joined.exists():
+            return (code or 1), time.perf_counter() - started_at
+        source_answers = _single_input_answers(answers, joined)
+        indices = audio_reverse_indices(source_answers)
+
+    reversed_audio = workspace / f"audio_reversed.{INTERMEDIATE_CONTAINER_EXT}"
+    code, _elapsed = bounded_audio_reverse_to_file(
+        source_answers, reversed_audio, audio_indices=indices, label=label)
+    if code != 0 or not reversed_audio.exists():
+        return (code or 1), time.perf_counter() - started_at
+
+    rebased = workspace / f"reversed_audio_source.{INTERMEDIATE_CONTAINER_EXT}"
+    maps, dispositions, warnings = reverse_mux_stream_policy(source_answers)
+    for warning in warnings:
+        appio.note(warning)
+    mux = [str(answers["ffmpeg"]), "-y" if OVERWRITE_OUTPUT else "-n", "-hide_banner",
+           "-i", str(source_answers["input_path"]), "-i", str(reversed_audio),
+           *maps, *dispositions, "-c", "copy",
+           "-avoid_negative_ts", "make_zero", str(rebased)]
+    log_info("Audio reverse remux: " + command_to_powershell(mux))
+    code, _elapsed = run_ffmpeg_with_progress(
+        mux, total_duration=total_duration, label="Restoring the picture")
+    if code != 0 or not rebased.exists():
+        return (code or 1), time.perf_counter() - started_at
+
+    final = _single_input_answers(answers, rebased)
+    final["reverse_audio"] = False
+    final["audio_cut_keep_ranges"] = []
+    final["audio_keep_ranges"] = []
+    final["output_path"] = output_path
+    # Keep the names the summary already showed. By this point `input_path` is
+    # the pipeline's own scratch, so a Split would derive its parts from THAT
+    # and write `reversed_audio_source_Part01.mkv` -- measured, and the same
+    # class of defect the staged video Split had.
+    resolved_stem = str(answers.get("output_name_stem") or "").strip()
+    if not resolved_stem and planned_output_paths:
+        resolved_stem = re.sub(r"_Part\d+$", "", Path(planned_output_paths[0]).stem)
+    if not resolved_stem:
+        resolved_stem = Path(answers["input_path"]).stem
+    final["output_name_stem"] = resolved_stem
+    final["cmd"] = build_ffmpeg_command(final)
+    answers["split_output_paths"] = final.get("split_output_paths") or []
+    answers["split_part_intervals"] = final.get("split_part_intervals") or []
+    code, _elapsed = execute_encode_plan(
+        final, final["cmd"], total_duration=total_duration,
+        label=label)
+    answers["output_path"] = final.get("output_path", output_path)
+    return code, time.perf_counter() - started_at
+
+
 def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
                         total_duration: float | None, label: str,
                         **progress_kwargs: Any) -> tuple[int, float]:
@@ -312,9 +426,11 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
         # unchanged when the job already fits the budget, so a short clip costs
         # nothing extra.
         answers["cmd"] = cmd
-        return run_bounded_audio_reverse(
-            answers, build_ffmpeg_command, label=label,
-            total_duration=total_duration)
+        # NOT `run_bounded_audio_reverse`: that one is the standalone AUDIO
+        # TOOLS' plan, and applying its semantics to an encode job dropped the
+        # picture, the later Join inputs and the Split plan (D01-D03).
+        return run_bounded_audio_reverse_encode(
+            answers, cmd, total_duration=total_duration, label=label)
     # The two-pass check lives here too, so no executor can quietly skip it.
     # The main dispatcher used to duplicate this whole selection and reach the
     # runner directly, which is how a retained cpu_two_pass was downgraded to
@@ -463,6 +579,7 @@ __all__ = [
     'run_crop_only_prompt',
     'run_metadata_report_inspect',
     'execute_encode_plan',
+    'run_bounded_audio_reverse_encode',
     'run_separator_main_encode',
     'FFMPEG_REFERENCE_SECTIONS',
 ]

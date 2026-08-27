@@ -7,8 +7,8 @@ Both are defined inside a factory so PySide6 is imported on demand -- see
 `gui_editor_unified_timeline.py` for the same reasoning.
 """
 from __future__ import annotations
-import gui_common  # noqa: F401
-from gui_common import *  # noqa: F401,F403
+from ffmwiz.gui import gui_common  # noqa: F401
+from ffmwiz.gui.gui_common import *  # noqa: F401,F403
 
 
 def build_unified_preview_widgets():

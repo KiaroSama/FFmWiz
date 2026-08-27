@@ -151,6 +151,22 @@ class AnUnknownFormatIsNotTheSmallestOne(unittest.TestCase):
                 self.assertIn(name, FFmWiz.HARDWARE_PIXEL_FORMATS)
                 self.assertIsNone(FFmWiz.pixel_format_bytes_per_pixel(name))
 
+    def test_a_surface_this_build_dropped_is_still_classified(self):
+        """The set spans the SUPPORTED builds, not the one that is installed (D14).
+
+        FFmpeg carried `xvmc` as a hardware surface until 7.0 removed it, so
+        `ffprobe -show_pixel_formats` reports it on 6.x and not on 8.x. The live
+        sweep below can only ever see the local build: on the audit's FFmpeg
+        6.1.1 it failed with `MISSING_HARDWARE_FORMATS ['xvmc']`, and on this
+        machine's 8.1.1 it cannot see the format at all and would pass whether
+        or not the classification is right. Keeping the name in the maintained
+        set is what makes the two builds agree.
+        """
+        self.assertIn("xvmc", FFmWiz.HARDWARE_PIXEL_FORMATS)
+        self.assertIsNone(FFmWiz.pixel_format_bytes_per_pixel("xvmc"),
+                          "a hardware surface has no software byte size")
+        self.assertNotIn("xvmc", FFmWiz.BYTES_PER_PIXEL_BY_FORMAT)
+
 
 @unittest.skipUnless(FFPROBE, "ffprobe required")
 class EverySoftwareFormatThisFFmpegReports(unittest.TestCase):

@@ -106,16 +106,22 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
         return answers
 
     def _routed(self, **extra):
-        """Which executor `execute_encode_plan` chose, without running it."""
+        """Which executor `execute_encode_plan` chose, without running it.
+
+        The watched name matters: `run_bounded_audio_reverse` is the standalone
+        AUDIO TOOLS' plan and this router never calls it, so a stub on that
+        name reports the one-shot command the real encode helper ends with --
+        indistinguishable from no bounding at all.
+        """
         out = self._tmp / "routing"
         out.mkdir(parents=True, exist_ok=True)
         answers = self._answers(out, **extra)
         answers["output_path"] = out / "routed.mkv"
         chosen = []
-        real_bounded = encoding.run_bounded_audio_reverse
+        real_bounded = encoding.run_bounded_audio_reverse_encode
         real_runner = encoding.run_ffmpeg_with_progress
         real_two_pass = encoding.run_cpu_two_pass_ffmpeg
-        encoding.run_bounded_audio_reverse = (
+        encoding.run_bounded_audio_reverse_encode = (
             lambda *a, **k: (chosen.append("bounded audio") or (0, 0.0)))
         encoding.run_ffmpeg_with_progress = (
             lambda *a, **k: (chosen.append("one shot") or (0, 0.0)))
@@ -128,7 +134,7 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
                 encoding.execute_encode_plan(answers, cmd, total_duration=SECONDS,
                                              label="routing")
         finally:
-            encoding.run_bounded_audio_reverse = real_bounded
+            encoding.run_bounded_audio_reverse_encode = real_bounded
             encoding.run_ffmpeg_with_progress = real_runner
             encoding.run_cpu_two_pass_ffmpeg = real_two_pass
         return chosen
@@ -167,10 +173,10 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
         answers["output_path"] = out / "video.mkv"
         chosen = []
         real_segmented = encoding.run_segmented_reverse_main_encode
-        real_bounded = encoding.run_bounded_audio_reverse
+        real_bounded = encoding.run_bounded_audio_reverse_encode
         encoding.run_segmented_reverse_main_encode = (
             lambda *a, **k: (chosen.append("segmented video") or (0, 0.0)))
-        encoding.run_bounded_audio_reverse = (
+        encoding.run_bounded_audio_reverse_encode = (
             lambda *a, **k: (chosen.append("bounded audio") or (0, 0.0)))
         noise = StringIO()
         try:
@@ -180,7 +186,7 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
                                              label="video")
         finally:
             encoding.run_segmented_reverse_main_encode = real_segmented
-            encoding.run_bounded_audio_reverse = real_bounded
+            encoding.run_bounded_audio_reverse_encode = real_bounded
         self.assertEqual(["segmented video"], chosen)
 
     def test_an_ordinary_encode_is_untouched(self):

@@ -37,7 +37,14 @@ for _p in (str(_ROOT), str(_GUI_DIR)):
 
 _ENTRY_SOURCE = (_GUI_DIR / "ffmwiz_gui.py").read_text(encoding="utf-8")
 
-_CHILDREN = [
+# Package-qualified. These stopped being importable as bare top-level
+# modules when the editors were made addressable as `ffmwiz.gui.<name>`
+# (D10); the bare name only ever resolved because the GUI was launched
+# as a script from its own folder. Loading them under the old name here
+# produced a SECOND module object, so `assertIs` against the entry
+# point's merged namespace could never match.
+_PACKAGE = "ffmwiz.gui"
+_CHILDREN = [f"{_PACKAGE}.{name}" for name in (
     "gui_common",
     "gui_style",
     "gui_geometry",
@@ -48,22 +55,22 @@ _CHILDREN = [
     "gui_editor_unified",
     "gui_editor_unified_canvas",
     "gui_editor_unified_timeline",
-]
+)]
 
 # The public entry point each child exists to provide. Hard-coded on purpose:
 # the exhaustive check below would still pass if a child contributed nothing at
 # all, and a namespace missing `build_crop_editor` is a broken GUI.
-_REPRESENTATIVE = {
-    "gui_common": "main",
-    "gui_style": "QSS",
-    "gui_geometry": "seconds_to_timecode",
-    "gui_editor_cut": "build_cut_editor",
-    "gui_editor_crop": "build_crop_editor",
-    "gui_editor_speed": "build_speed_editor",
-    "gui_editor_audio": "build_audio_cut_editor",
-    "gui_editor_unified": "build_unified_video_editor",
-    "gui_editor_unified_canvas": "build_unified_preview_widgets",
-    "gui_editor_unified_timeline": "build_unified_timeline_widget",
+_REPRESENTATIVE = {  # keyed by the same qualified names
+    f"{_PACKAGE}.gui_common": "main",
+    f"{_PACKAGE}.gui_style": "QSS",
+    f"{_PACKAGE}.gui_geometry": "seconds_to_timecode",
+    f"{_PACKAGE}.gui_editor_cut": "build_cut_editor",
+    f"{_PACKAGE}.gui_editor_crop": "build_crop_editor",
+    f"{_PACKAGE}.gui_editor_speed": "build_speed_editor",
+    f"{_PACKAGE}.gui_editor_audio": "build_audio_cut_editor",
+    f"{_PACKAGE}.gui_editor_unified": "build_unified_video_editor",
+    f"{_PACKAGE}.gui_editor_unified_canvas": "build_unified_preview_widgets",
+    f"{_PACKAGE}.gui_editor_unified_timeline": "build_unified_timeline_widget",
 }
 
 

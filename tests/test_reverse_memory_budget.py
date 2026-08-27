@@ -32,6 +32,7 @@ peaked at 878 MB against a 415 MB frame estimate, and 600 frames at 1306 MB --
 1.43 MB per frame against a theoretical 1.38, on a ~450 MB baseline.
 """
 import math
+import tempfile
 import unittest
 
 import FFmWiz
@@ -218,22 +219,48 @@ class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
         from ffmwiz.support import ext04b
         self.assertTrue(hasattr(ext04b, "reverse_segment_seconds_for"))
 
-    def test_the_standalone_mode_passes_a_size_to_the_splitter(self):
-        source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
-                  / "ffmwiz" / "support" / "ext04b.py").read_text(encoding="utf-8")
-        self.assertIn("reverse_segment_seconds_for(", source)
-        self.assertIn("split_ranges_for_reverse_segments([], duration, segment_seconds)",
-                      source)
-        self.assertNotIn("split_ranges_for_reverse_segments([], duration)", source)
+    def _splitter_call(self, answers):
+        """Run the standalone mode far enough to see what it asks the splitter.
 
-    def test_the_standalone_notice_does_not_reuse_the_flat_ceiling(self):
-        # The notice must report the size actually planned. Whether it prints
-        # seconds or milliseconds is the caller's call -- but see
-        # `test_reverse_budget_policy.TheWindowIsPrintable`: a `:.0f}s` format
-        # announces every legitimate subsecond window as `0s`.
-        source = (FFmWiz.Path(FFmWiz.__file__).resolve().parent
-                  / "ffmwiz" / "support" / "ext04b.py").read_text(encoding="utf-8")
-        self.assertNotIn("{int(REVERSE_SEGMENT_SECONDS)}s", source)
+        Returning no chunks makes it give up immediately, so this costs one
+        plan calculation and no ffmpeg. Reading the ARGUMENTS is the point: an
+        earlier version of this test read the source text instead, and pinned
+        one particular call shape so tightly that the correct repair -- passing
+        the shared plan object -- failed it.
+        """
+        from ffmwiz.support import ext04b
+        seen = {}
+
+        def record(ranges, duration, *args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return []
+
+        real_split = ext04b.split_ranges_for_reverse_segments
+        real_note = FFmWiz.appio.note
+        ext04b.split_ranges_for_reverse_segments = record
+        FFmWiz.appio.note = lambda *a, **k: None
+        try:
+            ext04b.run_segmented_reverse_video_speed(answers)
+        finally:
+            ext04b.split_ranges_for_reverse_segments = real_split
+            FFmWiz.appio.note = real_note
+        self.assertIn("args", seen, "the splitter was never reached")
+        return seen
+
+    def test_the_standalone_mode_passes_the_measured_size_and_rate(self):
+        # It used to pass neither. 60 s of 4K30 is 20.9 GiB of decoded frames,
+        # and without the rate the splitter's 1 ms floor is coarser than one
+        # frame above 1000 fps (B06, D08).
+        answers = _answers(3840, 2160, 30, "yuv420p")
+        answers["output_path"] = str(FFmWiz.Path(tempfile.gettempdir()) / "x.mp4")
+        answers["format"] = {"duration": "600.0"}
+        seen = self._splitter_call(answers)
+        passed = list(seen["args"]) + list(seen["kwargs"].values())
+        expected = FFmWiz.reverse_segment_plan_for(answers)
+        self.assertIn(expected.seconds, passed, "the measured window is not passed")
+        self.assertIn(expected.fps, passed, "the rate is not passed")
+        self.assertNotIn(60.0, passed, "still the flat ceiling")
 
     def test_both_entry_points_agree_on_the_same_geometry(self):
         # The executor's wrapper and the pure function must not drift apart.

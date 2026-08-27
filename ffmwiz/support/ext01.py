@@ -119,6 +119,22 @@ def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
         # Explicitly resample after LoudNorm to guarantee a stable output rate.
         filters.append(f"aresample={_loudnorm_output_sample_rate(answers)}")
     filters.append("asetpts=PTS-STARTPTS")
+    # The sound's half of the fade, on the same rule and in the same place as
+    # the picture's: last, so "one second" is one second of the output. Without
+    # it a faded picture would go to black over full-volume audio.
+    fade_in, fade_out = requested_fade_seconds(answers)
+    if fade_in or fade_out:
+        # Deferred: the timeline map is built a tier above this one.
+        from ffmwiz.wizard_build_b import encode_timeline_map
+        try:
+            output_seconds = encode_timeline_map(answers).output_duration
+        except (KeyError, ValueError, TypeError, ZeroDivisionError):
+            # A job whose duration is genuinely unknown. `fade_filter_parts`
+            # drops the fade-out and says so. A bare `except Exception` here
+            # swallowed the NameError from this function not being importable
+            # at this tier, and silently dropped every fade-out instead.
+            output_seconds = 0.0
+        filters.extend(fade_filter_parts("a", output_seconds, fade_in, fade_out))
     chain = ",".join(filters)
     if loudnorm_transform_enabled(answers):
         log_info(f"LoudNorm audio filter segment inserted: {chain}")

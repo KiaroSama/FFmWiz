@@ -10,8 +10,8 @@ subclasses QWidget, and PySide6 must stay importable-on-demand: most CI jobs
 install no Qt at all.
 """
 from __future__ import annotations
-import gui_common  # noqa: F401
-from gui_common import *  # noqa: F401,F403
+from ffmwiz.gui import gui_common  # noqa: F401
+from ffmwiz.gui.gui_common import *  # noqa: F401,F403
 
 
 def build_unified_timeline_widget():

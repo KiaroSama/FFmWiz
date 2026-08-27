@@ -452,10 +452,16 @@ class QmlSelfTestWiringTests(unittest.TestCase):
     Runs the real main() in a subprocess (offscreen) because the process can
     only ever own one QCoreApplication."""
 
+    # The PACKAGE root, and the package names. A bare `import gui_common` next
+    # to a `ffmwiz_gui_qml` that now says `from ffmwiz.gui.gui_common import *`
+    # loads the file TWICE under two names (D10): the stubs below would land on
+    # one object while the code under test used the other, and `fired` came
+    # back empty with nothing saying why.
     DRIVER = """
-import json, sys
-sys.path.insert(0, GUI_DIR)
-import gui_common, ffmwiz_gui_qml
+import json, sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(GUI_DIR)))
+from ffmwiz.gui import gui_common
+from ffmwiz.gui import ffmwiz_gui_qml
 fired = []
 gui_common._set_windows_app_id = lambda: fired.append("app_id")
 gui_common._set_qt_application_icon = lambda app: fired.append("icon")
