@@ -34,7 +34,7 @@ instances.
 | 002 | Dispatch the composite builder for an audio-only mix | P1 | S | — | DONE |
 | 003 | `loop=N` reaches every quick output, or is refused | P2 | S | — | DONE |
 | 004 | The four documented config keys are actually read | P1 | M | 002 | TODO |
-| 005 | The settings summary shows the five new features | P2 | S | — | TODO |
+| 005 | The settings summary shows the five new features | P2 | S | — | DONE |
 | 006 | Stage-ownership schema covers the new features | P1 | M | — | TODO |
 | 007 | Pin guard, stale skip count, unused-import guard | P3 | S | — | TODO |
 | 008 | Characterization tests for the untested mode drivers | P2 | M | — | TODO |
@@ -103,6 +103,18 @@ REJECTED (one-line rationale).
   `loop_count + 1` times. One line, no shared primitive touched, no extra
   encoding. Its test asserts the ORDER of the six entries, not just the count —
   six in the wrong order plays as something else entirely.
+
+- **005 — DONE, approved.** Branch `advisor/005-summary-shows-the-new-features`,
+  commit `cd99287`, pushed, **not merged**.
+  Verified by re-running: scope is the two in-scope files, tree clean, full
+  suite 1987/1987 `OK`.
+  The trap this plan carried was real and the executor avoided it. Every
+  `describe_*` returns the string `"none"` for a job that never touched the
+  feature, and `"none"` is truthy — so guarding a row on the describer's OUTPUT
+  would print all five rows on every plain encode. All five guards are on the
+  ANSWER KEY, and the comment in the code says why. Two negative controls
+  (`test_a_plain_encode_shows_none_of_them`, `test_a_volume_of_one_is_not_shown`)
+  are what hold that.
 
 ## Dependency notes
 
