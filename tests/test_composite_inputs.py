@@ -734,3 +734,21 @@ class TheAnswerActuallyReachesTheCommand(unittest.TestCase):
     def test_a_job_without_one_still_takes_the_ordinary_path(self):
         picked = self._dispatch()
         self.assertEqual(["ordinary"], picked)
+
+    def test_an_audio_only_mix_reaches_the_composite_builder(self):
+        picked = self._dispatch(composite_audio_mix=True,
+                                composite_audio_path="bed.mp3")
+        self.assertIn("composite", picked,
+                      f"the mix answer was ignored; builder chosen: {picked}")
+        self.assertNotIn("ordinary", picked)
+
+    def test_a_picture_mode_still_reaches_it(self):
+        picked = self._dispatch(composite_mode="overlay",
+                                composite_input_path="logo.png")
+        self.assertIn("composite", picked,
+                      f"the overlay answer was ignored; builder chosen: {picked}")
+        self.assertNotIn("ordinary", picked)
+
+    def test_a_job_with_neither_key_still_takes_the_ordinary_encode(self):
+        picked = self._dispatch()
+        self.assertEqual(["ordinary"], picked)
