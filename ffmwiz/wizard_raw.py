@@ -119,21 +119,19 @@ def step_audio_volume(answers: dict[str, Any]) -> None:
     hint = ("n, or a factor / percentage / decibels like "
             + paint("1.5", Color.LIME) + ", " + paint("150%", Color.LIME)
             + ", " + paint("+6dB", Color.LIME))
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Change the audio volume?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
+
+    def forget(answers):
         answers.pop("audio_volume", None)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            answers["audio_volume"] = parse_volume(value)
-        except ValueError as error:
-            appio.error(str(error))
-            continue
-        print(paint(f"Audio volume: {answers['audio_volume']:g}x", Color.LIME))
-        return
+
+    def record(value, answers):
+        answers["audio_volume"] = parse_volume(value)
+        return True
+
+    def describe(answers):
+        return f"Audio volume: {answers['audio_volume']:g}x"
+
+    appio.ask_optional(answers, "Change the audio volume?", hint,
+                       forget, record, describe)
 
 
 def step_raw_ffmpeg_args(answers: dict[str, Any]) -> None:
