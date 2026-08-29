@@ -19,6 +19,10 @@
 - **Depends on**: none
 - **Category**: bug
 - **Planned at**: commit `aaf0aed`, 2026-08-29
+- **Revised**: 2026-08-29 -- Step 3 rewritten after an executor STOPPED on it
+  correctly. The boomerang builder is in `wizard_build.py`, not
+  `wizard_build_b.py`, and the seam is the concat LIST, not `-stream_loop`.
+  Step 2 is already done and committed; Step 4 was found to need no change.
 
 ## Why this matters
 
@@ -97,12 +101,17 @@ what to do instead; comments state the observable symptom a line prevents.
 
 **In scope**:
 - `ffmwiz/wizard_quick.py`
-- `ffmwiz/wizard_build_b.py` — only the boomerang input-options path
+- `ffmwiz/wizard_build.py` — only the boomerang branch of
+  `build_quick_output_stages` (the concat list)
 - `tests/test_quick_outputs.py`
 
 **Out of scope**:
-- `ffmwiz/encoding.py` — the stage runner. If the loop needs a change there,
-  that is a STOP condition, not a licence to edit it.
+- `ffmwiz/encoding.py` — the stage runner.
+- `ffmwiz/support/L00_misc_b.py` — `build_concat_copy_command` is a shared
+  primitive with eight call sites and no `answers` awareness. An earlier
+  version of this plan implied changing it; do not.
+- `ffmwiz/wizard_build_b.py` — the GIF path's `append_stream_loop` is correct
+  and unrelated to the boomerang fix.
 - The GIF palette two-pass logic — it already handles the loop correctly.
 
 ## Steps
@@ -136,39 +145,91 @@ print('gif+loop still ok:', parse_quick_tokens('gif,loop=3'))"
 
 ### Step 3: Make boomerang honour the loop
 
-Find where the boomerang builder assembles its input options in
-`ffmwiz/wizard_build_b.py` (search for the boomerang command builder near
-`gif_input_options`). Call `append_stream_loop` on its input options in the
-same position `gif_input_options` does — **before** the `-i`, because
-`-stream_loop` is an input option and has no effect after one.
+**An earlier version of this plan pointed you at `ffmwiz/wizard_build_b.py` and
+at `append_stream_loop`. Both were wrong**, and an executor correctly stopped
+rather than forcing them. Here is the corrected instruction, with the evidence.
 
-A boomerang is built from two halves (forward + reversed) that are then
-concatenated. Read the builder before choosing where the loop goes: looping the
-INPUT of each half is not the same as looping the finished boomerang. **The
-user means the finished boomerang plays N+1 times.** If the builder's shape
-makes that impossible without touching `ffmwiz/encoding.py`, that is a STOP
-condition — report which and stop.
+The boomerang is not built in `wizard_build_b.py` at all. It is built in
+`build_quick_output_stages` in **`ffmwiz/wizard_build.py`**, around lines
+311-339. Read that whole block before editing. Its shape:
 
-**Verify**: build a boomerang command with `loop_count` set and assert
-`-stream_loop` appears before the relevant `-i` — write this as the test in the
-test plan rather than an ad-hoc command.
+```python
+    if mode == "boomerang":
+        ...
+        forward = _quick_sub_job(answers, workdir, "boomerang_forward", half_ext)
+        forward_cmd = build_ffmpeg_command(forward)
+        forward_path = Path(forward["output_path"])
+        backward_path = workdir / f"boomerang_reversed.{half_ext}"
+        joined = (workdir / f"boomerang_joined.{half_ext}") if gif_after else output_path
+        concat_list = workdir / "boomerang_concat.txt"
+        # Forward FIRST. The other order gives a clip that plays backwards and
+        # then forwards, which is a different thing and looks like one.
+        write_concat_list([forward_path, backward_path], concat_list)
+        stages.append(("Encode the forward half", ...))
+        stages.append(("Reverse the forward half in bounded segments", ...))
+        stages.append(("Concatenate the forward and reversed halves",
+                       [str(part) for part in build_concat_copy_command(
+                           str(answers["ffmpeg"]), concat_list, joined)]))
+```
 
-### Step 4: Make a bare `loop=N` reach the ordinary encode
+`-stream_loop` is the wrong tool here. It is an INPUT option on a single `-i`,
+and the boomerang's final output is a CONCAT of two files, not one looped
+input. Reaching for it would mean changing `build_concat_copy_command`
+(`ffmwiz/support/L00_misc_b.py`), which has **eight call sites** across the
+package and no `answers` awareness — a shared primitive, out of scope, and the
+right thing to refuse.
 
-A `loop=N` answer with no mode must put `-stream_loop N` in front of the main
-input of the ordinary encode command. Confirm whether that already happens:
+**The actual seam is the concat list.** `write_concat_list`
+(`ffmwiz/support/L00_misc.py:69-73`) takes a list of paths and writes one
+`file '...'` line per entry; ffmpeg's concat demuxer plays them in order.
+Repeating the forward/backward PAIR `loop_count + 1` times gives exactly what
+the user means by "the finished boomerang plays N+1 times":
+
+```python
+        plays = 1 + int(answers.get("loop_count") or 0)
+        write_concat_list([forward_path, backward_path] * plays, concat_list)
+```
+
+That is the whole change: one line, no new helper, no shared primitive touched,
+and no extra encoding — the halves are already on disk and the concat is a
+stream copy, so a 5x loop costs five list entries and no extra ffmpeg work.
+
+Add a comment above it saying why `-stream_loop` is not used: it applies to one
+input, and the boomerang's output is a concat of two files.
+
+**Verify**:
 
 ```
-python -c "import sys; sys.path.insert(0,'.'); from ffmwiz.wizard_quick import parse_quick_tokens; print(parse_quick_tokens('loop=2'))"
+python -c "import sys; sys.path.insert(0,'.'); import inspect
+from ffmwiz import wizard_build
+src = inspect.getsource(wizard_build.build_quick_output_stages)
+assert 'loop_count' in src, 'the boomerang branch does not read loop_count'
+print('boomerang reads loop_count')"
 ```
+→ prints `boomerang reads loop_count`.
 
-If it yields only `{'loop_count': 2}` with no `quick_output`, trace whether any
-builder reads it on the ordinary path. If nothing does, wire it the same way —
-`append_stream_loop` on the main command's input options. If the ordinary path
-turns out to have no input-options seam, STOP and report rather than inventing
-one.
+The behavioural check belongs in the test plan below: write the concat list for
+a `loop_count=2` boomerang and assert it holds **six** `file '...'` lines
+(three plays of a two-file pair), and that they alternate forward, backward,
+forward, backward, forward, backward. Assert the ORDER, not just the count — a
+list of six entries in the wrong order plays as something else entirely, and the
+existing comment in this block exists because that mistake was already made once.
 
-**Verify**: covered by the test plan below.
+### Step 4: A bare `loop=N` already works — verify, do not change
+
+An executor confirmed this live before the plan was revised: a `loop=N` answer
+with no mode already reaches the ordinary encode and emits `-stream_loop N` in
+front of the main input. **No code change is needed here.**
+
+Confirm it yourself so the claim is not taken on trust, then move on:
+
+```
+python -c "import sys; sys.path.insert(0,'.'); from ffmwiz.wizard_quick import parse_quick_tokens
+print(parse_quick_tokens('loop=2'))"
+```
+→ shows `loop_count` set. Then check an ordinary encode command built with that
+answer contains `-stream_loop 2` BEFORE its `-i`. If it does not, that is a
+STOP condition — report it; do not start wiring a new path.
 
 ### Step 5: Full suite
 
@@ -197,8 +258,7 @@ ALL must hold:
 - [ ] `python tests/run_suite.py -k quick_outputs -j 2` → `OK`
 - [ ] `python tests/run_suite.py -j 4` → `OK`, 0 failures
 - [ ] Both `thumb,loop=2` and `loop=2,thumb` raise `ValueError`
-- [ ] `grep -c "append_stream_loop" ffmwiz/wizard_build_b.py` returns at least 4
-      (definition, `__all__`, gif site, boomerang site)
+- [ ] `python -c "import sys; sys.path.insert(0,'.'); import inspect; from ffmwiz import wizard_build; assert 'loop_count' in inspect.getsource(wizard_build.build_quick_output_stages)"` exits 0
 - [ ] `git status --short` shows only the three in-scope files
 
 ## STOP conditions
