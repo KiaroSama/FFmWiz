@@ -20,6 +20,10 @@
 - **Depends on**: none
 - **Category**: bug + security
 - **Planned at**: commit `aaf0aed`, 2026-08-29
+- **Revised**: 2026-08-29 -- Step 2 rewritten after an executor hit its STOP
+  condition honestly. `posix=False` was the wrong mechanism; clearing
+  `lex.escape` is the right one. Step 1 was verified complete and is
+  unchanged.
 
 ## Why this matters
 
@@ -169,31 +173,67 @@ for probe in ('-c:v:0 x', '-vf:0 x', '-map_metadata:s:0 1', '-codec:a:1 mp3', '-
 
 ### Step 2: Keep backslashes in Windows paths
 
-Change the split to `shlex.split(text.strip(), posix=False)`.
+**Do NOT use `posix=False`.** That was this plan's first instruction and it is
+wrong: `posix=False` also stops shlex raising on an unbalanced quote, which
+breaks `test_an_unbalanced_quote_is_reported_not_guessed`, and it leaves quote
+characters attached to the token, which breaks
+`test_a_quoted_value_survives_with_its_spaces`. Both of those tests are right
+and must keep passing.
 
-`posix=False` keeps backslashes literal, which is what a Windows path needs. It
-also changes quote handling: `posix=False` leaves the quote characters ON the
-token, so `-metadata title="my film"` arrives as `title="my film"` with the
-quotes still attached — which would then be passed to ffmpeg as a literal
-quote character.
+The correct change keeps posix quoting and disables ONLY the escape character:
 
-So after splitting, strip one matching pair of surrounding double quotes from
-each token, and one from the value half of a `key=value` token. Implement it as
-a small module-level helper (e.g. `_unquote`) with a docstring explaining that
-`posix=False` is required for Windows paths and this is the cost of it.
+```python
+    lex = shlex.shlex(text.strip(), posix=True)
+    lex.whitespace_split = True
+    lex.escape = ""      # a Windows path is not an escape sequence
+    try:
+        parts = list(lex)
+    except ValueError as error:      # an unbalanced quote
+        raise ValueError(f"could not read that: {error}")
+```
 
-Update the `parse_raw_arguments` docstring: it currently justifies
-`posix=True`, and that justification is now wrong.
+`shlex.split(text, posix=True)` is a convenience wrapper around exactly this
+object, with `escape` left at its default backslash. Setting it to `""` makes
+backslash an ordinary character, while quote handling is unchanged — the quotes
+are still consumed, and an unbalanced one still raises `No closing quotation`.
+
+Measured on this repository's Python before this revision was written:
+
+```
+r'-metadata comment=C:\Users\mobin\video'
+    -> ['-metadata', 'comment=C:\\Users\\mobin\\video']     backslashes kept
+'-metadata title="My film" -tune film'
+    -> ['-metadata', 'title=My film', '-tune', 'film']      quotes consumed
+'-metadata title="unclosed'
+    -> raises ValueError("No closing quotation")            still detected
+```
+
+All three at once, which is what `posix=False` could not do.
+
+Update the `parse_raw_arguments` docstring. It currently justifies `posix=True`
+for quoted values — keep that reason and add the escape one, saying a Windows
+path is why `escape` is cleared. Without that sentence someone will restore the
+default later believing it is a tidy-up.
+
+No `_unquote` helper is needed. If you wrote one for the earlier version of this
+step, delete it.
 
 **Verify**:
+
 ```
 python -c "import sys; sys.path.insert(0,'.'); from ffmwiz.wizard_raw import parse_raw_arguments
-print(parse_raw_arguments(r'-metadata comment=C:\\Users\\mobin\\video'))
-print(parse_raw_arguments('-metadata title=\"my film\"'))"
+print(parse_raw_arguments(r'-metadata comment=C:\Users\me\clip'))
+print(parse_raw_arguments('-metadata title=\"my film\"'))
+try:
+    parse_raw_arguments('-metadata title=\"unclosed')
+    print('UNBALANCED NOT CAUGHT')
+except ValueError as e:
+    print('unbalanced raises:', e)"
 ```
-→ first prints `['-metadata', 'comment=C:\\Users\\mobin\\video']` (backslashes
-present); second prints `['-metadata', 'title=my film']` (spaces kept, no
-quote characters).
+
+Expected: the first line shows the backslashes intact, the second shows
+`title=my film` with no quote characters, and the third prints
+`unbalanced raises: No closing quotation`.
 
 ### Step 3: Confirm nothing else regressed
 
@@ -236,9 +276,11 @@ ALL must hold:
 Stop and report (do not improvise) if:
 
 - The excerpts above do not match the live code (drift since `aaf0aed`).
-- Switching to `posix=False` breaks an existing test in
-  `test_volume_and_raw_args.py` that you cannot satisfy without changing
-  behaviour the plan did not ask you to change.
+- Clearing `lex.escape` breaks an existing test in
+  `test_volume_and_raw_args.py`. (An earlier version of this plan said to use
+  `posix=False`; that DID break two tests, which is why the instruction
+  changed. If `lex.escape = ""` breaks something too, STOP -- do not fall back
+  to `posix=False`.)
 - The base-option check turns out to block something the existing suite
   expects to be allowed — report which, do not weaken the check silently.
 - You find the parsed options are joined into a string anywhere downstream.
