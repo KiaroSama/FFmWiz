@@ -34,6 +34,7 @@ import argparse
 import copy
 import json
 import math
+import functools
 import os
 import re
 import shutil
@@ -142,13 +143,52 @@ def _app_icon_path(prefer_ico: bool = False) -> Path | None:
     return None
 
 
+@functools.cache
+def _bound_win32():
+    """The Win32 entry points this module calls, with their types declared.
+
+    `ctypes` defaults every unbound argument and return value to `c_int`, which
+    is 32 bits. A Windows HANDLE is 64 bits on a 64-bit build, so an unbound
+    `OpenProcess` hands back a TRUNCATED handle -- and it can look like it works
+    when the upper bits happen to be all ones and sign extension rebuilds the
+    value by luck. `CloseHandle` on a truncated handle closes something else and
+    leaks the real one, which matters here because the watchdog runs for the
+    life of the editor. The icon path below already declared its signatures;
+    these did not.
+
+    Cached because the watchdog asks on every tick and the declarations only
+    need to happen once per process.
+    """
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+    shell32 = ctypes.windll.shell32
+    shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+    shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [ctypes.c_wchar_p]
+    return kernel32, shell32
+
+
 def _set_windows_app_id() -> None:
     if os.name != "nt":
         return
     try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
-        _gui_log_debug(f"Set Windows AppUserModelID={APP_ID}", force=True)
+        _kernel32, shell32 = _bound_win32()
+        # It returns an HRESULT. Ignoring it meant the log said the id was set
+        # whatever happened.
+        result = shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+        if result == 0:
+            _gui_log_debug(f"Set Windows AppUserModelID={APP_ID}", force=True)
+        else:
+            _gui_log_debug(
+                f"Could not set Windows AppUserModelID={APP_ID}: HRESULT 0x{result & 0xFFFFFFFF:08X}",
+                force=True)
     except Exception as exc:
         _gui_log_debug(f"Could not set Windows AppUserModelID: {exc}", force=True)
 
@@ -158,12 +198,11 @@ def _parent_process_is_alive(pid: int | None) -> bool:
         return True
     try:
         if os.name == "nt":
-            import ctypes
-
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             SYNCHRONIZE = 0x00100000
             WAIT_TIMEOUT = 0x00000102
-            handle = ctypes.windll.kernel32.OpenProcess(
+            kernel32, _shell32 = _bound_win32()
+            handle = kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
                 False,
                 int(pid),
@@ -171,9 +210,9 @@ def _parent_process_is_alive(pid: int | None) -> bool:
             if not handle:
                 return False
             try:
-                return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
             finally:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32.CloseHandle(handle)
         os.kill(int(pid), 0)
         return True
     except Exception:

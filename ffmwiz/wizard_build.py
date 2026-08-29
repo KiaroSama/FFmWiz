@@ -86,185 +86,15 @@ from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 
-from ffmwiz import wizard  # facade for monkeypatch-stable cross-module calls  # noqa: F401
-from ffmwiz.wizard import *  # sibling helpers  # noqa: F401,F403
-
-
-def build_orientation_filters(answers: dict[str, Any]) -> list[str]:
-    """Rotation and flips, which change the FRAME the rest of the chain sees.
-
-    They belong straight after the crop and before the frame rate and the
-    scale: a 90-degree rotation swaps width and height, so a resize target
-    asked for afterwards applies to the rotated picture, which is what the user
-    means by it. Putting them later would size the canvas against the source
-    orientation and letterbox the result.
-    """
-    out: list[str] = []
-    rotation = str(answers.get("rotate_choice") or "none").strip().lower()
-    if rotation in ROTATE_FILTERS:
-        out.append(ROTATE_FILTERS[rotation])
-    if answers.get("flip_horizontal"):
-        out.append("hflip")
-    if answers.get("flip_vertical"):
-        out.append("vflip")
-    return out
-
-
-def build_look_filters(answers: dict[str, Any]) -> list[str]:
-    """Colour, denoise and sharpen/blur, in the order they have to run.
-
-    All three leave the geometry alone, so they sit after the scale and before
-    the speed/reverse -- which matters, because `reverse` buffers whatever
-    reaches it and the memory budget is computed from the frame at ITS input.
-    A filter placed after `reverse` would also be applied to a buffered frame
-    for no benefit.
-
-    Denoise before sharpen is deliberate: sharpening first amplifies exactly
-    the grain the denoiser is about to remove.
-    """
-    out: list[str] = []
-    settings = []
-    for key, (low, high, neutral) in ADJUST_RANGES.items():
-        try:
-            value = float(answers.get(key, neutral))
-        except (TypeError, ValueError):
-            continue
-        if value != neutral:
-            settings.append(f"{key[len('adjust_'):]}={max(low, min(high, value)):g}")
-    if answers.get("adjust_grayscale"):
-        # Saturation wins over any explicit value: the user asked for no colour.
-        settings = [s for s in settings if not s.startswith("saturation=")]
-        settings.append("saturation=0")
-    if settings:
-        out.append("eq=" + ":".join(settings))
-
-    denoise = str(answers.get("denoise_level") or "off").strip().lower()
-    if denoise in DENOISE_FILTERS:
-        out.append(DENOISE_FILTERS[denoise])
-
-    sharpen = str(answers.get("sharpen_level") or "off").strip().lower()
-    blur = str(answers.get("blur_level") or "off").strip().lower()
-    if sharpen in SHARPEN_FILTERS:
-        out.append(SHARPEN_FILTERS[sharpen])
-    elif blur in BLUR_FILTERS:
-        # Only one of the two: sharpening a blur back is not a thing a user
-        # means, and emitting both would silently make the pair meaningless.
-        out.append(BLUR_FILTERS[blur])
-    return out
-
-
-def build_fade_filters(answers: dict[str, Any], output_seconds: float) -> list[str]:
-    """The picture's half of the shared fade rule (see `fade_filter_parts`)."""
-    return fade_filter_parts("", output_seconds, *requested_fade_seconds(answers))
-
-
-def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
-    filters: list[str] = []
-    if answers.get("crop_enabled"):
-        left, right, top, bottom = normalized_crop_margins(answers)
-        filters.append(f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1")
-
-    filters.extend(build_orientation_filters(answers))
-
-    if answers.get("fps") is not None:
-        filters.append(f"fps={answers['fps']}")
-
-    resolution = answers.get("resolution", "n")
-    scale_dimensions = resolve_scale_dimensions(answers, resolution)
-    scale_resets_sar = False
-    if scale_dimensions:
-        width, height = scale_dimensions
-        is_stretch = resize_mode_is_stretch(answers)
-        if is_stretch:
-            # Exact stretch: force the requested dimensions regardless of AR.
-            filters.append(f"scale={width}:{height}")
-            log_info(f"Resize mode: Stretch; scale={width}:{height}")
-        else:
-            # AR-preserving: always use force_original_aspect_ratio=decrease so
-            # the content fits inside the target canvas without distortion, then
-            # pad to the exact canvas dimensions. When the source AR matches
-            # the target, FFmpeg produces the exact dimensions and the pad is a
-            # no-op. This approach handles all cases uniformly.
-            # reset_sar=1 inside the scale filter ensures output pixels are
-            # square, making a trailing setsar=1 unnecessary -- but it does not
-            # exist before FFmpeg 7.2, so ask before emitting it. A bare
-            # trailing setsar=1 is NOT a substitute: on a 720x576 DAR-16:9
-            # source it yields a squeezed 900x720 DAR-5:4 picture (D01).
-            sar = source_sar(answers)
-            crop_w, crop_h = cropped_source_size(answers)
-            display_w, display_h = cropped_display_size(answers)
-            filters.append(square_pixel_scale_chain(
-                answers.get("ffmpeg") or "ffmpeg",
-                f"scale={width}:{height}:"
-                f"force_original_aspect_ratio=decrease:force_divisible_by=2",
-            ))
-            filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
-            scale_resets_sar = True
-            log_info(
-                f"Resize mode: Preserve; "
-                f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
-                f"display={display_w}x{display_h}; target={width}x{height}; "
-                f"upscaling={'yes' if max(width, height) > max(display_w, display_h) else 'no'}"
-            )
-
-    filters.extend(build_look_filters(answers))
-
-    if video_speed_transform_enabled(answers):
-        filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
-
-    try:
-        output_seconds = encode_timeline_map(answers).output_duration
-    except (KeyError, ValueError, TypeError, ZeroDivisionError):
-        # Only a genuinely unknown duration. A bare `except Exception` here
-        # would also swallow a NameError or an ImportError and silently drop
-        # every fade-out, which is how the audio side broke.
-        output_seconds = 0.0
-    filters.extend(build_fade_filters(answers, output_seconds))
-
-    # Crop dimensions are normalized to the output encoder grid by
-    # normalized_crop_margins, so no black compatibility padding is added here.
-
-    # SAR handling:
-    #  - Preserve/Fit resize already resets SAR inside the scale filter
-    #    (scale_resets_sar) -> no trailing setsar needed.
-    #  - Stretch resize (scale_dimensions set, but not reset) intentionally
-    #    produces square pixels -> keep the explicit setsar.
-    #  - No resize: do NOT blindly force setsar=1. Forcing 1:1 on a non-square
-    #    source changes its display geometry. Preserve the source SAR by
-    #    omitting the filter (the decoder passes the source SAR through), and do
-    #    not invent 1:1 for an unknown SAR.
-    if not scale_resets_sar:
-        if scale_dimensions:
-            # Stretch resize: square-pixel output is intentional here.
-            if FORCE_SAR:
-                filters.append(f"setsar={FORCE_SAR}")
-        else:
-            info = sar_dar_info(answers)
-            sar = info.get("resolved_sar")
-            if info.get("fallback_used"):
-                log_info(
-                    "SAR: source SAR/DAR unavailable; no-resize command generation assumes a "
-                    "square-pixel source (SAR 1:1); no setsar forced."
-                )
-            elif sar is not None and abs(sar - 1.0) >= SAR_DAR_TOLERANCE:
-                log_info(
-                    f"SAR: no-resize path preserves resolved non-square SAR "
-                    f"{info.get('sar_text')} ({info.get('sar_source')}); no setsar forced."
-                )
-            elif sar is None:
-                log_info("SAR: source SAR unresolved; no setsar forced in no-resize path.")
-            else:
-                log_info(
-                    f"SAR: resolved source pixels are square ({info.get('sar_source')}); "
-                    f"setsar omitted as redundant."
-                )
-
-    filters.append(f"format={cpu_graph_pixel_format_for_encoder(answers)}")
-    return ",".join(filters) if filters else None
+# The facade star-import was deleted. It made this module unimportable on its
+# own: the facade ends with `__all__ += <this module>.__all__` and reached that
+# line while this module was still on its first statements. Names that live in
+# a sibling are now addressed through that sibling's module object, imported at
+# the BOTTOM of this file where nothing partial is read.
 
 
 def build_video_filter(answers: dict[str, Any], use_gpu_filtering: bool) -> str | None:
-    return build_cuda_video_filter(answers) if use_gpu_filtering else wizard.build_cpu_video_filter(answers)
+    return build_cuda_video_filter(answers) if use_gpu_filtering else build_cpu_video_filter(answers)
 
 
 def append_single_input_split_outputs(
@@ -288,12 +118,12 @@ def append_single_input_split_outputs(
     filters: list[str] = []
     audio_labels: list[str] = []
     if multi_cut:
-        filters.extend(wizard.build_cut_filter_complex(answers, list(answers.get("cut_keep_ranges") or []), audio_for_cut).split(";"))
+        filters.extend(wizard_build_b.build_cut_filter_complex(answers, list(answers.get("cut_keep_ranges") or []), audio_for_cut).split(";"))
         video_label = "v"
         if audio_for_cut is not None:
             audio_labels.append("a")
     else:
-        video_filter = wizard.build_cpu_video_filter(answers) or "null"
+        video_filter = build_cpu_video_filter(answers) or "null"
         filters.append(f"[0:v:0]{video_filter}[vbase]")
         video_label = "vbase"
         if audio_indices:
@@ -366,7 +196,7 @@ def append_single_input_split_outputs(
     # Slice the subtitles onto each part's own clock and map them. Without this
     # the Split path emitted -sn: a cut/speed Split built and announced a
     # retimed track that no output ever carried.
-    split_subtitles = wizard.build_split_subtitle_inputs(
+    split_subtitles = wizard_build_b.build_split_subtitle_inputs(
         answers, split_intervals, retimed_subtitles)
     subtitle_input_indices: list[list[int]] = []
     next_input_index = chapter_input_base + metadata_input_count
@@ -414,7 +244,7 @@ def append_single_input_split_outputs(
             cmd, answers, True,
             list(range(len(part_subtitles))) if part_subtitles else [],
             data_mapped)
-        wizard.append_video_encode_options(cmd, answers, video_encoder, tag, profile)
+        wizard_base.append_video_encode_options(cmd, answers, video_encoder, tag, profile)
         append_audio_encode_options(cmd, answers, bool(audio_outputs_by_part[part_idx]))
         append_clear_reencoded_stream_stat_metadata(
             cmd,
@@ -628,7 +458,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         retimed_subtitles = list(prebuilt_retimed)
         log_info(f"Retimed subtitles supplied by the caller: {len(retimed_subtitles)} track(s)")
     else:
-        retimed_subtitles = wizard.build_retimed_subtitle_inputs(answers) if subtitle_retiming else []
+        retimed_subtitles = wizard_build_b.build_retimed_subtitle_inputs(answers) if subtitle_retiming else []
     retimed_subtitle_base = 1 + chapter_metadata_inputs
     for retimed_track in retimed_subtitles:
         cmd.extend(["-i", str(retimed_track["path"])])
@@ -672,7 +502,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         and video_encoder
         and video_encoder != "copy"
         and answers.get("separator_points")
-        and wizard.append_single_input_split_outputs(
+        and append_single_input_split_outputs(
             cmd,
             answers,
             output_path,
@@ -758,10 +588,10 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             if full_source_map:
                 cmd.extend(["-c", "copy"])
             if multi_cut:
-                fc = wizard.build_cut_filter_complex(answers, cut_keep_ranges, audio_for_cut)
+                fc = wizard_build_b.build_cut_filter_complex(answers, cut_keep_ranges, audio_for_cut)
                 cmd.extend(["-filter_complex", fc])
             else:
-                video_filter = wizard.build_video_filter(answers, use_gpu_filtering=use_cuda_fast_path)
+                video_filter = build_video_filter(answers, use_gpu_filtering=use_cuda_fast_path)
                 if video_filter:
                     cmd.extend(["-filter:v:0" if (extra_video_count or full_source_map) else "-filter:v", video_filter])
             forced_cfr = use_cuda_fast_path and answers.get("fps") is not None
@@ -781,7 +611,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 
             if video_encoder.endswith("_nvenc"):
                 cmd.extend(["-preset", NVENC_PRESET, "-tune", NVENC_TUNE, "-rc", NVENC_RC])
-                wizard.append_nvenc_multipass_args(cmd, answers, video_encoder)
+                wizard_base.append_nvenc_multipass_args(cmd, answers, video_encoder)
                 if "hevc" in video_encoder:
                     cmd.extend(["-profile:v:0" if full_source_map else "-profile:v", hevc_profile_for_output(answers, profile)])
             elif video_encoder in {"libx264", "libx265"}:
@@ -933,16 +763,20 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 
 __all__ = [
     'append_single_input_split_outputs',
-    'build_cpu_video_filter',
-    'build_orientation_filters',
-    'build_look_filters',
-    'build_fade_filters',
     'build_ffmpeg_command',
     'build_video_filter',
 ]
 
 
 # wizard_build_b holds an overflow slice of this module (split for file size).
+# Bound twice on purpose: the call sites above address it through the module
+# object so a test patching the DEFINING module is seen, and the `_` alias is
+# what tests/test_module_reference_hygiene reads to find re-export pairs.
 from ffmwiz import wizard_build_b as _wizard_build_b  # noqa: E402
+from ffmwiz import wizard_build_b  # noqa: E402,F401
 from ffmwiz.wizard_build_b import *  # noqa: E402,F401,F403
 __all__ = list(__all__) + list(_wizard_build_b.__all__)
+
+# wizard_base holds the encode-option builders this module calls; it is a leaf
+# and imports nothing from the wizard facade tier.
+from ffmwiz import wizard_base  # noqa: E402,F401

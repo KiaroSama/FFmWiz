@@ -5,6 +5,10 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 import FFmWiz
+# `run_wizard` reaches these prompts through their DEFINING module now that the
+# wizard facade is no longer imported by its own leaves, so a patch on the
+# facade would rebind an attribute nothing reads.
+from ffmwiz import wizard_b, wizard_flow_b, wizard_steps  # noqa: E402
 from command_gen_base import CommandGenBase, _home_module
 
 
@@ -32,13 +36,13 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             "step_start_now": FFmWiz.wizard.step_start_now,
         }
         try:
-            FFmWiz.wizard.step_input_path = lambda answers: calls.append("input")
-            FFmWiz.wizard.step_join_additional_inputs_for_encode = lambda answers: calls.append("join")
-            FFmWiz.wizard.step_output_location = lambda answers: calls.append("output")
-            FFmWiz.wizard.step_output_format = lambda answers: calls.append("format")
-            FFmWiz.wizard.step_video_codec = lambda answers: calls.append("codec")
-            FFmWiz.wizard.step_use_gpu = lambda answers: (calls.append("gpu"), answers.__setitem__("use_gpu", False))
-            FFmWiz.wizard.step_unified_video_editor_for_encode = lambda answers: (
+            wizard_steps.step_input_path = lambda answers: calls.append("input")
+            wizard_steps.step_join_additional_inputs_for_encode = lambda answers: calls.append("join")
+            wizard_steps.step_output_location = lambda answers: calls.append("output")
+            wizard_steps.step_output_format = lambda answers: calls.append("format")
+            wizard_steps.step_video_codec = lambda answers: calls.append("codec")
+            wizard_steps.step_use_gpu = lambda answers: (calls.append("gpu"), answers.__setitem__("use_gpu", False))
+            wizard_steps.step_unified_video_editor_for_encode = lambda answers: (
                 calls.append("unified"),
                 answers.__setitem__("_unified_video_editor_used", False),
                 answers.__setitem__("_unified_video_editor_declined", True),
@@ -46,14 +50,14 @@ class CommandCutJoinFolderTests2(CommandGenBase):
                 answers.__setitem__("video_speed_enabled", False),
                 answers.__setitem__("cut_keep_ranges", []),
             )
-            FFmWiz.wizard.step_crop_enabled = lambda answers: calls.append("crop")
-            FFmWiz.wizard.step_video_bitrate = lambda answers: calls.append("bitrate")
-            FFmWiz.wizard.step_cpu_two_pass = lambda answers: calls.append("two_pass")
-            FFmWiz.wizard.step_resolution = lambda answers: calls.append("resolution")
-            FFmWiz.wizard.step_fps = lambda answers: calls.append("fps")
-            FFmWiz.wizard.step_video_speed_reverse_for_encode = lambda answers: calls.append("speed")
-            FFmWiz.wizard.step_cuts = lambda answers: calls.append("cuts")
-            FFmWiz.wizard.step_start_now = lambda answers: (_ for _ in ()).throw(StopRun())
+            wizard_steps.step_crop_enabled = lambda answers: calls.append("crop")
+            wizard_steps.step_video_bitrate = lambda answers: calls.append("bitrate")
+            wizard_steps.step_cpu_two_pass = lambda answers: calls.append("two_pass")
+            wizard_steps.step_resolution = lambda answers: calls.append("resolution")
+            wizard_steps.step_fps = lambda answers: calls.append("fps")
+            wizard_flow_b.step_video_speed_reverse_for_encode = lambda answers: calls.append("speed")
+            wizard_flow_b.step_cuts = lambda answers: calls.append("cuts")
+            wizard_b.step_start_now = lambda answers: (_ for _ in ()).throw(StopRun())
             with self.assertRaises(StopRun):
                 FFmWiz.run_wizard({
                     "output_ext": "mp4",
@@ -101,9 +105,9 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             raise StopRun()
 
         try:
-            FFmWiz.wizard.step_input_path = fake_input
-            FFmWiz.wizard.step_join_additional_inputs_for_encode = fake_join
-            FFmWiz.wizard.step_output_location = fake_output
+            wizard_steps.step_input_path = fake_input
+            wizard_steps.step_join_additional_inputs_for_encode = fake_join
+            wizard_steps.step_output_location = fake_output
             with self.assertRaises(StopRun):
                 FFmWiz.run_wizard({"_question_offset": 1})
         finally:
@@ -114,7 +118,7 @@ class CommandCutJoinFolderTests2(CommandGenBase):
 
     def test_step_join_back_resume_preserves_existing_join_items_and_number_extra(self):
         originals = {
-            "ask_join_add_another": FFmWiz.wizard.ask_join_add_another,
+            "ask_join_add_another": wizard_steps.ask_join_add_another,
             "ask_required": FFmWiz.appio.ask_required,
         }
         item = {
@@ -132,7 +136,9 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             return False
 
         try:
-            FFmWiz.wizard.ask_join_add_another = fake_add_another
+            # The DEFINING module. `wizard_steps` calls this name directly now, so a
+            # patch on the facade would rebind an attribute nothing reads.
+            wizard_steps.ask_join_add_another = fake_add_another
             FFmWiz.appio.ask_required = lambda _prompt: (_ for _ in ()).throw(AssertionError("path prompt should not be shown"))
             answers = {
                 "_question_number": 5,
@@ -222,7 +228,10 @@ class CommandCutJoinFolderTests2(CommandGenBase):
                     }
                 return {"status": "ok", "keep_ranges": [[0.0, 10.0]]}
 
-            with mock.patch.object(FFmWiz.guibridge, "_launch_qt_gui", side_effect=fake_launch):
+            # The DEFINING module. guibridge_b calls this name directly now, so a
+            # patch on the facade would rebind an attribute nothing reads.
+            from ffmwiz import guibridge_b
+            with mock.patch.object(guibridge_b, "_launch_qt_gui", side_effect=fake_launch):
                 self.assertIsNotNone(FFmWiz.guibridge.open_unified_video_gui(answers))
                 self.assertEqual(captured[-1]["chapters"], chapters)
                 self.assertEqual(FFmWiz.guibridge.open_cut_gui(answers, fps=30.0, duration=100.0), [(0.0, 10.0)])

@@ -64,6 +64,10 @@ from ffmwiz.support.ext01 import *  # noqa: F401,F403
 from ffmwiz.support.ext02 import *  # noqa: F401,F403
 from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.support.ext04 import *  # noqa: F401,F403
+from ffmwiz.support.L01_cover import (COVER_ART_METHOD_DESCRIPTIONS,  # noqa: F401
+                                      cover_art_input_args, cover_art_method,
+                                      cover_art_output_args,
+                                      cover_art_rejection_reason)
 from ffmwiz.support.ext05 import *  # noqa: F401,F403
 from ffmwiz.support.ext06 import *  # noqa: F401,F403
 from ffmwiz.support.ext07 import *  # noqa: F401,F403

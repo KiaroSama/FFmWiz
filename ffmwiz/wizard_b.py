@@ -88,8 +88,15 @@ from ffmwiz.runtime import *  # noqa: F401,F403
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
-from ffmwiz.wizard import *  # noqa: E402,F401,F403  (back-import)
-from ffmwiz import wizard  # noqa: E402,F401  (qualified self-ref for patched names)
+from ffmwiz import wizard_base  # noqa: E402,F401  (defines names used below)
+from ffmwiz import wizard_build  # noqa: E402,F401  (defines names used below)
+from ffmwiz import wizard_build_b  # noqa: E402,F401  (defines names used below)
+from ffmwiz import wizard_flow  # noqa: E402,F401  (defines names used below)
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def open_audio_speed_gui(answers: dict[str, Any], audio_index: int) -> dict[str, Any] | None:
@@ -211,14 +218,14 @@ def step_start_now(answers: dict[str, Any]) -> None:
                 appio.note("Join inputs are stream-copy compatible, but selected encode settings require re-encoding.")
             else:
                 appio.note("Join inputs are not stream-copy compatible. Re-encoding is required.")
-            cmd = build_join_encode_command(answers, join_items, output_path)
+            cmd = wizard_build_b.build_join_encode_command(answers, join_items, output_path)
     else:
-        cmd = build_ffmpeg_command(answers)
+        cmd = wizard_build.build_ffmpeg_command(answers)
     answers["cmd"] = cmd
     ensure_color_range_resolved(answers, workflow="Main Wizard")
     log_crop_normalization_summary(answers)
-    log_and_warn_pixel_format(answers)
-    print_summary(answers, cmd)
+    wizard_base.log_and_warn_pixel_format(answers)
+    wizard_flow.print_summary(answers, cmd)
     answers["start_now"] = appio.ask_yes_no(
         appio.question_prompt(answers, "Start FFmpeg now?", "y/n", "y"),
         True,
@@ -371,7 +378,7 @@ def step_audio_transform_editor(answers: dict[str, Any]) -> None:
                 if choice == "2":
                     _apply_manual_audio_transform(answers)
                 else:
-                    wizard._run_gui_audio_transform(answers, audio_index)
+                    _run_gui_audio_transform(answers, audio_index)
             except Back:
                 stage = "menu"
                 continue
@@ -380,7 +387,7 @@ def step_audio_transform_editor(answers: dict[str, Any]) -> None:
             stage = "confirm"
         else:  # confirm
             try:
-                wizard._confirm_audio_transform_start(answers)
+                _confirm_audio_transform_start(answers)
             except Back:
                 stage = "configure"
                 continue
@@ -396,7 +403,7 @@ def step_audio_cut_for_encode(answers: dict[str, Any]) -> None:
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     while True:
         hint = (
-            f"y/n, {graphical_hint('g=Show Graphical Audio Cut Editor')}; applies to selected audio tracks"
+            f"y/n, {wizard_flow.graphical_hint('g=Show Graphical Audio Cut Editor')}; applies to selected audio tracks"
             if allow_gui
             else "y/n; terminal range entry applies to selected audio tracks"
         )
@@ -443,7 +450,7 @@ def step_audio_transform_start_now(answers: dict[str, Any]) -> None:
     if answers.get("_audio_transform_finalized"):
         return
     # Fallback for any path that did not finalize in the editor.
-    wizard._confirm_audio_transform_start(answers)
+    _confirm_audio_transform_start(answers)
 
 
 __all__ = [

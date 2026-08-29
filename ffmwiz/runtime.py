@@ -73,22 +73,6 @@ from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 
 
-PROGRESS_COLORS: dict[str, str] = {
-    "percent": Color.PROGRESS_PERCENT,
-    "time": Color.PROGRESS_TIME,
-    "total": Color.GRAY,
-    "fps": Color.PROGRESS_FPS,
-    "q": Color.PROGRESS_Q,
-    "speed": Color.PROGRESS_SPEED,
-    "size": Color.PROGRESS_SIZE,
-    "bitrate": Color.PROGRESS_BITRATE,
-    "elapsed": Color.PROGRESS_ELAPSED,
-    "eta_label": Color.PROGRESS_ETA_LABEL,
-    "eta_value": Color.PROGRESS_ETA_VALUE,
-    "separator": Color.DIM,
-}
-
-
 _PYSIDE6_AVAILABLE_CACHE: bool | None = None
 
 
@@ -830,7 +814,6 @@ __all__ = [
     '_render_initial_progress_line',
     '_stdout_supports_in_place_progress',
     '_write_progress_line',
-    'PROGRESS_COLORS',
 ]
 
 

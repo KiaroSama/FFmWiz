@@ -75,8 +75,11 @@ from ffmwiz.core.artifacts import (  # noqa: F401
     EFFECTIVE_SETTINGS_KEY,
     PLAN_REVISION_KEY,
 )
-from ffmwiz.support.L01_cover import cover_art_method  # noqa: F401
-from ffmwiz.support.ext04 import *  # sibling helpers  # noqa: F401,F403
+from ffmwiz.support.L01_cover import (audio_tool_picture_args,  # noqa: F401
+                                      cover_art_method)
+# The facade back-import was deleted: it carried no name this module does
+# not already get from the lower tiers above, and it made the facade's
+# `__all__` depend on which side was imported first.
 
 
 def build_audio_transform_filter_complex(
@@ -181,7 +184,7 @@ def build_video_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
 def run_segmented_reverse_video_speed(answers: dict[str, Any]) -> tuple[int, float]:
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     if duration <= 0:
-        return run_ffmpeg_with_progress(
+        return runtime.run_ffmpeg_with_progress(
             answers["cmd"],
             total_duration=None,
             label="Video Speed / Reverse",
@@ -202,9 +205,14 @@ def run_segmented_reverse_video_speed(answers: dict[str, Any]) -> tuple[int, flo
     # 0.001 s = 2 frames = 2.206 GiB against the 2 GiB cap, where the plan's own
     # single frame is 0.000833 s = 1.353 GiB (D08). Passing the whole plan keeps
     # its seconds and its fps from drifting apart.
-    from ffmwiz import encoding  # higher tier: deferred to avoid a cycle
-    budget = encoding.reverse_segment_plan_for(answers)
-    chunks = split_ranges_for_reverse_segments([], duration, budget.seconds,
+    # `reverse_stages` DEFINES this; `encoding` only re-exported it, so a test
+    # that patched the definer never reached this caller and a test that
+    # patched `encoding` never reached the pipeline's. Still deferred, because
+    # `reverse_stages` sits above this tier and importing it at module level
+    # would be the cycle this whole repair removed.
+    from ffmwiz import reverse_stages  # higher tier: deferred to avoid a cycle
+    budget = reverse_stages.reverse_segment_plan_for(answers)
+    chunks = L00_split.split_ranges_for_reverse_segments([], duration, budget.seconds,
                                                fps=budget.fps)
     if not chunks:
         return 1, 0.0
@@ -226,7 +234,7 @@ def run_segmented_reverse_video_speed(answers: dict[str, Any]) -> tuple[int, flo
             cmd = build_video_speed_reverse_segment_command(answers, start, end, segment_path)
             log_info(f"Reverse segment {idx}/{len(chunks)} command: {command_to_powershell(cmd)}")
             appio.note(f"Reverse segment {idx}/{len(chunks)}: {seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}")
-            rc, _ = run_ffmpeg_with_progress(
+            rc, _ = runtime.run_ffmpeg_with_progress(
                 cmd,
                 total_duration=max(0.001, (end - start) / speed),
                 label=f"Reverse segment {idx}/{len(chunks)}",
@@ -238,7 +246,7 @@ def run_segmented_reverse_video_speed(answers: dict[str, Any]) -> tuple[int, flo
         concat_cmd = build_concat_copy_command(answers["ffmpeg"], concat_list, output_path)
         log_info("Reverse concat command: " + command_to_powershell(concat_cmd))
         appio.note("Concatenating reversed segments...")
-        rc, _ = run_ffmpeg_with_progress(
+        rc, _ = runtime.run_ffmpeg_with_progress(
             concat_cmd,
             total_duration=(duration / speed if duration > 0 else None),
             label="Reverse concat",
@@ -286,33 +294,6 @@ def build_audio_speed_reverse_command(answers: dict[str, Any]) -> list[str]:
         f"speed={speed}; reverse={reverse}; output={output_path}"
     )
     return cmd
-
-
-def audio_tool_picture_args(answers: dict[str, Any], output_ext: str) -> list[str]:
-    """Args that carry the source cover art through an audio tool, or ["-vn"].
-
-    Mapping the picture only works for containers that store a cover AS a
-    stream (mp4/m4a, mp3, flac). Opus/Ogg keep it in a base64 VorbisComment and
-    reject a mapped image stream outright, and wav has no mechanism at all, so
-    those still drop video.
-    """
-    method = cover_art_method(output_ext)
-    if method not in {"attached_pic", "id3", "flac_stream"}:
-        return ["-vn"]
-    # Normally input 0. The bounded audio-reverse pipeline re-points input 0 at
-    # a scratch file that holds only the reversed audio, and adds the original
-    # as a second input purely so the cover art still has a home; carrying the
-    # picture through the segment/concat stages instead would replicate it into
-    # every chunk for no gain.
-    picture_input = int(answers.get("_picture_input_index") or 0)
-    for position, stream in enumerate(answers.get("video_streams") or []):
-        if (stream.get("disposition") or {}).get("attached_pic"):
-            args = ["-map", f"{picture_input}:v:{position}", "-c:v", "copy"]
-            if method == "id3":
-                args.extend(["-id3v2_version", "3"])
-            args.extend(["-disposition:v", "attached_pic"])
-            return args
-    return ["-vn"]
 
 
 def audio_cut_stream_copy_available(answers: dict[str, Any]) -> bool:
@@ -497,7 +478,7 @@ def run_cpu_two_pass_ffmpeg(
     log_command("CPU two-pass pass 2", second)
     try:
         print(paint("Starting FFmpeg pass 1/2...", Color.GREEN))
-        rc1, elapsed1 = run_ffmpeg_with_progress(
+        rc1, elapsed1 = runtime.run_ffmpeg_with_progress(
             first,
             total_duration=total_duration,
             label="FFmpeg encode pass 1/2",
@@ -507,7 +488,7 @@ def run_cpu_two_pass_ffmpeg(
             return rc1, elapsed1
         print()
         print(paint("Starting FFmpeg pass 2/2...", Color.GREEN))
-        rc2, elapsed2 = run_ffmpeg_with_progress(
+        rc2, elapsed2 = runtime.run_ffmpeg_with_progress(
             second,
             total_duration=total_duration,
             label="FFmpeg encode pass 2/2",
@@ -824,8 +805,8 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
 
 
 __all__ = [
+    'audio_tool_picture_args',  # re-exported from L01_cover
     'build_audio_transform_filter_complex',
-    'audio_tool_picture_args',
     'audio_cut_stream_copy_available',
     'build_video_speed_reverse_command',
     'run_segmented_reverse_video_speed',
@@ -850,4 +831,5 @@ __all__ = [
 # every existing `from ffmwiz.support.ext04b import *` keeps working.
 from ffmwiz.support import ext04c  # noqa: E402
 from ffmwiz.support.ext04c import *  # noqa: E402,F401,F403
+from ffmwiz.support import L00_split  # noqa: E402,F401  (single patch point)
 __all__ += ext04c.__all__

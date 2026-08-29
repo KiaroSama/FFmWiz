@@ -507,17 +507,13 @@ __all__ = [
 from ffmwiz.support import ext01b as _ext01b  # noqa: E402
 # Guard the direct-import case: importing this overflow module FIRST
 # re-enters the parent while the child has no __all__ yet.
-_ext01b_names = list(getattr(_ext01b, "__all__", []))
-if _ext01b_names:
-    from ffmwiz.support.ext01b import *  # noqa: E402,F401,F403
-    __all__ = list(__all__) + _ext01b_names
+from ffmwiz.support.ext01b import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext01b.__all__)
 
 
 # ext01c holds an overflow slice of this module (split for file size).
 from ffmwiz.support import ext01c as _ext01c  # noqa: E402
 # Guard the direct-import case: importing this overflow module FIRST
 # re-enters the parent while the child has no __all__ yet.
-_ext01c_names = list(getattr(_ext01c, "__all__", []))
-if _ext01c_names:
-    from ffmwiz.support.ext01c import *  # noqa: E402,F401,F403
-    __all__ = list(__all__) + _ext01c_names
+from ffmwiz.support.ext01c import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext01c.__all__)

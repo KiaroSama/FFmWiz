@@ -472,7 +472,11 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
     def test_metadata_report_output_path_creates_reports_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             reports_dir = Path(tmp) / "MediaReports"
-            with mock.patch.object(FFmWiz.services, "default_media_reports_dir", return_value=reports_dir):
+            # The DEFINING module. metadata_report_output_path is a services_b
+            # sibling and calls this name directly now, so a patch on the
+            # facade would rebind an attribute nothing reads.
+            from ffmwiz import services_b
+            with mock.patch.object(services_b, "default_media_reports_dir", return_value=reports_dir):
                 output = FFmWiz.metadata_report_output_path(Path("input.mkv"), "_metadata_report", ".txt")
             self.assertEqual(output.parent.name, "MediaReports")
             self.assertTrue(reports_dir.exists())

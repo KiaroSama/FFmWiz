@@ -50,6 +50,11 @@ import FFmWiz
 
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
+from ffmwiz.support import L00_probe
+from ffmwiz import reverse_pipeline
+from ffmwiz import reverse_stages
+from ffmwiz import runtime
+from ffmwiz import wizard_build
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -225,26 +230,26 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
 
     def _executed(self, answers):
         commands = []
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
 
         def spy(cmd, **kwargs):
             commands.append([str(part) for part in cmd])
             return real_runner(cmd, **kwargs)
 
-        encoding.run_ffmpeg_with_progress = spy
+        runtime.run_ffmpeg_with_progress = spy
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
                 code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
         finally:
-            encoding.run_ffmpeg_with_progress = real_runner
+            runtime.run_ffmpeg_with_progress = real_runner
         self.assertEqual(0, code, noise.getvalue()[-1500:])
         return commands
 
     def _planned(self, answers):
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            stages = encoding.bounded_reverse_plan(answers, self._tmp / "planned_ws")
+            stages = reverse_pipeline.bounded_reverse_plan(answers, self._tmp / "planned_ws")
         return [cmd for _label, cmd in stages]
 
     def _compare(self, label, sources=None, **extra):
@@ -336,7 +341,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         answers = self._answers(planning, self.plain_inputs[:2])
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            stages = encoding.bounded_reverse_plan(answers, planning / "ws")
+            stages = reverse_pipeline.bounded_reverse_plan(answers, planning / "ws")
         windows = [float(cmd[cmd.index("-t") + 1])
                    for label, cmd in stages
                    if label.startswith("Reverse segment") and "-t" in cmd]
@@ -380,7 +385,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         planning.mkdir(parents=True, exist_ok=True)
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            stages = encoding.bounded_reverse_plan(
+            stages = reverse_pipeline.bounded_reverse_plan(
                 self._answers(planning, self.primed_inputs[:2]), planning / "ws")
         for label, cmd in stages:
             result = _run(cmd)
@@ -429,15 +434,15 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         planning.mkdir(parents=True, exist_ok=True)
         answers = self._answers(planning, self.inputs[:2])
         seen = []
-        real_stage = encoding.stage_answers
-        encoding.stage_answers = (
+        real_stage = reverse_stages.stage_answers
+        reverse_stages.stage_answers = (
             lambda a, owns: (seen.append(a) or real_stage(a, owns)))
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
-                encoding.bounded_reverse_plan(answers, planning / "ws")
+                reverse_pipeline.bounded_reverse_plan(answers, planning / "ws")
         finally:
-            encoding.stage_answers = real_stage
+            reverse_stages.stage_answers = real_stage
         described = [a for a in seen if str(a.get("input_path", "")).endswith(
             "joined_forward.mkv")]
         self.assertTrue(described, "the joined intermediate was never described")
@@ -458,15 +463,15 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         answers = self._answers(planning, self.plain_inputs[:2], separator_points=[2.0],
                                 video_speed_factor=0.5, audio_speed_from_video=True)
         seen = []
-        real_build = encoding.build_ffmpeg_command
-        encoding.build_ffmpeg_command = (
+        real_build = wizard_build.build_ffmpeg_command
+        wizard_build.build_ffmpeg_command = (
             lambda built, *a, **k: (seen.append(built) or real_build(built, *a, **k)))
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
-                encoding.bounded_reverse_plan(answers, planning / "ws")
+                reverse_pipeline.bounded_reverse_plan(answers, planning / "ws")
         finally:
-            encoding.build_ffmpeg_command = real_build
+            wizard_build.build_ffmpeg_command = real_build
         # The split stage builds into its OWN copy, so the intervals it
         # resolves are written there rather than back onto the job's answers.
         intervals = next((built.get("split_part_intervals") for built in reversed(seen)
@@ -508,15 +513,15 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         answers = self._answers(planning, self.plain_inputs[:2],
                                 video_codec="H265", video_encoder="libx265")
         seen = []
-        real_stage = encoding.stage_answers
-        encoding.stage_answers = (
+        real_stage = reverse_stages.stage_answers
+        reverse_stages.stage_answers = (
             lambda a, owns: (seen.append(a) or real_stage(a, owns)))
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
-                encoding.bounded_reverse_plan(answers, planning / "ws")
+                reverse_pipeline.bounded_reverse_plan(answers, planning / "ws")
         finally:
-            encoding.stage_answers = real_stage
+            reverse_stages.stage_answers = real_stage
         described = [a for a in seen if str(a.get("input_path", "")).endswith(
             "joined_forward.mkv")]
         self.assertTrue(described, "the joined intermediate was never described")
@@ -539,15 +544,15 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
                                      for stream in item["video_streams"]]
             item["duration"] = 0.0
         answers["join_input_items"] = blind
-        real_span = encoding.join_item_picture_span
-        encoding.join_item_picture_span = lambda _item: 0.0
+        real_span = L00_probe.join_item_picture_span
+        L00_probe.join_item_picture_span = lambda _item: 0.0
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
                 with self.assertRaises(ValueError) as caught:
-                    encoding.bounded_reverse_plan(answers, planning / "ws")
+                    reverse_pipeline.bounded_reverse_plan(answers, planning / "ws")
         finally:
-            encoding.join_item_picture_span = real_span
+            L00_probe.join_item_picture_span = real_span
         self.assertIn("duration", str(caught.exception).lower())
 
     # ---- D08 -------------------------------------------------------------
@@ -555,17 +560,17 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         planning = self._tmp / "failexport"
         planning.mkdir(parents=True, exist_ok=True)
         answers = self._answers(planning, self.inputs[:2], separator_points=[2.0])
-        real_plan = encoding.bounded_reverse_plan
+        real_plan = reverse_pipeline.bounded_reverse_plan
 
         def explode(_answers, _workspace):
             raise RuntimeError("scratch directory is read-only")
 
-        encoding.bounded_reverse_plan = explode
+        reverse_pipeline.bounded_reverse_plan = explode
         try:
             export = encoding.export_bounded_reverse_plan(
                 answers, Path(answers["output_path"]))
         finally:
-            encoding.bounded_reverse_plan = real_plan
+            reverse_pipeline.bounded_reverse_plan = real_plan
         self.assertFalse(export.succeeded)
         self.assertIn("read-only", export.error)
 
@@ -573,13 +578,13 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
         planning = self._tmp / "emptyexport"
         planning.mkdir(parents=True, exist_ok=True)
         answers = self._answers(planning, self.inputs[:2], separator_points=[2.0])
-        real_plan = encoding.bounded_reverse_plan
-        encoding.bounded_reverse_plan = lambda _a, _w: []
+        real_plan = reverse_pipeline.bounded_reverse_plan
+        reverse_pipeline.bounded_reverse_plan = lambda _a, _w: []
         try:
             export = encoding.export_bounded_reverse_plan(
                 answers, Path(answers["output_path"]))
         finally:
-            encoding.bounded_reverse_plan = real_plan
+            reverse_pipeline.bounded_reverse_plan = real_plan
         self.assertFalse(export.succeeded)
         self.assertTrue(export.error, "an empty plan reported no reason")
 

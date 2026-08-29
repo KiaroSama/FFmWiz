@@ -32,6 +32,8 @@ import FFmWiz
 
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
+from ffmwiz import reverse_pipeline
+from ffmwiz import reverse_stages
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -129,7 +131,7 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir()
         answers = self._build(out)
-        stages = encoding.bounded_reverse_plan(answers, out / "scratch")
+        stages = reverse_pipeline.bounded_reverse_plan(answers, out / "scratch")
         self.assertGreaterEqual(len(stages), 3,
                                 f"expected a multi-stage plan, got {stages}")
 
@@ -138,7 +140,7 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         shutil.rmtree(out, ignore_errors=True)
         out.mkdir()
         answers = self._build(out)
-        stages = encoding.bounded_reverse_plan(answers, out / "scratch")
+        stages = reverse_pipeline.bounded_reverse_plan(answers, out / "scratch")
         for label, cmd in stages:
             filters = [cmd[index + 1] for index, part in enumerate(cmd[:-1])
                        if part in {"-vf", "-filter:v", "-filter_complex"}]
@@ -220,12 +222,12 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         answers = self._build(out)
         answers.update(extra)
         scratch = out / "scratch"
-        real_budget = encoding.reverse_segment_seconds
-        encoding.reverse_segment_seconds = lambda _answers: 1.0
+        real_budget = reverse_stages.reverse_segment_seconds
+        reverse_stages.reverse_segment_seconds = lambda _answers: 1.0
         try:
-            stages = encoding.bounded_reverse_plan(answers, scratch)
+            stages = reverse_pipeline.bounded_reverse_plan(answers, scratch)
         finally:
-            encoding.reverse_segment_seconds = real_budget
+            reverse_stages.reverse_segment_seconds = real_budget
         segments = [label for label, _cmd in stages
                     if label.startswith("Reverse segment")]
         self.assertGreaterEqual(len(segments), 3,

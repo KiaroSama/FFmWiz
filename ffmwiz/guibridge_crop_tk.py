@@ -78,9 +78,18 @@ from ffmwiz.runner import *  # noqa: F401,F403
 from ffmwiz.runtime import *  # noqa: F401,F403
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
+from ffmwiz.guibridge_tk_common import (  # noqa: F401
+    _PreviewScheduler,
+    _UIPalette,
+    _apply_app_ttk_theme,
+    _bind_layout_independent_keys,
+)
 
-from ffmwiz import guibridge  # facade for monkeypatch-stable cross-module calls  # noqa: F401
-from ffmwiz.guibridge import *  # sibling helpers  # noqa: F401,F403
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int, int] | None:
@@ -104,12 +113,12 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
             temp_dir = Path(temp_name)
 
             result: dict[str, tuple[int, int, int, int] | None] = {"margins": None}
-            palette = guibridge._UIPalette
+            palette = _UIPalette
             root = tk.Tk()
             root.title("FFmWiz Crop Editor")
             root.configure(bg=palette.BG)
             _apply_tk_window_icon(root)
-            guibridge._apply_app_ttk_theme(root)
+            _apply_app_ttk_theme(root)
             try:
                 style = ttk.Style(root)
                 # Combobox styling specific to this GUI (zoom dropdown).
@@ -349,7 +358,7 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                 )
                 redraw(force_image_request=False)
 
-            crop_scheduler = guibridge._PreviewScheduler(
+            crop_scheduler = _PreviewScheduler(
                 root,
                 extract_fn=_crop_extract,
                 on_ready=_crop_on_ready,
@@ -988,7 +997,7 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
             # Layout-independent shortcuts so the Crop GUI still responds
             # when the active keyboard language is Persian or another
             # non-Latin layout (these bindings match by Windows VK code).
-            guibridge._bind_layout_independent_keys(root, [
+            _bind_layout_independent_keys(root, [
                 {"key": "space", "callback": lambda _e: space_toggle_playback(_e)},
                 {"key": "h", "ctrl": False, "alt": False, "callback": set_tool_hand},
                 {"key": "z", "ctrl": False, "alt": False, "callback": set_tool_zoom},
@@ -1086,7 +1095,7 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                        command=lambda: set_time(0.0)).pack(side="left", padx=(8, 0))
             ttk.Button(media_controls, text="⏭", width=3,
                        command=lambda: set_time(timeline_duration)).pack(side="left", padx=(4, 0))
-            guibridge._bind_layout_independent_keys(root, [
+            _bind_layout_independent_keys(root, [
                 {"key": "home", "callback": lambda _e: set_time(0.0)},
                 {"key": "end", "callback": lambda _e: set_time(timeline_duration)},
             ], is_text_focus_fn=is_editing_text)

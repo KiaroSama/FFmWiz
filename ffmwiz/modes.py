@@ -104,31 +104,6 @@ MEDIA_INFO_VALUE_COLORS = [
 ]
 
 
-def run_mode_steps(answers: dict[str, Any], steps: list[Step]) -> None:
-    def visible_question_number(current: int) -> int:
-        count = 0
-        for pos in range(current + 1):
-            if steps[pos].applicable(answers):
-                count += 1
-        return int(answers.get("_question_offset", 0) or 0) + count
-
-    idx = 0
-    while idx < len(steps):
-        if not steps[idx].applicable(answers):
-            idx += 1
-            continue
-        try:
-            answers["_question_number"] = visible_question_number(idx)
-            steps[idx].run(answers)
-            idx += 1
-        except Back:
-            if idx == 0:
-                raise
-            idx -= 1
-            while idx > 0 and (not steps[idx].applicable(answers) or step_is_auto_back_skip(steps[idx], answers)):
-                idx -= 1
-
-
 def run_capability_cache_menu(base_answers: dict[str, Any]) -> None:
     """Diagnostics sub-menu for the FFmpeg capability cache. View / re-probe /
     clear, using the existing 0=Back convention. Never affects user settings,
@@ -710,7 +685,6 @@ __all__ = [
     'run_copy_cut_mode',
     'run_folder_encode_mode',
     'run_folder_settings_wizard',
-    'run_mode_steps',
     '_capability_cache_clear',
     '_capability_cache_reprobe',
     '_run_add_files_to_video_mode_impl',

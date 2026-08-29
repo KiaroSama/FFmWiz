@@ -33,6 +33,8 @@ import FFmWiz
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
 from ffmwiz.support import L00_split
+from ffmwiz import reverse_pipeline
+from ffmwiz import runtime
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -47,21 +49,21 @@ class TheSelectorRoutesAJoinedReverse(unittest.TestCase):
         self.one_shot = []
         self.notes = []
         self._real_bounded = encoding.run_bounded_reverse_pipeline
-        self._real_segmented = encoding.run_segmented_reverse_main_encode
-        self._real_runner = encoding.run_ffmpeg_with_progress
+        self._real_segmented = reverse_pipeline.run_segmented_reverse_main_encode
+        self._real_runner = runtime.run_ffmpeg_with_progress
         self._real_note = FFmWiz.appio.note
         encoding.run_bounded_reverse_pipeline = (
             lambda answers: (self.bounded.append(answers) or (0, 0.0)))
-        encoding.run_segmented_reverse_main_encode = (
+        reverse_pipeline.run_segmented_reverse_main_encode = (
             lambda answers: (self.segmented.append(answers) or (0, 0.0)))
-        encoding.run_ffmpeg_with_progress = (
+        runtime.run_ffmpeg_with_progress = (
             lambda cmd, **kwargs: (self.one_shot.append(cmd) or (0, 0.0)))
         FFmWiz.appio.note = self.notes.append
 
     def tearDown(self):
         encoding.run_bounded_reverse_pipeline = self._real_bounded
-        encoding.run_segmented_reverse_main_encode = self._real_segmented
-        encoding.run_ffmpeg_with_progress = self._real_runner
+        reverse_pipeline.run_segmented_reverse_main_encode = self._real_segmented
+        runtime.run_ffmpeg_with_progress = self._real_runner
         FFmWiz.appio.note = self._real_note
 
     def _run(self, **extra):
@@ -186,7 +188,7 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
         answers["output_path"] = out / "bounded.mkv"
         real_split = L00_split.split_ranges_for_reverse_segments
         commands = []
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
 
         def small_split(ranges, duration, seconds=None):
             return real_split(ranges, duration, chunk_seconds or seconds)
@@ -196,8 +198,8 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
             return real_runner(cmd, **kwargs)
 
         if chunk_seconds:
-            encoding.split_ranges_for_reverse_segments = small_split
-        encoding.run_ffmpeg_with_progress = spy
+            L00_split.split_ranges_for_reverse_segments = small_split
+        runtime.run_ffmpeg_with_progress = spy
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
@@ -206,8 +208,8 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
                                       dict(answers), items, answers["output_path"])]
                 code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
         finally:
-            encoding.split_ranges_for_reverse_segments = real_split
-            encoding.run_ffmpeg_with_progress = real_runner
+            L00_split.split_ranges_for_reverse_segments = real_split
+            runtime.run_ffmpeg_with_progress = real_runner
         self.assertEqual(0, code, noise.getvalue()[-1500:])
         return answers["output_path"], commands, noise.getvalue()
 
@@ -278,17 +280,17 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
         # The whole point: the segmented executor has to run. Before this the
         # split branch went straight to a one-shot `reverse` over everything.
         seen = []
-        real = encoding.run_segmented_reverse_main_encode
+        real = reverse_pipeline.run_segmented_reverse_main_encode
 
         def spy(answers):
             seen.append(answers)
             return real(answers)
 
-        encoding.run_segmented_reverse_main_encode = spy
+        reverse_pipeline.run_segmented_reverse_main_encode = spy
         try:
             self._reverse_with("splitbounded", separator_points=[2.0])
         finally:
-            encoding.run_segmented_reverse_main_encode = real
+            reverse_pipeline.run_segmented_reverse_main_encode = real
         self.assertEqual(1, len(seen))
         self.assertNotIn("separator_points", seen[0],
                          "the reverse stage must not also try to split")
@@ -388,13 +390,13 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
             "reverse_video": True, "separator_points": [2.0],
         })
         commands = []
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
 
         def spy(cmd, **kwargs):
             commands.append([str(part) for part in cmd])
             return real_runner(cmd, **kwargs)
 
-        encoding.run_ffmpeg_with_progress = spy
+        runtime.run_ffmpeg_with_progress = spy
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
@@ -407,7 +409,7 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
                                           or [out / "o.mkv"])[0]
                 code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
         finally:
-            encoding.run_ffmpeg_with_progress = real_runner
+            runtime.run_ffmpeg_with_progress = real_runner
         self.assertEqual(0, code, noise.getvalue()[-1500:])
 
         scratch = [cmd for cmd in commands
@@ -445,13 +447,13 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
             "reverse_video": True, "separator_points": [2.0],
         })
         commands = []
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
 
         def spy(cmd, **kwargs):
             commands.append([str(part) for part in cmd])
             return real_runner(cmd, **kwargs)
 
-        encoding.run_ffmpeg_with_progress = spy
+        runtime.run_ffmpeg_with_progress = spy
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
@@ -464,7 +466,7 @@ class TheBoundedPlanProducesTheRightFile(NoLeakedArtifacts, unittest.TestCase):
                                           or [out / "o.mkv"])[0]
                 encoding.run_bounded_reverse_pipeline(answers)
         finally:
-            encoding.run_ffmpeg_with_progress = real_runner
+            runtime.run_ffmpeg_with_progress = real_runner
         final = [cmd for cmd in commands if "Part" in Path(cmd[-1]).name]
         self.assertTrue(final, "no final part command was issued")
         self.assertTrue(any("-b:v" in cmd for cmd in final),

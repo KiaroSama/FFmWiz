@@ -216,10 +216,12 @@ class CutEverythingRejectionTests(unittest.TestCase):
     returning the untouched source."""
 
     def _bridge(self, reply):
-        from ffmwiz import guibridge, guibridge_b
-        original = guibridge._launch_qt_gui
-        guibridge._launch_qt_gui = lambda request: reply
-        self.addCleanup(setattr, guibridge, "_launch_qt_gui", original)
+        from ffmwiz import guibridge_b
+        # The DEFINING module. guibridge_b calls this name directly now, so a
+        # patch on the facade would rebind an attribute nothing reads.
+        original = guibridge_b._launch_qt_gui
+        guibridge_b._launch_qt_gui = lambda request: reply
+        self.addCleanup(setattr, guibridge_b, "_launch_qt_gui", original)
         return guibridge_b
 
     def _answers(self):
@@ -390,16 +392,18 @@ class UnifiedRequestTests(unittest.TestCase):
     """What the bridge actually puts on the wire for the editors."""
 
     def _capture(self, answers):
-        from ffmwiz import guibridge, guibridge_b
+        from ffmwiz import guibridge_b
         seen = {}
 
         def fake(request):
             seen["request"] = request
             return {"status": "canceled"}
 
-        original = guibridge._launch_qt_gui
-        guibridge._launch_qt_gui = fake
-        self.addCleanup(setattr, guibridge, "_launch_qt_gui", original)
+        # The DEFINING module. guibridge_b calls this name directly now, so a
+        # patch on the facade would rebind an attribute nothing reads.
+        original = guibridge_b._launch_qt_gui
+        guibridge_b._launch_qt_gui = fake
+        self.addCleanup(setattr, guibridge_b, "_launch_qt_gui", original)
         guibridge_b.open_unified_video_gui(answers)
         return seen["request"]
 

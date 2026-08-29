@@ -80,8 +80,13 @@ class SinglePaletteTests(unittest.TestCase):
                 self.assertEqual(getattr(guibridge._UIPalette, attr), palette[key])
 
     def test_tk_palette_declares_no_colours_of_its_own(self):
-        src = (_ROOT / "ffmwiz" / "guibridge.py").read_text(encoding="utf-8")
-        body = src[src.index("class _UIPalette:"):src.index("def _apply_app_ttk_theme")]
+        # Read off the LOADED class instead of a pinned file path. The class
+        # moved to guibridge_tk_common (guibridge still re-exports it) and a
+        # path pinned here would keep failing a test whose subject -- one
+        # shared palette -- is untouched.
+        import inspect
+        from ffmwiz import guibridge
+        body = inspect.getsource(guibridge._UIPalette)
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}", body), [])
 
     def test_qml_declares_no_fallback_palette_of_its_own(self):

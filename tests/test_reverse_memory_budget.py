@@ -216,7 +216,7 @@ class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
         # It lives beside the chunk splitter precisely so the standalone mode
         # can use it; the executor's own wrapper sits a layer above and cannot
         # be imported from there.
-        from ffmwiz.support import ext04b
+        from ffmwiz.support import ext04b, L00_split
         self.assertTrue(hasattr(ext04b, "reverse_segment_seconds_for"))
 
     def _splitter_call(self, answers):
@@ -228,7 +228,7 @@ class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
         one particular call shape so tightly that the correct repair -- passing
         the shared plan object -- failed it.
         """
-        from ffmwiz.support import ext04b
+        from ffmwiz.support import ext04b, L00_split
         seen = {}
 
         def record(ranges, duration, *args, **kwargs):
@@ -236,14 +236,14 @@ class EveryReverseEntryPointSharesTheBudget(unittest.TestCase):
             seen["kwargs"] = kwargs
             return []
 
-        real_split = ext04b.split_ranges_for_reverse_segments
+        real_split = L00_split.split_ranges_for_reverse_segments
         real_note = FFmWiz.appio.note
-        ext04b.split_ranges_for_reverse_segments = record
+        L00_split.split_ranges_for_reverse_segments = record
         FFmWiz.appio.note = lambda *a, **k: None
         try:
             ext04b.run_segmented_reverse_video_speed(answers)
         finally:
-            ext04b.split_ranges_for_reverse_segments = real_split
+            L00_split.split_ranges_for_reverse_segments = real_split
             FFmWiz.appio.note = real_note
         self.assertIn("args", seen, "the splitter was never reached")
         return seen

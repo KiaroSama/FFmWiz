@@ -38,6 +38,10 @@ import FFmWiz
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
 from ffmwiz.support import ext04b
+from ffmwiz import reverse_pipeline
+from ffmwiz import reverse_stages
+from ffmwiz import runtime
+from ffmwiz.support import L00_split
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -113,10 +117,12 @@ class EveryReverseCallerHonoursTheCap(NoLeakedArtifacts, unittest.TestCase):
     def _ranges_from(self, drive):
         """Every (fps, chunks) pair `drive` hands the shared chunker.
 
-        Patched in BOTH namespaces because the callers reach the helper
-        differently: the pipeline calls it through the `encoding` facade and the
-        standalone mode through its own module globals. A spy on one of them
-        would report an untested caller as clean.
+        One namespace now, not two. The callers used to reach this helper
+        differently -- the pipeline through the `encoding` facade, the
+        standalone mode through its own module globals -- so a spy had to be
+        installed in both, and a caller that found a third route would have
+        been reported as clean. Every caller now goes through the module that
+        DEFINES it, so patching that one module is what proves coverage.
         """
         calls = []
         real_split = FFmWiz.split_ranges_for_reverse_segments
@@ -126,17 +132,15 @@ class EveryReverseCallerHonoursTheCap(NoLeakedArtifacts, unittest.TestCase):
             calls.append((fps, chunks))
             return chunks
 
-        patched = [(encoding, "split_ranges_for_reverse_segments"),
-                   (ext04b, "split_ranges_for_reverse_segments"),
-                   (encoding, "reverse_segment_plan_for"),
-                   (encoding, "run_ffmpeg_with_progress"),
-                   (ext04b, "run_ffmpeg_with_progress")]
+        patched = [(L00_split, "split_ranges_for_reverse_segments"),
+                   (reverse_stages, "reverse_segment_plan_for"),
+                   (runtime, "run_ffmpeg_with_progress")]
         saved = [(module, name, getattr(module, name)) for module, name in patched]
-        for module, name in patched[:2]:
+        for module, name in patched[:1]:
             setattr(module, name, spy)
-        setattr(encoding, "reverse_segment_plan_for",
+        setattr(reverse_stages, "reverse_segment_plan_for",
                 lambda answers, best_effort=False: self.budget)
-        for module, name in patched[3:]:
+        for module, name in patched[2:]:
             setattr(module, name, lambda cmd, **kwargs: (0, 0.0))
         noise = StringIO()
         try:
@@ -177,7 +181,7 @@ class EveryReverseCallerHonoursTheCap(NoLeakedArtifacts, unittest.TestCase):
         self._assert_within_cap(
             "run_segmented_reverse_main_encode",
             self._ranges_from(
-                lambda: encoding.run_segmented_reverse_main_encode(answers)))
+                lambda: reverse_pipeline.run_segmented_reverse_main_encode(answers)))
 
     def test_the_bounded_reverse_pipeline_honours_the_cap(self):
         answers = self._answers()
@@ -191,7 +195,7 @@ class EveryReverseCallerHonoursTheCap(NoLeakedArtifacts, unittest.TestCase):
         self._assert_within_cap(
             "bounded_reverse_plan",
             self._ranges_from(
-                lambda: encoding.bounded_reverse_plan(answers, self._tmp / "ws")))
+                lambda: reverse_pipeline.bounded_reverse_plan(answers, self._tmp / "ws")))
 
     def test_the_standalone_reverse_honours_the_cap(self):
         answers = self._answers()

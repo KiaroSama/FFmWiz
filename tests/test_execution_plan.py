@@ -16,6 +16,8 @@ from pathlib import Path
 import FFmWiz
 
 from ffmwiz import encoding
+from ffmwiz import reverse_pipeline
+from ffmwiz import runtime
 
 
 def _answers(**extra):
@@ -36,22 +38,22 @@ class PlanSelection(unittest.TestCase):
         self.one_shot = []
         self.notes = []
         self.bounded_join = []
-        self._real_segmented = encoding.run_segmented_reverse_main_encode
+        self._real_segmented = reverse_pipeline.run_segmented_reverse_main_encode
         self._real_bounded = encoding.run_bounded_reverse_pipeline
-        self._real_runner = encoding.run_ffmpeg_with_progress
+        self._real_runner = runtime.run_ffmpeg_with_progress
         self._real_note = FFmWiz.appio.note
-        encoding.run_segmented_reverse_main_encode = (
+        reverse_pipeline.run_segmented_reverse_main_encode = (
             lambda answers: (self.segmented.append(answers) or (0, 0.0)))
         encoding.run_bounded_reverse_pipeline = (
             lambda answers: (self.bounded_join.append(answers) or (0, 0.0)))
-        encoding.run_ffmpeg_with_progress = (
+        runtime.run_ffmpeg_with_progress = (
             lambda cmd, **kwargs: (self.one_shot.append(cmd) or (0, 0.0)))
         FFmWiz.appio.note = self.notes.append
 
     def tearDown(self):
-        encoding.run_segmented_reverse_main_encode = self._real_segmented
+        reverse_pipeline.run_segmented_reverse_main_encode = self._real_segmented
         encoding.run_bounded_reverse_pipeline = self._real_bounded
-        encoding.run_ffmpeg_with_progress = self._real_runner
+        runtime.run_ffmpeg_with_progress = self._real_runner
         FFmWiz.appio.note = self._real_note
 
     def _run(self, answers):

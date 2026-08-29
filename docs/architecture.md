@@ -101,10 +101,13 @@ All real implementation lives in the `ffmwiz/` package.
 
 Modules import only from lower layers, so the *layer* graph is acyclic:
 
-> The one deliberate exception is the `<name>` / `<name>_b` sibling pair described
-> under [Module size policy](#module-size-policy): a sibling back-imports from its
-> source and the source re-exports the sibling at its end. That cycle is intentional
-> and lives *inside* one logical module, not between layers.
+> This holds for individual MODULES too, not just layers. The `<name>` /
+> `<name>_b` sibling pairs used to be an exception -- the sibling back-imported
+> its source and the source re-exported the sibling at its end -- and that cycle
+> made 17 modules impossible to import on their own. It is gone: a sibling now
+> imports only lower tiers, and the source re-exports it one-directionally.
+> `tests/test_package_imports.py` and `tests/test_module_reference_hygiene.py`
+> keep it that way.
 
 ```
 core/            constants, colors, exceptions, timeline        (layer 0)
@@ -145,12 +148,24 @@ splitting a module requires care so patches still take effect:
 - A source module re-exports its new sibling(s) at its end
   (`from ffmwiz.<sibling> import *` and `__all__ += sibling.__all__`), so every
   `import *` consumer keeps seeing the full set of names.
-- When a moved function references a name that tests patch on the facade
-  module, that reference is qualified to `<facade>.<name>` (e.g.
-  `wizard.step_input_path(...)`, `guibridge._launch_qt_gui(...)`). Qualified
-  references resolve through the facade module at call time, so a
-  `patch.object(FFmWiz.wizard, "step_input_path")` is still observed by callers
-  that now live in a sibling module.
+- **The sibling must not import the source back.** That is the direction that
+  made the pair a cycle: the source reaches `__all__ += sibling.__all__` while
+  the sibling is still on its first statements. If the sibling needs a name the
+  source defines, move the DEFINITION down to a module both can import -- as
+  `Step`, `step_is_auto_back_skip` and `run_mode_steps` went to `wizard_base.py`,
+  the shared Tk helpers to `guibridge_tk_common.py`, and
+  `audio_tool_picture_args` to `support/L01_cover.py`.
+- When a moved function references a name that tests patch, that reference is
+  qualified to the module that **defines** it -- `runtime.run_ffmpeg_with_progress`,
+  `reverse_stages.stage_answers`, `L00_split.split_ranges_for_reverse_segments` --
+  never to a facade that merely re-exports it. One definer means one patch
+  point that every caller observes. Qualifying through a facade instead gave
+  each caller its own copy, so a double installed on one of them silently
+  missed the others, and the test passed while testing nothing.
+- Never guard the re-export with `getattr(_sibling, "__all__", [])`. It stops
+  the error without stopping the cycle: the merge is skipped and the source's
+  `__all__` is silently short. Measured before removal, `ext04.__all__` was 53
+  names imported directly and 14 with its sibling imported first.
 - Modules that mutate shared module-level state via `global` keep that state and
   all its readers/writers together in one module.
 
@@ -215,12 +230,13 @@ these checks on Windows across Python 3.10–3.13.
 
 Every module is kept under ~800 lines. Oversized modules are split with the
 sibling pattern: the source keeps the smaller half, a `<name>_b`/`<name>c`
-sibling holds the rest, does `from ffmwiz.<source> import *` (back-import) plus
-`from ffmwiz import <source>`, and the source re-exports the sibling at its end
-(`from ffmwiz.<sibling> import *`; `__all__ += <sibling>.__all__`). For a
-monkeypatched facade (services, wizard, guibridge, modes, runtime), bare calls
-in the sibling to patched names are rewritten to `<facade>.<name>` so
-`mock.patch` targets still resolve. The pure-data modules
+sibling holds the rest and imports only LOWER tiers, and the source re-exports
+the sibling at its end (`from ffmwiz.<sibling> import *`;
+`__all__ += <sibling>.__all__`). The dependency runs one way. Where a sibling
+needs a name the source owns, the definition moves down to a shared module
+rather than the sibling reaching back up. Calls to monkeypatched names are
+qualified at the module that DEFINES the name, so one `mock.patch` covers every
+caller. The pure-data modules
 `core/constants_config_template.py` and `core/constants_tables.py` are leaf
 siblings of `constants.py`.
 

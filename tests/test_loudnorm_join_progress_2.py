@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 import FFmWiz
+from ffmwiz import wizard_b
 import cache_test_utils
 from join_test_helpers import video_stream, audio_stream, make_item
 
@@ -61,7 +62,7 @@ class LoudnormJoinProgressTests2(unittest.TestCase):
         # menu -> manual(2); "add cuts/split?" yes; layout 5; split line.
         with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "5", "10:00,20:00,25:00"]), \
              mock.patch.object(FFmWiz.appio, "ask_yes_no", return_value=True), \
-             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start"):
+             mock.patch.object(wizard_b, "_confirm_audio_transform_start"):
             FFmWiz.step_audio_transform_editor(answers)
         self.assertFalse(answers["_audio_transform_noop"])
         self.assertEqual(answers["_audio_transform_split_points"], [600.0, 1200.0, 1500.0])

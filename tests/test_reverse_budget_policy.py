@@ -38,6 +38,7 @@ from unittest import mock
 import FFmWiz
 from ffmwiz import encoding
 from ffmwiz.support import L00_split
+from ffmwiz import reverse_stages
 
 CAP = FFmWiz.REVERSE_PEAK_BUDGET_BYTES
 OVERHEAD = FFmWiz.REVERSE_FIXED_OVERHEAD_BYTES
@@ -430,7 +431,7 @@ class NoFFmpegStartsOnARejectedPlan(unittest.TestCase):
             for start, end in FFmWiz.split_ranges_for_reverse_segments(
                     [(0.0, duration)], duration, plan.seconds, plan.fps):
                 commands.append([str(part) for part in
-                                 encoding.build_main_encode_reverse_segment_command(
+                                 reverse_stages.build_main_encode_reverse_segment_command(
                                      answers, start, end, Path("out/seg.mkv"))])
             return plan, commands, popen, run
 
@@ -482,7 +483,7 @@ class TheSharedEntryPointsStillLineUp(unittest.TestCase):
     def test_the_executor_wrapper_agrees_with_the_pure_function(self):
         answers = segment_answers(3840, 2160, 30.0, "yuv420p")
         self.assertAlmostEqual(
-            encoding.reverse_segment_seconds(answers),
+            reverse_stages.reverse_segment_seconds(answers),
             FFmWiz.reverse_segment_seconds_for(3840, 2160, 30.0, "yuv420p"),
             places=9)
 
