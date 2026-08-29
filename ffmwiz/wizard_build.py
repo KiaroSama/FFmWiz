@@ -323,7 +323,12 @@ def build_quick_output_stages(answers: dict[str, Any], mode: str,
         concat_list = workdir / "boomerang_concat.txt"
         # Forward FIRST. The other order gives a clip that plays backwards and
         # then forwards, which is a different thing and looks like one.
-        write_concat_list([forward_path, backward_path], concat_list)
+        # `-stream_loop` is not used for `loop_count` here: it is an INPUT
+        # option on a single `-i`, and this output is a CONCAT of two files.
+        # Repeating the forward/backward PAIR in the list instead plays the
+        # finished boomerang N+1 times, which is what the answer means.
+        plays = 1 + int(answers.get("loop_count") or 0)
+        write_concat_list([forward_path, backward_path] * plays, concat_list)
         stages.append(("Encode the forward half", [str(part) for part in forward_cmd]))
         stages.append((
             "Reverse the forward half in bounded segments",
