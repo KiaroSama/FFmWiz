@@ -86,6 +86,15 @@ class TheAnswerVocabularyIsWhatThePromptOffers(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     wizard_quick.parse_quick_tokens(text)
 
+    def test_a_thumbnail_refuses_a_loop(self):
+        # A thumbnail is a single frame; `-stream_loop` on it is meaningless.
+        # Checked after the whole answer is parsed, so token order must not
+        # change whether the combination is accepted.
+        for text in ("thumb,loop=2", "loop=2,thumb"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    wizard_quick.parse_quick_tokens(text)
+
     def test_describe_names_what_was_asked_for(self):
         for text, fragment in (("gif=10:200", "10 fps, 200 px"),
                                ("boomerang", "reversed"),
@@ -294,6 +303,16 @@ class TheCommandsHaveTheShapeTheyHaveToHave(NoLeakedArtifacts, unittest.TestCase
                 argv: list[str] = []
                 wizard_build_b.append_stream_loop(argv, {"loop_count": bad})
                 self.assertEqual([], argv)
+
+    def test_a_gif_still_loops(self):
+        # Regression guard: `gif_input_options` already threads `loop_count`
+        # through both GIF passes, in front of each one's own `-i`.
+        stages = self._plan(quick_output="gif", output_ext="gif",
+                            loop_count=2)["stages"]
+        for _label, argv in stages:
+            self.assertIn("-stream_loop", argv, argv)
+            self.assertLess(argv.index("-stream_loop"), argv.index("-i"))
+            self.assertEqual("2", argv[argv.index("-stream_loop") + 1])
 
     def test_a_single_cut_reaches_both_gif_passes_identically(self):
         options = wizard_build_b.gif_input_options(

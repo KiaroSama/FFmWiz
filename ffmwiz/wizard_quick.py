@@ -121,6 +121,11 @@ def parse_quick_tokens(value: str) -> dict[str, Any]:
             answers["thumbnail_ext"] = THUMBNAIL_DEFAULT_EXT
     if not answers:
         raise ValueError("no quick output was named")
+    # Checked after the whole answer is parsed, not inside the token loop, so
+    # `loop=2,thumb` is refused exactly like `thumb,loop=2` -- token order
+    # must not change whether this combination is accepted.
+    if answers.get("quick_output") == "thumbnail" and answers.get("loop_count"):
+        raise ValueError("a thumbnail is a single frame, so there is nothing to loop")
     return answers
 
 
