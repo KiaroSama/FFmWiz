@@ -87,6 +87,9 @@ from ffmwiz.runner import *  # noqa: F401,F403
 from ffmwiz.runtime import *  # noqa: F401,F403
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
+from ffmwiz import wizard_composite  # noqa: F401  (module, so a patch is seen)
+from ffmwiz import wizard_quick  # noqa: F401  (module, so a patch is seen)
+from ffmwiz import wizard_raw  # noqa: F401  (module, so a patch is seen)
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 
 
@@ -621,6 +624,27 @@ def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
                     duration = max(0.0, end - start)
                     interval_text = f"  [{seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}, duration {format_elapsed(duration)}]"
                 print("    " + field_text(f"Part {idx:02d}", str(part_path) + interval_text, Color.LIME))
+    # Picture filters, quick output, compositing, volume and raw ffmpeg options
+    # each change the job as much as anything printed above, and this is the
+    # last thing a user reads before committing to an encode that may run for
+    # an hour. Guarded on the ANSWER, not on the describer's text -- every
+    # describe_* below returns the string "none" for a job that never touched
+    # it, and "none" is still a non-empty, truthy string.
+    if any(key in answers for key in LOOK_ANSWER_KEYS):
+        print("  " + field_text("picture filters", describe_look(answers), Color.ORANGE))
+    if answers.get("quick_output") or answers.get("loop_count"):
+        print("  " + field_text("quick output", wizard_quick.describe_quick(answers), Color.LIME))
+    if answers.get("composite_mode") or answers.get("composite_audio_mix"):
+        print("  " + field_text("composite", wizard_composite.describe_composite(answers), Color.LIGHT_BLUE))
+    _volume = answers.get("audio_volume")
+    if _volume is not None and abs(float(_volume) - 1.0) > 1e-9:
+        print("  " + field_text("volume", wizard_raw.describe_raw({"audio_volume": _volume}), Color.MEAN_VOLUME))
+    if answers.get("raw_ffmpeg_args"):
+        print("  " + field_text(
+            "raw options",
+            wizard_raw.describe_raw({"raw_ffmpeg_args": answers["raw_ffmpeg_args"]}),
+            Color.YELLOW,
+        ))
     if any_join_audio(answers):
         _recovered_streams, _recovered_tracks = join_audio_recovery(answers)
         print("  " + field_text(
