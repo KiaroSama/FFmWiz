@@ -30,7 +30,7 @@ instances.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001 | Raw-options parsing: Windows paths and per-stream reserved options | P1 | S | — | TODO |
+| 001 | Raw-options parsing: Windows paths and per-stream reserved options | P1 | S | — | DONE |
 | 002 | Dispatch the composite builder for an audio-only mix | P1 | S | — | TODO |
 | 003 | `loop=N` reaches every quick output, or is refused | P2 | S | — | TODO |
 | 004 | The four documented config keys are actually read | P1 | M | 002 | TODO |
@@ -44,6 +44,21 @@ instances.
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).
+
+## Executed
+
+- **001 — DONE, approved.** Branch `advisor/001-raw-arguments-parsing`, commit
+  `a5e993a`, in worktree `.claude/worktrees/agent-a87f55a45fe799e50`. NOT merged
+  and NOT pushed — merging is the maintainer's call.
+  Reviewed by re-running the criteria rather than trusting the report: scope is
+  the two in-scope files only, the tree is clean, `-k volume_and_raw_args` is
+  32/32 and the full suite 1988/1988 `OK` (five new tests).
+  The executor **STOPPED once, correctly** — this plan's original Step 2 said to
+  use `posix=False`, which also disables shlex's unbalanced-quote detection and
+  leaves quote characters on the token, breaking two existing tests that were
+  right. It reverted rather than editing them. The plan was revised to clear
+  `lex.escape` instead, which keeps all three behaviours, and re-dispatched.
+  **The plan was wrong, not the executor.**
 
 ## Dependency notes
 
