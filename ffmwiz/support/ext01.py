@@ -118,6 +118,10 @@ def build_encode_audio_processing_filter(answers: dict[str, Any]) -> str:
         filters.append(build_loudnorm_filter(answers))
         # Explicitly resample after LoudNorm to guarantee a stable output rate.
         filters.append(f"aresample={_loudnorm_output_sample_rate(answers)}")
+    # After LoudNorm on purpose: LoudNorm normalises to a target, so a manual
+    # gain applied before it is exactly what it would undo.
+    from ffmwiz.wizard_raw import build_volume_filter
+    filters.extend(build_volume_filter(answers))
     filters.append("asetpts=PTS-STARTPTS")
     # The sound's half of the fade, on the same rule and in the same place as
     # the picture's: last, so "one second" is one second of the output. Without

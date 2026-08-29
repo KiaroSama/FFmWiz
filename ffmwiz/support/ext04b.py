@@ -123,7 +123,8 @@ def build_audio_transform_filter_complex(
         out_label = f"aout{pos}"
         if (audio_speed_transform_enabled(answers)
                 or loudnorm_transform_enabled(answers)
-                or any(requested_fade_seconds(answers))):
+                or any(requested_fade_seconds(answers))
+                or build_volume_filter(answers)):
             parts.append(f"[{current_label}]{build_encode_audio_speed_filter(answers)}[{out_label}]")
         elif current_label.startswith("0:"):
             parts.append(f"[{current_label}]anull[{out_label}]")
@@ -831,5 +832,6 @@ __all__ = [
 # every existing `from ffmwiz.support.ext04b import *` keeps working.
 from ffmwiz.support import ext04c  # noqa: E402
 from ffmwiz.support.ext04c import *  # noqa: E402,F401,F403
+from ffmwiz.wizard_raw import build_volume_filter  # noqa: E402,F401
 from ffmwiz.support import L00_split  # noqa: E402,F401  (single patch point)
 __all__ += ext04c.__all__

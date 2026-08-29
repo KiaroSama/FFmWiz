@@ -344,10 +344,39 @@ VIDEO_SPEED_REVERSE_FORMATS = ["mp4", "mkv", "mov", "m4v", "ts", "avi"]
 # closest match before accepting it.
 KNOWN_OUTPUT_FORMATS = {
     "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "mpg", "mpeg", "wmv", "flv",
-    "ogv", "3gp", "mts", "m2ts", "vob", "mxf",
+    "ogv", "3gp", "mts", "m2ts", "vob", "mxf", "gif",
     "mp3", "m4a", "aac", "opus", "ogg", "oga", "wav", "flac", "ac3", "eac3",
     "wma", "alac", "aiff", "aif", "amr", "mka", "caf", "spx",
 }
+
+# ---- Quick outputs (GIF, boomerang, loop, thumbnail) -------------------------
+# A naive `-c:v gif` quantises every frame against the same 216-colour web
+# palette and looks it. The two-pass palette below is the recipe FFmpeg's own
+# documentation gives, and it is TWO commands on purpose: the single-command
+# `split`+`palettegen` variant has to buffer the stream to build the palette
+# from it, which is the same unbounded-memory shape `reverse` has and that this
+# project already refuses everywhere else.
+GIF_DEFAULT_FPS = 15
+GIF_DEFAULT_WIDTH = 480
+GIF_PALETTEGEN_FILTER = "palettegen=stats_mode=diff"
+GIF_PALETTEUSE_FILTER = "paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+GIF_PALETTE_FILE_NAME = "palette.png"
+
+# Image containers a single extracted frame may be written to.
+THUMBNAIL_IMAGE_EXTS = ("png", "jpg", "jpeg", "webp", "bmp")
+THUMBNAIL_DEFAULT_EXT = "png"
+
+# Every answer key the quick-output question owns. Re-asking must clear the
+# whole set, or a rejected second attempt leaves the first one's mode behind --
+# the same trap `LOOK_ANSWER_KEYS` exists for.
+QUICK_ANSWER_KEYS = (
+    "quick_output",
+    "gif_fps",
+    "gif_width",
+    "loop_count",
+    "thumbnail_seconds",
+    "thumbnail_ext",
+)
 COMMON_VIDEO_CODECS = ["H265", "H264", "AV1", "VP9", "MPEG4", "copy"]
 COMMON_AUDIO_CODECS = ["aac", "libopus", "opus", "libmp3lame", "flac", "pcm_s16le", "copy"]
 # Common output audio sample rates (Hz) shown as prompt examples.
@@ -728,6 +757,12 @@ from ffmwiz.core.constants_tables import *  # noqa: E402,F401,F403
 
 
 __all__ = [
+    'OVERLAY_CORNERS',
+    'COMPOSITE_PICTURE_MODES',
+    'COMPOSITE_DEFAULT_CORNER',
+    'COMPOSITE_DEFAULT_MARGIN',
+    'COMPOSITE_DEFAULT_PIP_SCALE',
+    'COMPOSITE_DEFAULT_MIX_WEIGHT',
     'ROTATE_FILTERS',
     'DENOISE_FILTERS',
     'SHARPEN_FILTERS',
@@ -783,6 +818,14 @@ __all__ = [
     'COMMON_AUDIO_FORMATS',
     'VIDEO_SPEED_REVERSE_FORMATS',
     'KNOWN_OUTPUT_FORMATS',
+    'GIF_DEFAULT_FPS',
+    'GIF_DEFAULT_WIDTH',
+    'GIF_PALETTEGEN_FILTER',
+    'GIF_PALETTEUSE_FILTER',
+    'GIF_PALETTE_FILE_NAME',
+    'THUMBNAIL_IMAGE_EXTS',
+    'THUMBNAIL_DEFAULT_EXT',
+    'QUICK_ANSWER_KEYS',
     'COMMON_VIDEO_CODECS',
     'COMMON_AUDIO_CODECS',
     'COMMON_AUDIO_SAMPLE_RATES',
@@ -918,3 +961,38 @@ ADJUST_RANGES: dict[str, tuple[float, float, float]] = {
     "adjust_saturation": (0.0, 3.0, 1.0),
     "adjust_gamma": (0.1, 10.0, 1.0),
 }
+
+
+# ---------------------------------------------------------------------------
+# Multi-input compositing (overlay / picture-in-picture / stacks / audio mix).
+# ---------------------------------------------------------------------------
+
+# Corner -> (x, y) expressions for `overlay`, with `{m}` for the margin.
+# W/H are the MAIN input's dimensions and w/h the overlay's, so the same four
+# strings place any size of logo against any size of picture -- which is why
+# they are expressions rather than numbers computed from the probe.
+OVERLAY_CORNERS: dict[str, tuple[str, str]] = {
+    "tl": ("{m}", "{m}"),
+    "tr": ("W-w-{m}", "{m}"),
+    "bl": ("{m}", "H-h-{m}"),
+    "br": ("W-w-{m}", "H-h-{m}"),
+    "center": ("(W-w)/2", "(H-h)/2"),
+}
+
+# Picture modes, and how each one combines the second input with the first.
+COMPOSITE_PICTURE_MODES: dict[str, str] = {
+    "overlay": "a second input placed at a corner, at its own size",
+    "pip": "a second video scaled down and placed at a corner",
+    "hstack": "the two inputs side by side",
+    "vstack": "the two inputs one above the other",
+}
+
+# Defaults for the options the corner modes take. A margin in pixels rather
+# than a fraction: a logo 10 px from the edge looks the same on 720p and 4K,
+# a logo 2% in does not.
+COMPOSITE_DEFAULT_CORNER = "br"
+COMPOSITE_DEFAULT_MARGIN = 10
+COMPOSITE_DEFAULT_PIP_SCALE = 0.25
+# The SECOND source's level in the mix. The first keeps its own (normalize=0),
+# so this reads as "the music plays at 30% of its own volume under the voice".
+COMPOSITE_DEFAULT_MIX_WEIGHT = 0.3

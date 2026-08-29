@@ -28,7 +28,10 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
-from ffmwiz.wizard_look import step_video_look
+from ffmwiz import wizard_look  # noqa: F401  (module, so a patch is seen)
+from ffmwiz import wizard_quick  # noqa: F401  (module, so a patch is seen)
+from ffmwiz import wizard_raw  # noqa: F401  (module, so a patch is seen)
+from ffmwiz import wizard_composite  # noqa: F401  (module, so a patch is seen)
 from ffmwiz.core.artifacts import *  # noqa: F401,F403
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
@@ -121,6 +124,10 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         "crop_enabled": ("crop",),
         "crop_top": ("crop",), "crop_left": ("crop",), "crop_right": ("crop",), "crop_bottom": ("crop",),
         "video_look": ("video_look",),
+        "video_quick": ("video_quick",),
+        "audio_volume": ("audio_volume",),
+        "raw_ffmpeg_args": ("raw_ffmpeg_args",),
+        "video_composite": ("video_composite",),
         "video_bitrate": ("video_bitrate_kbps",),
         "nvenc_multipass": ("nvenc_multipass",),
         "cpu_two_pass": ("cpu_two_pass",),
@@ -188,7 +195,40 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
                                and not a.get("_unified_video_editor_used")
                                and not a.get("_unified_video_editor_declined")
                                and (not config_mode or cfg_has("video_look"))),
-                    step_video_look),
+                    wizard_look.step_video_look),
+        # Straight after the picture filters, on the same gate. A quick output
+        # changes what the job PRODUCES -- a GIF, a boomerang, a still frame --
+        # so it has to be answered before the questions describing the rate and
+        # the size, which it reads for its own defaults.
+        wizard_base.Step("video_quick",
+                    lambda a: (video_reencode_options_applicable(a)
+                               and not a.get("_unified_video_editor_used")
+                               and not a.get("_unified_video_editor_declined")
+                               and (not config_mode or cfg_has("video_quick"))),
+                    wizard_quick.step_quick_output),
+        # Compositing is a filter graph too, so it rides the same re-encode
+        # gate -- widened, because an audio-only output has no picture to
+        # composite but can still take a music bed under its own track.
+        wizard_base.Step("video_composite",
+                    lambda a: ((video_reencode_options_applicable(a)
+                                or bool(a.get("audio_streams")))
+                               and not a.get("_unified_video_editor_used")
+                               and not a.get("_unified_video_editor_declined")
+                               and (not config_mode or cfg_has("video_composite"))),
+                    wizard_composite.step_video_composite),
+        # Volume rides the AUDIO gate, not the video one: an audio-only
+        # output has no picture but still has a level to set. Both follow
+        # `video_look` in skipping the prompt on a config run that did not
+        # ask for them -- a non-interactive run has no one to answer.
+        wizard_base.Step("audio_volume",
+                    lambda a: (bool(a.get("audio_streams"))
+                               and (not config_mode or cfg_has("audio_volume"))),
+                    wizard_raw.step_audio_volume),
+        # Last question before the summary: it is the escape hatch, so the
+        # user should have seen every other answer before reaching for it.
+        wizard_base.Step("raw_ffmpeg_args",
+                    lambda a: (not config_mode or cfg_has("raw_ffmpeg_args")),
+                    wizard_raw.step_raw_ffmpeg_args),
         wizard_base.Step("video_bitrate", video_reencode_options_applicable, wizard_steps.step_video_bitrate),
         wizard_base.Step("nvenc_multipass", wizard_base.nvenc_multipass_prompt_applicable, wizard_base.step_nvenc_multipass),
         wizard_base.Step("cpu_two_pass", cpu_two_pass_applicable, wizard_steps.step_cpu_two_pass),

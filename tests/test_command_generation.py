@@ -9,7 +9,7 @@ import FFmWiz
 # `run_wizard` reaches these prompts through their DEFINING module now that the
 # wizard facade is no longer imported by its own leaves, so a patch on the
 # facade would rebind an attribute nothing reads.
-from ffmwiz import wizard_b, wizard_steps  # noqa: E402
+from ffmwiz import wizard_b, wizard_raw, wizard_steps  # noqa: E402
 import cache_test_utils
 from command_gen_base import CommandGenBase, _home_module
 
@@ -537,6 +537,7 @@ class CommandGenerationCoreTests(CommandGenBase):
             "step_resolution": FFmWiz.wizard.step_resolution,
             "step_fps": FFmWiz.wizard.step_fps,
             "step_start_now": FFmWiz.wizard.step_start_now,
+            "step_raw_ffmpeg_args": wizard_raw.step_raw_ffmpeg_args,
             "ask_raw": FFmWiz.appio.ask_raw,
             "get_video_fps": FFmWiz.services.get_video_fps,
             "stream_duration_seconds": FFmWiz.services.stream_duration_seconds,
@@ -564,6 +565,7 @@ class CommandGenerationCoreTests(CommandGenBase):
             wizard_steps.step_use_gpu = lambda answers: calls.append("gpu")
             wizard_steps.step_unified_video_editor_for_encode = fake_unified
             wizard_steps.step_video_bitrate = lambda answers: calls.append("bitrate")
+            wizard_raw.step_raw_ffmpeg_args = lambda answers: calls.append("raw_args")
             wizard_steps.step_resolution = lambda answers: calls.append("resolution")
             wizard_steps.step_fps = lambda answers: calls.append("fps")
             wizard_b.step_start_now = lambda answers: calls.append("start")

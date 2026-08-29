@@ -27,6 +27,7 @@ def _home_module(name):
     # script, which only re-exports a few of the submodules by name.
     for _mn in ('appio', 'runtime', 'services', 'runner', 'guibridge',
                 'trackmanager', 'metadata', 'wizard_base', 'wizard_steps',
+                'wizard_look', 'wizard_raw',
                 'wizard_b', 'wizard_flow_b', 'wizard', 'modes'):
         _m = getattr(ffmwiz, _mn, None)
         if _m is not None and name in vars(_m):
