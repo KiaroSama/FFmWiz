@@ -56,6 +56,7 @@ def _run(args, timeout=300):
                           errors="replace", timeout=timeout)
 
 
+@requires_ffmpeg
 class SpeedFixtures(NoLeakedArtifacts, unittest.TestCase):
     """One real source and the tools to count and look at what came out.
 
