@@ -8,7 +8,7 @@ import FFmWiz
 # `run_wizard` reaches these prompts through their DEFINING module now that the
 # wizard facade is no longer imported by its own leaves, so a patch on the
 # facade would rebind an attribute nothing reads.
-from ffmwiz import wizard_b, wizard_flow_b, wizard_steps  # noqa: E402
+from ffmwiz import wizard_b, wizard_flow_b, wizard_raw, wizard_steps  # noqa: E402
 from command_gen_base import CommandGenBase, _home_module
 
 
@@ -34,6 +34,7 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             "step_video_speed_reverse_for_encode": FFmWiz.wizard.step_video_speed_reverse_for_encode,
             "step_cuts": FFmWiz.wizard.step_cuts,
             "step_start_now": FFmWiz.wizard.step_start_now,
+            "step_raw_ffmpeg_args": wizard_raw.step_raw_ffmpeg_args,
         }
         try:
             wizard_steps.step_input_path = lambda answers: calls.append("input")
@@ -52,6 +53,7 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             )
             wizard_steps.step_crop_enabled = lambda answers: calls.append("crop")
             wizard_steps.step_video_bitrate = lambda answers: calls.append("bitrate")
+            wizard_raw.step_raw_ffmpeg_args = lambda answers: calls.append("raw_args")
             wizard_steps.step_cpu_two_pass = lambda answers: calls.append("two_pass")
             wizard_steps.step_resolution = lambda answers: calls.append("resolution")
             wizard_steps.step_fps = lambda answers: calls.append("fps")

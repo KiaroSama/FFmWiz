@@ -382,6 +382,109 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
     return code, time.perf_counter() - started_at
 
 
+def run_quick_output_stages(answers: dict[str, Any]) -> tuple[int, float]:
+    """Run the GIF / boomerang / thumbnail plan `build_quick_output_stages` wrote.
+
+    It executes the recorded list and nothing else. A second place that decided
+    what a quick output runs as would be free to disagree with the record the
+    user was shown, which is the exact failure the staged reverse plan had to be
+    repaired for -- so the plan is built once, in the builder, and this only
+    walks it.
+
+    One stage is a placeholder rather than an argv: the boomerang's reverse
+    cannot be written down before the forward half exists, because it is planned
+    from that file's real geometry and duration. It is handed to
+    `execute_encode_plan`, so it gets the same bounded segmented reverse every
+    other reversed job gets -- there is no second reverse implementation here.
+    """
+    started_at = time.perf_counter()
+    plan = answers.get("quick_output_plan") or {}
+    stages = list(plan.get("stages") or [])
+    if not stages:
+        return 1, time.perf_counter() - started_at
+    source_duration = services.stream_duration_seconds({}, answers.get("format"))
+    for index, (label, argv) in enumerate(stages):
+        print()
+        print(paint(f"Quick output [{index + 1}/{len(stages)}]: {label}",
+                    Color.BOLD + Color.LIGHT_BLUE))
+        if argv and str(argv[0]).startswith("<"):
+            code = _run_boomerang_reverse(plan, source_duration)
+        elif index == 0 and plan.get("forward_answers") is not None:
+            # Through the shared executor, not the runner: the forward half is
+            # an ordinary job and may itself need two-pass or a staged reverse.
+            code, _elapsed = execute_encode_plan(
+                plan["forward_answers"], [str(part) for part in argv],
+                total_duration=source_duration, label=label)
+        else:
+            code, _elapsed = runtime.run_ffmpeg_with_progress(
+                [str(part) for part in argv], total_duration=source_duration,
+                label=label)
+        if code != 0:
+            log_warn(f"Quick output stage {index + 1} failed ({label}); "
+                     "the remaining stages were not started.")
+            return code, time.perf_counter() - started_at
+    produced = Path(plan.get("output_path") or answers.get("output_path"))
+    if not produced.exists():
+        log_warn(f"Quick output finished but {produced} was not written.")
+        return 1, time.perf_counter() - started_at
+    return 0, time.perf_counter() - started_at
+
+
+def _run_boomerang_reverse(plan: dict[str, Any],
+                           source_duration: float | None) -> int:
+    """Reverse the forward half, planned from the file that now exists.
+
+    `stage_answers` is what keeps this from applying the job twice: the forward
+    half already carries the crop, the resize, the cuts and the speed, so this
+    stage owns the reversal and NOTHING else. Re-applying a crop to an
+    already-cropped intermediate is silent in the argv and visible only in the
+    finished picture, which is why ownership is declared rather than inherited.
+    """
+    forward_path = Path(plan["forward_path"])
+    if not forward_path.exists():
+        log_warn(f"Boomerang: the forward half {forward_path} was not written.")
+        return 1
+    backward_path = Path(plan["backward_path"])
+    rebased = reverse_stages._single_input_answers(plan["forward_answers"], forward_path)
+    rev = reverse_stages.stage_answers(rebased, owns=("video_reverse", "audio_reverse"))
+    # `video_speed_enabled` is what `reverse_video_needs_segmented_main_encode`
+    # reads to decide the reverse is bounded; the speed/reverse question sets it
+    # for a plain reverse too, at factor 1.0, and so does this.
+    rev["video_speed_enabled"] = True
+    rev["video_speed_factor"] = 1.0
+    rev["reverse_video"] = True
+    # The sound has to run backwards with the picture. Leaving it forward gives
+    # a second half whose audio does not match anything on screen -- and
+    # `reverse_audio` alone does NOT say that: `encode_audio_reverse_enabled`
+    # reads it only when the audio has a speed of its own, and otherwise asks
+    # whether the audio follows the video. Measured without the second flag: the
+    # picture came back reversed and the pipeline logged "Video reverse only:
+    # the audio keeps its own order".
+    rev["reverse_audio"] = bool(rev.get("audio_streams"))
+    rev["audio_speed_from_video"] = bool(rev.get("audio_streams"))
+    rev["output_location"] = backward_path.parent
+    rev["output_name_stem"] = backward_path.stem
+    rev["output_ext"] = backward_path.suffix.lstrip(".")
+    rev["output_collision_suffix"] = ""
+    for key in ("output_path", "cmd", "split_output_paths", "split_part_intervals"):
+        rev.pop(key, None)
+    rev["cmd"] = wizard_build.build_ffmpeg_command(rev)
+    code, _elapsed = execute_encode_plan(
+        rev, rev["cmd"], total_duration=source_duration,
+        label="Reversing the forward half")
+    if code != 0:
+        return code
+    written = Path(rev.get("output_path") or backward_path)
+    if written != backward_path:
+        # The concat list was written when the plan was, and it names
+        # `backward_path`. A collision-resolved name here would leave the concat
+        # pointing at a file nothing produced.
+        if not written.exists():
+            return 1
+        written.replace(backward_path)
+    return 0 if backward_path.exists() else 1
+
+
 def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
                         total_duration: float | None, label: str,
                         **progress_kwargs: Any) -> tuple[int, float]:
@@ -406,6 +509,11 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
     if two_pass_off:
         appio.note(f"CPU two-pass was turned off for this job: {two_pass_off}.")
         log_info(f"CPU two-pass disabled before execution: {two_pass_off}")
+    if answers.get("quick_output_plan"):
+        # A GIF or a boomerang is several commands, and `cmd` is only the last
+        # of them. Running it alone would read a palette or a half that nothing
+        # had written yet.
+        return run_quick_output_stages(answers)
     if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
         answers["cmd"] = cmd
         return reverse_pipeline.run_segmented_reverse_main_encode(answers)
@@ -579,6 +687,7 @@ __all__ = [
     'run_crop_only_prompt',
     'run_metadata_report_inspect',
     'execute_encode_plan',
+    'run_quick_output_stages',
     'run_bounded_audio_reverse_encode',
     'run_separator_main_encode',
     'FFMPEG_REFERENCE_SECTIONS',
@@ -590,5 +699,6 @@ __all__ = [
 from ffmwiz import reverse_pipeline  # noqa: E402
 from ffmwiz.reverse_pipeline import *  # noqa: E402,F401,F403
 from ffmwiz import reverse_stages  # noqa: E402,F401  (single patch point)
+from ffmwiz import wizard_build  # noqa: E402,F401  (defines build_ffmpeg_command)
 from ffmwiz.support import L00_split  # noqa: E402,F401  (single patch point)
 __all__ += reverse_pipeline.__all__

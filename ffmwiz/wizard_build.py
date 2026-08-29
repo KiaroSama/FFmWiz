@@ -280,6 +280,116 @@ def append_single_input_split_outputs(
     return True
 
 
+def build_quick_output_stages(answers: dict[str, Any], mode: str,
+                              output_path: Path) -> list[str]:
+    """Plan a GIF, boomerang or thumbnail job, and return its FINAL command.
+
+    The whole ordered plan is recorded on `answers["quick_output_plan"]`, which
+    `encoding.run_quick_output_stages` then executes. ONE list, built once and
+    consumed twice: the executor cannot run a plan the record does not describe,
+    which is the drift the staged reverse had to be repaired for (B04).
+
+    The returned argv is the LAST stage -- the one that writes the file the user
+    named. On its own it is not the whole job, so the note below says so and
+    names every stage.
+    """
+    workdir = artifact_lease(answers).register(
+        Path(tempfile.mkdtemp(prefix="ffmwiz_quick_")))
+    stages: list[tuple[str, list[str]]] = []
+    plan: dict[str, Any] = {"mode": mode, "workdir": workdir,
+                            "output_path": output_path}
+    source: Path = answers["input_path"]
+    # True once a stage has written the picture: the edits are spent, so a GIF
+    # reading that file must not apply them a second time.
+    source_is_prepared = False
+
+    if mode == "thumbnail":
+        stages.append(("Extract the frame",
+                       wizard_build_b.build_thumbnail_command(
+                           answers, source, output_path)))
+
+    if mode == "boomerang":
+        # A GIF boomerang is both features, in the only order that works: the
+        # halves have to be concatenated as video before anything quantises
+        # them, because a palette built from one half is the wrong palette for
+        # the other.
+        gif_after = str(answers.get("output_ext") or "").lower() == "gif"
+        half_ext = INTERMEDIATE_CONTAINER_EXT if gif_after else str(answers["output_ext"])
+        forward = _quick_sub_job(answers, workdir, "boomerang_forward", half_ext)
+        forward_cmd = build_ffmpeg_command(forward)
+        forward_path = Path(forward["output_path"])
+        backward_path = workdir / f"boomerang_reversed.{half_ext}"
+        joined = (workdir / f"boomerang_joined.{half_ext}") if gif_after else output_path
+        concat_list = workdir / "boomerang_concat.txt"
+        # Forward FIRST. The other order gives a clip that plays backwards and
+        # then forwards, which is a different thing and looks like one.
+        write_concat_list([forward_path, backward_path], concat_list)
+        stages.append(("Encode the forward half", [str(part) for part in forward_cmd]))
+        stages.append((
+            "Reverse the forward half in bounded segments",
+            ["<built from the forward half once it exists; runs as a bounded "
+             "segmented reverse, never one full-timeline pass>"]))
+        stages.append(("Concatenate the forward and reversed halves",
+                       [str(part) for part in build_concat_copy_command(
+                           str(answers["ffmpeg"]), concat_list, joined)]))
+        plan.update({"forward_answers": forward, "forward_path": forward_path,
+                     "backward_path": backward_path, "joined_path": joined,
+                     "concat_list": concat_list})
+        source, source_is_prepared = joined, True
+        mode = "gif" if gif_after else mode
+
+    if mode == "gif":
+        palette = workdir / GIF_PALETTE_FILE_NAME
+        for note in wizard_build_b.gif_unsupported_answer_notes(answers):
+            appio.note(note)
+            log_warn(f"GIF output: {note}")
+        stages.append(("Build the GIF palette",
+                       wizard_build_b.build_gif_palette_command(
+                           answers, source, palette, source_is_prepared)))
+        stages.append(("Write the GIF with that palette",
+                       wizard_build_b.build_gif_write_command(
+                           answers, source, palette, output_path,
+                           source_is_prepared)))
+        plan["palette_path"] = palette
+
+    plan["stages"] = stages
+    answers["quick_output_plan"] = plan
+    log_info(f"Quick output plan ({plan['mode']}): {len(stages)} stage(s) in {workdir}")
+    for index, (label, argv) in enumerate(stages, start=1):
+        log_info(f"  stage {index}/{len(stages)} {label}: "
+                 + (argv[0] if argv and str(argv[0]).startswith("<")
+                    else command_to_powershell(argv)))
+    if len(stages) > 1:
+        appio.note(f"This {plan['mode']} job runs as {len(stages)} commands, in order:")
+        for index, (label, _argv) in enumerate(stages, start=1):
+            appio.note(f"  {index}. {label}")
+        appio.note("The command printed below is the LAST of them; the earlier "
+                   "stages write the files it reads.")
+    return [str(part) for part in stages[-1][1]]
+
+
+def _quick_sub_job(answers: dict[str, Any], workdir: Path, stem: str,
+                   ext: str) -> dict[str, Any]:
+    """The same job, aimed at a scratch file and stripped of the quick output.
+
+    Stripped, not merely re-aimed: leaving `quick_output` set would make
+    `build_ffmpeg_command` plan a second quick output for the stage that exists
+    to feed the first one, without end.
+    """
+    job = dict(answers)
+    for key in QUICK_ANSWER_KEYS:
+        job.pop(key, None)
+    for key in ("_output_ext_before_quick", "quick_output_plan", "cmd",
+                "output_path", "separator_points", "separator_jobs",
+                "split_output_paths", "split_part_intervals"):
+        job.pop(key, None)
+    job["output_ext"] = ext
+    job["output_location"] = workdir
+    job["output_name_stem"] = stem
+    job["output_collision_suffix"] = ""
+    return job
+
+
 def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     # A build is a PLAN BOUNDARY, and this is the only place every caller of
     # this builder shares. `step_start_now()` reset the resolved map and the
@@ -310,6 +420,15 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise RuntimeError(f"Could not create output folder: {output_path.parent}. {exc}") from exc
+
+    # A quick output is a different SHAPE of job, not a different set of options
+    # on this one: a GIF is two commands and a boomerang is three, and neither
+    # can be expressed as the single argv the rest of this function builds. It
+    # is intercepted here rather than earlier so the output path, the artifact
+    # lease and the plan revision are already the job's own.
+    quick_mode = wizard_build_b.quick_output_mode(answers)
+    if quick_mode:
+        return build_quick_output_stages(answers, quick_mode, output_path)
 
     # FFmpeg command rules used here:
     # - Explicit -map options disable automatic stream selection for this output.
@@ -410,6 +529,9 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
         # unaffected, which is what the old "-t after every -i" note was about.
         cmd.extend(["-t", f"{max(0.0, end - start):.6f}"])
 
+    # `-stream_loop` belongs to the input it repeats, so it goes here rather
+    # than with the output options. See wizard_build_b.append_stream_loop.
+    wizard_build_b.append_stream_loop(cmd, answers)
     cmd.extend(["-i", str(input_path)])
 
     # Chapter remapping: if timeline is modified and source has chapters,
@@ -757,6 +879,12 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
     if answers["output_ext"].lower() in MP4_LIKE_EXTS and MOVFLAGS:
         cmd.extend(["-movflags", MOVFLAGS])
 
+    # Last, immediately before the output path: ffmpeg reads output options in
+    # order, so anything the user adds here can override what the wizard chose
+    # -- which is the point of the escape hatch. The whole command is printed
+    # for review before it runs.
+    cmd.extend(answers.get("raw_ffmpeg_args") or [])
+
     cmd.append(str(output_path))
     return cmd
 
@@ -764,6 +892,7 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
 __all__ = [
     'append_single_input_split_outputs',
     'build_ffmpeg_command',
+    'build_quick_output_stages',
     'build_video_filter',
 ]
 
