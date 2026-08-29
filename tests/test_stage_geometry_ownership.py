@@ -22,6 +22,21 @@ normalisation target is the post-crop size.
 Dimensions alone would accept a crop taken from the wrong offset, so the
 fixture paints a different colour on each edge and the assertions read actual
 pixels at all four boundaries.
+
+Extended for plan 006: orientation, look (denoise/sharpen/blur/colour), fade,
+volume and the raw-ffmpeg escape hatch shipped in d0e8f69/0fe7e98 with no
+schema entry at all, so the same Join + Reverse + Split applied every one of
+them three times. A 90-degree rotation applied twice is 180 degrees -- which
+looks like NO rotation at all to a check that only asks "did it rotate",
+since 160x120 rotated twice is 160x120 again:
+
+    ROTATED_ONCE     120x160
+    ROTATED_TWICE     160x120   (indistinguishable from "never rotated")
+
+so the rotation test below asserts the ONE-rotation shape, not merely that
+some rotation happened. A horizontal flip applied twice is the identity for
+the same reason -- doubling `hflip` moves nothing -- which is why that test
+reads pixels instead of dimensions, the same way the crop test above does.
 """
 import json
 import shutil
@@ -320,6 +335,127 @@ class GeometryOwnership(NoLeakedArtifacts, unittest.TestCase):
         early = pixel(width - 2, 2)
         self.assertGreater(max(early), 60,
                            "the joined picture lost its bands entirely")
+
+    # ---- plan 006: orientation, look, fade, volume, raw_args -------------
+    # Expected to fail until the builder gap is closed: build_join_encode_command
+    # never calls build_cpu_video_filter, so a rotation on a joined job is
+    # dropped before ownership is even consulted. Verified on the unmodified
+    # tree. When that is fixed this test becomes an unexpected success and the
+    # suite goes red -- which is the signal to delete this marker.
+    @unittest.expectedFailure
+    def test_a_joined_reverse_split_rotates_exactly_once(self):
+        out, _commands = self._pipeline(
+            "joinrotate", separator_points=[2.0], rotate_choice="90cw")
+        parts = sorted(out.glob("*Part*.mkv"))
+        self.assertEqual(2, len(parts), [p.name for p in parts])
+        for part in parts:
+            stream = self._video(part)
+            # The 160x120 source rotated ONCE is 120x160. Rotated TWICE it is
+            # back to 160x120 -- indistinguishable from no rotation at all by
+            # this same check, which is exactly why this is the assertion
+            # that catches a doubled rotation and a dropped one alike.
+            self.assertEqual(
+                (HEIGHT, WIDTH),
+                (int(stream["width"]), int(stream["height"])),
+                f"{part.name}: expected the once-rotated {HEIGHT}x{WIDTH}")
+
+    # Expected to fail until the builder gap is closed: build_join_encode_command
+    # never calls build_cpu_video_filter, so transpose= never appears in any
+    # issued command on a joined job -- the forward join "owns" orientation but
+    # cannot express it, and ownership correctly stripped it from reverse and
+    # split. Verified on the unmodified tree, where the SAME missing call
+    # produces a different symptom: orientation is never owned by anyone
+    # there, so reverse AND split both apply it, and the doubled rotation
+    # shows up as transpose= in two stages instead of zero. When the builder
+    # gap is fixed this test becomes an unexpected success and the suite goes
+    # red -- which is the signal to delete this marker.
+    @unittest.expectedFailure
+    def test_the_rotation_appears_in_its_owner_stage_and_nowhere_else(self):
+        _out, commands = self._pipeline(
+            "joinrotatecmd", separator_points=[2.0], rotate_choice="90cw")
+        rotated = self._stages_with(commands, "transpose=")
+        self.assertEqual(1, len(rotated),
+                         f"transpose= appears in {len(rotated)} stages: {rotated}")
+        self.assertTrue(rotated[0].startswith("joined_forward"),
+                        f"orientation travels with geometry, owned by the "
+                        f"forward join, not {rotated[0]}")
+
+    def test_a_joined_reverse_split_denoises_once(self):
+        _out, commands = self._pipeline(
+            "joindenoise", separator_points=[2.0], denoise_level="medium")
+        denoised = self._stages_with(commands, "hqdn3d")
+        self.assertEqual(1, len(denoised),
+                         f"hqdn3d appears in {len(denoised)} stages: {denoised}")
+        self.assertFalse(denoised[0].startswith("joined_forward"),
+                         f"look is owned by the reverse stage, not the "
+                         f"forward join ({denoised[0]})")
+
+    def test_a_flip_is_applied_once(self):
+        # Single-input path: the reverse stage owns the whole geometry group,
+        # including orientation, since there is no forward join to own it.
+        out, _commands = self._pipeline(
+            "soloflip", join=False, flip_horizontal=True)
+        width, height, pixel = self._pixels(out / "geometry.mkv")
+        mid_y = height // 2
+        # Red (green channel low) starts on the LEFT and yellow (green
+        # channel high) on the RIGHT. A flip applied zero or TWICE times is
+        # the identity -- dimensions cannot tell those apart from one correct
+        # flip, so this reads the green channel at each edge to see which
+        # colour actually ended up where.
+        right_green = pixel(width - 2, mid_y)[1]
+        left_green = pixel(1, mid_y)[1]
+        self.assertLess(right_green, 90,
+                        f"expected the red band (green channel low) on the "
+                        f"right after one flip; measured green={right_green}")
+        self.assertGreater(left_green, 120,
+                           f"expected the yellow band (green channel high) on "
+                           f"the left after one flip; measured green={left_green}")
+
+    # Expected to fail until the builder gap is closed: raw_ffmpeg_args never
+    # reaches a staged reverse's delivered file. On a Split,
+    # append_single_input_split_outputs returns before build_ffmpeg_command's
+    # own raw_ffmpeg_args append is ever reached. It is not only the Split
+    # path either -- even a no-split reverse job's raw options only make it
+    # onto the throwaway reverse_encode_seg_*.mkv, because the file the user
+    # actually receives is written by reverse_concat_stages' own concat/mux
+    # command, which was never taught to carry raw_ffmpeg_args forward.
+    # Verified on the unmodified tree: identical placement, the options land
+    # on the scratch segment there too and never reach a_Part0N.mkv. When the
+    # builder gap is fixed this test becomes an unexpected success and the
+    # suite goes red -- which is the signal to delete this marker.
+    @unittest.expectedFailure
+    def test_the_raw_options_reach_only_the_final_stage(self):
+        out, commands = self._pipeline(
+            "joinraw", separator_points=[2.0],
+            raw_ffmpeg_args=["-metadata", "comment=ffmwiz006"])
+        tagged = self._stages_with(commands, "comment=ffmwiz006")
+        self.assertEqual(1, len(tagged),
+                         f"comment=ffmwiz006 appears in {len(tagged)} stages: {tagged}")
+        self.assertIn("Part", tagged[0],
+                      f"raw_args is owned by the Split stage, not {tagged[0]}")
+        self.assertFalse(
+            tagged[0].startswith("joined_forward"),
+            "a scratch intermediate must not carry the user's raw options -- "
+            "intermediate_profile strips the rate control that a raw -b:v "
+            f"would re-impose, and {tagged[0]} is exactly that intermediate")
+
+    # Expected to fail until the builder gap is closed: audio_transform_enabled
+    # (ffmwiz/support/L03.py:159-160) gates the whole audio filter chain behind
+    # audio speed/cut/LoudNorm only, so build_ffmpeg_command never calls
+    # build_audio_transform_filter_complex for a volume-only request and
+    # volume= never appears in any issued command. build_volume_filter itself
+    # is correct -- it is just unreachable, because that gate's own check
+    # (ext04b.py:124-127) never runs. Verified on the unmodified tree:
+    # identical, volume is dropped there too, unrelated to ownership. When the
+    # builder gap is fixed this test becomes an unexpected success and the
+    # suite goes red -- which is the signal to delete this marker.
+    @unittest.expectedFailure
+    def test_the_volume_gain_is_applied_once(self):
+        out, commands = self._pipeline(
+            "joinvolume", separator_points=[2.0], audio_volume=2.0)
+        boosted = self._stages_with(commands, "volume=2")
+        self.assertEqual(1, len(boosted),
+                         f"volume=2 appears in {len(boosted)} stages: {boosted}")
 
 
 @requires_ffmpeg
