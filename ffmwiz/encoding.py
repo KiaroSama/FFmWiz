@@ -315,7 +315,33 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
         Path(tempfile.mkdtemp(prefix="ffmwiz_audio_reverse_")))
     source_answers = answers
 
-    if answers.get("join_input_items"):
+    # The same ownership schema `run_bounded_reverse_pipeline` validates: every
+    # transformation the job asks for is owned by EXACTLY one stage. Geometry
+    # belongs to the forward join when there is one -- the first stage to
+    # write a picture -- and to the final rebuild otherwise, since nothing
+    # upstream would have applied a crop/fps/resize at all. The bounded
+    # reverse itself consumes the audio cut: `bounded_audio_reverse_to_file`
+    # only extracts and reverses the KEPT ranges, so a cut applied there must
+    # not be re-applied by the final rebuild. This is the check that would
+    # have caught the geometry bug: the final rebuild used to inherit every
+    # key unfiltered from `answers` and re-apply a join's geometry a second
+    # time, with no warning and a silently wrong-sized output.
+    has_join = bool(answers.get("join_input_items"))
+    forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    reverse_owns = ("audio_reverse", "audio_cuts")
+    final_owns = ("cuts", "video_speed", "audio_speed", "loudnorm", "split")
+    if not has_join:
+        final_owns = final_owns + GEOMETRY_TRANSFORMATIONS
+    # Before the join, not after: a plan that cannot be executed correctly
+    # must not spend a full forward encode first.
+    reverse_stages.validate_stage_plan(
+        [("forward join", forward_owns),
+         ("bounded audio reverse", reverse_owns),
+         ("remux", ()),
+         ("final rebuild", final_owns)],
+        answers)
+
+    if has_join:
         items = join_items_from_answers(answers)
         if not items:
             return 1, time.perf_counter() - started_at
@@ -357,9 +383,15 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
     if code != 0 or not rebased.exists():
         return (code or 1), time.perf_counter() - started_at
 
-    final = _single_input_answers(answers, rebased)
-    final["reverse_audio"] = False
-    final["audio_cut_keep_ranges"] = []
+    # Owns everything the earlier stages did not: the reversal and any audio
+    # cut were spent by the bounded reverse, and the geometry was spent by the
+    # forward join whenever one ran (`final_owns` above already accounts for
+    # both cases).
+    final = reverse_stages.stage_answers(
+        _single_input_answers(answers, rebased), owns=final_owns)
+    # Not one of STAGE_TRANSFORMATIONS' keys, so stage_answers() cannot clear
+    # it: the range that scoped what got reversed, now stale against the
+    # reversed file's own timeline.
     final["audio_keep_ranges"] = []
     final["output_path"] = output_path
     # Keep the names the summary already showed. By this point `input_path` is
