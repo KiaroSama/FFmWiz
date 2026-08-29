@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz import wizard_raw  # noqa: F401  (module, so a patch is seen)
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -243,6 +244,17 @@ def step_audio_tracks(answers: dict[str, Any]) -> None:
 def apply_config_audio_options(answers: dict[str, Any], config: dict[str, Any]) -> None:
     if not answers.get("audio_streams"):
         return
+
+    # Volume rides the same gate the interactive step uses -- any audio
+    # present, independent of which tracks end up selected or which codec is
+    # chosen -- so it is read here, before either of those narrow further.
+    answers.pop("audio_volume", None)
+    volume = (config_value(config, "audio_volume") or "").strip()
+    if volume and volume.lower() not in {"n", "no"}:
+        try:
+            answers["audio_volume"] = wizard_raw.parse_volume(volume)
+        except ValueError as error:
+            fail(f"audio_volume in config.env is not valid: {error}")
 
     audio_tracks_value = config_value(config, "audio_tracks") or "de"
     if audio_tracks_value.lower() in {"d", "e", "de", "ed"}:
