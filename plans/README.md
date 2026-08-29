@@ -33,9 +33,9 @@ instances.
 | 001 | Raw-options parsing: Windows paths and per-stream reserved options | P1 | S | — | DONE |
 | 002 | Dispatch the composite builder for an audio-only mix | P1 | S | — | DONE |
 | 003 | `loop=N` reaches every quick output, or is refused | P2 | S | — | DONE |
-| 004 | The four documented config keys are actually read | P1 | M | 002 | TODO |
+| 004 | The four documented config keys are actually read | P1 | M | 002 | DONE |
 | 005 | The settings summary shows the five new features | P2 | S | — | DONE |
-| 006 | Stage-ownership schema covers the new features | P1 | M | — | TODO |
+| 006 | Stage-ownership schema covers the new features | P1 | M | — | DONE |
 | 007 | Pin guard, stale skip count, unused-import guard | P3 | S | — | DONE |
 | 008 | Characterization tests for the untested mode drivers | P2 | M | — | TODO |
 | 009 | One optional-prompt helper instead of five copies | P3 | S | 001, 003 | TODO |
@@ -131,6 +131,30 @@ REJECTED (one-line rationale).
   rotted once already, it points at `--require ffmpeg --require numpy`, the same
   gate CI uses.
 
+- **004 — DONE, approved.** Branch `advisor/004-config-keys-are-actually-read`,
+  commits `d52f4e6`, `6039e21`, `3a42068`, pushed, **not merged**.
+  Verified by re-running: readers for `video_quick` (`ext08.py`),
+  `audio_volume` (`ext11.py`) and `raw_ffmpeg_args` (`ext12.py`) all exist;
+  `CONFIG_TEMPLATE` and `config.env.example` still byte-identical;
+  `video_composite` gone from the skip-map, the gate's config clause and the
+  template, left as an interactive-only step with a comment saying why; full
+  suite 1995/1995 `OK`.
+  **I proved the new skip-map guard bites**: disabling the `audio_volume`
+  reader made it fail with `skip-map key(s) with no config_value(...) reader
+  and no PROMPT_ONLY_ALLOWLIST entry: audio_volume`, then restored. That guard
+  is what makes this class of bug impossible rather than fixing one instance.
+
+- **006 — DONE, approved.** Branch
+  `advisor/006-stage-ownership-for-the-new-features`, commit `7f81cda`, pushed,
+  **not merged**.
+  All seven new answer keys are now owned; the schema went from 11
+  transformations to 16. Full suite 1989/1989 `OK`.
+  **This plan found something bigger than itself** — see the section below.
+  Four tests pin behaviour the builders cannot yet deliver; they carry
+  `@unittest.expectedFailure` with a comment naming the gap and stating it was
+  verified on the unmodified tree. The marker removes itself: when the builder
+  gap is closed each becomes an unexpected success and the suite goes red.
+
 ## Dependency notes
 
 - **004 depends on 002** — 004 decides whether `video_composite` becomes a
@@ -187,6 +211,22 @@ wrong-sized file.
   check-run annotation is an account billing / spending-limit block, external to
   the code, and no commit can clear it. Not a repo defect and not plannable
   here.
+
+## Found while EXECUTING, and bigger than the plan that found it
+
+**`build_join_encode_command` never calls `build_cpu_video_filter`.** Measured
+independently after plan 006's executor hit it: the only filters that builder
+constructs are `build_video_speed_filter`, `build_encode_audio_speed_filter`
+and its own `scale=`/`fps=` normalisation. So orientation, colour, denoise,
+sharpen and fade are DROPPED on every joined job — before stage ownership is
+consulted at all. No amount of `STAGE_TRANSFORMATIONS` work fixes it; it is a
+builder gap. `raw_ffmpeg_args` likewise has no consumer in the three main
+builders.
+
+Not planned yet, deliberately: the follow-up should be written against the
+executor's measurements rather than inference. Plan 006's four
+`expectedFailure` tests are the standing record that the defect exists, and
+they will go red on their own the moment it is fixed.
 
 ## Found while writing the plans, not in the original audit
 
