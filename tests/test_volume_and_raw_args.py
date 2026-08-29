@@ -289,5 +289,74 @@ class TheWizardQuestionsBehave(unittest.TestCase):
         self.assertIn("-tune film", text)
 
 
+class TheConfigKeysReachTheSameAnswers(unittest.TestCase):
+    """`audio_volume` and `raw_ffmpeg_args`, documented in Appendix B.
+
+    Mode 2 never asks either question once its config key is filled, so the
+    config key is the ONLY way a non-interactive run reaches them. A key that
+    is documented but not read is worse than one that does not exist -- these
+    two, and `video_quick`, were in exactly that state.
+    """
+
+    def _audio_applied(self, settings):
+        # `config_value` reads `config["settings"]`, not the top level.
+        config = {"settings": settings}
+        from ffmwiz.support import ext11
+        answers = {
+            "audio_streams": [{"codec_type": "audio", "codec_name": "aac",
+                               "channels": 2, "sample_rate": "48000"}],
+            "format": {"duration": "10.0"},
+            "input_path": FFmWiz.Path("x.mkv"), "output_ext": "mkv",
+            "packet_sizes": {},
+        }
+        real = FFmWiz.services.get_packet_sizes
+        FFmWiz.services.get_packet_sizes = lambda _a: {}
+        try:
+            ext11.apply_config_audio_options(answers, config)
+        finally:
+            FFmWiz.services.get_packet_sizes = real
+        return answers
+
+    def _raw_applied(self, settings):
+        from ffmwiz.support import ext12
+        answers: dict = {}
+        ext12.apply_config_raw_options(answers, {"settings": settings})
+        return answers
+
+    def test_audio_volume_from_config_reaches_the_answers(self):
+        applied = self._audio_applied({"audio_volume": "150%"})
+        self.assertAlmostEqual(wizard_raw.parse_volume("150%"),
+                               applied["audio_volume"])
+
+    def test_raw_args_from_config_reach_the_answers(self):
+        text = '-metadata title="My film" -tune film'
+        applied = self._raw_applied({"raw_ffmpeg_args": text})
+        self.assertEqual(wizard_raw.parse_raw_arguments(text),
+                         applied["raw_ffmpeg_args"])
+
+    def test_an_invalid_audio_volume_in_config_fails_loudly(self):
+        # `fail()` prints before it exits; keep that off the suite's console.
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self._audio_applied({"audio_volume": "loud"})
+
+    def test_an_invalid_raw_args_in_config_fails_loudly(self):
+        # The bug this whole plan started from: an invalid value silently
+        # ignored rather than rejected.
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self._raw_applied({"raw_ffmpeg_args": "-vf scale=2:2"})
+
+    def test_an_absent_audio_volume_leaves_the_job_alone(self):
+        self.assertNotIn("audio_volume", self._audio_applied({}))
+
+    def test_an_absent_raw_args_leaves_the_job_alone(self):
+        self.assertNotIn("raw_ffmpeg_args", self._raw_applied({}))
+
+
 if __name__ == "__main__":
     unittest.main()

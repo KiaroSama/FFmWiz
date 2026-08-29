@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz import wizard_raw  # noqa: F401  (module, so a patch is seen)
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -105,8 +106,33 @@ def apply_config_settings_after_input(
     apply_config_source_extra_options(answers, config)
     apply_config_subtitle_options(answers, config)
     apply_config_extra_recipe_options(answers, config)
+    apply_config_raw_options(answers, config)
+
+
+def apply_config_raw_options(answers: dict[str, Any], config: dict[str, Any]) -> None:
+    """Read `raw_ffmpeg_args` from config.env.
+
+    The interactive step asks for it on every job, video or audio-only alike
+    -- its Step gate in `wizard_flow` carries no applicability condition at
+    all. That is why this is its own applier rather than living inside
+    `apply_config_video_options` (skipped whenever `output_has_video` is
+    False, e.g. converting to mp3) or `apply_config_audio_options` (skipped
+    whenever the source has no `audio_streams`, e.g. a silent video): either
+    of those would silently drop the key for the job type it does not cover.
+    """
+    answers.pop("raw_ffmpeg_args", None)
+    raw_args = (config_value(config, "raw_ffmpeg_args") or "").strip()
+    if not raw_args or raw_args.lower() in {"n", "no"}:
+        return
+    try:
+        parsed = wizard_raw.parse_raw_arguments(raw_args)
+    except ValueError as error:
+        fail(f"raw_ffmpeg_args in config.env is not valid: {error}")
+    if parsed:
+        answers["raw_ffmpeg_args"] = parsed
 
 
 __all__ = [
     'apply_config_settings_after_input',
+    'apply_config_raw_options',
 ]
