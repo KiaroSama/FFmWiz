@@ -12,7 +12,6 @@ chain, which is where the order actually matters.
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from ffmwiz import appio
