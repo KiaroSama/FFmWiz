@@ -32,7 +32,7 @@ instances.
 |------|-------|----------|--------|------------|--------|
 | 001 | Raw-options parsing: Windows paths and per-stream reserved options | P1 | S | — | DONE |
 | 002 | Dispatch the composite builder for an audio-only mix | P1 | S | — | DONE |
-| 003 | `loop=N` reaches every quick output, or is refused | P2 | S | — | TODO |
+| 003 | `loop=N` reaches every quick output, or is refused | P2 | S | — | DONE |
 | 004 | The four documented config keys are actually read | P1 | M | 002 | TODO |
 | 005 | The settings summary shows the five new features | P2 | S | — | TODO |
 | 006 | Stage-ownership schema covers the new features | P1 | M | — | TODO |
@@ -86,6 +86,23 @@ REJECTED (one-line rationale).
   All three tests are present including the negative control
   (`test_a_job_with_neither_key_still_takes_the_ordinary_encode`) — without it a
   condition of `True` would satisfy the other two.
+
+- **003 — DONE, approved.** Branch `advisor/003-loop-count-quick-outputs`,
+  commits `dfeb3ae` + `eda8530`, pushed, **not merged**.
+  Verified by re-running the criteria: `thumb,loop=2` and `loop=2,thumb` both
+  refused, `gif,loop=3` still parses, `build_quick_output_stages` reads
+  `loop_count`, full suite 1986/1986 `OK`.
+  **The executor STOPPED once and was right.** This plan's original Step 3 sent
+  it to `wizard_build_b.py` and told it to use `append_stream_loop`; both were
+  wrong. The boomerang is built in `wizard_build.py`, and `-stream_loop` is an
+  INPUT option on one `-i` while the boomerang's output is a CONCAT of two
+  files — so there was no seam to find. Reaching for it would have meant
+  editing `build_concat_copy_command`, a shared primitive with eight call
+  sites, which the executor correctly refused.
+  The real seam is the concat LIST: repeating the forward/backward pair
+  `loop_count + 1` times. One line, no shared primitive touched, no extra
+  encoding. Its test asserts the ORDER of the six entries, not just the count —
+  six in the wrong order plays as something else entirely.
 
 ## Dependency notes
 
