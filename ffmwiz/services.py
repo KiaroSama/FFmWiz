@@ -298,90 +298,11 @@ def resolve_capability(answers: dict[str, Any], *, allow_probe: bool = True,
     return dict(result)
 
 
-# Read budgets for the two ffprobe passes. Unbounded reads are what let one
-# wedged probe (network path, stalled mount, pathological file) hang the whole
-# wizard with no output and no way out but Ctrl+C. The header probe only reads
-# container metadata; the packet probe walks the entire file, so it gets far
-# more room.
-_FFPROBE_JSON_TIMEOUT = 60.0
+# Read budget for the packet probe. Unbounded reads are what let one wedged
+# probe (network path, stalled mount, pathological file) hang the whole wizard
+# with no output and no way out but Ctrl+C. This pass walks the entire file, so
+# it gets far more room than the header probe (services_b._FFPROBE_JSON_TIMEOUT).
 _FFPROBE_PACKETS_TIMEOUT = 600.0
-
-
-def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
-    args = [
-        ffprobe,
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_format",
-        "-show_streams",
-        "-show_chapters",
-        str(input_path),
-    ]
-    stdout_text = ""
-    stderr_text = ""
-    decoded_using = "not decoded"
-    try:
-        result = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=_FFPROBE_JSON_TIMEOUT,
-        )
-        stdout_text, stdout_encoding = decode_subprocess_bytes(result.stdout, "utf-8-sig")
-        stderr_text, stderr_encoding = decode_subprocess_bytes(result.stderr, "utf-8")
-        decoded_using = f"stdout={stdout_encoding}; stderr={stderr_encoding}"
-        if result.returncode != 0:
-            log_ffprobe_diagnostics(
-                input_path, ffprobe, args, result.returncode,
-                stdout_text, stderr_text, decoded_using,
-            )
-            raise FFprobeError(f"ffprobe could not read the file. See log file: {_log_file_text()}")
-        if not stdout_text.strip():
-            log_ffprobe_diagnostics(
-                input_path, ffprobe, args, result.returncode,
-                stdout_text, stderr_text, decoded_using,
-            )
-            raise FFprobeError(f"ffprobe returned no JSON output. See log file: {_log_file_text()}")
-        try:
-            payload = json.loads(stdout_text)
-        except json.JSONDecodeError as exc:
-            log_ffprobe_diagnostics(
-                input_path, ffprobe, args, result.returncode,
-                stdout_text, stderr_text, decoded_using, exc,
-            )
-            raise FFprobeError(f"ffprobe returned invalid JSON. See log file: {_log_file_text()}") from exc
-        if not isinstance(payload, dict):
-            log_ffprobe_diagnostics(
-                input_path, ffprobe, args, result.returncode,
-                stdout_text, stderr_text, decoded_using,
-            )
-            raise FFprobeError(f"ffprobe returned unexpected JSON. See log file: {_log_file_text()}")
-        log_debug(
-            f"ffprobe JSON decoded successfully for {input_path}; "
-            f"stdout length={len(stdout_text)} stderr length={len(stderr_text)}")
-        if os.environ.get("FFMWIZ_DEBUG"):
-            try:
-                safe_name = sanitize_output_stem(input_path.name)
-                stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-                json_path = _logs_dir() / f"ffprobe_{stamp}_{safe_name}.json"
-                json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                log_info(f"Full ffprobe JSON saved to: {json_path}")
-            except Exception as exc:
-                log_warn(f"Could not save ffprobe JSON debug file: {exc}")
-        if stderr_text.strip():
-            log_debug("ffprobe stderr:\n" + stderr_text.rstrip())
-        return payload
-    except FFprobeError:
-        raise
-    except Exception as exc:
-        log_ffprobe_diagnostics(
-            input_path, ffprobe, args, "not available",
-            stdout_text, stderr_text, decoded_using, exc,
-        )
-        raise FFprobeError(f"ffprobe could not read the file. See log file: {_log_file_text()}") from exc
 
 
 def probe_packet_sizes(ffprobe: str, input_path: Path) -> dict[int, int]:
@@ -761,7 +682,6 @@ __all__ = [
     'build_join_loudnorm_analysis_args',
     'capability_environment_identity',
     'capability_environment_key',
-    'ffprobe_json',
     'get_audio_volume_stats',
     'get_packet_sizes',
     'get_video_fps',

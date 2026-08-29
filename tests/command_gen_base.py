@@ -14,15 +14,21 @@ import uuid
 from pathlib import Path
 from unittest import mock
 import FFmWiz
+import ffmwiz
 import cache_test_utils
 
 
 def _home_module(name):
     # Return the ffmwiz submodule that DEFINES `name` (checked in dependency
     # order so re-exporters don't shadow the real definer), else the facade.
+    # The wizard siblings come before `wizard`: the facade re-exports all of
+    # them, but it is the definer a call site now reads, so it is the definer a
+    # restore has to put back. Resolved on the package, not on the FFmWiz entry
+    # script, which only re-exports a few of the submodules by name.
     for _mn in ('appio', 'runtime', 'services', 'runner', 'guibridge',
-                'trackmanager', 'metadata', 'wizard', 'modes'):
-        _m = getattr(FFmWiz, _mn, None)
+                'trackmanager', 'metadata', 'wizard_base', 'wizard_steps',
+                'wizard_b', 'wizard_flow_b', 'wizard', 'modes'):
+        _m = getattr(ffmwiz, _mn, None)
         if _m is not None and name in vars(_m):
             return _m
     return FFmWiz

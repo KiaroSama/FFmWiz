@@ -20,6 +20,10 @@ import unittest
 from pathlib import Path
 
 import FFmWiz
+# `run_wizard` reaches these prompts through their DEFINING module now that the
+# wizard facade is no longer imported by its own leaves, so a patch on the
+# facade would rebind an attribute nothing reads.
+from ffmwiz import wizard_base, wizard_steps  # noqa: E402
 from command_gen_base import CommandGenBase
 
 FFMPEG = shutil.which("ffmpeg")
@@ -175,14 +179,14 @@ class ExtraVideoStreams(CommandGenBase):
         def stop(_answers):
             raise _Stop()
 
-        FFmWiz.wizard.Step = recorder
-        FFmWiz.wizard.step_input_path = stop
+        wizard_base.Step = recorder
+        wizard_steps.step_input_path = stop
         try:
             with self.assertRaises(_Stop):
                 FFmWiz.run_wizard({})
         finally:
-            FFmWiz.wizard.Step = real_step
-            FFmWiz.wizard.step_input_path = real_input
+            wizard_base.Step = real_step
+            wizard_steps.step_input_path = real_input
 
         names = [step.name for step in recorded]
         self.assertIn("source_extra_outcomes", names)

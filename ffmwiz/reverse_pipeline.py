@@ -98,9 +98,17 @@ from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 from ffmwiz.wizard import *  # noqa: F401,F403
 from ffmwiz import wizard  # noqa: F401
-from ffmwiz import encoding  # facade for monkeypatched names  # noqa: E402
+# The facade back-import was deleted: it carried no name this module does
+# not already get from the lower tiers above, and the facade ends with
+# `__all__ += <this module>.__all__`, which it reached while this module
+# was still on its first statements.
 from ffmwiz.reverse_stages import *  # noqa: E402,F401,F403
 from ffmwiz import reverse_stages  # noqa: E402,F401
+from ffmwiz.support import L00_probe  # noqa: E402,F401  (defines join_item_picture_span)
+from ffmwiz.support import L00_split  # noqa: E402,F401  (defines the chunk splitter)
+from ffmwiz import runtime  # noqa: E402,F401  (defines run_ffmpeg_with_progress)
+from ffmwiz import wizard_build  # noqa: E402,F401  (defines build_ffmpeg_command)
+from ffmwiz import reverse_pipeline  # noqa: E402,F401  (own handle, so a patch of these names is seen)
 
 
 def bounded_reverse_plan(answers: dict[str, Any],
@@ -181,7 +189,7 @@ def bounded_reverse_plan(answers: dict[str, Any],
         rebased = dict(source_answers)
         rebased.pop("join_input_items", None)
         rebased["input_path"] = produced
-        writes = encoding.intermediate_video_descriptor(writer)
+        writes = reverse_stages.intermediate_video_descriptor(writer)
         rate = (str(Fraction(writes["fps"]).limit_denominator(1000000))
                 if writes["fps"] else "")
         streams = [dict(stream) for stream in (source_answers.get("video_streams") or [])]
@@ -243,7 +251,7 @@ def bounded_reverse_plan(answers: dict[str, Any],
         if not items:
             return stages
         joined = workspace / f"joined_forward.{extension}"
-        forward = intermediate_profile(encoding.stage_answers(answers, owns=forward_owns))
+        forward = intermediate_profile(reverse_stages.stage_answers(answers, owns=forward_owns))
         forward["output_path"] = joined
         subtitle_source_answers = forward
         stages.append(("Join the inputs forward",
@@ -268,8 +276,8 @@ def bounded_reverse_plan(answers: dict[str, Any],
         # saw this because it probes the file and reads the span the container
         # reports, which already counts that frame: measured 150 frames against
         # the exported plan's 149.
-        joined_seconds = sum(encoding.join_item_picture_span(item) for item in items)
-        joined_fps = encoding.intermediate_video_descriptor(forward)["fps"]
+        joined_seconds = sum(L00_probe.join_item_picture_span(item) for item in items)
+        joined_fps = reverse_stages.intermediate_video_descriptor(forward)["fps"]
         # Only ever a correction to a length that is known. Adding it to an
         # unreadable timeline would turn "I cannot describe this" into a
         # confident one-frame plan, and `described()` refuses on zero for a
@@ -278,7 +286,7 @@ def bounded_reverse_plan(answers: dict[str, Any],
             joined_seconds += 1.0 / joined_fps
         stage_source = described(answers, joined, joined_seconds, forward)
 
-    reverse_answers = encoding.stage_answers(stage_source, owns=reverse_owns)
+    reverse_answers = reverse_stages.stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
     # Hand the stage its subtitles instead of letting it try to extract them
     # from a file the plan has not written. Without this the planner emits
@@ -320,8 +328,8 @@ def bounded_reverse_plan(answers: dict[str, Any],
     # more than one frame above 1000 fps, so a plan whose own unit was one
     # 0.000833 s frame emitted 0.001 s chunks -- two frames, 2.206 GiB against
     # the 2 GiB cap (D08). The floor now stops at the command grid.
-    chunks = encoding.split_ranges_for_reverse_segments(
-        keep_ranges, duration, encoding.reverse_segment_seconds(reverse_answers))
+    chunks = L00_split.split_ranges_for_reverse_segments(
+        keep_ranges, duration, reverse_stages.reverse_segment_seconds(reverse_answers))
     segment_ext = Path(reverse_answers["output_path"]).suffix.lstrip(".") or extension
     segments: list[Path] = []
     for index, (start, end) in enumerate(chunks, start=1):
@@ -329,20 +337,20 @@ def bounded_reverse_plan(answers: dict[str, Any],
         segments.append(segment)
         stages.append((
             f"Reverse segment {index}/{len(chunks)}",
-            [str(part) for part in encoding.build_main_encode_reverse_segment_command(
+            [str(part) for part in reverse_stages.build_main_encode_reverse_segment_command(
                 reverse_answers, start, end, segment)]))
 
     # The SAME builder the executor uses, so the exported plan cannot describe
     # a different final mux. It writes its concat lists and chapter metadata
     # into the workspace, which is what makes the exported script runnable as
     # it stands.
-    concat_stages, _plan_warnings = encoding.reverse_concat_stages(
+    concat_stages, _plan_warnings = reverse_stages.reverse_concat_stages(
         reverse_answers, segments, workspace, Path(reverse_answers["output_path"]),
         encode_video_speed_factor(reverse_answers) or 1.0, segment_ext)
     stages.extend((label, cmd) for label, cmd, _progress in concat_stages)
 
     if split_points:
-        split_answers = encoding.stage_answers(
+        split_answers = reverse_stages.stage_answers(
             described(answers, Path(reverse_answers["output_path"]),
                       reversed_seconds, reverse_answers), owns=("split",))
         # The split reads the REVERSED intermediate, whose subtitle track is
@@ -366,7 +374,7 @@ def bounded_reverse_plan(answers: dict[str, Any],
             resolved_stem = Path(answers["input_path"]).stem
         split_answers["output_name_stem"] = resolved_stem
         stages.append(("Split the reversed result",
-                       [str(part) for part in encoding.build_ffmpeg_command(split_answers)]))
+                       [str(part) for part in wizard_build.build_ffmpeg_command(split_answers)]))
     return stages
 
 
@@ -408,7 +416,7 @@ def export_bounded_reverse_plan(answers: dict[str, Any],
     workspace = Path(destination).parent / f"{stem}_plan"
     try:
         workspace.mkdir(parents=True, exist_ok=True)
-        stages = encoding.bounded_reverse_plan(answers, workspace)
+        stages = reverse_pipeline.bounded_reverse_plan(answers, workspace)
     except Exception as exc:  # a plan we cannot describe must not break the run
         log_warn(f"Could not export the staged reverse plan: {exc}")
         return PlanExport(None, str(exc) or exc.__class__.__name__)
@@ -507,13 +515,13 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
         # left an independent audio speed to be applied here AND by the reverse
         # stage AND by the split (B01); leaving geometry unowned did the same
         # to crop, fps and resize (D01/D02).
-        forward = intermediate_profile(encoding.stage_answers(answers, owns=forward_owns))
+        forward = intermediate_profile(reverse_stages.stage_answers(answers, owns=forward_owns))
         forward["output_path"] = joined
         forward_cmd = wizard.build_join_encode_command(forward, items, joined)
         appio.note("Reverse across a join: joining first, then reversing in bounded "
                    "segments so the whole joined timeline is never held in RAM.")
         log_info(f"Bounded reverse pipeline: forward join -> {joined}")
-        code, _elapsed = encoding.run_ffmpeg_with_progress(
+        code, _elapsed = runtime.run_ffmpeg_with_progress(
             forward_cmd,
             total_duration=sum(float(item.get("duration") or 0.0) for item in items) or None,
             label="Joining before reverse")
@@ -523,7 +531,7 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
 
     # Owns everything except the split -- and the geometry too when no forward
     # join already applied it.
-    reverse_answers = encoding.stage_answers(stage_source, owns=reverse_owns)
+    reverse_answers = reverse_stages.stage_answers(stage_source, owns=reverse_owns)
     reverse_answers.pop("join_input_items", None)
     if split_points:
         # Split AFTER the reverse: reversing each part separately would return
@@ -540,8 +548,8 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
                    "segments first, then cutting the parts out of the result.")
     else:
         reverse_answers["output_path"] = answers["output_path"]
-    reverse_answers["cmd"] = encoding.build_ffmpeg_command(dict(reverse_answers))
-    code, _elapsed = encoding.run_segmented_reverse_main_encode(reverse_answers)
+    reverse_answers["cmd"] = wizard_build.build_ffmpeg_command(dict(reverse_answers))
+    code, _elapsed = reverse_pipeline.run_segmented_reverse_main_encode(reverse_answers)
     if code != 0 or not split_points:
         return code, time.perf_counter() - started_at
 
@@ -550,7 +558,7 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
         return 1, time.perf_counter() - started_at
     # Owns the split alone. Stage 2 already applied every other edit; leaving
     # any of them here would apply it a second (or third) time.
-    split_answers = encoding.stage_answers(
+    split_answers = reverse_stages.stage_answers(
         _single_input_answers(answers, reversed_whole), owns=("split",))
     split_answers.pop("split_output_paths", None)
     split_answers.pop("split_part_intervals", None)
@@ -568,10 +576,10 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     if not resolved_stem:
         resolved_stem = Path(answers["input_path"]).stem
     split_answers["output_name_stem"] = resolved_stem
-    split_cmd = encoding.build_ffmpeg_command(split_answers)
+    split_cmd = wizard_build.build_ffmpeg_command(split_answers)
     log_info(f"Bounded reverse pipeline: splitting {reversed_whole} into "
              f"{len(split_answers.get('split_output_paths') or [])} part(s)")
-    code, _elapsed = encoding.run_ffmpeg_with_progress(
+    code, _elapsed = runtime.run_ffmpeg_with_progress(
         split_cmd,
         total_duration=services.stream_duration_seconds({}, split_answers.get("format")),
         label="Splitting the reversed result")
@@ -686,20 +694,20 @@ def reverse_source_seconds(answers: dict[str, Any]) -> float:
 def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
     duration = reverse_source_seconds(answers)
     if duration <= 0:
-        return encoding.run_ffmpeg_with_progress(
+        return runtime.run_ffmpeg_with_progress(
             answers["cmd"],
             total_duration=None,
             label="FFmpeg encode",
         )
     original_keep_ranges = normalize_cut_ranges(list(answers.get("cut_keep_ranges") or []), duration)
-    budget = encoding.reverse_segment_plan_for(answers)
+    budget = reverse_stages.reverse_segment_plan_for(answers)
     segment_seconds = budget.seconds
     # Tiled at the size the budget measured. The splitter used to floor a
     # rate-less step at 1 ms, which is more than one frame above 1000 fps: at
     # 15360x8640, 1200 fps, yuv444p12le this tiled a 1 s timeline into 1000
     # chunks of two frames -- 2.206 GiB against the 2 GiB cap -- where the
     # budget's own unit is one frame of 0.000833 s and 1.353 GiB (D08).
-    chunks = encoding.split_ranges_for_reverse_segments(original_keep_ranges, duration,
+    chunks = L00_split.split_ranges_for_reverse_segments(original_keep_ranges, duration,
                                                segment_seconds)
     if not chunks:
         return 1, 0.0
@@ -723,10 +731,10 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
         for idx, (start, end) in enumerate(chunks, start=1):
             segment_path = tmpdir / f"reverse_encode_seg_{idx:04d}.{segment_ext}"
             segment_paths.append(segment_path)
-            cmd = encoding.build_main_encode_reverse_segment_command(answers, start, end, segment_path)
+            cmd = reverse_stages.build_main_encode_reverse_segment_command(answers, start, end, segment_path)
             log_info(f"Reverse encode segment {idx}/{len(chunks)} command: {command_to_powershell(cmd)}")
             appio.note(f"Reverse encode segment {idx}/{len(chunks)}: {seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}")
-            rc, _ = encoding.run_ffmpeg_with_progress(
+            rc, _ = runtime.run_ffmpeg_with_progress(
                 cmd,
                 total_duration=max(0.001, (end - start) / speed),
                 label=f"Reverse encode segment {idx}/{len(chunks)}",
@@ -743,7 +751,7 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
         # So the two timelines are concatenated separately: video from the
         # reversed order, audio from the forward one, then muxed. Both passes
         # are stream copies, so this costs no extra encode.
-        stages, mux_warnings = encoding.reverse_concat_stages(
+        stages, mux_warnings = reverse_stages.reverse_concat_stages(
             answers, segment_paths, tmpdir, output_path, speed, segment_ext,
             progress_seconds=(total_keep_duration(chunks) / speed if chunks else None))
         if not stages:
@@ -758,7 +766,7 @@ def run_segmented_reverse_main_encode(answers: dict[str, Any]) -> tuple[int, flo
         for label, cmd, progress in stages:
             log_info(f"{label}: " + command_to_powershell(cmd))
             appio.note(f"{label}...")
-            rc, _ = encoding.run_ffmpeg_with_progress(cmd, total_duration=progress, label=label)
+            rc, _ = runtime.run_ffmpeg_with_progress(cmd, total_duration=progress, label=label)
             if rc != 0:
                 return rc, time.perf_counter() - started_at
         return rc, time.perf_counter() - started_at

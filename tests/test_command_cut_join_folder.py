@@ -542,9 +542,14 @@ class CommandCutJoinFolderTests(CommandGenBase):
         calls: list[str] = []
         output_calls = {"count": 0}
         method_calls = {"count": 0}
-        originals = {
+        # `modes._run_copy_cut_mode_impl` calls the step prompts through the
+        # wizard facade, not through wizard_steps the way run_wizard does, so
+        # the patch and the restore both have to go there.
+        facade_originals = {
             "step_input_path": FFmWiz.wizard.step_input_path,
             "step_output_location": FFmWiz.wizard.step_output_location,
+        }
+        originals = {
             "ask_cut_method": FFmWiz.modes.ask_cut_method,
             "collect_cut_ranges_terminal": FFmWiz.services.collect_cut_ranges_terminal,
             "ask_continue_default_yes": FFmWiz.modes.ask_continue_default_yes,
@@ -587,6 +592,8 @@ class CommandCutJoinFolderTests(CommandGenBase):
         finally:
             for name, original in originals.items():
                 setattr(_home_module(name), name, original)
+            for name, original in facade_originals.items():
+                setattr(FFmWiz.wizard, name, original)
 
         self.assertIsNone(result)
         self.assertEqual(calls[:4], ["input", "output", "method", "output"])

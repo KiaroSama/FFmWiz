@@ -30,7 +30,11 @@ from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
 
-from ffmwiz.support.L00_misc import *  # sibling helpers  # noqa: F401,F403
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def mux_normalize_language(value: str) -> str:

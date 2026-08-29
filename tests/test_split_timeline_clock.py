@@ -30,6 +30,7 @@ from pathlib import Path
 import FFmWiz
 
 from ffmwiz import encoding
+from ffmwiz import runtime
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -197,18 +198,18 @@ class TheRealDispatcherProducesTheRightParts(unittest.TestCase):
         # transformed Split runs with `total_duration=None` and no per-part
         # progress at all.
         seen = {}
-        real = encoding.run_ffmpeg_with_progress
+        real = runtime.run_ffmpeg_with_progress
 
         def spy(cmd, **kwargs):
             seen.update(kwargs)
             return real(cmd, **kwargs)
 
-        encoding.run_ffmpeg_with_progress = spy
+        runtime.run_ffmpeg_with_progress = spy
         try:
             self._dispatch("progress", separator_points=[1.0],
                            video_speed_enabled=True, video_speed_factor=2.0)
         finally:
-            encoding.run_ffmpeg_with_progress = real
+            runtime.run_ffmpeg_with_progress = real
         self.assertTrue(seen.get("split_progress_part_durations"),
                         "the runner was given no per-part durations")
         self.assertTrue(seen.get("progress_output_paths"),

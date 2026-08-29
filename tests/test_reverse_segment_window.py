@@ -27,6 +27,8 @@ import FFmWiz
 
 from ffmwiz import encoding
 from ffmwiz.support import L00_split
+from ffmwiz import reverse_pipeline
+from ffmwiz import runtime
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -102,7 +104,7 @@ class SegmentedReverseReturnsTheSelectedWindow(unittest.TestCase):
         # injected rather than using a 60+ second fixture.
         real_split = L00_split.split_ranges_for_reverse_segments
         commands = []
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
 
         def small_split(ranges, duration, seconds=None):
             return real_split(ranges, duration, chunk_seconds)
@@ -111,13 +113,13 @@ class SegmentedReverseReturnsTheSelectedWindow(unittest.TestCase):
             commands.append([str(part) for part in cmd])
             return real_runner(cmd, **kwargs)
 
-        encoding.split_ranges_for_reverse_segments = small_split
-        encoding.run_ffmpeg_with_progress = spy
+        L00_split.split_ranges_for_reverse_segments = small_split
+        runtime.run_ffmpeg_with_progress = spy
         try:
-            code, _elapsed = encoding.run_segmented_reverse_main_encode(answers)
+            code, _elapsed = reverse_pipeline.run_segmented_reverse_main_encode(answers)
         finally:
-            encoding.split_ranges_for_reverse_segments = real_split
-            encoding.run_ffmpeg_with_progress = real_runner
+            L00_split.split_ranges_for_reverse_segments = real_split
+            runtime.run_ffmpeg_with_progress = real_runner
         self.assertEqual(0, code)
         return Path(answers["output_path"]), commands
 

@@ -89,8 +89,11 @@ from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 from ffmwiz.wizard import *  # noqa: F401,F403
 from ffmwiz import wizard
-from ffmwiz.modes import *  # noqa: F401,F403  (back-import: run_mode_steps etc.)
-from ffmwiz import modes  # noqa: F401
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def run_video_speed_reverse_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:

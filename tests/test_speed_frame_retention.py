@@ -288,13 +288,16 @@ class AJoinedSpeedChangeStatesItToo(SpeedFixtures):
 
 
 class EveryBuilderThatRetimesAlsoStatesItsTiming(unittest.TestCase):
-    """The filter and the output option are a pair; four builders emit the filter.
+    """The filter and the output option are a pair; three builders emit the filter.
 
     A mechanical guard, because the defect was exactly this pair coming apart:
-    the filter shipped in four places and the option in none.
+    the filter shipped in several places and the option in none. The list is
+    checked against the source every run, so a builder that moves file -- as
+    build_cpu_video_filter did, from wizard_build to wizard_build_b -- fails
+    here until the list follows it.
     """
 
-    MODULES = ("ffmwiz/wizard_build.py", "ffmwiz/wizard_build_b.py",
+    MODULES = ("ffmwiz/wizard_build_b.py",
                "ffmwiz/support/ext04b.py", "ffmwiz/support/L04.py")
 
     def _source(self, relative):

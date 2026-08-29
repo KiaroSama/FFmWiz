@@ -1,7 +1,8 @@
 """FFmWiz services overflow (services_b) — split for file size.
 
-Back-imports services and is re-exported by it, so every consumer of
-`from ffmwiz.services import *` still sees the full set. Monkeypatch-safe.
+Re-exported by services, so every consumer of `from ffmwiz.services import *`
+still sees the full set. Imports only tiers BELOW services -- never services
+itself, which is what made this module unimportable on its own.
 """
 from __future__ import annotations
 
@@ -70,8 +71,11 @@ from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 from ffmwiz.runtime import *  # noqa: F401,F403
-from ffmwiz.services import *  # noqa: E402,F401,F403  (back-import)
-from ffmwiz import services  # noqa: E402,F401  (qualified self-ref for patched names)
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def stream_duration_seconds(stream: dict[str, Any], fmt: dict[str, Any] | None = None) -> float | None:
@@ -108,11 +112,11 @@ def estimated_encode_duration_seconds(answers: dict[str, Any]) -> float | None:
     for stream in (video_streams[0] if video_streams else None,
                    audio_streams[0] if audio_streams else None):
         if stream:
-            base = services.stream_duration_seconds(stream, fmt)
+            base = stream_duration_seconds(stream, fmt)
             if base:
                 break
     if not base:
-        base = services.stream_duration_seconds({}, fmt)
+        base = stream_duration_seconds({}, fmt)
     if not base or base <= 0:
         return None
     duration = float(base)
@@ -180,7 +184,7 @@ def build_output_path(answers: dict[str, Any]) -> Path:
 
 
 def metadata_report_output_path(input_path: Path, suffix: str, ext: str) -> Path:
-    report_dir = services.default_media_reports_dir()
+    report_dir = default_media_reports_dir()
     report_dir.mkdir(parents=True, exist_ok=True)
     candidate = report_dir / f"{sanitize_output_stem(input_path.name)}{suffix}{ext}"
     return unique_numbered_path(candidate)
@@ -201,7 +205,7 @@ def estimate_color_range(
     # The limited-vs-full thresholds below are expressed in 8-bit terms, so we
     # normalize the observed values to an 8-bit scale before classifying;
     # otherwise every >8-bit clip is misread as full/PC range.
-    output_path = services.metadata_report_output_path(input_path, f"_color_range_signalstats_stream{video_stream_index}", ".txt")
+    output_path = metadata_report_output_path(input_path, f"_color_range_signalstats_stream{video_stream_index}", ".txt")
     args = build_signalstats_command(input_path, video_stream_index, sampling_mode, ffmpeg, output_path, use_cuda_decode)
     log_info("Metadata Editor signalstats command: " + command_to_powershell(args))
     # The signalstats metadata is written to a file, so ffmpeg's stdout is free
@@ -357,8 +361,91 @@ def collect_cut_ranges_terminal(
     return normalize_cut_ranges(keeps, duration or (keeps[-1][1] if keeps else 0.0))
 
 
+# Read budget for the header probe: it only reads container metadata, so it
+# gets far less room than the packet probe in services.py. An unbounded read
+# is what let one wedged probe hang the whole wizard with no way out.
+_FFPROBE_JSON_TIMEOUT = 60.0
+
+
+def ffprobe_json(ffprobe: str, input_path: Path) -> dict[str, Any]:
+    args = [
+        ffprobe,
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        "-show_chapters",
+        str(input_path),
+    ]
+    stdout_text = ""
+    stderr_text = ""
+    decoded_using = "not decoded"
+    try:
+        result = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=_FFPROBE_JSON_TIMEOUT,
+        )
+        stdout_text, stdout_encoding = decode_subprocess_bytes(result.stdout, "utf-8-sig")
+        stderr_text, stderr_encoding = decode_subprocess_bytes(result.stderr, "utf-8")
+        decoded_using = f"stdout={stdout_encoding}; stderr={stderr_encoding}"
+        if result.returncode != 0:
+            log_ffprobe_diagnostics(
+                input_path, ffprobe, args, result.returncode,
+                stdout_text, stderr_text, decoded_using,
+            )
+            raise FFprobeError(f"ffprobe could not read the file. See log file: {_log_file_text()}")
+        if not stdout_text.strip():
+            log_ffprobe_diagnostics(
+                input_path, ffprobe, args, result.returncode,
+                stdout_text, stderr_text, decoded_using,
+            )
+            raise FFprobeError(f"ffprobe returned no JSON output. See log file: {_log_file_text()}")
+        try:
+            payload = json.loads(stdout_text)
+        except json.JSONDecodeError as exc:
+            log_ffprobe_diagnostics(
+                input_path, ffprobe, args, result.returncode,
+                stdout_text, stderr_text, decoded_using, exc,
+            )
+            raise FFprobeError(f"ffprobe returned invalid JSON. See log file: {_log_file_text()}") from exc
+        if not isinstance(payload, dict):
+            log_ffprobe_diagnostics(
+                input_path, ffprobe, args, result.returncode,
+                stdout_text, stderr_text, decoded_using,
+            )
+            raise FFprobeError(f"ffprobe returned unexpected JSON. See log file: {_log_file_text()}")
+        log_debug(
+            f"ffprobe JSON decoded successfully for {input_path}; "
+            f"stdout length={len(stdout_text)} stderr length={len(stderr_text)}")
+        if os.environ.get("FFMWIZ_DEBUG"):
+            try:
+                safe_name = sanitize_output_stem(input_path.name)
+                stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+                json_path = appio._logs_dir() / f"ffprobe_{stamp}_{safe_name}.json"
+                json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                log_info(f"Full ffprobe JSON saved to: {json_path}")
+            except Exception as exc:
+                log_warn(f"Could not save ffprobe JSON debug file: {exc}")
+        if stderr_text.strip():
+            log_debug("ffprobe stderr:\n" + stderr_text.rstrip())
+        return payload
+    except FFprobeError:
+        raise
+    except Exception as exc:
+        log_ffprobe_diagnostics(
+            input_path, ffprobe, args, "not available",
+            stdout_text, stderr_text, decoded_using, exc,
+        )
+        raise FFprobeError(f"ffprobe could not read the file. See log file: {_log_file_text()}") from exc
+
+
 def join_load_media_item(answers: dict[str, Any], path: Path, allow_audio_only: bool = False) -> dict[str, Any]:
-    probe = services.ffprobe_json(answers["ffprobe"], path)
+    probe = ffprobe_json(answers["ffprobe"], path)
     streams = probe.get("streams", [])
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
@@ -384,11 +471,12 @@ def join_load_media_item(answers: dict[str, Any], path: Path, allow_audio_only: 
         "subtitle_streams": subtitle_streams,
         "attachment_streams": attachment_streams,
         "data_streams": data_streams,
-        "duration": services.stream_duration_seconds({}, probe.get("format")) or services.stream_duration_seconds(primary_stream, probe.get("format")) or 0.0,
+        "duration": stream_duration_seconds({}, probe.get("format")) or stream_duration_seconds(primary_stream, probe.get("format")) or 0.0,
     }
 
 
 __all__ = [
+    'ffprobe_json',
     'stream_duration_seconds',
     'BITRATE_SIZE_ESTIMATE_NOTE',
     'estimated_encode_duration_seconds',

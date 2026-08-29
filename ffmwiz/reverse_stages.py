@@ -96,7 +96,11 @@ from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 from ffmwiz.wizard import *  # noqa: F401,F403
-from ffmwiz import encoding  # facade for monkeypatched names  # noqa: E402
+from ffmwiz import wizard_build  # noqa: E402,F401  (defines build_ffmpeg_command)
+# The `encoding` back-import was deleted: the names used here are defined
+# in this module or in the lower tiers above. `encoding` ends with
+# `__all__ += reverse_pipeline.__all__`, which made this module
+# unimportable on its own.
 
 
 def build_main_encode_reverse_segment_command(
@@ -117,7 +121,7 @@ def build_main_encode_reverse_segment_command(
     segment_answers["output_ext"] = output_path.suffix.lstrip(".") or str(answers.get("output_ext") or "mp4")
     segment_answers["output_collision_suffix"] = ""
     segment_answers.pop("output_path", None)
-    return encoding.build_ffmpeg_command(segment_answers)
+    return wizard_build.build_ffmpeg_command(segment_answers)
 
 
 def reverse_filter_input_for(answers: dict[str, Any]):
@@ -194,7 +198,7 @@ def reverse_segment_seconds(answers: dict[str, Any]) -> float:
     `window_text`, because `f"{seconds:.0f}s"` renders a legitimate 233 ms
     budget as `0s` (D09).
     """
-    return encoding.reverse_segment_plan_for(answers).seconds
+    return reverse_segment_plan_for(answers).seconds
 
 
 # Every user edit the staged reverse pipeline can apply, grouped by the
@@ -218,7 +222,7 @@ STAGE_TRANSFORMATIONS: dict[str, tuple[str, ...]] = {
     # GEOMETRY. `build_cpu_video_filter` orders crop -> fps -> scale/pad ->
     # speed/reverse, so every one of these is a semantic transformation that a
     # stage can apply a second time. They were missing, which is why a
-    # `encoding.stage_answers(..., owns=())` "neutral" stage still cropped: a real
+    # `reverse_stages.stage_answers(..., owns=())` "neutral" stage still cropped: a real
     # 160x120 Join + Reverse + Split asking for 10 px off each side produced
     # 120x120 parts instead of 140x120, with `crop=` in joined_forward.mkv, in
     # every reverse segment AND in the final Split graph (D01). FPS and resize
@@ -401,7 +405,7 @@ def intermediate_video_descriptor(writer: dict[str, Any]) -> dict[str, Any]:
     which is what makes the reverse budget REFUSE rather than plan against an
     invented picture.
     """
-    resolved = encoding.reverse_filter_input_for(dict(writer))
+    resolved = reverse_filter_input_for(dict(writer))
     try:
         # The format the file will hold, not the wider one the reverse BUFFER
         # may hold: `reverse_filter_input_for` deliberately takes the larger of
@@ -410,7 +414,7 @@ def intermediate_video_descriptor(writer: dict[str, Any]) -> dict[str, Any]:
         pix_fmt = target_pixel_format_for_answers(writer) or resolved.pix_fmt
     except Exception:  # a descriptor must never break the plan it describes
         pix_fmt = resolved.pix_fmt
-    return {"codec_name": encoding.intermediate_video_codec_name(writer),
+    return {"codec_name": intermediate_video_codec_name(writer),
             "width": resolved.width, "height": resolved.height,
             "pix_fmt": pix_fmt, "fps": resolved.fps}
 
@@ -588,7 +592,7 @@ def reverse_concat_stages(answers: dict[str, Any], segment_paths: list[Path],
         stages.append(("Reverse encode concat audio (source order)",
                        [str(part) for part in audio_cmd], progress_seconds))
         mux_inputs = ["-i", str(reversed_video), "-i", str(forward_audio)]
-        mux_maps, mux_dispositions, warnings = encoding.reverse_mux_stream_policy(answers)
+        mux_maps, mux_dispositions, warnings = reverse_mux_stream_policy(answers)
         mux_maps = mux_maps + mux_dispositions
         metadata_input = 2
     else:

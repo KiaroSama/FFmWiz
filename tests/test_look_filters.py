@@ -378,7 +378,7 @@ class TheWizardQuestionReachesTheBuilders(unittest.TestCase):
         # Registered but unreachable is the same as absent.
         import inspect
         from ffmwiz import wizard_flow
-        self.assertIn('wizard.Step("video_look"',
+        self.assertIn('wizard_base.Step("video_look"',
                       inspect.getsource(wizard_flow.run_wizard))
 
 

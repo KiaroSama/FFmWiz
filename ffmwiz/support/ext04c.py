@@ -82,9 +82,12 @@ from ffmwiz.core.artifacts import (  # noqa: F401
     EFFECTIVE_SETTINGS_KEY,
     PLAN_REVISION_KEY,
 )
-from ffmwiz.support.L01_cover import cover_art_method  # noqa: F401
-from ffmwiz.support.ext04 import *  # sibling helpers  # noqa: F401,F403
-from ffmwiz.support.ext04b import *  # sibling helpers  # noqa: F401,F403
+from ffmwiz.support.L01_cover import (audio_tool_picture_args,  # noqa: F401
+                                      cover_art_method)
+# The facade back-import was deleted: it carried no name this module does
+# not already get from the lower tiers above, and the facade ends with
+# `__all__ += <this module>.__all__`, which it reached while this module
+# was still on its first statements.
 
 
 # ---------------------------------------------------------------------------

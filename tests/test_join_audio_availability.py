@@ -22,6 +22,10 @@ import unittest
 from pathlib import Path
 
 import FFmWiz
+# `run_wizard` reaches these prompts through their DEFINING module now that the
+# wizard facade is no longer imported by its own leaves, so a patch on the
+# facade would rebind an attribute nothing reads.
+from ffmwiz import wizard_base, wizard_steps  # noqa: E402
 
 from join_test_helpers import make_item
 
@@ -143,14 +147,14 @@ class WizardGates(unittest.TestCase):
         def stop(_answers):
             raise WizardGates._Stop()
 
-        FFmWiz.wizard.Step = recorder
-        FFmWiz.wizard.step_input_path = stop
+        wizard_base.Step = recorder
+        wizard_steps.step_input_path = stop
         try:
             with self.assertRaises(WizardGates._Stop):
                 FFmWiz.run_wizard({})
         finally:
-            FFmWiz.wizard.Step = real_step
-            FFmWiz.wizard.step_input_path = real_input
+            wizard_base.Step = real_step
+            wizard_steps.step_input_path = real_input
         return {step.name: step for step in recorded}
 
     def test_audio_config_steps_are_offered_when_only_a_later_input_is_audible(self):
@@ -245,12 +249,15 @@ class EditorRequest(unittest.TestCase):
             captured.update(request)
             return {"status": "canceled"}
 
-        real = FFmWiz.guibridge._launch_qt_gui
-        FFmWiz.guibridge._launch_qt_gui = fake_launch
+        # The DEFINING module. guibridge_b calls this name directly now, so a
+        # patch on the facade would rebind an attribute nothing reads.
+        from ffmwiz import guibridge_b
+        real = guibridge_b._launch_qt_gui
+        guibridge_b._launch_qt_gui = fake_launch
         try:
             FFmWiz.guibridge.open_unified_video_gui(_answers(items, probe={}))
         finally:
-            FFmWiz.guibridge._launch_qt_gui = real
+            guibridge_b._launch_qt_gui = real
         return captured
 
     def test_a_silent_input_1_still_advertises_audio(self):

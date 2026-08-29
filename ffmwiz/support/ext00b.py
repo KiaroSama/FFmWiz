@@ -62,7 +62,9 @@ from ffmwiz.support.L07 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # qualified primitives
 
-from ffmwiz.support.ext00 import *  # sibling helpers  # noqa: F401,F403
+# The facade back-import was deleted: it carried no name this module does
+# not already get from the lower tiers above, and it made the facade's
+# `__all__` depend on which side was imported first.
 
 
 def mux_separator_line(color_code: str = Color.MUX_SEPARATOR, char: str = "=") -> str:
@@ -563,7 +565,5 @@ __all__ = [
 from ffmwiz.support import ext00d as _ext00d  # noqa: E402
 # Guard the direct-import case: importing this overflow module FIRST
 # re-enters the parent while the child has no __all__ yet.
-_ext00d_names = list(getattr(_ext00d, "__all__", []))
-if _ext00d_names:
-    from ffmwiz.support.ext00d import *  # noqa: E402,F401,F403
-    __all__ = list(__all__) + _ext00d_names
+from ffmwiz.support.ext00d import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext00d.__all__)

@@ -63,7 +63,9 @@ from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # qualified primitives
 from ffmwiz.support.ext00 import *  # noqa: F401,F403
 
-from ffmwiz.support.ext01 import *  # sibling helpers  # noqa: F401,F403
+# The facade back-import was deleted: it carried no name this module does
+# not already get from the lower tiers above, and it made the facade's
+# `__all__` depend on which side was imported first.
 
 
 def metadata_stream_line(probe_json: dict[str, Any], stream: dict[str, Any]) -> str:
@@ -545,7 +547,5 @@ __all__ = [
 from ffmwiz.support import ext01d as _ext01d  # noqa: E402
 # Guard the direct-import case: importing this overflow module FIRST
 # re-enters the parent while the child has no __all__ yet.
-_ext01d_names = list(getattr(_ext01d, "__all__", []))
-if _ext01d_names:
-    from ffmwiz.support.ext01d import *  # noqa: E402,F401,F403
-    __all__ = list(__all__) + _ext01d_names
+from ffmwiz.support.ext01d import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext01d.__all__)

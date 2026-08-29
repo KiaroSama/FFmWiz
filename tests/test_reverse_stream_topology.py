@@ -44,6 +44,7 @@ import FFmWiz
 from artifact_guard import NoLeakedArtifacts
 from cue_clock import read_cues
 from ffmwiz import encoding
+from ffmwiz import reverse_pipeline
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -287,7 +288,7 @@ class RichSource(NoLeakedArtifacts, unittest.TestCase):
         workspace = self._tmp / "plan_workspace"
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            stages = encoding.bounded_reverse_plan(answers, workspace)
+            stages = reverse_pipeline.bounded_reverse_plan(answers, workspace)
         muxes = [cmd for label, cmd in stages
                  if label.startswith("Concatenating reversed")]
         self.assertEqual(1, len(muxes), [label for label, _cmd in stages])

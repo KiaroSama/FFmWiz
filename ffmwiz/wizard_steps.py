@@ -86,8 +86,11 @@ from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 from ffmwiz import trackmanager  # noqa: F401
 
-from ffmwiz import wizard  # facade for monkeypatch-stable cross-module calls  # noqa: F401
-from ffmwiz.wizard import *  # sibling helpers  # noqa: F401,F403
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def step_input_path(answers: dict[str, Any]) -> None:
@@ -226,7 +229,7 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
 
     # Initial add-another question (now also accepts 'folder').
     answers["_question_number"] = sub_question_base
-    decision = wizard.ask_join_add_another(
+    decision = ask_join_add_another(
         appio.question_prompt(answers, first_title, "y/n", "n", back=join_back), allow_folder=allow_folder
     )
     if decision is False:
@@ -298,7 +301,7 @@ def step_join_additional_inputs_for_encode(answers: dict[str, Any]) -> None:
             sub_question += 1
 
         answers["_question_number"] = sub_question
-        decision = wizard.ask_join_add_another(
+        decision = ask_join_add_another(
             appio.question_prompt(answers, f"Add another {media_word} file?", "y/n", "n", back=join_back), allow_folder=allow_folder
         )
         if decision is False:

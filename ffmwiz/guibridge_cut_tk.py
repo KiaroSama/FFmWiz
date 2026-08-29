@@ -77,9 +77,18 @@ from ffmwiz import appio  # noqa: F401
 from ffmwiz.runner import *  # noqa: F401,F403
 from ffmwiz.runtime import *  # noqa: F401,F403
 from ffmwiz.services import *  # noqa: F401,F403
+from ffmwiz.guibridge_tk_common import (  # noqa: F401
+    _PreviewScheduler,
+    _UIPalette,
+    _apply_app_ttk_theme,
+    _bind_layout_independent_keys,
+)
 
-from ffmwiz import guibridge  # facade for monkeypatch-stable cross-module calls  # noqa: F401
-from ffmwiz.guibridge import *  # sibling helpers  # noqa: F401,F403
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def _open_legacy_cut_gui_tk(
@@ -113,7 +122,7 @@ def _open_legacy_cut_gui_tk(
         appio.error("Cannot open the cut GUI: source duration is unknown.")
         return None
 
-    palette = guibridge._UIPalette
+    palette = _UIPalette
     ffplay = shutil.which("ffplay")
     input_path: Path = answers["input_path"]
 
@@ -157,7 +166,7 @@ def _open_legacy_cut_gui_tk(
             root.title("FFmWiz Cut Editor")
             root.configure(bg=palette.BG)
             _apply_tk_window_icon(root)
-            guibridge._apply_app_ttk_theme(root)
+            _apply_app_ttk_theme(root)
             _apply_dark_title_bar(root)
             load_icon = _make_icon_loader(root)
 
@@ -248,7 +257,7 @@ def _open_legacy_cut_gui_tk(
                     return
                 redraw_preview_canvas()
 
-            scheduler = guibridge._PreviewScheduler(
+            scheduler = _PreviewScheduler(
                 root,
                 extract_fn=_extract,
                 on_ready=_on_frame_ready,
@@ -872,7 +881,7 @@ def _open_legacy_cut_gui_tk(
                     cls = ""
                 return cls in ("Entry", "TEntry", "Text", "Spinbox", "TCombobox", "TSpinbox")
 
-            guibridge._bind_layout_independent_keys(root, [
+            _bind_layout_independent_keys(root, [
                 {"key": "space", "callback": toggle_playback},
                 {"key": "i", "callback": set_in_marker},
                 {"key": "o", "callback": set_out_marker},

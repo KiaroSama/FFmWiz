@@ -39,6 +39,7 @@ from unittest import mock
 
 import FFmWiz
 from ffmwiz.support import ext04b
+from ffmwiz import runtime
 from ffmwiz.support import L00_split
 
 FFMPEG = shutil.which("ffmpeg")
@@ -84,7 +85,9 @@ class TheStandaloneReverseUsesTheSharedBudget(unittest.TestCase):
                 ranges.append((start, start + float(argv[argv.index("-t") + 1])))
             return 0, 0.0
 
-        with mock.patch.object(ext04b, "run_ffmpeg_with_progress", fake_runner), \
+        # `runtime` DEFINES it. ext04b used to hold its own star-imported copy,
+        # so a double installed there reached that one caller and no other.
+        with mock.patch.object(runtime, "run_ffmpeg_with_progress", fake_runner), \
                 mock.patch.object(FFmWiz.appio, "note",
                                   lambda text: notes.append(str(text))):
             code, _elapsed = ext04b.run_segmented_reverse_video_speed(answers)

@@ -36,6 +36,8 @@ import FFmWiz
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
 from ffmwiz.support import L00_split
+from ffmwiz import reverse_pipeline
+from ffmwiz import reverse_stages
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -138,7 +140,7 @@ class ExportedPlanSizesPostTransformFrames(NoLeakedArtifacts, unittest.TestCase)
         workspace = self._tmp / "ws"
         noise = StringIO()
         with redirect_stdout(noise), redirect_stderr(noise):
-            stages = encoding.bounded_reverse_plan(self._answers(self._tmp), workspace)
+            stages = reverse_pipeline.bounded_reverse_plan(self._answers(self._tmp), workspace)
         self.assertTrue(stages, "the plan produced no stages")
         label, forward = stages[0]
         result = _run(forward)
@@ -165,15 +167,15 @@ class ExportedPlanSizesPostTransformFrames(NoLeakedArtifacts, unittest.TestCase)
         """
         stages, probed = self._plan()
         seen = []
-        real_stage = encoding.stage_answers
-        encoding.stage_answers = lambda a, owns: (seen.append(a) or real_stage(a, owns))
+        real_stage = reverse_stages.stage_answers
+        reverse_stages.stage_answers = lambda a, owns: (seen.append(a) or real_stage(a, owns))
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
-                encoding.bounded_reverse_plan(self._answers(self._tmp),
+                reverse_pipeline.bounded_reverse_plan(self._answers(self._tmp),
                                               self._tmp / "ws2")
         finally:
-            encoding.stage_answers = real_stage
+            reverse_stages.stage_answers = real_stage
         described = [a for a in seen
                      if str(a.get("input_path", "")).endswith("joined_forward.mkv")]
         self.assertTrue(described, "the joined intermediate was never described")

@@ -92,8 +92,11 @@ from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
 from ffmwiz import trackmanager  # noqa: F401
 
-from ffmwiz import wizard  # facade for monkeypatch-stable cross-module calls  # noqa: F401
-from ffmwiz.wizard import *  # sibling helpers  # noqa: F401,F403
+# The facade star-import was deleted. It made this module unimportable on its
+# own: the facade ends with `__all__ += <this module>.__all__` and reached that
+# line while this module was still on its first statements. Names that live in
+# a sibling are now addressed through that sibling's module object, imported at
+# the BOTTOM of this file where nothing partial is read.
 
 
 def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) -> None:
@@ -160,18 +163,18 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         return all(cfg_has(k) for k in keys)
 
     steps = [
-        wizard.Step("input_path", lambda a: True, wizard.step_input_path),
-        wizard.Step("join_inputs", wizard_join_inputs_applicable, wizard.step_join_additional_inputs_for_encode),
-        wizard.Step("output_location", lambda a: True, wizard.step_output_location),
-        wizard.Step("output_format", lambda a: True, wizard.step_output_format),
-        wizard.Step("video_codec", output_has_video, wizard.step_video_codec),
-        wizard.Step("use_gpu", output_has_video, wizard.step_use_gpu),
-        wizard.Step("unified_video_editor", output_has_video, wizard.step_unified_video_editor_for_encode),
-        wizard.Step("crop_enabled", lambda a: output_has_video(a) and not a.get("_unified_video_editor_declined"), wizard.step_crop_enabled),
-        wizard.Step("crop_top", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_top),
-        wizard.Step("crop_left", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_left),
-        wizard.Step("crop_right", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_right),
-        wizard.Step("crop_bottom", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_bottom),
+        wizard_base.Step("input_path", lambda a: True, wizard_steps.step_input_path),
+        wizard_base.Step("join_inputs", wizard_join_inputs_applicable, wizard_steps.step_join_additional_inputs_for_encode),
+        wizard_base.Step("output_location", lambda a: True, wizard_steps.step_output_location),
+        wizard_base.Step("output_format", lambda a: True, wizard_steps.step_output_format),
+        wizard_base.Step("video_codec", output_has_video, wizard_steps.step_video_codec),
+        wizard_base.Step("use_gpu", output_has_video, wizard_steps.step_use_gpu),
+        wizard_base.Step("unified_video_editor", output_has_video, wizard_steps.step_unified_video_editor_for_encode),
+        wizard_base.Step("crop_enabled", lambda a: output_has_video(a) and not a.get("_unified_video_editor_declined"), wizard_steps.step_crop_enabled),
+        wizard_base.Step("crop_top", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_top),
+        wizard_base.Step("crop_left", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_left),
+        wizard_base.Step("crop_right", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_right),
+        wizard_base.Step("crop_bottom", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_bottom),
         # Filters need a re-encode, so this rides the same gate as the
         # bitrate and resolution questions rather than crop's. In config
         # mode it is skipped entirely unless the config names it: every
@@ -180,47 +183,47 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         # run has no one to answer the prompt. The unified editor path is
         # contractually prompt-free, so it is skipped there too, exactly
         # like the crop questions above.
-        wizard.Step("video_look",
+        wizard_base.Step("video_look",
                     lambda a: (video_reencode_options_applicable(a)
                                and not a.get("_unified_video_editor_used")
                                and not a.get("_unified_video_editor_declined")
                                and (not config_mode or cfg_has("video_look"))),
                     step_video_look),
-        wizard.Step("video_bitrate", video_reencode_options_applicable, wizard.step_video_bitrate),
-        wizard.Step("nvenc_multipass", wizard.nvenc_multipass_prompt_applicable, wizard.step_nvenc_multipass),
-        wizard.Step("cpu_two_pass", cpu_two_pass_applicable, wizard.step_cpu_two_pass),
-        wizard.Step("resolution", video_reencode_options_applicable, wizard.step_resolution),
-        wizard.Step("fps", video_reencode_options_applicable, wizard.step_fps),
-        wizard.Step("video_speed_reverse", lambda a: output_has_video(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard.step_video_speed_reverse_for_encode),
-        wizard.Step("cuts", lambda a: video_reencode_options_applicable(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard.step_cuts),
+        wizard_base.Step("video_bitrate", video_reencode_options_applicable, wizard_steps.step_video_bitrate),
+        wizard_base.Step("nvenc_multipass", wizard_base.nvenc_multipass_prompt_applicable, wizard_base.step_nvenc_multipass),
+        wizard_base.Step("cpu_two_pass", cpu_two_pass_applicable, wizard_steps.step_cpu_two_pass),
+        wizard_base.Step("resolution", video_reencode_options_applicable, wizard_steps.step_resolution),
+        wizard_base.Step("fps", video_reencode_options_applicable, wizard_steps.step_fps),
+        wizard_base.Step("video_speed_reverse", lambda a: output_has_video(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard_flow_b.step_video_speed_reverse_for_encode),
+        wizard_base.Step("cuts", lambda a: video_reencode_options_applicable(a) and not a.get("_unified_video_editor_used") and not a.get("_unified_video_editor_declined"), wizard_flow_b.step_cuts),
         # The track question itself gets the same treatment: it used to be
         # gated by and sized from input 1's list, so a track only a LATER input
         # carries could not be selected at all -- the prompt rejected the index
         # as out of range and the builder then reported the track as missing
         # from the output (F05).
-        wizard.Step("audio_tracks", lambda a: any_join_audio(a), with_join_audio_view(step_audio_tracks)),
+        wizard_base.Step("audio_tracks", lambda a: any_join_audio(a), with_join_audio_view(step_audio_tracks)),
         # any_join_audio, not a.get("audio_streams"): a join whose FIRST input is
         # silent still produces audio, and gating on input 1 hid every question
         # that configures it (R02). with_join_audio_view lends the joined track
         # list to the steps whose bodies index input 1's list directly.
-        wizard.Step("loudnorm", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_loudnorm)),
-        wizard.Step("audio_cut", audio_only_transform_prompt_applicable, wizard.step_audio_cut_for_encode),
-        wizard.Step("audio_speed_reverse", audio_only_transform_prompt_applicable, wizard.step_audio_speed_reverse_for_encode),
-        wizard.Step("audio_codec", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_audio_codec)),
-        wizard.Step("audio_bitrate", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), with_join_audio_view(step_audio_bitrate)),
-        wizard.Step("audio_sample_rate", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy", with_join_audio_view(step_audio_sample_rate)),
-        wizard.Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
+        wizard_base.Step("loudnorm", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_loudnorm)),
+        wizard_base.Step("audio_cut", audio_only_transform_prompt_applicable, wizard_b.step_audio_cut_for_encode),
+        wizard_base.Step("audio_speed_reverse", audio_only_transform_prompt_applicable, wizard_flow_b.step_audio_speed_reverse_for_encode),
+        wizard_base.Step("audio_codec", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True), with_join_audio_view(step_audio_codec)),
+        wizard_base.Step("audio_bitrate", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy" and audio_codec_uses_bitrate(str(a.get("audio_codec") or default_audio_codec_for_ext(a.get("output_ext", "")))), with_join_audio_view(step_audio_bitrate)),
+        wizard_base.Step("audio_sample_rate", lambda a: any_join_audio(a) and bool(selected_audio_streams(a) if "audio_tracks" in a else True) and a.get("audio_codec") != "copy", with_join_audio_view(step_audio_sample_rate)),
+        wizard_base.Step("source_extras", source_extra_policy_applicable, step_source_extra_policy),
         # Runs after the extras answer AND after speed/cuts/Split are known, so
         # the drop is stated and confirmed while the edit can still change --
         # not logged silently and discovered in the output (R11).
-        wizard.Step("source_extra_outcomes", lambda a: bool(source_extra_stream_outcome_notes(a)), confirm_source_extra_stream_outcomes),
+        wizard_base.Step("source_extra_outcomes", lambda a: bool(source_extra_stream_outcome_notes(a)), confirm_source_extra_stream_outcomes),
         # any_join_subtitles, not a.get("subtitle_streams"): a join whose FIRST
         # input has no subtitles still carries the later inputs' tracks, so
         # gating on input 1 meant the question was skipped and ALL of them
         # were kept without asking.
-        wizard.Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and any_join_subtitles(a), with_join_subtitle_view(step_subtitle_tracks)),
-        wizard.Step("color_range", color_range_prompt_applicable, wizard.step_color_range),
-        wizard.Step("start_now", lambda a: True, wizard.step_start_now),
+        wizard_base.Step("subtitle_tracks", lambda a: output_has_video(a) and source_subtitles_keep_enabled(a) and any_join_subtitles(a), with_join_subtitle_view(step_subtitle_tracks)),
+        wizard_base.Step("color_range", color_range_prompt_applicable, wizard_base.step_color_range),
+        wizard_base.Step("start_now", lambda a: True, wizard_b.step_start_now),
     ]
 
     def runnable(pos: int) -> bool:
@@ -237,7 +240,7 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         while idx > 0 and (
             not runnable(idx)
             or is_auto_unified_crop_step(idx)
-            or wizard.step_is_auto_back_skip(steps[idx], answers)
+            or wizard_base.step_is_auto_back_skip(steps[idx], answers)
         ):
             idx -= 1
         return max(0, idx)
@@ -281,336 +284,22 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
             idx = prev_index(idx - 1)
 
 
-def print_summary(answers: dict[str, Any], cmd: list[str]) -> None:
-    two_pass_display = cpu_two_pass_enabled_for_command(answers, cmd)
-    if two_pass_display:
-        pass1_cmd, pass2_cmd, _passlog = build_cpu_two_pass_commands(cmd, answers)
-        log_info("Final PowerShell command (CPU two-pass pass 1/2): " + command_to_powershell(pass1_cmd))
-        log_info("Final PowerShell command (CPU two-pass pass 2/2): " + command_to_powershell(pass2_cmd))
-        log_command("Actual final subprocess pass 1/2", pass1_cmd)
-        log_command("Actual final subprocess pass 2/2", pass2_cmd)
-    else:
-        log_info("Final PowerShell command: " + command_to_powershell(cmd))
-        log_command("Actual final subprocess", cmd)
-    log_final_normalized_answers(answers, cmd)
-    log_info(
-        "Selected settings: input={}; output={}; format={}; video_codec={}; audio_codec={}; crop={}; fps={}; resolution={}".format(
-            answers.get("input_path"), answers.get("output_path"), answers.get("output_ext"),
-            effective_value(answers, "video_codec"), effective_value(answers, "audio_codec"),
-            format_crop_margins(answers) if answers.get("crop_enabled") else "no",
-            answers.get("fps") or "source", format_resolution_summary(answers.get("resolution")),
-        )
-    )
-    print()
-    if two_pass_display:
-        pass1_cmd, pass2_cmd, _passlog = build_cpu_two_pass_commands(cmd, answers)
-        print(paint("Final PowerShell command (CPU two-pass pass 1/2):", Color.BOLD + Color.FINAL_COMMAND_LABEL))
-        print(paint(command_to_powershell(pass1_cmd), Color.FINAL_COMMAND_TEXT))
-        print()
-        print(paint("Final PowerShell command (CPU two-pass pass 2/2):", Color.BOLD + Color.FINAL_COMMAND_LABEL))
-        print(paint(command_to_powershell(pass2_cmd), Color.FINAL_COMMAND_TEXT))
-    else:
-        print(paint("Final PowerShell command:", Color.BOLD + Color.FINAL_COMMAND_LABEL))
-        print(paint(command_to_powershell(cmd), Color.FINAL_COMMAND_TEXT))
-    print()
-    print(paint("Selected settings summary:", Color.BOLD + Color.LIME))
-    print("  " + field_text("input", answers["input_path"], Color.WHITE))
-    if answers.get("join_input_items"):
-        join_items = list(answers.get("join_input_items") or [])
-        print("  " + field_text("joined inputs", len(join_items) + 1, Color.LIGHT_BLUE))
-        print("    " + paint(f"1. {Path(answers['input_path']).name}", Color.WHITE))
-        for idx, item in enumerate(join_items, start=2):
-            print("    " + paint(f"{idx}. {Path(item.get('path')).name}", Color.WHITE))
-        print("  " + field_text("join settings", "video/audio settings apply by track number to every joined input", Color.YELLOW))
-    print("  " + field_text("output", answers["output_path"], Color.LIME))
-    if output_has_video(answers):
-        print("  " + field_text("video codec",
-                                effective_value(answers, "video_codec", DEFAULT_VIDEO_CODEC),
-                                Color.CYAN))
-        _resolved_encoder = resolve_video_encoder(answers)[0]
-        print("  " + field_text("source bit depth", describe_video_bit_depth(source_video_stream(answers) or {}), Color.PINK))
-        print("  " + field_text("output bit depth", f"{output_video_bit_depth(answers)}-bit", Color.PINK))
-        if str(_resolved_encoder).lower() != "copy":
-            print("  " + field_text("encoder", _resolved_encoder, Color.CYAN))
-            if "hevc" in str(_resolved_encoder) or str(_resolved_encoder) in {"libx265"}:
-                _default_profile = "main" if str(_resolved_encoder) in {"libx265"} else None
-                print("  " + field_text("profile", hevc_profile_for_output(answers, _default_profile), Color.CYAN))
-            print("  " + field_text(
-                "pixel format",
-                cuda_pixel_format_for_output(answers) if (str(_resolved_encoder).endswith("_nvenc") and can_use_cuda_fast_path(answers, _resolved_encoder))
-                else cpu_graph_pixel_format_for_encoder(answers, _resolved_encoder),
-                Color.ORANGE,
-            ))
-            print("  " + field_text("path", filter_graph_path_label(answers, _resolved_encoder), Color.AQUA))
-            _precision_note = bit_depth_precision_note(answers)
-            if _precision_note:
-                print("  " + field_text("precision note", _precision_note, Color.NOTE_YELLOW))
-        print("  " + field_text("GPU", "yes" if answers.get("use_gpu") else "no", Color.GREEN if answers.get("use_gpu") else Color.YELLOW))
-        if "_nvenc" in command_to_text(cmd):
-            print("  " + field_text("NVENC multipass", normalize_nvenc_multipass_mode(answers.get("nvenc_multipass")), Color.YELLOW))
-        if answers.get("crop_enabled"):
-            print("  " + field_text("crop", "yes, " + format_crop_margins(answers), Color.ORANGE))
-            try:
-                adj_left, adj_right, adj_top, adj_bottom = normalized_crop_margins(answers)
-                req = (
-                    int(answers.get("crop_left", 0) or 0),
-                    int(answers.get("crop_right", 0) or 0),
-                    int(answers.get("crop_top", 0) or 0),
-                    int(answers.get("crop_bottom", 0) or 0),
-                )
-                if (adj_left, adj_right, adj_top, adj_bottom) != req:
-                    print("  " + field_text(
-                        "crop (aligned)",
-                        f"top={adj_top} px, left={adj_left} px, right={adj_right} px, bottom={adj_bottom} px",
-                        Color.ORANGE,
-                    ))
-                crop_w, crop_h = cropped_source_size(answers)
-                print("  " + field_text("cropped resolution", f"{crop_w}x{crop_h}", Color.ORANGE))
-            except ValueError:
-                pass
-            crop_box = answers.get("crop_box_dimensions")
-            crop_ar = answers.get("cropped_aspect_ratio")
-            if crop_box and crop_ar:
-                print("  " + field_text("crop box", f"{crop_box[0]}x{crop_box[1]} (AR {crop_ar:.4f})", Color.ORANGE))
-        else:
-            print("  " + field_text("crop", "no", Color.GREEN))
-        print("  " + field_text("video bitrate", str(answers.get("video_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
-        if answers.get("cpu_two_pass"):
-            print("  " + field_text("CPU two-pass", "yes", Color.YELLOW))
-        print("  " + field_text("resolution", format_resolution_summary(answers.get("resolution")), Color.MAGENTA))
-        if answers.get("final_resolution"):
-            final_w, final_h = answers["final_resolution"]
-            print("  " + field_text("final output resolution", f"{final_w}x{final_h}", Color.LIME))
-        # Color-range and SAR/DAR summary. The summary is a display surface, so
-        # an unresolved unknown range (e.g. a pure stream-copy that writes no
-        # color-range metadata) is reported honestly instead of raising.
-        try:
-            resolved_range, range_source = resolve_color_range(answers, workflow="print_summary")
-        except ColorRangeUnresolvedError:
-            resolved_range, range_source = "", "unresolved (no metadata written)"
-        detected_range = display_color_range((source_video_stream(answers) or {}).get("color_range"))
-        is_copy = str(resolve_video_encoder(answers)[0]).lower() == "copy"
-        print("  " + field_text("detected source color range", detected_range, Color.COLOR_RANGE_VALUE))
-        if is_copy:
-            # Stream copy: bitstream range signaling is preserved from the source;
-            # the re-encode menu semantics do not apply.
-            print("  " + field_text("color-range policy", "stream copy (preserved from source)", Color.COLOR_RANGE_VALUE))
-            print("  " + field_text(
-                "output color-range metadata", f"{detected_range} (preserved from copied stream)", Color.COLOR_RANGE_VALUE))
-        elif range_source == "user choice":
-            # "Do not force a range in FFmWiz" (option 2). Capability is resolved
-            # from the per-environment FFmpeg cache (lazy probe). Without a
-            # verified result we report conservatively rather than guessing.
-            cap = services.resolve_capability(answers, allow_probe=not answers.get("_no_capability_probe"))
-            print("  " + field_text("requested color-range policy", "do not force", Color.COLOR_RANGE_VALUE))
-            print("  " + field_text("FFmWiz explicit color-range option", "omitted", Color.COLOR_RANGE_VALUE))
-            print("  " + field_text("capability source", cap["capability_source"], Color.COLOR_RANGE_VALUE))
-            print("  " + field_text("capability environment fingerprint", cap["env_short"], Color.DIM))
-            if cap.get("status") == "verified" and cap.get("expected_final_range") is not None:
-                fr = cap["expected_final_range"]
-                shown = "unspecified" if fr in {"unknown", "", None} else fr
-                print("  " + field_text("expected encoder-reported final range", shown, Color.COLOR_RANGE_VALUE))
-                if cap.get("verified_at_utc"):
-                    print("  " + field_text("verified probe timestamp", cap["verified_at_utc"], Color.DIM))
-            else:
-                print("  " + field_text("expected encoder-reported final range",
-                                        "unknown until verified", Color.COLOR_RANGE_VALUE))
-        else:
-            print("  " + field_text(
-                "resolved color range",
-                (resolved_range or "unspecified") + f" ({range_source})",
-                Color.COLOR_RANGE_VALUE,
-            ))
-            print("  " + field_text(
-                "output color-range metadata",
-                resolved_range if resolved_range else "omitted",
-                Color.COLOR_RANGE_VALUE,
-            ))
-        print("  " + field_text("pixel-value range conversion", "no", Color.DIM))
-        _sd = sar_dar_info(answers)
-        print("  " + field_text(
-            "source SAR",
-            f"{_sd['sar_text']} ({_sd['sar_source']})",
-            Color.AQUA,
-        ))
-        print("  " + field_text(
-            "source DAR",
-            f"{_sd['dar_text']} ({_sd['dar_source']})",
-            Color.AQUA,
-        ))
-        if _sd.get("effective_dar_decimal"):
-            print("  " + field_text("effective DAR", f"{_sd['effective_dar_decimal']:.6f}", Color.AQUA))
-        print("  " + field_text("pixel shape", _sd["pixel_shape"], Color.PINK))
-        if _sd.get("warning"):
-            print("  " + field_text("geometry warning", _sd["warning"], Color.YELLOW))
-        # Pixel-format operation summary.
-        try:
-            if str(resolve_video_encoder(answers)[0]).lower() != "copy":
-                _pf = wizard.pixel_format_analysis(answers)
-                _src, _tgt = _pf["source"], _pf["target"]
-                print("  " + field_text(
-                    "source pixel format",
-                    f"{_src['pix_fmt']} ({(str(_src['bit_depth']) + '-bit') if _src['bit_depth'] else 'unknown-bit'}, {_src['chroma']})",
-                    Color.ORANGE,
-                ))
-                print("  " + field_text(
-                    "target pixel format",
-                    f"{_tgt['pix_fmt']} ({(str(_tgt['bit_depth']) + '-bit') if _tgt['bit_depth'] else 'unknown-bit'}, {_tgt['chroma']})",
-                    Color.ORANGE,
-                ))
-                print("  " + field_text("pixel-format operation", _pf["operation"], Color.PINK))
-                print("  " + field_text("bit-depth conversion", _pf["bit_depth_conversion"], Color.PINK))
-                print("  " + field_text("chroma-subsampling conversion", _pf["chroma_conversion"], Color.PINK))
-        except Exception:
-            pass
-        print("  " + field_text("fps", answers.get("fps") or "source", Color.MAGENTA))
-        if video_speed_transform_enabled(answers):
-            print("  " + field_text("video speed", f"{encode_video_speed_factor(answers) * 100:.0f}%", Color.MAGENTA))
-            print("  " + field_text("reverse video", "yes" if answers.get("reverse_video") else "no", Color.ORANGE))
-            if answers.get("reverse_video"):
-                appio.note(
-                    "FFmWiz runs reverse video in short segments to avoid buffering the whole clip in RAM. "
-                    "The single command above is an equivalent simple reference command."
-                )
-        if answers.get("separator_points"):
-            print(paint(format_split_points_for_summary(answers.get("separator_points") or [], services.get_video_fps(answers), "Split points"), Color.LIGHT_BLUE))
-        if answers.get("split_output_paths"):
-            print("  " + field_text("Split output parts", len(answers.get("split_output_paths") or []), Color.LIGHT_BLUE))
-            split_intervals = list(answers.get("split_part_intervals") or [])
-            for idx, part_path in enumerate(answers.get("split_output_paths") or [], start=1):
-                interval_text = ""
-                if idx - 1 < len(split_intervals):
-                    start, end = split_intervals[idx - 1]
-                    duration = max(0.0, end - start)
-                    interval_text = f"  [{seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}, duration {format_elapsed(duration)}]"
-                print("    " + field_text(f"Part {idx:02d}", str(part_path) + interval_text, Color.LIME))
-    if any_join_audio(answers):
-        _recovered_streams, _recovered_tracks = join_audio_recovery(answers)
-        print("  " + field_text(
-            "audio tracks",
-            f"{_recovered_tracks} (input 1 is silent; taken from the other joined inputs)"
-            if _recovered_streams else answers.get("audio_tracks"),
-            Color.LIGHT_BLUE))
-        # The resolved codec: a container fallback records its substitution
-        # in the effective map and leaves the requested key alone, so this
-        # line reported "copy" while -c:a said aac (F07).
-        print("  " + field_text("audio codec", effective_value(answers, "audio_codec"), Color.CYAN))
-        print("  " + field_text("audio bitrate", str(answers.get("audio_bitrate_kbps") or "source/default") + " kbps", Color.YELLOW))
-        _sr = resolve_audio_sample_rate(answers)
-        if answers.get("join_input_items"):
-            print("  " + field_text("audio sample rate", f"{join_target_sample_rate(answers)} Hz (uniform across joined inputs)", Color.AUDIO_SAMPLE_RATE))
-        else:
-            print("  " + field_text("audio sample rate", f"{_sr} Hz" if _sr else "keep source", Color.AUDIO_SAMPLE_RATE))
-        if audio_cut_transform_enabled(answers):
-            print(paint(format_audio_ranges_for_summary(answers["audio_cut_keep_ranges"], "audio cuts (keep ranges)"), Color.LIME))
-        if audio_speed_transform_enabled(answers):
-            print("  " + field_text("audio speed", f"{encode_audio_speed_factor(answers) * 100:.0f}%", Color.MAGENTA))
-            print("  " + field_text("reverse audio", "yes" if encode_audio_reverse_enabled(answers) else "no", Color.ORANGE))
-        if loudnorm_transform_enabled(answers):
-            mode = loudnorm_mode(answers)
-            mode_text = {"single": "Single-pass", "two_pass": "Two-pass"}.get(mode, mode)
-            target_i = answers.get("loudnorm_target_i", LOUDNORM_DEFAULT_TARGET_I)
-            print("  " + field_text(
-                "LoudNorm",
-                f"{mode_text} on final output audio  (I={target_i:g}, TP={LOUDNORM_TARGET_TP:g}, LRA={LOUDNORM_TARGET_LRA:g})",
-                Color.MEAN_VOLUME,
-            ))
-            if mode == "two_pass":
-                source_text = (
-                    "final joined audio from all selected input clips"
-                    if answers.get("join_input_items") else "final output audio"
-                )
-                print("    " + field_text("measurement source", source_text, Color.MEAN_VOLUME))
-    if output_has_video(answers) and answers.get("subtitle_streams"):
-        if source_subtitles_keep_enabled(answers):
-            print("  " + field_text("subtitle tracks", answers.get("subtitle_tracks"), Color.WHITE))
-        else:
-            print("  " + field_text("subtitle tracks", "removed by metadata policy", Color.ORANGE))
-    if output_has_video(answers) and services.source_extra_preservation_features(answers):
-        print("  " + field_text("source metadata", "keep" if source_metadata_keep_enabled(answers) else "remove", Color.LIGHT_BLUE))
-        print("  " + field_text("chapters", "keep" if source_chapters_keep_enabled(answers) else "remove", Color.LIGHT_BLUE))
-    if output_has_video(answers) and additional_source_video_streams(answers):
-        _extra_count = len(additional_source_video_streams(answers))
-        _extra_reason = additional_source_video_drop_reason(answers)
-        _extra_keep = resolve_source_extra_video_keep(answers)
-        print("  " + field_text(
-            "extra source video streams",
-            f"keep {_extra_count}" if _extra_keep
-            else f"dropped ({_extra_reason or 'removed by the metadata policy'})",
-            Color.LIGHT_BLUE if _extra_keep else Color.ORANGE))
-    if output_has_video(answers) and source_data_streams(answers) and source_data_keep_enabled(answers) and timeline_is_modified(answers):
-        print("  " + field_text(
-            "source data streams",
-            f"copied unchanged ({len(source_data_streams(answers))}); timestamps still follow the source timeline",
-            Color.ORANGE))
-    if output_has_video(answers) and embedded_attachment_streams(answers):
-        attachment_state = "yes" if embedded_attachment_keep_enabled(answers) else "no"
-        print("  " + field_text("embedded attachments", attachment_state, Color.PINK))
-    cut_keep_ranges = answers.get("cut_keep_ranges") or []
-    if cut_keep_ranges:
-        fps = services.get_video_fps(answers)
-        print(paint(
-            format_cut_ranges_for_summary(cut_keep_ranges, fps, "cuts (keep ranges)"),
-            Color.LIME,
-        ))
-    _print_estimated_output_size(answers)
-
-
-def _print_estimated_output_size(answers: dict[str, Any]) -> None:
-    """Summary line: approximate output size from the chosen target bitrates.
-
-    Uses the TOTAL target bitrate (video + audio). Shows ``N/A`` with a reason
-    when a target bitrate is not available for the video stream (constant-quality
-    CRF/CQ mode, or stream copy), since size then cannot be estimated.
-    """
-    total_kbps = 0.0
-    na_reason = ""
-    if output_has_video(answers):
-        if str(resolve_video_encoder(answers)[0]).lower() == "copy":
-            na_reason = "video stream copy, no target bitrate"
-        elif answers.get("video_crf") is not None:
-            na_reason = "constant-quality CRF/CQ mode"
-        elif answers.get("video_bitrate_kbps"):
-            total_kbps += float(answers["video_bitrate_kbps"])
-        else:
-            na_reason = "no target video bitrate"
-    if (
-        not na_reason
-        and answers.get("audio_streams")
-        and answers.get("audio_bitrate_kbps")
-        and str(effective_value(answers, "audio_codec")) != "copy"
-    ):
-        total_kbps += float(answers["audio_bitrate_kbps"])
-    if na_reason:
-        print("  " + field_text("estimated output size", f"N/A ({na_reason})", Color.NOTE_YELLOW))
-        return
-    duration = services.estimated_encode_duration_seconds(answers)
-    size = estimate_size_bytes_from_bitrate(total_kbps, duration)
-    if size is None or total_kbps <= 0:
-        print("  " + field_text("estimated output size", "N/A (unknown source duration)", Color.NOTE_YELLOW))
-        return
-    print("  " + field_text(
-        "estimated output size",
-        f"{format_estimated_size(size)}  (total {int(total_kbps)} kbps over {format_duration(duration)})",
-        Color.LIME,
-    ))
-    appio.note(BITRATE_SIZE_ESTIMATE_NOTE)
-
-
-def graphical_hint(text: str) -> str:
-    if USE_COLOR:
-        return f"{Color.AQUA}{text}{Color.RESET}{Color.HINT_YELLOW}"
-    return text
-
-
 __all__ = [
-    'graphical_hint',
-    'print_summary',
     'run_wizard',
 ]
 
 
 # wizard_flow_b holds an overflow slice of this module (split for file size).
+# Bound twice on purpose: run_wizard addresses it through the module object so a
+# test patching the DEFINING module is seen, and the `_` alias is what
+# tests/test_module_reference_hygiene reads to find re-export pairs.
 from ffmwiz import wizard_flow_b as _wizard_flow_b  # noqa: E402
+from ffmwiz import wizard_flow_b  # noqa: E402,F401
 from ffmwiz.wizard_flow_b import *  # noqa: E402,F401,F403
 __all__ = list(__all__) + list(_wizard_flow_b.__all__)
+
+# The step prompts run_wizard schedules, and Step itself, live in these leaves.
+# None of them imports this module or wizard, so the wizard tier stays acyclic.
+from ffmwiz import wizard_base  # noqa: E402,F401
+from ffmwiz import wizard_steps  # noqa: E402,F401
+from ffmwiz import wizard_b  # noqa: E402,F401

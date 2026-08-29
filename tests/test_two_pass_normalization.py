@@ -26,6 +26,7 @@ summary can still claim it, and say why before the command is confirmed.
 import unittest
 
 import FFmWiz
+from ffmwiz import runtime
 
 
 def _answers(**extra):
@@ -184,17 +185,17 @@ class NoExecutorCanSkipTheCheck(unittest.TestCase):
 
     def setUp(self):
         self._real_note = FFmWiz.appio.note
-        self._real_runner = FFmWiz.encoding.run_ffmpeg_with_progress
+        self._real_runner = FFmWiz.runtime.run_ffmpeg_with_progress
         self._real_two_pass = FFmWiz.encoding.run_cpu_two_pass_ffmpeg
         self.two_pass_calls = []
         FFmWiz.appio.note = lambda *a, **k: None
-        FFmWiz.encoding.run_ffmpeg_with_progress = lambda cmd, **kwargs: (0, 0.0)
+        FFmWiz.runtime.run_ffmpeg_with_progress = lambda cmd, **kwargs: (0, 0.0)
         FFmWiz.encoding.run_cpu_two_pass_ffmpeg = (
             lambda cmd, answers, **kwargs: (self.two_pass_calls.append(cmd) or (0, 0.0)))
 
     def tearDown(self):
         FFmWiz.appio.note = self._real_note
-        FFmWiz.encoding.run_ffmpeg_with_progress = self._real_runner
+        FFmWiz.runtime.run_ffmpeg_with_progress = self._real_runner
         FFmWiz.encoding.run_cpu_two_pass_ffmpeg = self._real_two_pass
 
     def _execute(self, **extra):

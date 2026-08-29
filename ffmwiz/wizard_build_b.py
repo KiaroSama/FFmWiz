@@ -1,6 +1,6 @@
 """FFmWiz wizard_build overflow (wizard_build_b) — split for file size.
 
-Back-imports wizard_build and is re-exported by it, so every consumer of
+Re-exported by wizard_build, so every consumer of
 `from ffmwiz.wizard_build import *` still sees the full set. Monkeypatch-safe.
 """
 from __future__ import annotations
@@ -89,11 +89,6 @@ from ffmwiz.runtime import *  # noqa: F401,F403
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
 from ffmwiz.trackmanager import *  # noqa: F401,F403
-
-from ffmwiz import wizard  # facade for monkeypatch-stable cross-module calls  # noqa: F401
-from ffmwiz.wizard import *  # sibling helpers  # noqa: F401,F403
-from ffmwiz.wizard_build import *  # noqa: E402,F401,F403  (back-import)
-from ffmwiz import wizard_build  # noqa: E402,F401  (qualified self-ref for patched names)
 
 
 def build_hardsub_video_filter(answers: dict[str, Any], video_encoder: str) -> str:
@@ -234,10 +229,10 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
 
     cmd.extend(["-sn", "-dn", "-map_metadata", "0", "-map_chapters", "0"])
     log_info("Hard Sub Encode uses the CPU subtitles/libass filter chain; NVENC may still be used for video encode.")
-    cmd.extend(["-filter:v", wizard.build_hardsub_video_filter(answers, video_encoder)])
+    cmd.extend(["-filter:v", build_hardsub_video_filter(answers, video_encoder)])
     cmd.extend(["-c:v", video_encoder])
     append_hardsub_quality_args(cmd, answers, video_encoder)
-    wizard.append_nvenc_multipass_args(cmd, answers, video_encoder)
+    wizard_base.append_nvenc_multipass_args(cmd, answers, video_encoder)
     append_hardsub_color_args(cmd, answers)
     if video_encoder == "hevc_nvenc":
         cmd.extend(["-profile:v", hevc_profile_for_output(answers, "main")])
@@ -324,7 +319,7 @@ def build_cut_filter_complex(
                 fc_parts.append("[a0]asetpts=PTS-STARTPTS[a]")
 
     # Apply the user's video filters (crop/fps/scale/setsar/setparams) after concat.
-    user_video_filter = wizard.build_cpu_video_filter(answers)
+    user_video_filter = build_cpu_video_filter(answers)
     if user_video_filter:
         fc_parts.append(f"[{video_label}]{user_video_filter}[v]")
     else:
@@ -1145,7 +1140,7 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             list(range(len(mapped_subtitle_tracks))), data_mapped)
         cmd.extend(subtitle_args)
         append_subtitle_track_metadata(cmd, mapped_subtitle_tracks)
-        wizard.append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
+        wizard_base.append_video_encode_options(cmd, join_answers, video_encoder, tag, profile)
         if video_speed_transform_enabled(join_answers) and video_encoder != "copy":
             # A speed change outranks the VFR choice below: `vfr` still drops
             # frames against the guessed source rate (measured 40 -> 22 at 2x),
@@ -1184,7 +1179,184 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     return cmd
 
 
+def build_cpu_video_filter(answers: dict[str, Any]) -> str | None:
+    filters: list[str] = []
+    if answers.get("crop_enabled"):
+        left, right, top, bottom = normalized_crop_margins(answers)
+        filters.append(f"crop=iw-{left}-{right}:ih-{top}-{bottom}:{left}:{top}:exact=1")
+
+    filters.extend(build_orientation_filters(answers))
+
+    if answers.get("fps") is not None:
+        filters.append(f"fps={answers['fps']}")
+
+    resolution = answers.get("resolution", "n")
+    scale_dimensions = resolve_scale_dimensions(answers, resolution)
+    scale_resets_sar = False
+    if scale_dimensions:
+        width, height = scale_dimensions
+        is_stretch = resize_mode_is_stretch(answers)
+        if is_stretch:
+            # Exact stretch: force the requested dimensions regardless of AR.
+            filters.append(f"scale={width}:{height}")
+            log_info(f"Resize mode: Stretch; scale={width}:{height}")
+        else:
+            # AR-preserving: always use force_original_aspect_ratio=decrease so
+            # the content fits inside the target canvas without distortion, then
+            # pad to the exact canvas dimensions. When the source AR matches
+            # the target, FFmpeg produces the exact dimensions and the pad is a
+            # no-op. This approach handles all cases uniformly.
+            # reset_sar=1 inside the scale filter ensures output pixels are
+            # square, making a trailing setsar=1 unnecessary -- but it does not
+            # exist before FFmpeg 7.2, so ask before emitting it. A bare
+            # trailing setsar=1 is NOT a substitute: on a 720x576 DAR-16:9
+            # source it yields a squeezed 900x720 DAR-5:4 picture (D01).
+            sar = source_sar(answers)
+            crop_w, crop_h = cropped_source_size(answers)
+            display_w, display_h = cropped_display_size(answers)
+            filters.append(square_pixel_scale_chain(
+                answers.get("ffmpeg") or "ffmpeg",
+                f"scale={width}:{height}:"
+                f"force_original_aspect_ratio=decrease:force_divisible_by=2",
+            ))
+            filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
+            scale_resets_sar = True
+            log_info(
+                f"Resize mode: Preserve; "
+                f"source_coded={crop_w}x{crop_h}; SAR={sar:.4f}; "
+                f"display={display_w}x{display_h}; target={width}x{height}; "
+                f"upscaling={'yes' if max(width, height) > max(display_w, display_h) else 'no'}"
+            )
+
+    filters.extend(build_look_filters(answers))
+
+    if video_speed_transform_enabled(answers):
+        filters.append(build_video_speed_filter(encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
+
+    try:
+        output_seconds = encode_timeline_map(answers).output_duration
+    except (KeyError, ValueError, TypeError, ZeroDivisionError):
+        # Only a genuinely unknown duration. A bare `except Exception` here
+        # would also swallow a NameError or an ImportError and silently drop
+        # every fade-out, which is how the audio side broke.
+        output_seconds = 0.0
+    filters.extend(build_fade_filters(answers, output_seconds))
+
+    # Crop dimensions are normalized to the output encoder grid by
+    # normalized_crop_margins, so no black compatibility padding is added here.
+
+    # SAR handling:
+    #  - Preserve/Fit resize already resets SAR inside the scale filter
+    #    (scale_resets_sar) -> no trailing setsar needed.
+    #  - Stretch resize (scale_dimensions set, but not reset) intentionally
+    #    produces square pixels -> keep the explicit setsar.
+    #  - No resize: do NOT blindly force setsar=1. Forcing 1:1 on a non-square
+    #    source changes its display geometry. Preserve the source SAR by
+    #    omitting the filter (the decoder passes the source SAR through), and do
+    #    not invent 1:1 for an unknown SAR.
+    if not scale_resets_sar:
+        if scale_dimensions:
+            # Stretch resize: square-pixel output is intentional here.
+            if FORCE_SAR:
+                filters.append(f"setsar={FORCE_SAR}")
+        else:
+            info = sar_dar_info(answers)
+            sar = info.get("resolved_sar")
+            if info.get("fallback_used"):
+                log_info(
+                    "SAR: source SAR/DAR unavailable; no-resize command generation assumes a "
+                    "square-pixel source (SAR 1:1); no setsar forced."
+                )
+            elif sar is not None and abs(sar - 1.0) >= SAR_DAR_TOLERANCE:
+                log_info(
+                    f"SAR: no-resize path preserves resolved non-square SAR "
+                    f"{info.get('sar_text')} ({info.get('sar_source')}); no setsar forced."
+                )
+            elif sar is None:
+                log_info("SAR: source SAR unresolved; no setsar forced in no-resize path.")
+            else:
+                log_info(
+                    f"SAR: resolved source pixels are square ({info.get('sar_source')}); "
+                    f"setsar omitted as redundant."
+                )
+
+    filters.append(f"format={cpu_graph_pixel_format_for_encoder(answers)}")
+    return ",".join(filters) if filters else None
+
+
+def build_orientation_filters(answers: dict[str, Any]) -> list[str]:
+    """Rotation and flips, which change the FRAME the rest of the chain sees.
+
+    They belong straight after the crop and before the frame rate and the
+    scale: a 90-degree rotation swaps width and height, so a resize target
+    asked for afterwards applies to the rotated picture, which is what the user
+    means by it. Putting them later would size the canvas against the source
+    orientation and letterbox the result.
+    """
+    out: list[str] = []
+    rotation = str(answers.get("rotate_choice") or "none").strip().lower()
+    if rotation in ROTATE_FILTERS:
+        out.append(ROTATE_FILTERS[rotation])
+    if answers.get("flip_horizontal"):
+        out.append("hflip")
+    if answers.get("flip_vertical"):
+        out.append("vflip")
+    return out
+
+
+def build_look_filters(answers: dict[str, Any]) -> list[str]:
+    """Colour, denoise and sharpen/blur, in the order they have to run.
+
+    All three leave the geometry alone, so they sit after the scale and before
+    the speed/reverse -- which matters, because `reverse` buffers whatever
+    reaches it and the memory budget is computed from the frame at ITS input.
+    A filter placed after `reverse` would also be applied to a buffered frame
+    for no benefit.
+
+    Denoise before sharpen is deliberate: sharpening first amplifies exactly
+    the grain the denoiser is about to remove.
+    """
+    out: list[str] = []
+    settings = []
+    for key, (low, high, neutral) in ADJUST_RANGES.items():
+        try:
+            value = float(answers.get(key, neutral))
+        except (TypeError, ValueError):
+            continue
+        if value != neutral:
+            settings.append(f"{key[len('adjust_'):]}={max(low, min(high, value)):g}")
+    if answers.get("adjust_grayscale"):
+        # Saturation wins over any explicit value: the user asked for no colour.
+        settings = [s for s in settings if not s.startswith("saturation=")]
+        settings.append("saturation=0")
+    if settings:
+        out.append("eq=" + ":".join(settings))
+
+    denoise = str(answers.get("denoise_level") or "off").strip().lower()
+    if denoise in DENOISE_FILTERS:
+        out.append(DENOISE_FILTERS[denoise])
+
+    sharpen = str(answers.get("sharpen_level") or "off").strip().lower()
+    blur = str(answers.get("blur_level") or "off").strip().lower()
+    if sharpen in SHARPEN_FILTERS:
+        out.append(SHARPEN_FILTERS[sharpen])
+    elif blur in BLUR_FILTERS:
+        # Only one of the two: sharpening a blur back is not a thing a user
+        # means, and emitting both would silently make the pair meaningless.
+        out.append(BLUR_FILTERS[blur])
+    return out
+
+
+def build_fade_filters(answers: dict[str, Any], output_seconds: float) -> list[str]:
+    """The picture's half of the shared fade rule (see `fade_filter_parts`)."""
+    return fade_filter_parts("", output_seconds, *requested_fade_seconds(answers))
+
+
 __all__ = [
+    'build_fade_filters',
+    'build_look_filters',
+    'build_orientation_filters',
+    'build_cpu_video_filter',
     'build_hardsub_video_filter',
     'build_hardsub_command',
     'build_cut_filter_complex',
@@ -1199,3 +1371,9 @@ __all__ = [
     'build_split_subtitle_inputs',
     'build_join_encode_command',
 ]
+
+
+# wizard_base holds the encode-option builders this module calls. It is a leaf:
+# it imports neither wizard nor wizard_build, so nothing here can re-enter a
+# facade that is still merging its __all__.
+from ffmwiz import wizard_base  # noqa: E402,F401

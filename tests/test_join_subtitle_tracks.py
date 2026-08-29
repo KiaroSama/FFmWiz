@@ -420,7 +420,7 @@ class TheWizardUsesTheJoinAwareGate(unittest.TestCase):
         source = (Path(FFmWiz.__file__).resolve().parent
                   / "ffmwiz" / "wizard_flow.py").read_text(encoding="utf-8")
         step = [line for line in source.splitlines()
-                if 'wizard.Step("subtitle_tracks"' in line]
+                if 'wizard_base.Step("subtitle_tracks"' in line]
         self.assertEqual(1, len(step))
         self.assertIn("any_join_subtitles(a)", step[0])
         self.assertIn("with_join_subtitle_view(step_subtitle_tracks)", step[0])

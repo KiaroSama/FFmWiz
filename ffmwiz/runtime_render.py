@@ -68,7 +68,29 @@ from ffmwiz.support.ext01 import *  # noqa: F401,F403
 from ffmwiz.support.ext02 import *  # noqa: F401,F403
 from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
-from ffmwiz.runtime import *  # noqa: E402,F401,F403  (back-import)
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
+
+
+# The progress-line colour table. It lives with the renderer that reads it;
+# runtime re-exports it (see its __all__) for `from ffmwiz.runtime import *`.
+PROGRESS_COLORS: dict[str, str] = {
+    "percent": Color.PROGRESS_PERCENT,
+    "time": Color.PROGRESS_TIME,
+    "total": Color.GRAY,
+    "fps": Color.PROGRESS_FPS,
+    "q": Color.PROGRESS_Q,
+    "speed": Color.PROGRESS_SPEED,
+    "size": Color.PROGRESS_SIZE,
+    "bitrate": Color.PROGRESS_BITRATE,
+    "elapsed": Color.PROGRESS_ELAPSED,
+    "eta_label": Color.PROGRESS_ETA_LABEL,
+    "eta_value": Color.PROGRESS_ETA_VALUE,
+    "separator": Color.DIM,
+}
 
 
 def _progress_terminal_width() -> int:
@@ -250,6 +272,7 @@ def _render_progress_line(state: dict[str, str], total_duration: float | None,
 
 
 __all__ = [
+    'PROGRESS_COLORS',
     '_progress_terminal_width',
     '_join_progress_segments',
     '_render_progress_line',

@@ -21,6 +21,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ffmwiz.services as services
+# The DEFINING module for default_media_reports_dir: estimate_color_range
+# is a services_b sibling and calls it directly, so a patch on the services
+# facade would rebind an attribute nothing reads.
+import ffmwiz.services_b as services_b
 
 FFMPEG = shutil.which("ffmpeg")
 FFMPEG_AVAILABLE = FFMPEG is not None and shutil.which("ffprobe") is not None
@@ -50,7 +54,7 @@ def _make_clip(path: Path, luma_expr: str, pix_fmt: str) -> None:
 class ColorRangeEstimationTests(unittest.TestCase):
     def _estimate(self, path: Path, bit_depth: int) -> dict:
         with tempfile.TemporaryDirectory() as reports:
-            with mock.patch.object(services, "default_media_reports_dir", return_value=Path(reports)):
+            with mock.patch.object(services_b, "default_media_reports_dir", return_value=Path(reports)):
                 return services.estimate_color_range(path, 0, "detailed", FFMPEG, bit_depth=bit_depth)
 
     def test_limited_8bit_detected_as_limited(self):

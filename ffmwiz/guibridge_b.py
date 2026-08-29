@@ -83,8 +83,15 @@ from ffmwiz.runner import *  # noqa: F401,F403
 from ffmwiz.runtime import *  # noqa: F401,F403
 from ffmwiz.services import *  # noqa: F401,F403
 from ffmwiz import services  # noqa: F401
-from ffmwiz.guibridge import *  # noqa: E402,F401,F403  (back-import)
-from ffmwiz import guibridge  # noqa: E402,F401  (qualified self-ref for patched names)
+# The Tk fallback editors are sibling leaves of the guibridge facade, so
+# they are imported directly rather than reached through it.
+from ffmwiz.guibridge_crop_tk import _choose_crop_graphically_tk  # noqa: F401
+from ffmwiz.guibridge_cut_tk import _open_legacy_cut_gui_tk  # noqa: F401
+# The facade back-import was deleted: every name this module uses comes
+# from the LOWER tiers above, which the facade only re-exported. Importing
+# it here bought nothing and made this module unimportable on its own,
+# because the facade ends with `__all__ += <this module>.__all__` and
+# reached that line while this module was still on its first statements.
 
 
 def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -209,7 +216,7 @@ def choose_crop_graphically(answers: dict[str, Any]) -> tuple[int, int, int, int
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "log_path": str(log_path()) if log_path() is not None else "",
     }
-    reply = guibridge._launch_qt_gui(request)
+    reply = _launch_qt_gui(request)
     if reply is not None:
         if reply.get("status") == "ok":
             margins = reply.get("margins") or [0, 0, 0, 0]
@@ -251,7 +258,7 @@ def open_cut_gui(
         "chapters": (answers.get("probe") or {}).get("chapters") or [],
         "log_path": str(log_path()) if log_path() is not None else "",
     }
-    reply = guibridge._launch_qt_gui(request)
+    reply = _launch_qt_gui(request)
     if reply is not None:
         if reply.get("status") == "ok":
             ranges = reply.get("keep_ranges") or []
@@ -292,7 +299,7 @@ def open_video_speed_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "log_path": str(log_path()) if log_path() is not None else "",
     }
-    reply = guibridge._launch_qt_gui(request)
+    reply = _launch_qt_gui(request)
     if reply is None:
         appio.error("Graphical video speed editor is not available. Install PySide6 and try again.")
         return None
@@ -407,7 +414,7 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
             "Opening Unified Video Editor with joined inputs: "
             + ", ".join(f"{idx + 1}:{Path(segment.get('path') or '').name}" for idx, segment in enumerate(join_segments))
         )
-    reply = guibridge._launch_qt_gui(request)
+    reply = _launch_qt_gui(request)
     if reply is None:
         appio.error("Unified graphical video editor is not available. Install PySide6 and try again.")
         return None
@@ -456,7 +463,7 @@ def open_audio_transform_gui(answers: dict[str, Any], audio_index: int) -> dict[
         "log_path": str(log_path()) if log_path() is not None else "",
         "start_maximized": True,
     }
-    reply = guibridge._launch_qt_gui(request)
+    reply = _launch_qt_gui(request)
     if reply is None:
         appio.error("Graphical audio transform editor is not available. Install PySide6 and try again.")
         return None

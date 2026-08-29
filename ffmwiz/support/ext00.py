@@ -1027,17 +1027,13 @@ from ffmwiz.support import ext00b as _ext00b  # noqa: E402
 # and the star-import below would raise AttributeError. Importing the parent
 # first is the normal path and is unaffected; this guard just makes the direct
 # import work too, and ext00b re-exports the tier itself in that case.
-_ext00b_names = list(getattr(_ext00b, "__all__", []))
-if _ext00b_names:
-    from ffmwiz.support.ext00b import *  # noqa: E402,F401,F403
-    __all__ = list(__all__) + _ext00b_names
+from ffmwiz.support.ext00b import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext00b.__all__)
 
 
 # ext00c holds an overflow slice of this module (split for file size).
 from ffmwiz.support import ext00c as _ext00c  # noqa: E402
 # Guard the direct-import case: importing this overflow module FIRST
 # re-enters the parent while the child has no __all__ yet.
-_ext00c_names = list(getattr(_ext00c, "__all__", []))
-if _ext00c_names:
-    from ffmwiz.support.ext00c import *  # noqa: E402,F401,F403
-    __all__ = list(__all__) + _ext00c_names
+from ffmwiz.support.ext00c import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext00c.__all__)

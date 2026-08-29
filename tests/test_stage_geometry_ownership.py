@@ -37,6 +37,7 @@ import FFmWiz
 
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
+from ffmwiz import runtime
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -187,19 +188,19 @@ class GeometryOwnership(NoLeakedArtifacts, unittest.TestCase):
                                 **({"join_input_items": items[1:]} if join else {}),
                                 **extra)
         commands = []
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
 
         def spy(cmd, **kwargs):
             commands.append([str(part) for part in cmd])
             return real_runner(cmd, **kwargs)
 
-        encoding.run_ffmpeg_with_progress = spy
+        runtime.run_ffmpeg_with_progress = spy
         noise = StringIO()
         try:
             with redirect_stdout(noise), redirect_stderr(noise):
                 code, _elapsed = encoding.run_bounded_reverse_pipeline(answers)
         finally:
-            encoding.run_ffmpeg_with_progress = real_runner
+            runtime.run_ffmpeg_with_progress = real_runner
         self.assertEqual(0, code, noise.getvalue()[-1500:])
         return out, commands
 

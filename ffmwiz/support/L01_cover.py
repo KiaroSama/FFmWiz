@@ -254,7 +254,36 @@ def build_cover_art_command(
     return cmd
 
 
+
+def audio_tool_picture_args(answers: dict[str, Any], output_ext: str) -> list[str]:
+    """Args that carry the source cover art through an audio tool, or ["-vn"].
+
+    Mapping the picture only works for containers that store a cover AS a
+    stream (mp4/m4a, mp3, flac). Opus/Ogg keep it in a base64 VorbisComment and
+    reject a mapped image stream outright, and wav has no mechanism at all, so
+    those still drop video.
+    """
+    method = cover_art_method(output_ext)
+    if method not in {"attached_pic", "id3", "flac_stream"}:
+        return ["-vn"]
+    # Normally input 0. The bounded audio-reverse pipeline re-points input 0 at
+    # a scratch file that holds only the reversed audio, and adds the original
+    # as a second input purely so the cover art still has a home; carrying the
+    # picture through the segment/concat stages instead would replicate it into
+    # every chunk for no gain.
+    picture_input = int(answers.get("_picture_input_index") or 0)
+    for position, stream in enumerate(answers.get("video_streams") or []):
+        if (stream.get("disposition") or {}).get("attached_pic"):
+            args = ["-map", f"{picture_input}:v:{position}", "-c:v", "copy"]
+            if method == "id3":
+                args.extend(["-id3v2_version", "3"])
+            args.extend(["-disposition:v", "attached_pic"])
+            return args
+    return ["-vn"]
+
+
 __all__ = [
+    'audio_tool_picture_args',
     'COVER_ART_MIME_TYPES',
     'COVER_ART_METHOD_BY_FORMAT',
     'COVER_ART_UNSUPPORTED_REASONS',

@@ -31,6 +31,8 @@ import FFmWiz
 
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
+from ffmwiz import reverse_pipeline
+from ffmwiz import runtime
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -119,11 +121,11 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
         answers["output_path"] = out / "routed.mkv"
         chosen = []
         real_bounded = encoding.run_bounded_audio_reverse_encode
-        real_runner = encoding.run_ffmpeg_with_progress
+        real_runner = runtime.run_ffmpeg_with_progress
         real_two_pass = encoding.run_cpu_two_pass_ffmpeg
         encoding.run_bounded_audio_reverse_encode = (
             lambda *a, **k: (chosen.append("bounded audio") or (0, 0.0)))
-        encoding.run_ffmpeg_with_progress = (
+        runtime.run_ffmpeg_with_progress = (
             lambda *a, **k: (chosen.append("one shot") or (0, 0.0)))
         encoding.run_cpu_two_pass_ffmpeg = (
             lambda *a, **k: (chosen.append("two pass") or (0, 0.0)))
@@ -135,7 +137,7 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
                                              label="routing")
         finally:
             encoding.run_bounded_audio_reverse_encode = real_bounded
-            encoding.run_ffmpeg_with_progress = real_runner
+            runtime.run_ffmpeg_with_progress = real_runner
             encoding.run_cpu_two_pass_ffmpeg = real_two_pass
         return chosen
 
@@ -172,9 +174,9 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
                                 video_speed_enabled=True, video_speed_factor=1.0)
         answers["output_path"] = out / "video.mkv"
         chosen = []
-        real_segmented = encoding.run_segmented_reverse_main_encode
+        real_segmented = reverse_pipeline.run_segmented_reverse_main_encode
         real_bounded = encoding.run_bounded_audio_reverse_encode
-        encoding.run_segmented_reverse_main_encode = (
+        reverse_pipeline.run_segmented_reverse_main_encode = (
             lambda *a, **k: (chosen.append("segmented video") or (0, 0.0)))
         encoding.run_bounded_audio_reverse_encode = (
             lambda *a, **k: (chosen.append("bounded audio") or (0, 0.0)))
@@ -185,7 +187,7 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
                 encoding.execute_encode_plan(answers, cmd, total_duration=SECONDS,
                                              label="video")
         finally:
-            encoding.run_segmented_reverse_main_encode = real_segmented
+            reverse_pipeline.run_segmented_reverse_main_encode = real_segmented
             encoding.run_bounded_audio_reverse_encode = real_bounded
         self.assertEqual(["segmented video"], chosen)
 

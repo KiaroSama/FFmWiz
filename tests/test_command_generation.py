@@ -6,6 +6,10 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 import FFmWiz
+# `run_wizard` reaches these prompts through their DEFINING module now that the
+# wizard facade is no longer imported by its own leaves, so a patch on the
+# facade would rebind an attribute nothing reads.
+from ffmwiz import wizard_b, wizard_steps  # noqa: E402
 import cache_test_utils
 from command_gen_base import CommandGenBase, _home_module
 
@@ -553,16 +557,16 @@ class CommandGenerationCoreTests(CommandGenBase):
             })
 
         try:
-            FFmWiz.wizard.step_input_path = lambda answers: calls.append("input")
-            FFmWiz.wizard.step_output_location = lambda answers: calls.append("output")
-            FFmWiz.wizard.step_output_format = lambda answers: calls.append("format")
-            FFmWiz.wizard.step_video_codec = lambda answers: calls.append("codec")
-            FFmWiz.wizard.step_use_gpu = lambda answers: calls.append("gpu")
-            FFmWiz.wizard.step_unified_video_editor_for_encode = fake_unified
-            FFmWiz.wizard.step_video_bitrate = lambda answers: calls.append("bitrate")
-            FFmWiz.wizard.step_resolution = lambda answers: calls.append("resolution")
-            FFmWiz.wizard.step_fps = lambda answers: calls.append("fps")
-            FFmWiz.wizard.step_start_now = lambda answers: calls.append("start")
+            wizard_steps.step_input_path = lambda answers: calls.append("input")
+            wizard_steps.step_output_location = lambda answers: calls.append("output")
+            wizard_steps.step_output_format = lambda answers: calls.append("format")
+            wizard_steps.step_video_codec = lambda answers: calls.append("codec")
+            wizard_steps.step_use_gpu = lambda answers: calls.append("gpu")
+            wizard_steps.step_unified_video_editor_for_encode = fake_unified
+            wizard_steps.step_video_bitrate = lambda answers: calls.append("bitrate")
+            wizard_steps.step_resolution = lambda answers: calls.append("resolution")
+            wizard_steps.step_fps = lambda answers: calls.append("fps")
+            wizard_b.step_start_now = lambda answers: calls.append("start")
             FFmWiz.appio.ask_raw = lambda _prompt: (_ for _ in ()).throw(AssertionError("legacy prompt was shown"))
             FFmWiz.services.get_video_fps = lambda _answers: 30.0
             FFmWiz.services.stream_duration_seconds = lambda _stream, _fmt=None: 100.0

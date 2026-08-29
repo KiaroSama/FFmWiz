@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 import FFmWiz
+from ffmwiz import wizard_b
 import cache_test_utils
 from join_test_helpers import video_stream, audio_stream, make_item
 
@@ -548,7 +549,11 @@ class LoudnormJoinProgressTests(unittest.TestCase):
 
     # ================= Audio+Video Join (auto-detect) =================
     def test_join_load_media_item_rejects_audio_only_by_default(self):
-        with mock.patch.object(FFmWiz.services, "ffprobe_json", return_value={
+        # The DEFINING module. ffprobe_json moved down to the services_b
+        # sibling that calls it, so a patch on the services facade would
+        # rebind an attribute nothing reads.
+        from ffmwiz import services_b
+        with mock.patch.object(services_b, "ffprobe_json", return_value={
             "format": {"duration": "5"},
             "streams": [{"codec_type": "audio", "codec_name": "aac"}],
         }):
@@ -556,7 +561,11 @@ class LoudnormJoinProgressTests(unittest.TestCase):
                 FFmWiz.services.join_load_media_item({"ffprobe": "ffprobe"}, Path("a.m4a"))
 
     def test_join_load_media_item_accepts_audio_only_when_allowed(self):
-        with mock.patch.object(FFmWiz.services, "ffprobe_json", return_value={
+        # The DEFINING module. ffprobe_json moved down to the services_b
+        # sibling that calls it, so a patch on the services facade would
+        # rebind an attribute nothing reads.
+        from ffmwiz import services_b
+        with mock.patch.object(services_b, "ffprobe_json", return_value={
             "format": {"duration": "5"},
             "streams": [{"codec_type": "audio", "codec_name": "aac"}],
         }):
@@ -565,7 +574,9 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         self.assertEqual(len(item["audio_streams"]), 1)
 
     def test_join_load_media_item_rejects_empty_when_allowed(self):
-        with mock.patch.object(FFmWiz.services, "ffprobe_json", return_value={"format": {}, "streams": []}):
+        # The DEFINING module -- see above.
+        from ffmwiz import services_b
+        with mock.patch.object(services_b, "ffprobe_json", return_value={"format": {}, "streams": []}):
             with self.assertRaises(ValueError):
                 FFmWiz.services.join_load_media_item({"ffprobe": "ffprobe"}, Path("x.bin"), allow_audio_only=True)
 
@@ -652,7 +663,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
         with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "150%"]), \
              mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False]), \
-             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start") as confirm:
+             mock.patch.object(wizard_b, "_confirm_audio_transform_start") as confirm:
             FFmWiz.step_audio_transform_editor(answers)
         self.assertAlmostEqual(answers["audio_speed_factor"], 1.5)
         self.assertTrue(confirm.called)
@@ -661,7 +672,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
     def test_audio_transform_gui_success(self):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
         with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["1"]), \
-             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start"), \
+             mock.patch.object(wizard_b, "_confirm_audio_transform_start"), \
              mock.patch.object(FFmWiz.guibridge, "open_audio_transform_gui",
                                return_value={"keep_ranges": [], "speed": 1.5, "reverse": True}):
             FFmWiz.step_audio_transform_editor(answers)
@@ -675,7 +686,7 @@ class LoudnormJoinProgressTests(unittest.TestCase):
         answers = {"audio_index": 0, "format": {"duration": "10"}}
         with mock.patch.object(FFmWiz.appio, "ask_raw", side_effect=["2", "150%", "120%"]), \
              mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[False, False, False, False]), \
-             mock.patch.object(FFmWiz.wizard, "_confirm_audio_transform_start",
+             mock.patch.object(wizard_b, "_confirm_audio_transform_start",
                                side_effect=[FFmWiz.Back(), None]):
             FFmWiz.step_audio_transform_editor(answers)
         # The first menu choice persists; only the value prompts were repeated.

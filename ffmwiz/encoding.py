@@ -304,7 +304,7 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
     started_at = time.perf_counter()
     indices = audio_reverse_indices(answers)
     if not audio_reverse_needs_staging(answers, indices):
-        return run_ffmpeg_with_progress(
+        return runtime.run_ffmpeg_with_progress(
             cmd, total_duration=total_duration, label=label)
 
     output_path = Path(answers["output_path"])
@@ -324,11 +324,11 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
         # forward stage does: the reversal and every later edit belong to the
         # stages after it.
         forward = intermediate_profile(
-            stage_answers(answers, owns=GEOMETRY_TRANSFORMATIONS))
+            reverse_stages.stage_answers(answers, owns=GEOMETRY_TRANSFORMATIONS))
         forward["output_path"] = joined
         appio.note("Audio reverse across a join: joining first, so the whole "
                    "joined timeline is reversed rather than the first input.")
-        code, _elapsed = run_ffmpeg_with_progress(
+        code, _elapsed = runtime.run_ffmpeg_with_progress(
             wizard.build_join_encode_command(forward, items, joined),
             total_duration=sum(join_item_picture_span(item) for item in items) or None,
             label="Joining before audio reverse")
@@ -352,7 +352,7 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
            *maps, *dispositions, "-c", "copy",
            "-avoid_negative_ts", "make_zero", str(rebased)]
     log_info("Audio reverse remux: " + command_to_powershell(mux))
-    code, _elapsed = run_ffmpeg_with_progress(
+    code, _elapsed = runtime.run_ffmpeg_with_progress(
         mux, total_duration=total_duration, label="Restoring the picture")
     if code != 0 or not rebased.exists():
         return (code or 1), time.perf_counter() - started_at
@@ -408,7 +408,7 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
         log_info(f"CPU two-pass disabled before execution: {two_pass_off}")
     if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
         answers["cmd"] = cmd
-        return run_segmented_reverse_main_encode(answers)
+        return reverse_pipeline.run_segmented_reverse_main_encode(answers)
     if (answers.get("reverse_video")
             and (answers.get("join_input_items") or answers.get("separator_points"))):
         # A join or a Split means the one-pass plan would hand `reverse` a whole
@@ -439,14 +439,14 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
         return run_cpu_two_pass_ffmpeg(
             cmd, answers, total_duration=total_duration,
             progress_output_paths=progress_kwargs.get("progress_output_paths"))
-    return run_ffmpeg_with_progress(cmd, total_duration=total_duration,
+    return runtime.run_ffmpeg_with_progress(cmd, total_duration=total_duration,
                                     label=label, **progress_kwargs)
 
 
 def run_separator_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
     specs = build_separator_job_specs(answers)
     if not specs:
-        return run_ffmpeg_with_progress(
+        return runtime.run_ffmpeg_with_progress(
             answers["cmd"],
             total_duration=None,
             label="FFmpeg encode",
@@ -461,12 +461,12 @@ def run_separator_main_encode(answers: dict[str, Any]) -> tuple[int, float]:
         print()
         print(paint(f"Split part [{position}/{len(specs)}]: {seconds_to_ffmpeg_time(start)} -> {seconds_to_ffmpeg_time(end)}", Color.BOLD + Color.LIGHT_BLUE))
         if reverse_video_needs_segmented_main_encode(job_answers):
-            rc, _ = run_segmented_reverse_main_encode(job_answers)
+            rc, _ = reverse_pipeline.run_segmented_reverse_main_encode(job_answers)
         else:
             part_source_seconds = total_keep_duration(job_answers.get("cut_keep_ranges") or [])
             part_speed = encode_video_speed_factor(job_answers) if video_speed_transform_enabled(job_answers) else 1.0
             part_output_seconds = part_source_seconds / max(0.01, float(part_speed or 1.0))
-            rc, _ = run_ffmpeg_with_progress(
+            rc, _ = runtime.run_ffmpeg_with_progress(
                 spec["cmd"],
                 total_duration=max(0.001, part_output_seconds),
                 label=f"Split part {position}/{len(specs)}",
@@ -589,4 +589,6 @@ __all__ = [
 # so every existing `from ffmwiz.encoding import *` keeps working.
 from ffmwiz import reverse_pipeline  # noqa: E402
 from ffmwiz.reverse_pipeline import *  # noqa: E402,F401,F403
+from ffmwiz import reverse_stages  # noqa: E402,F401  (single patch point)
+from ffmwiz.support import L00_split  # noqa: E402,F401  (single patch point)
 __all__ += reverse_pipeline.__all__
