@@ -190,35 +190,47 @@ structural model — read it first.
 **Verify**: `python tests/run_suite.py -k volume_and_raw_args -j 2` and
 `-k quick_outputs -j 2` → both `OK`
 
-### Step 4: Decide `video_composite` — and record the decision
+### Step 4: Make `video_composite` prompt-only — the decision is made
 
-`video_composite` is different: the interactive step probes the second input
-file with a media-loading call before it can build the graph. A config reader
-would need the same probe with no one to answer a prompt about a missing or
-unreadable file.
+An earlier draft of this plan left this open. It is now settled, with evidence,
+so you do not have to investigate: **take route (b), remove it.**
 
-Investigate first: read `ffmwiz/wizard_composite.py`'s step function and find
-what it does beyond `parse_composite_tokens` — specifically whether the second
-file's path and its probed metadata both end up in `answers`, and whether
-`build_composite_command` needs the probe or just the path.
+Why: the interactive step calls `_ask_partner`
+(`ffmwiz/wizard_composite.py:167-201`), which is a `while True:` loop that
+validates a second input file and recovers from EVERY failure by calling
+`appio.error(...)` and asking again — file not found, same as the main input,
+looks like a generated output, no usable streams, no audio to mix. Its probe is
+`services.join_load_media_item`.
 
-Then take ONE of these two, and say in your report which and why:
+A config run has nobody to answer those prompts. Wiring `video_composite` as a
+config key would mean either duplicating that validation with `fail()` instead
+of a re-ask, or accepting a path unprobed and letting the builder discover the
+problem — and the builder needs the stream lists the probe returns. Neither is
+a small change, and neither belongs in this plan.
 
-**(a)** If the parse plus a path is enough and the probe is only for the
-prompt's own validation: wire it like the others, and add
-`composite_path` / `composite_audio_path` as separate config keys so the file
-can be named non-interactively. Document them in Appendix B.
+So:
 
-**(b)** If it genuinely needs an interactive probe: make it prompt-only.
-Remove `"video_composite"` from the skip-map, drop the
-`and (not config_mode or cfg_has("video_composite"))` clause from its gate in
-`ffmwiz/wizard_flow.py`, remove the row from the `docs/DOCUMENTATION.md`
-settings table and its Appendix B entry, and add one sentence to Mode 2's
-section saying compositing is asked interactively even on a config run.
+1. Remove `"video_composite"` from the skip-map in `ffmwiz/wizard_flow.py`.
+2. Drop the `and (not config_mode or cfg_has("video_composite"))` clause from
+   its `Step` gate in the same file — **and check what that leaves behind**: if
+   removing the clause means the composite question now gets asked on a config
+   run where it previously did not, that is the intended behaviour (it is
+   prompt-only), but say so explicitly in your report.
+3. Remove its row from the settings table in `docs/DOCUMENTATION.md` (around
+   line 281) and its entry from the Appendix B key reference.
+4. Add one sentence to the Mode 2 section of `docs/DOCUMENTATION.md` saying
+   compositing is asked interactively even on a config run, because it needs to
+   probe a second input file.
+5. Do NOT add `video_composite` to `config.env.example` or `CONFIG_TEMPLATE`.
 
-**Do not leave it in the current state under any circumstance.**
+The other three keys — `video_quick`, `audio_volume`, `raw_ffmpeg_args` — are
+pure text-to-answers parses with no file probing, and they get real readers as
+Steps 1 and 2 describe.
 
-**Verify**: `grep -rn "video_composite" ffmwiz/ docs/DOCUMENTATION.md config.env.example` → every hit is consistent with the option you took.
+**Verify**: `grep -rn "video_composite" ffmwiz/ docs/DOCUMENTATION.md config.env.example`
+→ hits only in `ffmwiz/wizard_composite.py` (the step itself), the Mode 2
+sentence you added, and nowhere in the skip-map, the gate's config clause, the
+settings table, Appendix B, or the template.
 
 ### Step 5: Add the keys to the template — both copies
 
