@@ -95,9 +95,8 @@ already used in this function rather than introducing new ones.
 
 **In scope**:
 - `ffmwiz/wizard_flow_b.py` — `print_summary` only
-- One test file for the summary rows (find the existing one with
-  `grep -rln "print_summary" tests/`; create `tests/test_summary_rows.py` only
-  if none exists)
+- `tests/test_effective_summary.py` — the existing summary suite (located
+  before dispatch; do NOT create a new file)
 
 **Out of scope**:
 - Every `describe_*` function — they are written and tested. Call them.
@@ -114,18 +113,34 @@ already used in this function rather than introducing new ones.
 
 ## Steps
 
-### Step 1: Find the describers and what they return for an empty job
+### Step 1: Confirm the describers (already located for you)
+
+All four exist. Measured before this plan was dispatched:
+
+| Describer | Defined in |
+|---|---|
+| `describe_look` | `ffmwiz/support/L01_filters.py:115` |
+| `describe_quick` | `ffmwiz/wizard_quick.py:127` |
+| `describe_composite` | `ffmwiz/wizard_composite.py:140` |
+| `describe_raw` | `ffmwiz/wizard_raw.py:108` |
+
+**Every one of them returns the string `'none'` for an empty job — measured, not
+assumed.** So a truthiness test on the describer's output would print all five
+rows on every plain encode. **Guard each row on the underlying ANSWER KEY**, and
+call the describer only for the value. This is the single most likely way to get
+this plan wrong.
+
+Confirm for yourself before writing code:
 
 ```
 python -c "import sys; sys.path.insert(0,'.'); import FFmWiz
-from ffmwiz import wizard_look, wizard_quick, wizard_composite, wizard_raw
-for m in (wizard_look, wizard_quick, wizard_composite, wizard_raw):
-    print(m.__name__, [n for n in dir(m) if n.startswith('describe')])"
+from ffmwiz import wizard_quick, wizard_composite, wizard_raw
+from ffmwiz.support import L01_filters
+for n, f in (('look', L01_filters.describe_look), ('quick', wizard_quick.describe_quick),
+             ('composite', wizard_composite.describe_composite), ('raw', wizard_raw.describe_raw)):
+    print(n, '->', repr(f({})))"
 ```
-
-Then call each with `{}` and record what it returns. That answer decides the
-guard for each row: a describer returning `"none"` needs an explicit guard on
-the underlying answer key, not a truthiness test on the string.
+→ four lines, each `'none'`.
 
 ### Step 2: Add the rows
 
@@ -165,7 +180,7 @@ Write the tests below and confirm.
 
 ## Test plan
 
-In the summary test file (existing, or `tests/test_summary_rows.py`):
+In `tests/test_effective_summary.py`:
 
 Capture stdout with `contextlib.redirect_stdout(io.StringIO())` around
 `print_summary(answers, cmd)` — check whether the existing summary tests
