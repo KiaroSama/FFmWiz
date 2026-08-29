@@ -40,7 +40,7 @@ instances.
 | 008 | Characterization tests for the untested mode drivers | P2 | M | — | TODO |
 | 009 | One optional-prompt helper instead of five copies | P3 | S | 001, 003 | TODO |
 | 010 | Split the quick-output and composite builders out | P3 | S | 003 | TODO |
-| 011 | Audio reverse across a join applies the geometry twice | P1 | S | — | TODO |
+| 011 | Audio reverse across a join applies the geometry twice | P1 | S | — | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).
@@ -59,6 +59,23 @@ REJECTED (one-line rationale).
   right. It reverted rather than editing them. The plan was revised to clear
   `lex.escape` instead, which keeps all three behaviours, and re-dispatched.
   **The plan was wrong, not the executor.**
+
+- **011 — DONE, approved.** Branch `advisor/011-audio-reverse-join-geometry`,
+  commit `b2aed82`, pushed, **not merged**.
+  Verified by re-running the criteria: scope is the two in-scope files, tree
+  clean, `-k audio_reverse` 58/58, `-k stage_geometry_ownership` 21/21, full
+  suite 1988/1988 `OK`, and `stage_answers` now appears in the final rebuild
+  (`encoding.py:390`) and not only in the join stage.
+  The executor handled the trap the plan warned about: `final_owns` is
+  conditional on whether a join ran, so an UNJOINED audio reverse still owns
+  its geometry rather than dropping the crop. It also placed
+  `validate_stage_plan` BEFORE the join, so an unexecutable plan fails without
+  first spending a full forward encode — a judgement the plan did not ask for
+  and the right one.
+  The real-media test is the one that matters: a 160x120 source cropped 10 px
+  a side must come out 140x120, and comes out 120x120 when the crop lands
+  twice. An argv assertion alone would have passed a fix that merely moved the
+  duplicate.
 
 ## Dependency notes
 
