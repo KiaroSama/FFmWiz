@@ -36,7 +36,7 @@ instances.
 | 004 | The four documented config keys are actually read | P1 | M | 002 | TODO |
 | 005 | The settings summary shows the five new features | P2 | S | — | DONE |
 | 006 | Stage-ownership schema covers the new features | P1 | M | — | TODO |
-| 007 | Pin guard, stale skip count, unused-import guard | P3 | S | — | TODO |
+| 007 | Pin guard, stale skip count, unused-import guard | P3 | S | — | DONE |
 | 008 | Characterization tests for the untested mode drivers | P2 | M | — | TODO |
 | 009 | One optional-prompt helper instead of five copies | P3 | S | 001, 003 | TODO |
 | 010 | Split the quick-output and composite builders out | P3 | S | 003 | TODO |
@@ -115,6 +115,21 @@ REJECTED (one-line rationale).
   ANSWER KEY, and the comment in the code says why. Two negative controls
   (`test_a_plain_encode_shows_none_of_them`, `test_a_volume_of_one_is_not_shown`)
   are what hold that.
+
+- **007 — DONE, approved.** Branch
+  `advisor/007-hygiene-pin-guard-and-stale-numbers`, commits `8fb4456`,
+  `6586c05`, `acbc0ce`, pushed, **not merged**.
+  Verified by re-running: five in-scope files, tree clean, full suite
+  1986/1986 `OK`.
+  **I proved the new guard bites** rather than trusting that it exists: planting
+  `import json` into `wizard_look.py` made it fail with
+  `ffmwiz/wizard_look.py:55: import json -- never used`, then restored. Both
+  documented skips are in place — files with a star import, and everything under
+  `ffmwiz/gui/`, where one module `setattr`s a shared namespace onto its
+  siblings so an "unused" import can be another file's only binding.
+  The README fix took the durable form: instead of restating a number that
+  rotted once already, it points at `--require ffmpeg --require numpy`, the same
+  gate CI uses.
 
 ## Dependency notes
 
