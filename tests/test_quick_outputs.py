@@ -269,6 +269,23 @@ class TheCommandsHaveTheShapeTheyHaveToHave(NoLeakedArtifacts, unittest.TestCase
         self.assertIn(Path(plan["forward_path"]).name, listed[0])
         self.assertIn(Path(plan["backward_path"]).name, listed[1])
 
+    def test_a_boomerang_loops_the_finished_clip(self):
+        # `-stream_loop` cannot do this: it is an INPUT option on one `-i`,
+        # and the finished boomerang is a CONCAT of two files. `loop_count=2`
+        # must repeat the forward/backward PAIR three times (the original play
+        # plus two extra), not loop either half's own input.
+        plan = self._plan(quick_output="boomerang", loop_count=2)
+        listed = Path(plan["concat_list"]).read_text(encoding="utf-8").splitlines()
+        self.assertEqual(6, len(listed), listed)
+        forward_name = Path(plan["forward_path"]).name
+        backward_name = Path(plan["backward_path"]).name
+        # Assert the ORDER, not just the count: six entries in the wrong order
+        # play as something else entirely -- the mistake the comment beside
+        # `write_concat_list` already exists to prevent.
+        for index, line in enumerate(listed):
+            expected_name = forward_name if index % 2 == 0 else backward_name
+            self.assertIn(expected_name, line, listed)
+
     def test_the_boomerang_reverse_is_not_written_down_as_a_full_pass(self):
         # It is planned from the forward half's real geometry, which does not
         # exist yet. Emitting a one-shot `-vf reverse` here would print a
