@@ -97,6 +97,50 @@ class TheRawArgumentsAreSplitLikeAShellWould(unittest.TestCase):
     def test_nothing_is_an_empty_list_not_an_error(self):
         self.assertEqual([], wizard_raw.parse_raw_arguments("   "))
 
+    def test_a_windows_path_keeps_its_separators(self):
+        # The bug this pins: `shlex.split(..., posix=True)` treats `\` as an
+        # escape character by default, so a Windows path pasted straight out
+        # of Explorer silently lost every separator -- `C:\Users\me\logo.png`
+        # became `C:Usersmelogo.png`.
+        self.assertEqual(
+            ["-metadata", r"comment=C:\Users\mobin\video"],
+            wizard_raw.parse_raw_arguments(r"-metadata comment=C:\Users\mobin\video"))
+
+    def test_a_quoted_value_keeps_its_spaces_and_loses_its_quotes(self):
+        self.assertEqual(
+            ["-metadata", "title=my film"],
+            wizard_raw.parse_raw_arguments('-metadata title="my film"'))
+
+    def test_every_per_stream_spelling_of_a_reserved_option_is_refused(self):
+        # The bug this pins: the denylist matched exact strings only, so
+        # `-c:v:0 libx265` walked straight past `-c`/`-c:v` and got appended
+        # after the wizard's own codec choice -- ffmpeg honours the later,
+        # more specific option, so the file got encoded with a codec the
+        # summary never mentioned.
+        for owned in ("-c:v:0", "-codec:v:0", "-vf:0", "-af:1",
+                      "-map_metadata:s:0", "-c:a:1"):
+            with self.subTest(option=owned):
+                with self.assertRaises(ValueError):
+                    wizard_raw.parse_raw_arguments(f"{owned} something")
+
+    def test_an_unrelated_per_stream_option_is_still_allowed(self):
+        # The guard must not over-block: these are ordinary per-stream
+        # options nothing in the wizard owns, and a prefix match wide enough
+        # to catch them would make the escape hatch useless while looking
+        # like a fix.
+        self.assertEqual(["-b:v:0", "2M"],
+                         wizard_raw.parse_raw_arguments("-b:v:0 2M"))
+        self.assertEqual(["-metadata:s:v:0", "rotate=90"],
+                         wizard_raw.parse_raw_arguments("-metadata:s:v:0 rotate=90"))
+
+    def test_the_option_file_family_is_refused(self):
+        # `-fpre`/`-vpre`/`-apre` read an option file that can set anything
+        # the wizard owns -- same class of bypass as `-map_channel`.
+        for owned in ("-fpre", "-vpre", "-apre"):
+            with self.subTest(option=owned):
+                with self.assertRaises(ValueError):
+                    wizard_raw.parse_raw_arguments(f"{owned} something")
+
 
 class TheyReachTheCommand(unittest.TestCase):
 

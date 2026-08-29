@@ -35,9 +35,9 @@ VOLUME_MAX = 10.0
 RESERVED_RAW_OPTIONS = {
     "-i", "-y", "-n", "-f", "-progress", "-nostdin", "-hide_banner",
     "-filter_complex", "-lavfi", "-vf", "-filter:v", "-af", "-filter:a",
-    "-map", "-map_metadata", "-map_chapters", "-c", "-codec",
-    "-c:v", "-codec:v", "-c:a", "-codec:a", "-c:s", "-c:d", "-c:t",
-    "-ss", "-t", "-to", "-stream_loop",
+    "-filter", "-map", "-map_metadata", "-map_chapters", "-map_channel",
+    "-c", "-codec", "-c:v", "-codec:v", "-c:a", "-codec:a", "-c:s", "-c:d",
+    "-c:t", "-ss", "-t", "-to", "-stream_loop", "-fpre", "-vpre", "-apre",
 }
 
 
@@ -75,14 +75,29 @@ def parse_raw_arguments(text: str) -> list[str]:
 
     `shlex.split` with posix=True so `-metadata title="my film"` arrives as two
     arguments and keeps its spaces, which is how the line reads in every
-    tutorial it will be copied from.
+    tutorial it will be copied from. `escape` is cleared to "" because its
+    default is `\\`, and a Windows path uses `\\` as a separator, not an
+    escape character -- left at the default, `C:\\Users\\me\\x.png` would
+    lose every backslash. `shlex.split` has no parameter for this, so the
+    `shlex.shlex` object it wraps is built directly instead.
     """
+    lex = shlex.shlex(text.strip(), posix=True)
+    lex.whitespace_split = True
+    lex.escape = ""      # a Windows path is not an escape sequence
     try:
-        parts = shlex.split(text.strip(), posix=True)
+        parts = list(lex)
     except ValueError as error:      # an unbalanced quote
         raise ValueError(f"could not read that: {error}")
     for part in parts:
-        if part.lower() in RESERVED_RAW_OPTIONS:
+        lowered = part.lower()
+        # Compare the BASE, not just the exact string. ffmpeg lets almost any
+        # option take a per-stream qualifier (`-c:v:0`, `-map_metadata:s:0`),
+        # and an exact-match denylist waves every one of those spellings
+        # through: `-c:v:0` used to slip past `-c`/`-c:v` and get appended
+        # after the wizard's own codec choice, so ffmpeg would honour it
+        # silently.
+        base = lowered.partition(":")[0] if lowered.startswith("-") else lowered
+        if lowered in RESERVED_RAW_OPTIONS or base in RESERVED_RAW_OPTIONS:
             raise ValueError(
                 f"{part} is set by the wizard itself; changing it here would "
                 f"make the printed command and the job disagree")
