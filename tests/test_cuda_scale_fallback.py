@@ -20,6 +20,7 @@ path for the existing hwdownload/CPU/hwupload_cuda fallback.
 import contextlib
 import io
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -73,11 +74,20 @@ def _probe_geometry(path: Path):
 
 
 def _write_anamorphic_source(path: Path) -> None:
+    """A 720x576 clip with a 64:45 SAR -- i.e. non-square pixels to correct.
+
+    `-pix_fmt yuv420p` is load-bearing, not tidiness. `libx264 -preset
+    ultrafast` fed from `testsrc` picks **yuv444p**, and NVDEC on consumer
+    cards cannot decode 4:4:4 H.264: `-hwaccel cuda` then fails with "Hardware
+    is lacking required capabilities" and the whole filter graph collapses
+    before `scale_cuda` is ever reached. The GPU class below would have failed
+    on the FIXTURE rather than on the geometry it exists to measure.
+    """
     subprocess.run(
         [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
          "-f", "lavfi", "-i", "testsrc=size=720x576:rate=25:duration=1",
-         "-c:v", "libx264", "-preset", "ultrafast", "-vf", "setsar=64/45",
-         str(path)], check=True, timeout=300)
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-vf", "setsar=64/45", str(path)], check=True, timeout=300)
 
 
 class ModernBuildKeepsTheFastPath(unittest.TestCase):
@@ -184,8 +194,18 @@ class TheGeometryIsMeasuredNotAssumed(unittest.TestCase):
 
 def _cuda_nvenc_usable() -> bool:
     """True only when a CUDA device, scale_cuda and hevc_nvenc all really run.
+
     Listing the encoder is not enough: full FFmpeg builds list hevc_nvenc on
-    machines with no NVIDIA driver at all."""
+    machines with no NVIDIA driver at all.
+
+    The probe frame is 256x256 because NVENC has a MINIMUM frame size. An
+    earlier version scaled to 64x64 and every machine failed it with
+    "Frame dimensions are less than the minimum supported value", including an
+    RTX 4070 Ti with a working driver -- so this whole class reported itself as
+    skipped for missing hardware that was in fact present, and the GPU geometry
+    it exists to check went unverified. Measured on that card: 64 and 128 are
+    both refused, 160 is accepted.
+    """
     if not (FFMPEG and FFPROBE):
         return False
     try:
@@ -193,7 +213,7 @@ def _cuda_nvenc_usable() -> bool:
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
              "-init_hw_device", "cuda=gpu", "-filter_hw_device", "gpu",
              "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=0.2",
-             "-vf", "format=nv12,hwupload_cuda,scale_cuda=w=64:h=64:format=nv12",
+             "-vf", "format=nv12,hwupload_cuda,scale_cuda=w=256:h=256:format=nv12",
              "-c:v", "hevc_nvenc", "-frames:v", "1", "-f", "null", "-"],
             capture_output=True, text=True, timeout=120)
         return result.returncode == 0
@@ -241,3 +261,65 @@ class RealNvencStretchGeometry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheHardwareGateAgreesWithTheHardware(unittest.TestCase):
+    """The skip reason is a CLAIM about this machine. Check it against it.
+
+    `_cuda_nvenc_usable()` returning False prints "no usable NVIDIA
+    CUDA/hevc_nvenc hardware here". That sentence was false for a long time: the
+    probe asked NVENC for a 64x64 frame, which it refuses on every card, so the
+    gate closed on an RTX 4070 Ti with a working driver and the two GPU
+    geometry tests above never ran once.
+
+    Nothing failed, because a skip is not a failure. So this asks the machine
+    directly -- `nvidia-smi` plus FFmpeg's own encoder list -- and fails when
+    the gate disagrees with it. A probe is allowed to be stricter than the card
+    only if the card really cannot do the job.
+    """
+
+    def _nvidia_present(self) -> bool:
+        smi = shutil.which("nvidia-smi")
+        if not smi:
+            return False
+        try:
+            result = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"],
+                                    capture_output=True, text=True, timeout=60)
+        except Exception:
+            return False
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    def _ffmpeg_lists_nvenc(self) -> bool:
+        if not FFMPEG:
+            return False
+        result = subprocess.run([FFMPEG, "-hide_banner", "-encoders"],
+                                capture_output=True, text=True, timeout=120)
+        return "hevc_nvenc" in result.stdout
+
+    def test_the_probe_does_not_close_on_hardware_that_is_present(self):
+        if not (self._nvidia_present() and self._ffmpeg_lists_nvenc()):
+            self.skipTest("no NVIDIA GPU and hevc_nvenc build on this machine, so "
+                          "there is no claim to contradict")
+        self.assertTrue(
+            _cuda_nvenc_usable(),
+            "nvidia-smi reports a GPU and this FFmpeg lists hevc_nvenc, but the "
+            "probe says the hardware is unusable. Run the probe command by hand "
+            "and read its stderr -- it names the real reason on the first line.")
+
+    def test_the_probe_frame_is_one_nvenc_accepts(self):
+        # The specific trap, pinned by size rather than by outcome so it fails
+        # even on a machine with no GPU at all.
+        source = Path(__file__).with_name("test_cuda_scale_fallback.py").read_text(
+            encoding="utf-8")
+        start = source.index("def _cuda_nvenc_usable")
+        # Search FORWARD from the function: `@unittest.skipUnless` also appears
+        # earlier in this file, and a bare `.index` found that one and sliced
+        # backwards into an empty string that matched nothing.
+        probe = source[start:source.index("@unittest.skipUnless", start)]
+        match = re.search(r"scale_cuda=w=(\d+):h=(\d+)", probe)
+        self.assertIsNotNone(match, "the probe no longer scales; rewrite this guard")
+        width, height = int(match.group(1)), int(match.group(2))
+        # Measured on an RTX 4070 Ti: 64 and 128 are refused, 160 is accepted.
+        self.assertGreaterEqual(min(width, height), 160,
+                                "NVENC refuses frames below ~160 on a side, so a "
+                                "smaller probe fails on working hardware")
