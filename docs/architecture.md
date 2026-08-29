@@ -40,9 +40,14 @@ ffmwiz/                # the application package (all implementation lives here)
   runtime*.py          # progress rendering, console/VT, PySide detection
   services*.py         # ffprobe/capability/output-path/loudnorm services
   wizard*.py           # main wizard (wizard, wizard_build, wizard_steps, wizard_flow)
+  wizard_base.py       # the pieces every wizard/mode module needs: `Step`,
+                       #   `run_mode_steps`, the auto-back-skip rule. Below all
+                       #   of them, so none has to import a facade to get them
   modes*.py            # per-mode runners (modes, modes_b, modes_mediainfo,
                        #   modes_join, modes_transform)
   guibridge*.py        # GUI subprocess bridge (+ legacy-Tk crop/cut siblings)
+  guibridge_tk_common.py # palette, theme and key-binding helpers the two Tk
+                       #   editors share, so neither imports guibridge back
   metadata.py, trackmanager.py, runner.py, encoding.py
   reverse_pipeline.py   # the staged reverse pipeline: plan it, export it, run it
                        #   (`reverse` buffers every decoded frame, so a Join,
