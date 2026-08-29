@@ -277,6 +277,10 @@ Every key is also documented inline in `config.env.example`.
 | `resolution` | preset / `w1280` / `720h` / `WxH` / `stretch:WxH` / `n` | `n` | Output scale. |
 | `fps` | integer or `n` | `n` | Output frame rate. |
 | `video_look` | filter list or `n` | `n` | Rotate, mirror, colour, denoise, sharpen/blur, fades. |
+| `video_quick` | `gif` / `boomerang` / `thumb` / `loop=N` / `n` | `n` | Quick outputs; see below. |
+| `video_composite` | `overlay` / `pip` / `hstack` / `vstack` / `mix` / `n` | `n` | Combine a second input. |
+| `audio_volume` | factor, `150%`, `+6dB` or `n` | `n` | Audio gain, 0.01-10.0. |
+| `raw_ffmpeg_args` | ffmpeg options or `n` | `n` | Your own options, added last. |
 | `audio_tracks` | 0 / 0,1,2 / all / d / e / de | `de` | Which audio streams to keep. |
 | `audio_codec` | aac, libopus, opus, libmp3lame, flac, pcm_s16le, copy, ... | `aac` | Audio encoder. |
 | `audio_bitrate_kbps` | integer or `n` | `n` | Audio bitrate per stream (kbps). |
@@ -1521,6 +1525,49 @@ speed change. `sharpen` and `blur` cancel each other and are rejected together.
 A fade-out longer than the output is dropped with a warning rather than
 producing an invalid start time. The fade applies to picture and sound
 together.
+
+**`video_quick`** — A one-shot output shape, or `n`. One of `gif`, `boomerang`,
+`thumb`, or `loop=N`.
+
+`gif` writes an animated GIF through a TWO-PASS palette: the first pass builds
+an optimal 256-colour palette with `palettegen`, the second applies it with
+`paletteuse`. A single-command `split` variant exists but buffers the stream to
+build the palette, which is the memory shape this project avoids elsewhere.
+Defaults are 15 fps and 480 px wide; `gif_fps` and `gif_width` override them,
+and a GIF carries no audio. `boomerang` plays the clip forward then reversed,
+reusing the bounded reverse pipeline rather than a second implementation, so a
+long input is still segmented against the frame budget. `thumb` extracts one
+frame -- `thumbnail_seconds` picks the moment, `thumbnail_ext` the format
+(default `png`). `loop=N` repeats the input N times with `-stream_loop`, which
+is an INPUT option and so sits before `-i`.
+
+**`video_composite`** — Combine a SECOND input with the first, or `n`. One of
+`overlay` (a logo or watermark at its own size), `pip` (a second video scaled
+down), `hstack` / `vstack` (the two side by side or stacked), or `mix` (mix a
+second audio source under the first). Corners are `tl`, `tr`, `bl`, `br` or
+`center` (default `br`) with `composite_margin` pixels of inset (default 10);
+`composite_opacity` fades the overlay and `composite_scale` sizes the
+picture-in-picture (default 0.25). For `mix`, `composite_audio_weight` sets how
+far the second source sits under the first (default 0.3). `hstack` and `vstack`
+scale the inputs to a common edge first and say so rather than letterboxing in
+silence. This is not Join: Join plays inputs one after another, these play them
+at the same time.
+
+**`audio_volume`** — Audio gain as a factor (`1.5`), a percentage (`150%`) or
+decibels (`+6dB`), or `n`. Accepted range is 0.01 to 10.0, about -40 dB to
++20 dB; anything outside it is refused as more likely a typo than an intention.
+It is applied AFTER LoudNorm, because LoudNorm normalises to a target and would
+undo a gain applied before it.
+
+**`raw_ffmpeg_args`** — Your own ffmpeg options, or `n`. They are split the way
+a shell would quote them, so `-metadata title="My film"` keeps its spaces, and
+they are placed LAST, immediately before the output path: ffmpeg reads output
+options in order, so options here can override what the wizard chose. Options
+the wizard owns -- `-i`, `-vf`, `-c:v`, `-map`, `-ss`, `-y`, `-filter_complex`
+and the rest -- are refused, because the settings summary, the output path and
+the exported plan all read those back from the answers, and letting an argument
+change one would make the printed command disagree with the job. The full
+command is always shown for review before anything runs.
 
 Omit the key entirely and Mode 2 never asks about it. In the interactive
 wizard the same question is offered once, after the crop questions, and is
