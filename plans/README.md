@@ -31,7 +31,7 @@ instances.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001 | Raw-options parsing: Windows paths and per-stream reserved options | P1 | S | — | DONE |
-| 002 | Dispatch the composite builder for an audio-only mix | P1 | S | — | TODO |
+| 002 | Dispatch the composite builder for an audio-only mix | P1 | S | — | DONE |
 | 003 | `loop=N` reaches every quick output, or is refused | P2 | S | — | TODO |
 | 004 | The four documented config keys are actually read | P1 | M | 002 | TODO |
 | 005 | The settings summary shows the five new features | P2 | S | — | TODO |
@@ -76,6 +76,16 @@ REJECTED (one-line rationale).
   a side must come out 140x120, and comes out 120x120 when the crop lands
   twice. An argv assertion alone would have passed a fix that merely moved the
   duplicate.
+
+- **002 — DONE, approved.** Branch `advisor/002-composite-audio-mix-dispatch`,
+  commit `1cfe056`, pushed, **not merged**.
+  Verified by re-running the criteria: scope is the two in-scope files, tree
+  clean, `-k composite_inputs` 46/46, full suite 1986/1986 `OK`. The dispatch
+  condition is now `composite_mode or composite_audio_mix`, and the comment
+  names the `mix` case that used to fall through.
+  All three tests are present including the negative control
+  (`test_a_job_with_neither_key_still_takes_the_ordinary_encode`) — without it a
+  condition of `True` would satisfy the other two.
 
 ## Dependency notes
 
