@@ -137,26 +137,27 @@ def step_audio_volume(answers: dict[str, Any]) -> None:
 def step_raw_ffmpeg_args(answers: dict[str, Any]) -> None:
     hint = ("n, or your own ffmpeg options, e.g. "
             + paint('-metadata title="My film" -tune film', Color.LIME))
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Extra ffmpeg options?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
+
+    def forget(answers):
         answers.pop("raw_ffmpeg_args", None)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            parsed = parse_raw_arguments(value)
-        except ValueError as error:
-            appio.error(str(error))
-            continue
+
+    def record(value, answers):
+        parsed = parse_raw_arguments(value)
         if not parsed:
-            return
+            return parsed
         answers["raw_ffmpeg_args"] = parsed
+        # Printed here rather than left to the helper's single confirmation
+        # line: the warning must come BEFORE "Extra options: ..." so the user
+        # sees why the command deserves a second look before what was added.
         print(paint("These go in unchanged, just before the output path. "
                     "Check the command below before starting.", Color.YELLOW))
-        print(paint("Extra options: " + " ".join(parsed), Color.LIME))
-        return
+        return parsed
+
+    def describe(answers):
+        return "Extra options: " + " ".join(answers["raw_ffmpeg_args"])
+
+    appio.ask_optional(answers, "Extra ffmpeg options?", hint,
+                       forget, record, describe)
 
 
 __all__ = ["VOLUME_MIN", "VOLUME_MAX", "RESERVED_RAW_OPTIONS",
