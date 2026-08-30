@@ -68,6 +68,36 @@ def _bound_at_module_level(tree: ast.Module) -> set[str]:
     return bound
 
 
+def _loaded_anywhere(tree: ast.Module) -> set[str]:
+    """Every name this file actually reads, as a plain name or as `name.attr`.
+
+    Mirrors `_bound_at_module_level` in the opposite direction: a name that is
+    bound but never loaded here was imported for nothing.
+    """
+    loaded: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loaded.add(node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            loaded.add(node.value.id)
+    return loaded
+
+
+def _string_constant_tokens(tree: ast.Module) -> set[str]:
+    """Every identifier-shaped word inside a string constant in this file.
+
+    A real use -- a forward-reference type annotation or an `__all__` entry --
+    names the identifier exactly. Splitting on non-identifier characters
+    instead of a raw substring test matters: a raw `"re" in "...picture..."`
+    would call `re` used because it hides inside an unrelated word.
+    """
+    tokens: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            tokens |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", node.value))
+    return tokens
+
+
 class NoModuleNamesAModuleItDidNotImport(unittest.TestCase):
 
     def test_the_sweep_covers_the_package(self):
@@ -300,3 +330,64 @@ class EveryConfigDrivenSkipHasAReader(unittest.TestCase):
             [], missing,
             "skip-map key(s) with no config_value(config, \"...\") reader and "
             "no PROMPT_ONLY_ALLOWLIST entry: " + ", ".join(missing))
+
+
+class NoModuleImportsSomethingItNeverUses(unittest.TestCase):
+    """`ffmwiz/wizard_look.py` imported `re` and never used it -- line 15,
+    until this guard was added. Unlike the D09 fallout above, a merely unused
+    import never raises: it imports cleanly, nothing calls it, and it sits
+    there forever unless something reads the source. A static AST sweep is
+    exactly that "something", checked on every run instead of by a human
+    proofreading the package by eye.
+    """
+
+    def _checked_modules(self) -> list[tuple[str, Path]]:
+        """Every package module the sweep below can safely judge.
+
+        Two skips, both load-bearing:
+        - A file containing `import *` is skipped entirely. A star import can
+          re-export or shadow a name in ways this AST walk cannot see, so
+          checking these files would just be false positives.
+        - Anything under `ffmwiz/gui/` is skipped entirely.
+          `ffmwiz/gui/ffmwiz_gui.py` assembles ONE namespace out of every GUI
+          module and `setattr`s it back onto all of them, falling back to
+          `vars(module)` where a module has no `__all__` -- and none of the
+          12 GUI modules declares one. An "unused" import in one GUI file may
+          be a sibling's only binding; deleting it can break that sibling at
+          runtime with no test to catch it.
+        """
+        checked = []
+        for name, path in sorted(_package_modules().items()):
+            if "gui" in path.parts:
+                continue
+            if "import *" in path.read_text(encoding="utf-8"):
+                continue
+            checked.append((name, path))
+        return checked
+
+    def test_the_sweep_examines_a_useful_number_of_modules(self):
+        # Guard the guard: if the two skips above ever widen to eat the whole
+        # package, this fails instead of silently passing on zero modules.
+        self.assertGreater(len(self._checked_modules()), 10, self._checked_modules())
+
+    def test_every_plain_import_is_actually_used(self):
+        offenders: list[str] = []
+        for _, path in self._checked_modules():
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text)
+            loaded = _loaded_anywhere(tree)
+            string_tokens = _string_constant_tokens(tree)
+            lines = text.splitlines()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Import):
+                    continue
+                if "# noqa" in lines[node.lineno - 1]:
+                    continue
+                for alias in node.names:
+                    bound = alias.asname or alias.name.split(".")[0]
+                    if bound in loaded or bound in string_tokens:
+                        continue
+                    offenders.append(
+                        f"{path.relative_to(ROOT).as_posix()}:{node.lineno}: "
+                        f"import {alias.name} -- never used")
+        self.assertEqual([], offenders, "\n  " + "\n  ".join(offenders))

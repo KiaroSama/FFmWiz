@@ -73,6 +73,31 @@ class PyprojectDeclaration(unittest.TestCase):
         # [tool.py_compile_check] was read by nothing.
         self.assertNotIn("py_compile_check", self.config.get("tool", {}))
 
+    def test_the_pyside6_pin_is_the_same_in_both_files(self):
+        # CI installs Qt from requirements.txt; `pip install .` installs the pin
+        # declared here instead. Nothing else compares them, so editing one lets
+        # CI silently test a different Qt than the one a user gets.
+        requirements = PROJECT_ROOT / "requirements.txt"
+        lines = [
+            line.strip()
+            for line in requirements.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        requirements_pins = [line for line in lines if line.lower().startswith("pyside6")]
+        pyproject_pins = [
+            dep.strip() for dep in self.config["project"]["dependencies"]
+            if dep.strip().lower().startswith("pyside6")
+        ]
+        self.assertTrue(requirements_pins, "requirements.txt no longer pins PySide6")
+        self.assertTrue(pyproject_pins, "pyproject.toml no longer pins PySide6")
+        self.assertEqual(
+            requirements_pins[0], pyproject_pins[0],
+            "requirements.txt and pyproject.toml pin different PySide6 versions -- "
+            "edit both to match. CI installs requirements.txt "
+            "(.github/workflows/python-smoke.yml), so a drift means CI tests a "
+            "different Qt than `pip install .` gives a user, and nothing reports it.",
+        )
+
 
 @unittest.skipIf(not _setuptools_available(), "setuptools/wheel not installed")
 class WheelContents(unittest.TestCase):
