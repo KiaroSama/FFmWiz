@@ -234,13 +234,27 @@ def bounded_reverse_plan(answers: dict[str, Any],
     # the split identical is the point of validating both against one schema.
     has_join = bool(answers.get("join_input_items"))
     forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    # `look` and `fade` belong to the stage that produces the reversed
+    # timeline, not the forward join: `build_look_filters` runs after the
+    # scale and `build_fade_filters` runs after the reverse, so a fade-in
+    # applied by a forward stage would end up at the tail once the picture is
+    # mirrored.
     reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
-                    "video_reverse", "audio_reverse", "loudnorm")
+                    "video_reverse", "audio_reverse", "loudnorm",
+                    "look", "fade", "volume")
     if not has_join:
         reverse_owns = reverse_owns + GEOMETRY_TRANSFORMATIONS
+    # The raw options describe the FINAL file, so they belong to the LAST
+    # stage that writes one -- Split when there is one, otherwise the reverse
+    # -- and must never reach a scratch intermediate: `intermediate_profile`
+    # strips the rate control from one, and an opaque argv is exactly what it
+    # cannot strip.
+    split_owns = ("split", "raw_args") if split_points else ()
+    if not split_points:
+        reverse_owns = reverse_owns + ("raw_args",)
     validate_stage_plan([("forward join", forward_owns),
                          ("reverse", reverse_owns),
-                         ("split", ("split",) if split_points else ())],
+                         ("split", split_owns)],
                         answers)
 
     plan_items: list[dict[str, Any]] = []
@@ -495,15 +509,29 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     # crop the crop (D01/D02).
     has_join = bool(answers.get("join_input_items"))
     forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
+    # `look` and `fade` belong to the stage that produces the reversed
+    # timeline, not the forward join: `build_look_filters` runs after the
+    # scale and `build_fade_filters` runs after the reverse, so a fade-in
+    # applied by a forward stage would end up at the tail once the picture is
+    # mirrored.
     reverse_owns = ("cuts", "audio_cuts", "video_speed", "audio_speed",
-                    "video_reverse", "audio_reverse", "loudnorm")
+                    "video_reverse", "audio_reverse", "loudnorm",
+                    "look", "fade", "volume")
     if not has_join:
         reverse_owns = reverse_owns + GEOMETRY_TRANSFORMATIONS
+    # The raw options describe the FINAL file, so they belong to the LAST
+    # stage that writes one -- Split when there is one, otherwise the reverse
+    # -- and must never reach a scratch intermediate: `intermediate_profile`
+    # strips the rate control from one, and an opaque argv is exactly what it
+    # cannot strip.
+    split_owns = ("split", "raw_args") if split_points else ()
+    if not split_points:
+        reverse_owns = reverse_owns + ("raw_args",)
     # Before the join, not after: a plan that cannot be executed correctly must
     # not spend a full forward encode first.
     validate_stage_plan([("forward join", forward_owns),
                          ("reverse", reverse_owns),
-                         ("split", ("split",) if split_points else ())],
+                         ("split", split_owns)],
                         answers)
 
     if has_join:

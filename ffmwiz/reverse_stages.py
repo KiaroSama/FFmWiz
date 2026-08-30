@@ -234,16 +234,103 @@ STAGE_TRANSFORMATIONS: dict[str, tuple[str, ...]] = {
              "crop_bottom", "crop_box_dimensions", "cropped_aspect_ratio"),
     "fps": ("fps",),
     "resize": ("resolution", "final_resolution"),
+    # Five more transformations shipped in d0e8f69/0fe7e98 with no schema
+    # entry at all, so a Join + Reverse + Split applied every one of them
+    # three times: a 90-degree rotation applied twice is 180 degrees, and a
+    # 2x gain applied three times is 8x.
+    #
+    # QUICK_ANSWER_KEYS and COMPOSITE_ANSWER_KEYS are deliberately NOT added
+    # below, on evidence rather than omission -- a dead schema entry would
+    # make the next reader believe a path is covered that it is not. Quick
+    # outputs never reach a staged reverse: `ffmwiz/encoding.py:512-516`
+    # dispatches a `quick_output_plan` job to `run_quick_output_stages` before
+    # the reverse branch below it is reached, and `_quick_sub_job`
+    # (`ffmwiz/wizard_build.py:371-381`) strips every `QUICK_ANSWER_KEYS` entry
+    # from the sub-job it hands onward. Compositing is DROPPED by a staged
+    # reverse rather than repeated: the composite branch is reached only from
+    # `ffmwiz/wizard_b.py:222`, and neither `build_ffmpeg_command` nor
+    # `build_join_encode_command` has one -- a missing branch, which is a
+    # different fix.
+    #
+    # Rotation and flips change the FRAME the rest of the chain sees: a
+    # 90-degree rotation swaps width and height, so it travels with the
+    # geometry group rather than with `look` (`build_orientation_filters`).
+    "orientation": ("rotate_choice", "flip_horizontal", "flip_vertical"),
+    # Colour, denoise and sharpen/blur (`build_look_filters`). Denoising twice
+    # is visibly softer, not merely redundant -- each pass re-processes an
+    # already lossy intermediate.
+    "look": ("adjust_grayscale", "denoise_level", "sharpen_level", "blur_level",
+             "adjust_brightness", "adjust_contrast", "adjust_saturation",
+             "adjust_gamma"),
+    # A fade per stage compounds, and a fade applied by a stage before the
+    # reverse lands at the OTHER end of the clip once the picture is mirrored
+    # (`fade_filter_parts`, `ffmwiz/support/L01_filters.py:140-167`).
+    "fade": ("fade_in_seconds", "fade_out_seconds"),
+    # A gain applied by three stages is the gain CUBED, not tripled: 2x
+    # becomes 8x (`build_volume_filter`, `ffmwiz/wizard_raw.py:92-105`).
+    "volume": ("audio_volume",),
+    # The user's own output options, appended LAST so they override the
+    # wizard's (`ffmwiz/wizard_build.py:886`). `intermediate_profile`
+    # deliberately strips the rate control from a scratch stage but cannot
+    # strip an opaque argv, so a `-b:v 500k` here re-imposes on
+    # `joined_forward.mkv` exactly the low bitrate that function exists to
+    # avoid.
+    "raw_args": ("raw_ffmpeg_args",),
 }
 
 # Geometry travels together: cropping in one stage and resizing in another
 # would make the second stage scale a frame the first already changed.
-GEOMETRY_TRANSFORMATIONS: tuple[str, ...] = ("crop", "fps", "resize")
+# Orientation belongs here too, not with `look`: a 90-degree rotation swaps
+# width and height, so it must not be split from the resize that is sized
+# against it.
+GEOMETRY_TRANSFORMATIONS: tuple[str, ...] = ("crop", "fps", "resize", "orientation")
 
 
 def _requests_video_speed(answers: dict[str, Any]) -> bool:
     return (bool(answers.get("video_speed_enabled"))
             and float(answers.get("video_speed_factor") or 1.0) != 1.0)
+
+
+def _requests_orientation(answers: dict[str, Any]) -> bool:
+    # Read the same way `build_orientation_filters` reads it, so a value the
+    # builder ignores (an unrecognised `rotate_choice`) is not counted as a
+    # request. "none" is the explicit no-op, not a key of ROTATE_FILTERS.
+    rotation = str(answers.get("rotate_choice") or "none").strip().lower()
+    return (rotation in ROTATE_FILTERS
+            or bool(answers.get("flip_horizontal"))
+            or bool(answers.get("flip_vertical")))
+
+
+def _requests_look(answers: dict[str, Any]) -> bool:
+    # Same reads as `build_look_filters`: a level not in its filter table is
+    # "off" even if the key is set to something, and a value that will not
+    # convert to float is "not requested" rather than a plan-time TypeError.
+    if answers.get("adjust_grayscale"):
+        return True
+    for key, table in (("denoise_level", DENOISE_FILTERS),
+                       ("sharpen_level", SHARPEN_FILTERS),
+                       ("blur_level", BLUR_FILTERS)):
+        if str(answers.get(key) or "off").strip().lower() in table:
+            return True
+    for key, (_low, _high, neutral) in ADJUST_RANGES.items():
+        try:
+            value = float(answers.get(key, neutral))
+        except (TypeError, ValueError):
+            continue
+        if value != neutral:
+            return True
+    return False
+
+
+def _requests_volume(answers: dict[str, Any]) -> bool:
+    # Matches `build_volume_filter`'s own guard and its own tolerance
+    # (`ffmwiz/wizard_raw.py:98-102`), so this predicate and the filter it
+    # predicts agree on what counts as a gain.
+    try:
+        factor = float(answers.get("audio_volume") or 1.0)
+    except (TypeError, ValueError):
+        return False
+    return abs(factor - 1.0) > 1e-9
 
 
 # What makes each transformation REQUESTED. Ownership is only meaningful
@@ -267,6 +354,11 @@ _TRANSFORMATION_REQUESTED: dict[str, Any] = {
                                for edge in ("top", "left", "right", "bottom"))),
     "fps": lambda a: a.get("fps") is not None,
     "resize": lambda a: a.get("resolution") not in (None, "n"),
+    "orientation": _requests_orientation,
+    "look": _requests_look,
+    "fade": lambda a: any(requested_fade_seconds(a)),
+    "volume": _requests_volume,
+    "raw_args": lambda a: bool(a.get("raw_ffmpeg_args")),
 }
 
 
@@ -635,7 +727,10 @@ __all__ = [
     'GEOMETRY_TRANSFORMATIONS',
     'STAGE_TRANSFORMATIONS',
     '_disposition_value',
+    '_requests_look',
+    '_requests_orientation',
     '_requests_video_speed',
+    '_requests_volume',
     '_selected_indices',
     '_single_input_answers',
     'build_main_encode_reverse_segment_command',
