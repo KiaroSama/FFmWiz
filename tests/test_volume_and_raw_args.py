@@ -289,5 +289,101 @@ class TheWizardQuestionsBehave(unittest.TestCase):
         self.assertIn("-tune film", text)
 
 
+class TheOptionalPromptHelperItself(unittest.TestCase):
+    """Direct tests of `appio.ask_optional`, the loop all five call sites share.
+
+    These drive the helper itself, with throwaway `forget`/`record`/`describe`
+    callables, rather than one wizard step -- the behaviour under test (clear-
+    before-decline, a `Back` raised from inside `record`) is the helper's own
+    contract, not any one step's.
+    """
+
+    def _run(self, answers, replies, forget=None, record=None, describe=None,
+             calls=1, errors=None):
+        """Run `ask_optional` `calls` times off one FINITE reply queue.
+
+        A constant stub is not safe here either: a rejected value re-asks
+        within the SAME call, same as every wizard step above. A second CALL
+        is a different thing -- it is the question being asked again, the way
+        Back navigation revisits an earlier step -- so `calls=2` is how
+        `test_declining_on_the_second_pass_still_clears_the_first` gets its
+        second pass, sharing this one `answers` dict and reply queue.
+        """
+        collected = errors if errors is not None else []
+        script = iter(replies)
+        real_ask, real_error = FFmWiz.appio.ask_raw, FFmWiz.appio.error
+        FFmWiz.appio.ask_raw = lambda *a, **k: next(script)
+        FFmWiz.appio.error = lambda message: collected.append(message)
+        try:
+            for _ in range(calls):
+                FFmWiz.appio.ask_optional(
+                    answers, "Optional thing?", "hint",
+                    forget or (lambda a: None),
+                    record or (lambda v, a: True),
+                    describe or (lambda a: "recorded"))
+        finally:
+            FFmWiz.appio.ask_raw, FFmWiz.appio.error = real_ask, real_error
+
+    def test_declining_on_the_second_pass_still_clears_the_first(self):
+        # The rule the helper exists to hold: `forget` runs before the
+        # decline check on EVERY call, so declining on a later pass clears an
+        # earlier pass's answer exactly like declining right away would.
+        def forget(answers):
+            answers.pop("mark", None)
+
+        def record(value, answers):
+            answers["mark"] = value
+            return True
+
+        answers = {}
+        self._run(answers, ["1.5", "n"], forget=forget, record=record, calls=2)
+        self.assertEqual({}, answers)
+
+    def test_a_value_error_re_asks_instead_of_raising(self):
+        attempts = []
+
+        def record(value, answers):
+            attempts.append(value)
+            if len(attempts) == 1:
+                raise ValueError("bad")
+            answers["value"] = value
+            return True
+
+        answers = {}
+        errors = []
+        self._run(answers, ["bogus", "good"], record=record, errors=errors)
+        self.assertEqual(1, len(errors))
+        self.assertEqual("good", answers["value"])
+
+    def test_back_propagates_and_records_nothing(self):
+        # The back token is `0`, the same one every wizard step accepts.
+        answers = {}
+        with self.assertRaises(FFmWiz.Back):
+            self._run(answers, ["0"])
+        self.assertEqual({}, answers)
+
+    def test_a_falsy_record_prints_no_confirmation(self):
+        described = []
+
+        def describe(answers):
+            described.append(answers)
+            return "should never be printed"
+
+        answers = {}
+        self._run(answers, ["anything"], record=lambda v, a: {}, describe=describe)
+        self.assertEqual([], described)
+
+    def test_a_back_raised_inside_record_is_not_swallowed(self):
+        # The composite step's partner prompts can raise Back from inside
+        # `record`; only ValueError may be caught here, or that path would be
+        # trapped in a loop instead of taking the user back a step.
+        def record(value, answers):
+            raise FFmWiz.Back()
+
+        answers = {}
+        with self.assertRaises(FFmWiz.Back):
+            self._run(answers, ["anything"], record=record)
+
+
 if __name__ == "__main__":
     unittest.main()
