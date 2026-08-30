@@ -20,8 +20,6 @@ from typing import Any
 from ffmwiz import appio
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
-from ffmwiz.core.exceptions import Back
-from ffmwiz.support.L00_misc_b import is_back_value
 
 # ffmpeg's own limits on the `volume` filter are far wider, but a factor
 # outside this range is much more likely to be a typo than an intention: 0.01
