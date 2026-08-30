@@ -1034,7 +1034,34 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
 
     source_join_duration = sum(float(item.get("duration") or 0.0) for item in items)
     keep_ranges = normalize_cut_ranges(list(join_answers.get("cut_keep_ranges") or []), source_join_duration)
+    final_duration = final_processed_duration_for_splits(join_answers, source_join_duration)
     video_label = append_join_trim_concat_filter(filters, "jvcat", keep_ranges, "video", "jvcut")
+    # Orientation and look, which the per-input chain above has no way to
+    # carry. `build_cpu_video_filter` is deliberately NOT reused here: that
+    # chain already emits crop, fps, scale and format, so calling it would
+    # apply all four a SECOND time. Only the parts a join cannot otherwise
+    # express are rebuilt, in the relative order that builder uses.
+    #
+    # After the concat rather than per input, and the rotation is why: a
+    # 90-degree turn swaps width and height, so rotating each input first
+    # would leave a portrait frame to be fitted back into the landscape canvas
+    # every input is normalised to -- pillarboxing the picture instead of
+    # standing the output on its side. Applying it once, after the common
+    # scale, gives the 120x160 a 160x120 join is expected to produce.
+    # The one divergence from the single-input path: with an EXPLICIT
+    # resolution answer that path scales the ROTATED frame into the requested
+    # canvas, while this one rotates the canvas, so 720p + 90cw is 720x1280
+    # here and a pillarboxed 1280x720 there.
+    #
+    # A staged job reaches this with `look` already stripped by
+    # `stage_answers(owns=GEOMETRY_TRANSFORMATIONS)`, so the reverse stage
+    # keeps its ownership and nothing is applied twice. A plain join carries
+    # every key and gets the whole chain -- which is the case that was
+    # silently dropping all of it.
+    picture_chain = build_orientation_filters(join_answers) + build_look_filters(join_answers)
+    if picture_chain:
+        filters.append(f"[{video_label}]{','.join(picture_chain)}[jvpic]")
+        video_label = "jvpic"
     if video_speed_transform_enabled(join_answers):
         filters.append(
             f"[{video_label}]{build_video_speed_filter(encode_video_speed_factor(join_answers), bool(join_answers.get('reverse_video')))}[jvfinal]"
@@ -1042,6 +1069,13 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     else:
         filters.append(f"[{video_label}]setpts=PTS-STARTPTS[jvfinal]")
     video_label = "jvfinal"
+    # Fade last, and timed against the duration AFTER the trim and the speed
+    # change: a fade-out measured from the source length lands in the middle
+    # of a sped-up output, or past its end entirely.
+    fade_chain = build_fade_filters(join_answers, final_duration)
+    if fade_chain:
+        filters.append(f"[{video_label}]{','.join(fade_chain)}[jvfade]")
+        video_label = "jvfade"
 
     audio_labels: list[str] = []
     for audio_pos, _audio_index in enumerate(selected_audio):
@@ -1053,7 +1087,6 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
             filters.append(f"[{label}]asetpts=PTS-STARTPTS[{final_audio_label}]")
         audio_labels.append(final_audio_label)
 
-    final_duration = final_processed_duration_for_splits(join_answers, source_join_duration)
     split_points = normalize_separator_points(join_answers.get("separator_points"), final_duration)
     split_active = bool(split_points)
     if split_active:

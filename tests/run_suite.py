@@ -119,6 +119,14 @@ def run_module(name: str) -> dict:
         "failures": [(str(test), text) for test, text in result.failures],
         "errors": [(str(test), text) for test, text in result.errors],
         "skipped": [(str(test), why) for test, why in result.skipped],
+        # An @unittest.expectedFailure test that PASSES lands here and in
+        # nothing else -- not in `failures`, not in `errors`. The markers in
+        # this suite are self-removing: each says "delete me once the defect
+        # is fixed", and the signal to delete it is the run going red.
+        # Without this list the verdict below could not see them, so a fixed
+        # defect kept its marker and the suite still said OK -- which is how
+        # the join builder gap stayed marked after it was closed.
+        "unexpected": [str(test) for test in result.unexpectedSuccesses],
         "ok": result.wasSuccessful(),
     }
 
@@ -169,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = [entry for item in results for entry in item["failures"]]
     errors = [entry for item in results for entry in item["errors"]]
     skipped = [entry for item in results for entry in item["skipped"]]
+    unexpected = [entry for item in results for entry in item["unexpected"]]
 
     for test, text in failures + errors:
         print(f"\n{'=' * 70}\nFAIL: {test}\n{'-' * 70}\n{text}")
@@ -180,8 +189,17 @@ def main(argv: list[str] | None = None) -> int:
         f"{item['module']} {item['seconds']:.1f}s" for item in slowest))
     print(f"\nRan {total} tests in {elapsed:.2f}s across {args.jobs} worker(s)")
 
-    if failures or errors:
-        print(f"FAILED (failures={len(failures)}, errors={len(errors)})")
+    for test in unexpected:
+        print("=" * 70)
+        print(f"UNEXPECTED SUCCESS: {test}")
+        print("-" * 70)
+        print("Marked @unittest.expectedFailure, and it passed. The defect it")
+        print("documents is fixed: delete the marker and the comment above it,")
+        print("so the test guards the fix from here on.")
+
+    if failures or errors or unexpected:
+        print(f"FAILED (failures={len(failures)}, errors={len(errors)}, "
+              f"unexpected successes={len(unexpected)})")
         return 1
 
     required = {name.strip().lower()
