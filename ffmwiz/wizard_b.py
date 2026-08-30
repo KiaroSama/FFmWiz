@@ -219,12 +219,15 @@ def step_start_now(answers: dict[str, Any]) -> None:
             else:
                 appio.note("Join inputs are not stream-copy compatible. Re-encoding is required.")
             cmd = wizard_build_b.build_join_encode_command(answers, join_items, output_path)
-    elif answers.get("composite_mode"):
+    elif answers.get("composite_mode") or answers.get("composite_audio_mix"):
         # Without this branch the compositing question was asked, answered and
         # then ignored: the job ran as an ordinary encode with no overlay and
         # no warning, which is worse than not offering the feature. Compositing
         # needs its own command because it maps a SECOND input into the graph,
-        # which `build_ffmpeg_command` has no shape for.
+        # which `build_ffmpeg_command` has no shape for. `mix` sets
+        # `composite_audio_mix` and never `composite_mode`, so an audio-only
+        # composite used to fall through to the ordinary encode and lose the
+        # second track.
         output_path = services.build_output_path(answers)
         answers["output_path"] = output_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
