@@ -431,6 +431,52 @@ def ask_yes_no(prompt: str, default: bool) -> bool:
         error(f"Enter only y or n. Default on Enter: {default_text}")
 
 
+def ask_optional(
+    answers: dict[str, Any],
+    title: str,
+    hint: str,
+    forget: Callable[[dict[str, Any]], None],
+    record: Callable[[str, dict[str, Any]], Any],
+    describe: Callable[[dict[str, Any]], str],
+    default: str = "n",
+) -> None:
+    """One optional question: ask, allow Back, clear, decline, parse, confirm.
+
+    `forget(answers)` runs BEFORE the decline check and before `record`, on
+    EVERY pass -- including a `n` that follows an earlier accepted answer.
+    Skip that ordering and a rejected second attempt keeps the first attempt's
+    keys behind: answer `sharpen,blur` (rejected -- they cancel each other),
+    then decline, and `sharpen` would still be set from the first look at the
+    value. Clearing first and looking at the value second is what makes a
+    decline after a mistake behave the same as a decline on the first try.
+
+    `record(value, answers)` owns both the parse AND the write, because some
+    of these questions do more than update a dict -- forcing an output
+    extension, asking a follow-up prompt -- and a value merged in by the
+    helper could not sequence that. A falsy return means nothing was
+    recorded, so no confirmation line is printed. Only `ValueError` is
+    caught: a `Back` raised from inside `record` (a follow-up prompt going
+    back) must reach the caller unchanged, not be swallowed here.
+    """
+    while True:
+        value = ask_raw(question_prompt(answers, title, hint, default))
+        if is_back_value(value):
+            raise Back()
+        forget(answers)
+        if not value or value.strip().lower() in {"n", "no"}:
+            return
+        try:
+            recorded = record(value, answers)
+        except ValueError as problem:
+            error(str(problem))
+            continue
+        if not recorded:
+            return
+        line = describe(answers)
+        if line:
+            print(paint(line, Color.LIME))
+        return
+
 
 # --- secret redaction (used by the log formatter) ---
 _SECRET_KEY_RE = re.compile(
@@ -459,6 +505,7 @@ def redact_secrets(text: Any) -> str:
 
 
 __all__ = [
+    'ask_optional',
     'ask_raw',
     'ask_required',
     'ask_yes_no',
