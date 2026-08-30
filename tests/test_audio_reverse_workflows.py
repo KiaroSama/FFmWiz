@@ -47,6 +47,7 @@ import FFmWiz
 
 from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
+from ffmwiz import runtime
 from ffmwiz.support import ext04c
 
 FFMPEG = shutil.which("ffmpeg")
@@ -382,6 +383,118 @@ class AudioReverseKeepsTheWorkflow(NoLeakedArtifacts, unittest.TestCase):
             for s in self._probe(produced, "-show_streams")["streams"]
             if s["codec_type"] == "audio"]
         self.assertEqual([("eng", "English"), ("jpn", "Japanese")], described)
+
+    # ---- Plan 011 ----------------------------------------------------------
+    # The final rebuild used to inherit every key of `answers` unfiltered, so a
+    # crop/fps/resize the forward join had already applied to
+    # `joined_forward.mkv` was applied a SECOND time to the finished file.
+    # Stage 1 (the join) has always owned the geometry correctly; these cover
+    # stage 4 (the final rebuild), which now must own it only when no join
+    # stage ran to spend it first.
+    def _video(self, path):
+        return self._probe(path, "-select_streams", "v:0", "-show_streams")["streams"][0]
+
+    def _execute_capturing(self, answers, seconds=SECONDS):
+        """Like `_execute`, but also returns every command the pipeline issued."""
+        real_segment_seconds = ext04c.audio_reverse_segment_seconds
+        ext04c.audio_reverse_segment_seconds = lambda _a, _i=None: 1.0
+        commands = []
+        real_runner = runtime.run_ffmpeg_with_progress
+
+        def spy(cmd, **kwargs):
+            commands.append([str(part) for part in cmd])
+            return real_runner(cmd, **kwargs)
+
+        runtime.run_ffmpeg_with_progress = spy
+        noise = StringIO()
+        try:
+            with redirect_stdout(noise), redirect_stderr(noise):
+                answers["cmd"] = [str(part) for part in FFmWiz.build_ffmpeg_command(answers)]
+                code, _elapsed = encoding.execute_encode_plan(
+                    answers, answers["cmd"], total_duration=seconds, label="test")
+        finally:
+            runtime.run_ffmpeg_with_progress = real_runner
+            ext04c.audio_reverse_segment_seconds = real_segment_seconds
+        self.assertEqual(0, code, noise.getvalue()[-1500:])
+        return Path(answers["output_path"]), commands
+
+    def _stages_with(self, commands, needle):
+        """Which produced files were made by a command containing `needle`."""
+        return [cmd[-1] for cmd in commands if any(needle in str(part) for part in cmd)]
+
+    def test_a_joined_audio_reverse_crops_once(self):
+        out = self._tmp / "geomcrop"
+        out.mkdir()
+        items = [self._join_item(path) for path in self.join_inputs]
+        answers = self._answers(out, self.join_inputs[0], join_input_items=items[1:],
+                                crop_enabled=True, crop_left=10, crop_right=10,
+                                crop_top=0, crop_bottom=0)
+        _produced, commands = self._execute_capturing(answers)
+        cropped = self._stages_with(commands, "crop=")
+        self.assertEqual(1, len(cropped),
+                         f"crop appears in {len(cropped)} command(s): {cropped}")
+
+    def test_the_finished_file_has_the_asked_for_size(self):
+        # The strongest evidence: an argv assertion is satisfied by a fix that
+        # only MOVES the duplicate crop rather than removing it, but a crop
+        # applied twice to a 160x120 source comes out 120x120, not 140x120.
+        out = self._tmp / "geomsize"
+        out.mkdir()
+        items = [self._join_item(path) for path in self.join_inputs]
+        answers = self._answers(out, self.join_inputs[0], join_input_items=items[1:],
+                                crop_enabled=True, crop_left=10, crop_right=10,
+                                crop_top=0, crop_bottom=0)
+        produced, _commands = self._execute_capturing(answers)
+        stream = self._video(produced)
+        self.assertEqual((140, 120), (int(stream["width"]), int(stream["height"])),
+                         "a crop applied twice would come out 120x120, not 140x120")
+
+    def test_the_frame_rate_is_not_applied_twice(self):
+        # fps down-conversion is idempotent on a second pass (15fps -> 15fps
+        # changes nothing observable), so the command text is the only signal
+        # that would catch a repeat application here.
+        out = self._tmp / "geomfps"
+        out.mkdir()
+        items = [self._join_item(path) for path in self.join_inputs]
+        answers = self._answers(out, self.join_inputs[0], join_input_items=items[1:], fps=15)
+        _produced, commands = self._execute_capturing(answers)
+        rated = self._stages_with(commands, "fps=15")
+        self.assertEqual(1, len(rated),
+                         f"fps=15 appears in {len(rated)} command(s): {rated}")
+
+    def test_a_job_with_no_geometry_is_unchanged(self):
+        # Guard the guard: without a requested crop, nothing should crop, and
+        # the picture size must survive untouched. (The join always
+        # normalises its inputs through its own `scale=`/`fps=`, requested or
+        # not -- concat needs matching inputs -- so those two are not part of
+        # this assertion; only an unrequested CROP would be this bug.)
+        out = self._tmp / "geomnone"
+        out.mkdir()
+        items = [self._join_item(path) for path in self.join_inputs]
+        answers = self._answers(out, self.join_inputs[0], join_input_items=items[1:])
+        produced, commands = self._execute_capturing(answers)
+        stream = self._video(produced)
+        self.assertEqual((160, 120), (int(stream["width"]), int(stream["height"])))
+        self.assertFalse(self._stages_with(commands, "crop="))
+
+    def test_an_unjoined_audio_reverse_still_crops(self):
+        # The no-join case: no forward stage ever runs to spend the geometry,
+        # so the final rebuild must own it -- dropping it here would be a
+        # worse bug than applying it twice.
+        out = self._tmp / "geomsolo"
+        out.mkdir()
+        answers = self._answers(out, self.source, crop_enabled=True, crop_left=10,
+                                crop_right=10, crop_top=0, crop_bottom=0)
+        produced, commands = self._execute_capturing(answers)
+        stream = self._video(produced)
+        self.assertEqual((140, 120), (int(stream["width"]), int(stream["height"])),
+                         "a job with no join stage must still get its crop somewhere")
+        cropped = self._stages_with(commands, "crop=")
+        self.assertEqual(1, len(cropped),
+                         f"crop appears in {len(cropped)} command(s): {cropped}")
+        self.assertEqual(list(reversed(TONES)),
+                         [self._tone_at(produced, at) for at in (0.35, 1.35, 2.35, 3.35)],
+                         "the crop fix must not have broken the reversal itself")
 
 
 if __name__ == "__main__":
