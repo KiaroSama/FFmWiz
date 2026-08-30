@@ -57,6 +57,16 @@ EVERY_EDIT = {
     "crop_box_dimensions": (140, 112), "cropped_aspect_ratio": 1.25,
     "fps": 15, "resolution": {"mode": "exact_stretch", "width": 320, "height": 180},
     "final_resolution": (320, 180),
+    # ORIENTATION, LOOK, FADE, VOLUME, RAW_ARGS (plan 006). Same reason as the
+    # geometry block above: a transformation this fixture never requests
+    # cannot be observed surviving into a stage that owns nothing.
+    "rotate_choice": "90cw", "flip_horizontal": True, "flip_vertical": True,
+    "adjust_grayscale": True, "denoise_level": "medium",
+    "sharpen_level": "medium", "blur_level": "medium",
+    "adjust_brightness": 0.5, "adjust_contrast": 2.0,
+    "adjust_saturation": 2.0, "adjust_gamma": 2.0,
+    "fade_in_seconds": 1.0, "fade_out_seconds": 1.0,
+    "audio_volume": 2.0, "raw_ffmpeg_args": ["-b:v", "500k"],
 }
 
 
