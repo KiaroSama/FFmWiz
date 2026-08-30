@@ -38,7 +38,7 @@ instances.
 | 006 | Stage-ownership schema covers the new features | P1 | M | — | DONE |
 | 007 | Pin guard, stale skip count, unused-import guard | P3 | S | — | DONE |
 | 008 | Characterization tests for the untested mode drivers | P2 | M | — | DONE |
-| 009 | One optional-prompt helper instead of five copies | P3 | S | 001, 003 | TODO |
+| 009 | One optional-prompt helper instead of five copies | P3 | S | 001, 003 | DONE |
 | 010 | Split the quick-output and composite builders out | P3 | S | 003 | DONE |
 | 011 | Audio reverse across a join applies the geometry twice | P1 | S | — | DONE |
 
@@ -179,6 +179,26 @@ REJECTED (one-line rationale).
   `build_cpu_video_filter`, which `tests/test_speed_frame_retention.py` pins to
   `wizard_build_b.py`. The new module's docstring records that so the next
   person does not "finish" the split and break the guard.
+
+## Integration (2026-08-30)
+
+All eleven plans are merged into `main`. Merge order followed the dependency
+graph below; two conflicts occurred and both were the same benign shape --
+**two different new test classes appended at the same spot in one file**, with
+neither side touching the other's lines:
+
+- `tests/test_module_reference_hygiene.py` (004 vs 007) --
+  `EveryConfigDrivenSkipHasAReader` and `NoModuleImportsSomethingItNeverUses`.
+- `tests/test_volume_and_raw_args.py` (004 vs 009) --
+  `TheConfigKeysReachTheSameAnswers` and `TheOptionalPromptHelperItself`.
+
+Both were resolved by keeping BOTH classes, and the integrated suite proves
+nothing was dropped in either resolution. The count is the receipt: the base at
+`aaf0aed` ran **1983** tests, the eleven branches add **66** between them, and
+the merged tree runs **2049** -- exactly 1983 + 66. A conflict resolution that
+had quietly eaten a class would show up here as a shortfall.
+
+The eleven `advisor/*` branches remain published for history.
 
 ## Dependency notes
 
