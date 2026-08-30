@@ -75,11 +75,6 @@ _NUMBERS: dict[str, str] = {
     "saturation": "adjust_saturation",
 }
 
-LOOK_ANSWER_KEYS = ("rotate_choice", "flip_horizontal", "flip_vertical",
-              "adjust_grayscale", "denoise_level", "sharpen_level",
-              "blur_level", "fade_in_seconds", "fade_out_seconds",
-              *ADJUST_RANGES)
-
 
 def parse_look_tokens(text: str) -> dict[str, Any]:
     """Turn `90cw,gray,fadein=1.5` into answer keys. Raises ValueError.

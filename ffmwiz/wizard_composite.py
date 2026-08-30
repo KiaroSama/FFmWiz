@@ -29,7 +29,8 @@ from ffmwiz import appio
 from ffmwiz import services
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
-from ffmwiz.core.constants import (COMPOSITE_DEFAULT_CORNER,
+from ffmwiz.core.constants import (COMPOSITE_ANSWER_KEYS,
+                                   COMPOSITE_DEFAULT_CORNER,
                                    COMPOSITE_DEFAULT_MARGIN,
                                    COMPOSITE_DEFAULT_MIX_WEIGHT,
                                    COMPOSITE_DEFAULT_PIP_SCALE,
@@ -39,15 +40,6 @@ from ffmwiz.support.L00_misc_b import (is_back_value,
                                        looks_like_generated_output_file)
 from ffmwiz.support.L00_paths import paths_same
 from ffmwiz.support.L02 import terminal_path
-
-# Every key this step may write. Listed once so a re-ask can clear the previous
-# attempt instead of leaving half of it behind.
-COMPOSITE_ANSWER_KEYS = (
-    "composite_mode", "composite_corner", "composite_margin",
-    "composite_opacity", "composite_scale", "composite_path",
-    "composite_item", "composite_audio_mix", "composite_audio_weight",
-    "composite_audio_path", "composite_audio_item",
-)
 
 # Spelling -> picture mode. `sbs` because that is what the request is usually
 # called, `hstack` because that is what FFmpeg calls the filter.

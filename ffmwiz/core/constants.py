@@ -763,11 +763,13 @@ __all__ = [
     'COMPOSITE_DEFAULT_MARGIN',
     'COMPOSITE_DEFAULT_PIP_SCALE',
     'COMPOSITE_DEFAULT_MIX_WEIGHT',
+    'COMPOSITE_ANSWER_KEYS',
     'ROTATE_FILTERS',
     'DENOISE_FILTERS',
     'SHARPEN_FILTERS',
     'BLUR_FILTERS',
     'ADJUST_RANGES',
+    'LOOK_ANSWER_KEYS',
     'GPU_DEVICE_INDEX',
     'OVERWRITE_OUTPUT',
     'COLOR_RANGE',
@@ -962,6 +964,15 @@ ADJUST_RANGES: dict[str, tuple[float, float, float]] = {
     "adjust_gamma": (0.1, 10.0, 1.0),
 }
 
+# Every key the look-filters question may write. Listed once so a re-ask can
+# clear the previous attempt instead of leaving half of it behind. Defined
+# here, AFTER `ADJUST_RANGES`, because it splices that dict's keys in -- moved
+# any earlier and this raises NameError at import.
+LOOK_ANSWER_KEYS = ("rotate_choice", "flip_horizontal", "flip_vertical",
+                    "adjust_grayscale", "denoise_level", "sharpen_level",
+                    "blur_level", "fade_in_seconds", "fade_out_seconds",
+                    *ADJUST_RANGES)
+
 
 # ---------------------------------------------------------------------------
 # Multi-input compositing (overlay / picture-in-picture / stacks / audio mix).
@@ -996,3 +1007,12 @@ COMPOSITE_DEFAULT_PIP_SCALE = 0.25
 # The SECOND source's level in the mix. The first keeps its own (normalize=0),
 # so this reads as "the music plays at 30% of its own volume under the voice".
 COMPOSITE_DEFAULT_MIX_WEIGHT = 0.3
+
+# Every key the composite question may write. Listed once so a re-ask can
+# clear the previous attempt instead of leaving half of it behind.
+COMPOSITE_ANSWER_KEYS = (
+    "composite_mode", "composite_corner", "composite_margin",
+    "composite_opacity", "composite_scale", "composite_path",
+    "composite_item", "composite_audio_mix", "composite_audio_weight",
+    "composite_audio_path", "composite_audio_item",
+)
