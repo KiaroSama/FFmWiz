@@ -37,9 +37,9 @@ instances.
 | 005 | The settings summary shows the five new features | P2 | S | — | DONE |
 | 006 | Stage-ownership schema covers the new features | P1 | M | — | DONE |
 | 007 | Pin guard, stale skip count, unused-import guard | P3 | S | — | DONE |
-| 008 | Characterization tests for the untested mode drivers | P2 | M | — | TODO |
+| 008 | Characterization tests for the untested mode drivers | P2 | M | — | DONE |
 | 009 | One optional-prompt helper instead of five copies | P3 | S | 001, 003 | TODO |
-| 010 | Split the quick-output and composite builders out | P3 | S | 003 | TODO |
+| 010 | Split the quick-output and composite builders out | P3 | S | 003 | DONE |
 | 011 | Audio reverse across a join applies the geometry twice | P1 | S | — | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
@@ -154,6 +154,31 @@ REJECTED (one-line rationale).
   `@unittest.expectedFailure` with a comment naming the gap and stating it was
   verified on the unmodified tree. The marker removes itself: when the builder
   gap is closed each becomes an unexpected success and the suite goes red.
+
+- **008 — DONE, approved.** Branch
+  `advisor/008-mode-driver-characterization-tests`, commits `85844d2`,
+  `117add4`, `f44b710`, pushed, **not merged**.
+  Three new suites, 20 tests, ZERO source changes — exactly what a
+  characterization plan should produce. Full suite 2003/2003 `OK`.
+  They assert the ARGV the driver hands its builder, not that the mode
+  returned 0 — which is the whole point, since an exit-code assertion passes
+  against a driver that silently dropped every answer.
+  **The executor's own mutation check caught a false green in its first
+  hardsub test and it redesigned the test rather than reporting a pass.** That
+  is the behaviour the mutation step exists to produce.
+
+- **010 — DONE, approved.** Branch
+  `advisor/010-split-the-quick-and-composite-builders`, commit `0e16b18`,
+  pushed, **not merged**.
+  `wizard_build_b.py` 1777 → 1443 lines; new `wizard_build_c.py` at 448.
+  Verified: the leaf imports NOTHING from the facade (the direction rule), and
+  all three enforcing suites pass — `module_reference_hygiene`,
+  `package_imports`, `import_topology`. Full suite 1983/1983 `OK`, unchanged
+  count, which is what a pure move should show.
+  The three GIF functions stayed behind deliberately: they route through
+  `build_cpu_video_filter`, which `tests/test_speed_frame_retention.py` pins to
+  `wizard_build_b.py`. The new module's docstring records that so the next
+  person does not "finish" the split and break the guard.
 
 ## Dependency notes
 
