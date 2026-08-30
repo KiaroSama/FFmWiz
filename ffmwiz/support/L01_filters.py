@@ -171,6 +171,23 @@ def requested_fade_seconds(answers: dict[str, Any]) -> tuple[float, float]:
         return 0.0, 0.0
 
 
+def requested_volume_gain(answers: dict[str, Any]) -> bool:
+    """Did the user ask for a volume change?
+
+    The single definition of that question. `build_volume_filter` clamps and
+    formats the gain; `audio_transform_enabled` decides whether the audio
+    filter chain is built at all; `reverse_stages` decides which stage owns
+    it. All three have to agree on what counts, or the gate closes on a
+    request the chain behind it would have honoured -- which is exactly how a
+    volume-only job lost its gain.
+    """
+    try:
+        factor = float(answers.get("audio_volume") or 1.0)
+    except (TypeError, ValueError):
+        return False
+    return abs(factor - 1.0) > 1e-9
+
+
 def atempo_filter_chain(speed: float) -> str:
     """Build an atempo chain with each stage kept in FFmpeg's safe 0.5..2.0
     range. This avoids the artifacts/skipped-sample behavior of very large
@@ -315,6 +332,7 @@ __all__ = [
     'describe_look',
     'LOOK_ANSWER_KEYS',
     'requested_fade_seconds',
+    'requested_volume_gain',
     'build_video_speed_filter',
     'VIDEO_SPEED_OUTPUT_TIMING_ARGS',
     'loudnorm_analysis_filter',

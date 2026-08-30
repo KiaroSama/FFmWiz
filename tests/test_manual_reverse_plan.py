@@ -135,6 +135,25 @@ class TheExportedPlanMatchesTheAutomaticRun(NoLeakedArtifacts, unittest.TestCase
         self.assertGreaterEqual(len(stages), 3,
                                 f"expected a multi-stage plan, got {stages}")
 
+    def test_the_exported_plan_carries_the_raw_options_on_the_split(self):
+        # The plan and the executor build their split stage through separate
+        # code, and only the executor's was wired to the validated ownership.
+        # A plan that omits the user's options describes a different job than
+        # the one the executor would run -- and the whole point of this class
+        # is that those two agree.
+        out = self._tmp / "planraw"
+        shutil.rmtree(out, ignore_errors=True)
+        out.mkdir()
+        answers = self._build(out)
+        answers["raw_ffmpeg_args"] = ["-metadata", "comment=ffmwizplan"]
+        stages = reverse_pipeline.bounded_reverse_plan(answers, out / "scratch")
+        carrying = [label for label, cmd in stages
+                    if any("comment=ffmwizplan" in part for part in cmd)]
+        self.assertEqual(1, len(carrying),
+                         f"expected exactly one stage to carry them: {carrying}")
+        self.assertIn("Split", carrying[0],
+                      f"the Split stage owns the raw options, not {carrying[0]}")
+
     def test_no_stage_reverses_an_unbounded_timeline(self):
         out = self._tmp / "bounded"
         shutil.rmtree(out, ignore_errors=True)

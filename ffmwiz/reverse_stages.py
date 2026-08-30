@@ -323,14 +323,9 @@ def _requests_look(answers: dict[str, Any]) -> bool:
 
 
 def _requests_volume(answers: dict[str, Any]) -> bool:
-    # Matches `build_volume_filter`'s own guard and its own tolerance
-    # (`ffmwiz/wizard_raw.py:98-102`), so this predicate and the filter it
-    # predicts agree on what counts as a gain.
-    try:
-        factor = float(answers.get("audio_volume") or 1.0)
-    except (TypeError, ValueError):
-        return False
-    return abs(factor - 1.0) > 1e-9
+    # `requested_volume_gain` is the one definition of this question; see it
+    # for why the gate, the filter and this owner have to agree.
+    return requested_volume_gain(answers)
 
 
 # What makes each transformation REQUESTED. Ownership is only meaningful
@@ -717,6 +712,12 @@ def reverse_concat_stages(answers: dict[str, Any], segment_paths: list[Path],
                        "-avoid_negative_ts", "make_zero", *chapter_args])
     if output_path.suffix.lstrip(".").lower() in MP4_LIKE_EXTS and MOVFLAGS:
         concat_cmd.extend(["-movflags", MOVFLAGS])
+    # This command writes the file the user actually receives, so it is the one
+    # that has to carry their raw options -- the per-segment encodes before it
+    # write throwaway intermediates. Ownership decides whether the keys are
+    # here at all: with a Split they belong to the Split stage and
+    # `stage_answers` has already removed them, so this stays empty.
+    concat_cmd.extend(answers.get("raw_ffmpeg_args") or [])
     concat_cmd.append(str(output_path))
     stages.append(("Concatenating reversed encoded segments",
                    [str(part) for part in concat_cmd], progress_seconds))

@@ -269,6 +269,12 @@ def append_single_input_split_outputs(
         if data_mapped:
             append_source_data_codec_options(cmd, answers)
         append_container_options(cmd, answers["output_ext"])
+        # Same position and same reason as the single-output path below: last,
+        # immediately before this part's output, so the user's own options can
+        # override what the wizard chose. This branch RETURNS before that code
+        # is reached, so without this line a Split silently dropped the raw
+        # options from every part it wrote.
+        cmd.extend(answers.get("raw_ffmpeg_args") or [])
         cmd.append(str(part_output))
     log_info(
         "Split final output into parts: "

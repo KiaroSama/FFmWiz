@@ -157,7 +157,19 @@ def audio_speed_reverse_filter_parts(answers: dict[str, Any]) -> list[str]:
 
 
 def audio_transform_enabled(answers: dict[str, Any]) -> bool:
-    return audio_speed_transform_enabled(answers) or audio_cut_transform_enabled(answers) or loudnorm_transform_enabled(answers)
+    """Whether the audio filter chain has to be built at all.
+
+    This must cover everything the chain itself can emit. It used to test only
+    speed, cuts and LoudNorm, while the chain behind it (`ext04b`) also emits
+    a fade and a volume gain -- so a fade-only or volume-only job never opened
+    the gate, and a correct `build_volume_filter` was simply never reached.
+    A gate narrower than its own body drops the request silently.
+    """
+    return (audio_speed_transform_enabled(answers)
+            or audio_cut_transform_enabled(answers)
+            or loudnorm_transform_enabled(answers)
+            or any(requested_fade_seconds(answers))
+            or requested_volume_gain(answers))
 
 
 def color_range_output_args(

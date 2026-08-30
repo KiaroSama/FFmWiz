@@ -207,6 +207,57 @@ class TheyReachTheCommand(unittest.TestCase):
         self.assertEqual(["-tune", "film"], cmd[-3:-1],
                          f"expected the raw options just before the output: {cmd[-5:]}")
 
+    def test_the_gate_opens_for_a_volume_only_job(self):
+        # The chain test above calls `ext04b` directly, so it cannot see the
+        # gate standing in front of it -- and that gate was the actual defect:
+        # a correct filter that nothing ever asked for.
+        self.assertTrue(FFmWiz.audio_transform_enabled(
+            self._answers(audio_volume=1.5)))
+
+    def test_the_gate_opens_for_a_fade_only_job(self):
+        # Same gate, same shape: the chain behind it emits `afade`, so a
+        # fade-only job has to open it too.
+        self.assertTrue(FFmWiz.audio_transform_enabled(
+            self._answers(fade_out_seconds=1.5)))
+
+    def test_the_gate_stays_shut_when_nothing_was_asked_for(self):
+        # The other direction. A gate that opens for everything is not a gate,
+        # and it would put an audio filter chain on every plain encode.
+        self.assertFalse(FFmWiz.audio_transform_enabled(self._answers()))
+
+    def test_the_final_reverse_mux_carries_them_when_it_owns_them(self):
+        # A reverse with no Split ends in `reverse_concat_stages`, and THAT
+        # command writes the file the user receives -- the per-segment encodes
+        # before it write throwaway intermediates. Without this the options
+        # landed only on a scratch file and never on the output.
+        from ffmwiz import reverse_stages
+        tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_revraw_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        segments = [tmp / "seg_00.mkv", tmp / "seg_01.mkv"]
+        for segment in segments:
+            segment.write_bytes(b"")
+        answers = self._answers(ffmpeg="ffmpeg", audio_streams=[],
+                                raw_ffmpeg_args=["-metadata", "comment=revraw"])
+        stages, _warnings = reverse_stages.reverse_concat_stages(
+            answers, segments, tmp, tmp / "out.mkv", 1.0, "mkv")
+        final = stages[-1][1]
+        self.assertEqual(["-metadata", "comment=revraw"], final[-3:-1],
+                         f"expected them just before the output: {final[-5:]}")
+
+    def test_the_final_reverse_mux_adds_nothing_when_it_owns_nothing(self):
+        # With a Split the options belong to the Split stage and
+        # `stage_answers` has already removed the key, so this command must
+        # stay clean -- otherwise they would be applied twice.
+        from ffmwiz import reverse_stages
+        tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_revclean_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        segment = tmp / "seg_00.mkv"
+        segment.write_bytes(b"")
+        stages, _warnings = reverse_stages.reverse_concat_stages(
+            self._answers(ffmpeg="ffmpeg", audio_streams=[]),
+            [segment], tmp, tmp / "out.mkv", 1.0, "mkv")
+        self.assertNotIn("-metadata", stages[-1][1])
+
     def test_no_raw_arguments_changes_nothing(self):
         self.assertEqual([], self._answers().get("raw_ffmpeg_args", []))
 
