@@ -35,8 +35,10 @@ from io import StringIO
 from pathlib import Path
 
 import FFmWiz
+from ffmwiz import wizard_composite, wizard_quick, wizard_raw
 
 from artifact_guard import NoLeakedArtifacts
+from command_gen_base import CommandGenBase
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -174,6 +176,77 @@ class TheSummaryAgreesWithTheCommand(NoLeakedArtifacts, unittest.TestCase):
         _answers, _cmd, summary = self._join_summary()
         policy = self._line(summary, "color-range policy") or ""
         self.assertNotIn("stream copy", policy)
+
+
+class TheFiveNewFeaturesShowInTheSummary(CommandGenBase):
+    """Picture filters, quick output, compositing, volume and raw ffmpeg
+    options each change the job as much as anything already in the summary,
+    and none of them showed up there. `print_summary` now guards one row per
+    feature on the ANSWER key, never on the describer's own text -- every
+    describe_* returns the string "none" for a job that never touched it, and
+    "none" is still a non-empty, truthy string.
+    """
+
+    def _summary_for(self, tmp, **features):
+        # The command is built BEFORE the features are added: `quick_output`
+        # reroutes build_ffmpeg_command to an entirely different job shape
+        # (build_quick_output_stages), and none of these five rows read `cmd`
+        # at all, so a plain encode command is all print_summary needs here.
+        answers = self.base_answers(tmp)
+        cmd = self.command_for(answers)
+        answers.update(features)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            FFmWiz.print_summary(answers, cmd)
+        return answers, _plain(buf.getvalue())
+
+    def test_every_new_feature_appears_when_asked_for(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            answers, summary = self._summary_for(
+                tmp,
+                rotate_choice="90cw",
+                quick_output="boomerang",
+                composite_mode="overlay",
+                audio_volume=2.0,
+                raw_ffmpeg_args=["-tune", "film"],
+            )
+        checks = (
+            ("picture filters", FFmWiz.describe_look(answers)),
+            ("quick output", wizard_quick.describe_quick(answers)),
+            ("composite", wizard_composite.describe_composite(answers)),
+            ("volume", wizard_raw.describe_raw({"audio_volume": answers["audio_volume"]})),
+            ("raw options", wizard_raw.describe_raw({"raw_ffmpeg_args": answers["raw_ffmpeg_args"]})),
+        )
+        for label, expected in checks:
+            with self.subTest(label=label):
+                self.assertNotEqual("none", expected)
+                self.assertIn(label, summary)
+                self.assertIn(expected, summary)
+
+    def test_a_plain_encode_shows_none_of_them(self):
+        # The trap this plan warned about: every describe_* returns the
+        # string "none" for an empty job, and "none" is still truthy. A guard
+        # on the describer's OUTPUT would print all five rows right here.
+        with tempfile.TemporaryDirectory() as tmp:
+            _answers, summary = self._summary_for(tmp)
+        for label in ("picture filters", "quick output", "composite", "volume", "raw options"):
+            with self.subTest(label=label):
+                self.assertNotIn(label, summary)
+
+    def test_the_raw_options_row_shows_the_actual_options(self):
+        raw_args = ["-metadata", "title=my film", "-tune", "film"]
+        with tempfile.TemporaryDirectory() as tmp:
+            _answers, summary = self._summary_for(tmp, raw_ffmpeg_args=raw_args)
+        self.assertIn("raw options", summary)
+        self.assertIn(" ".join(raw_args), summary)
+
+    def test_a_volume_of_one_is_not_shown(self):
+        # 1.0 is reachable, not just "unset": parse_volume accepts an
+        # explicit 1.0/100%, and step_audio_volume stores whatever it parsed.
+        # Showing "no change" back to the user would be noise.
+        with tempfile.TemporaryDirectory() as tmp:
+            _answers, summary = self._summary_for(tmp, audio_volume=1.0)
+        self.assertNotIn("volume", summary)
 
 
 if __name__ == "__main__":
