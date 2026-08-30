@@ -20,6 +20,7 @@ from typing import Any
 from ffmwiz import appio
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
+from ffmwiz.support.L01_filters import requested_volume_gain
 
 # ffmpeg's own limits on the `volume` filter are far wider, but a factor
 # outside this range is much more likely to be a typo than an intention: 0.01
@@ -108,12 +109,9 @@ def build_volume_filter(answers: dict[str, Any]) -> list[str]:
     Before the fade and after LoudNorm: LoudNorm normalises to a target, so a
     manual gain applied first is exactly what it would undo.
     """
-    try:
-        factor = float(answers.get("audio_volume") or 1.0)
-    except (TypeError, ValueError):
+    if not requested_volume_gain(answers):
         return []
-    if abs(factor - 1.0) <= 1e-9:
-        return []
+    factor = float(answers["audio_volume"])
     clamped = max(VOLUME_MIN, min(VOLUME_MAX, factor))
     return [f"volume={clamped:g}"]
 

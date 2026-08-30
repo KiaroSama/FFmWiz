@@ -150,10 +150,12 @@ REJECTED (one-line rationale).
   All seven new answer keys are now owned; the schema went from 11
   transformations to 16. Full suite 1989/1989 `OK`.
   **This plan found something bigger than itself** — see the section below.
-  Four tests pin behaviour the builders cannot yet deliver; they carry
-  `@unittest.expectedFailure` with a comment naming the gap and stating it was
-  verified on the unmodified tree. The marker removes itself: when the builder
-  gap is closed each becomes an unexpected success and the suite goes red.
+  Four tests pinned behaviour the builders could not yet deliver, carrying
+  `@unittest.expectedFailure` with a comment naming the gap. **All four are
+  closed now** and the markers are gone; each test guards its fix instead.
+  The self-removing design worked, but only after `tests/run_suite.py` was
+  taught to fail on an unexpected success -- its verdict read `failures or
+  errors` alone, so two markers had been passing unnoticed.
 
 - **008 — DONE, approved.** Branch
   `advisor/008-mode-driver-characterization-tests`, commits `85844d2`,
@@ -268,10 +270,19 @@ consulted at all. No amount of `STAGE_TRANSFORMATIONS` work fixes it; it is a
 builder gap. `raw_ffmpeg_args` likewise has no consumer in the three main
 builders.
 
-Not planned yet, deliberately: the follow-up should be written against the
-executor's measurements rather than inference. Plan 006's four
-`expectedFailure` tests are the standing record that the defect exists, and
-they will go red on their own the moment it is fixed.
+**Fixed 2026-08-31**, written against measurement rather than inference, and
+wider than the note above records: on a PLAIN join -- no reverse behind it to
+compensate -- orientation, colour, denoise, sharpen and both fades were all
+absent from the command. `build_join_encode_command` now emits them itself
+after the concat; calling `build_cpu_video_filter` would have applied crop,
+fps, scale and format a second time.
+
+`raw_ffmpeg_args` turned out to be three defects, not one: the split stage was
+built with a hand-written `owns=("split",)` while `validate_stage_plan` was
+told `("split", "raw_args")`, and neither builder that writes a final file
+could emit the options anyway. The audio gate was a fourth: it asked only
+about speed, cuts and LoudNorm while the chain behind it also emits a fade and
+a gain, so a volume-only job never opened it.
 
 ## Found while writing the plans, not in the original audit
 

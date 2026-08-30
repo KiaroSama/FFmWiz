@@ -402,17 +402,14 @@ class GeometryOwnership(NoLeakedArtifacts, unittest.TestCase):
 
     # Expected to fail until the builder gap is closed: raw_ffmpeg_args never
     # reaches a staged reverse's delivered file. On a Split,
-    # append_single_input_split_outputs returns before build_ffmpeg_command's
-    # own raw_ffmpeg_args append is ever reached. It is not only the Split
-    # path either -- even a no-split reverse job's raw options only make it
-    # onto the throwaway reverse_encode_seg_*.mkv, because the file the user
-    # actually receives is written by reverse_concat_stages' own concat/mux
-    # command, which was never taught to carry raw_ffmpeg_args forward.
-    # Verified on the unmodified tree: identical placement, the options land
-    # on the scratch segment there too and never reach a_Part0N.mkv. When the
-    # builder gap is fixed this test becomes an unexpected success and the
-    # suite goes red -- which is the signal to delete this marker.
-    @unittest.expectedFailure
+    # Three things had to be true for this to pass, and none of them was.
+    # The Split stage was handed a hand-written `owns=("split",)` while
+    # `validate_stage_plan` was told `("split", "raw_args")` -- so the plan was
+    # approved with an owner whose answers had the key stripped. Behind that,
+    # neither builder that writes a final file could emit the options anyway:
+    # `append_single_input_split_outputs` returns before
+    # `build_ffmpeg_command` reaches its own append, and `reverse_concat_stages`
+    # writes the file the user receives with a command that never carried them.
     def test_the_raw_options_reach_only_the_final_stage(self):
         out, commands = self._pipeline(
             "joinraw", separator_points=[2.0],
@@ -428,17 +425,11 @@ class GeometryOwnership(NoLeakedArtifacts, unittest.TestCase):
             "intermediate_profile strips the rate control that a raw -b:v "
             f"would re-impose, and {tagged[0]} is exactly that intermediate")
 
-    # Expected to fail until the builder gap is closed: audio_transform_enabled
-    # (ffmwiz/support/L03.py:159-160) gates the whole audio filter chain behind
-    # audio speed/cut/LoudNorm only, so build_ffmpeg_command never calls
-    # build_audio_transform_filter_complex for a volume-only request and
-    # volume= never appears in any issued command. build_volume_filter itself
-    # is correct -- it is just unreachable, because that gate's own check
-    # (ext04b.py:124-127) never runs. Verified on the unmodified tree:
-    # identical, volume is dropped there too, unrelated to ownership. When the
-    # builder gap is fixed this test becomes an unexpected success and the
-    # suite goes red -- which is the signal to delete this marker.
-    @unittest.expectedFailure
+    # `audio_transform_enabled` gated the whole audio chain on speed, cuts and
+    # LoudNorm, while the chain behind it also emits a fade and a gain -- so a
+    # volume-only request never opened the gate and a correct
+    # `build_volume_filter` was never reached. The gate now covers everything
+    # its own body can emit.
     def test_the_volume_gain_is_applied_once(self):
         out, commands = self._pipeline(
             "joinvolume", separator_points=[2.0], audio_volume=2.0)

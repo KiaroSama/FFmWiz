@@ -252,6 +252,11 @@ def bounded_reverse_plan(answers: dict[str, Any],
     split_owns = ("split", "raw_args") if split_points else ()
     if not split_points:
         reverse_owns = reverse_owns + ("raw_args",)
+    # Every `owns=` below takes one of these tuples. The split stage used to be
+    # given a hand-written `("split",)` instead, so `validate_stage_plan`
+    # approved a plan that owned `raw_args` while the code that built the stage
+    # stripped the key -- the validator and the builder describing different
+    # jobs is worse than either being wrong alone.
     validate_stage_plan([("forward join", forward_owns),
                          ("reverse", reverse_owns),
                          ("split", split_owns)],
@@ -366,7 +371,7 @@ def bounded_reverse_plan(answers: dict[str, Any],
     if split_points:
         split_answers = reverse_stages.stage_answers(
             described(answers, Path(reverse_answers["output_path"]),
-                      reversed_seconds, reverse_answers), owns=("split",))
+                      reversed_seconds, reverse_answers), owns=split_owns)
         # The split reads the REVERSED intermediate, whose subtitle track is
         # what the stage above just wrote. Feed those cues forward rather than
         # extracting from a file that does not exist yet.
@@ -587,7 +592,7 @@ def run_bounded_reverse_pipeline(answers: dict[str, Any]) -> tuple[int, float]:
     # Owns the split alone. Stage 2 already applied every other edit; leaving
     # any of them here would apply it a second (or third) time.
     split_answers = reverse_stages.stage_answers(
-        _single_input_answers(answers, reversed_whole), owns=("split",))
+        _single_input_answers(answers, reversed_whole), owns=split_owns)
     split_answers.pop("split_output_paths", None)
     split_answers.pop("split_part_intervals", None)
     split_answers["separator_points"] = split_points
