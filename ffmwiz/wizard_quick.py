@@ -147,26 +147,17 @@ def step_quick_output(answers: dict[str, Any]) -> None:
         "n, or one of " + paint("gif[=fps[:width]]", Color.LIME) + ", "
         "boomerang, thumb[=SECONDS|HH:MM:SS]; loop=N may be added to any of them"
     )
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Quick output?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
-        # Re-asking must not leave the previous attempt's keys behind, or a
-        # rejected `gif,boomerang` would keep the gif. Same trap the picture
-        # filters have, and the same answer.
-        forget_quick_answers(answers)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            parsed = parse_quick_tokens(value)
-        except ValueError as error:
-            appio.error(str(error))
-            continue
+    def record(value, answers):
+        parsed = parse_quick_tokens(value)
         answers.update(parsed)
         apply_quick_output_ext(answers)
-        print(paint(f"Quick output: {describe_quick(answers)}", Color.LIME))
-        return
+        return parsed
+
+    def describe(answers):
+        return f"Quick output: {describe_quick(answers)}"
+
+    appio.ask_optional(answers, "Quick output?", hint,
+                       forget_quick_answers, record, describe)
 
 
 def apply_quick_output_ext(answers: dict[str, Any]) -> None:
