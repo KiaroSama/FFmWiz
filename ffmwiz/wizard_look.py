@@ -29,6 +29,7 @@ def step_video_look(answers: dict[str, Any]) -> None:
         "hflip, vflip, gray, denoise[=light|medium|heavy], sharpen[=...], "
         "blur[=...], bright=N, contrast=N, sat=N, fadein=N, fadeout=N"
     )
+
     def forget(answers):
         for key in LOOK_ANSWER_KEYS:
             answers.pop(key, None)

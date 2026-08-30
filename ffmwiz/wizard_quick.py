@@ -145,6 +145,7 @@ def step_quick_output(answers: dict[str, Any]) -> None:
         "n, or one of " + paint("gif[=fps[:width]]", Color.LIME) + ", "
         "boomerang, thumb[=SECONDS|HH:MM:SS]; loop=N may be added to any of them"
     )
+
     def record(value, answers):
         parsed = parse_quick_tokens(value)
         answers.update(parsed)

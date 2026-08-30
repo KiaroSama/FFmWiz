@@ -200,13 +200,14 @@ def step_video_composite(answers: dict[str, Any]) -> None:
         "amix; " + "|".join(OVERLAY_CORNERS) + ", margin=N, opacity=N, "
         "size=N, weight=N"
     )
+
     def forget(answers):
         for key in COMPOSITE_ANSWER_KEYS:
             answers.pop(key, None)
 
     def record(value, answers):
-        # `_ask_partner` can raise Back (the user backing out of the file
-        # question); that must reach ask_optional's caller unchanged, which is
+        # `_ask_partner` can send the user 0 (back) out of the file question;
+        # that exception must reach ask_optional's caller unchanged, which is
         # exactly what letting it propagate out of here, uncaught, does.
         chosen = parse_composite_tokens(value)
         answers.update(chosen)
