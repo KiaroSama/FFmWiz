@@ -28,6 +28,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from ffmwiz.core.constants import *  # noqa: F401,F403
+from ffmwiz import wizard_quick  # noqa: F401  (module, so a patch is seen)
 from ffmwiz.core.colors import *  # noqa: F401,F403
 from ffmwiz.core.exceptions import *  # noqa: F401,F403
 from ffmwiz.core.timeline import *  # noqa: F401,F403
@@ -442,6 +443,25 @@ def apply_config_video_options(
             answers.update(parse_look_tokens(look))
         except ValueError as error:
             fail(f"video_look in config.env is not valid: {error}")
+
+    # Quick output changes what the job PRODUCES (GIF/boomerang/thumbnail), so
+    # it is read right after the picture filters -- the same order the
+    # interactive wizard asks them in. `forget_quick_answers` both clears the
+    # answer keys and restores whatever container the format question chose,
+    # which a bare `answers.pop` loop would not do.
+    quick = (config_value(config, "video_quick") or "").strip()
+    wizard_quick.forget_quick_answers(answers)
+    if quick and quick.lower() not in {"n", "no"}:
+        try:
+            parsed = wizard_quick.parse_quick_tokens(quick)
+        except ValueError as error:
+            fail(f"video_quick in config.env is not valid: {error}")
+        else:
+            answers.update(parsed)
+            # Forces the output container (e.g. .gif), exactly as the prompt
+            # does. Skipping this would record quick_output correctly and
+            # still write the wrong file.
+            wizard_quick.apply_quick_output_ext(answers)
 
     if not force_video_options and not video_reencode_options_applicable(answers):
         return

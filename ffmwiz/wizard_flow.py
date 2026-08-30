@@ -127,7 +127,6 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         "video_quick": ("video_quick",),
         "audio_volume": ("audio_volume",),
         "raw_ffmpeg_args": ("raw_ffmpeg_args",),
-        "video_composite": ("video_composite",),
         "video_bitrate": ("video_bitrate_kbps",),
         "nvenc_multipass": ("nvenc_multipass",),
         "cpu_two_pass": ("cpu_two_pass",),
@@ -209,12 +208,16 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         # Compositing is a filter graph too, so it rides the same re-encode
         # gate -- widened, because an audio-only output has no picture to
         # composite but can still take a music bed under its own track.
+        # Prompt-only, even on a config run: `_ask_partner` is a `while True`
+        # loop that recovers from every failure (missing file, same as the
+        # main input, no usable streams) by re-asking, which a non-interactive
+        # run has nobody to answer. There is no config_mode/cfg_has clause
+        # here on purpose, and no `video_composite` config key either.
         wizard_base.Step("video_composite",
                     lambda a: ((video_reencode_options_applicable(a)
                                 or bool(a.get("audio_streams")))
                                and not a.get("_unified_video_editor_used")
-                               and not a.get("_unified_video_editor_declined")
-                               and (not config_mode or cfg_has("video_composite"))),
+                               and not a.get("_unified_video_editor_declined")),
                     wizard_composite.step_video_composite),
         # Volume rides the AUDIO gate, not the video one: an audio-only
         # output has no picture but still has a level to set. Both follow

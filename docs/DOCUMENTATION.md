@@ -221,7 +221,9 @@ Two questions are **never** auto-skipped, however complete your config is:
 - the final **"Start FFmpeg now?"** confirmation.
 
 The join-inputs, cuts, and audio-cut questions are likewise always asked, because they have
-no `config.env` equivalent.
+no `config.env` equivalent. The compositing question (`overlay`/`pip`/`hstack`/`vstack`/`mix`,
+formerly the `video_composite` key) is also always asked interactively, even on a config run,
+because it needs to probe a second input file and has nobody to answer for it non-interactively.
 
 `input_path` is **not** required. If it is set, the file is loaded and validated before the
 first question (a path that does not exist stops the run with a clear error); if it is blank,
@@ -278,7 +280,6 @@ Every key is also documented inline in `config.env.example`.
 | `fps` | integer or `n` | `n` | Output frame rate. |
 | `video_look` | filter list or `n` | `n` | Rotate, mirror, colour, denoise, sharpen/blur, fades. |
 | `video_quick` | `gif` / `boomerang` / `thumb` / `loop=N` / `n` | `n` | Quick outputs; see below. |
-| `video_composite` | `overlay` / `pip` / `hstack` / `vstack` / `mix` / `n` | `n` | Combine a second input. |
 | `audio_volume` | factor, `150%`, `+6dB` or `n` | `n` | Audio gain, 0.01-10.0. |
 | `raw_ffmpeg_args` | ffmpeg options or `n` | `n` | Your own options, added last. |
 | `audio_tracks` | 0 / 0,1,2 / all / d / e / de | `de` | Which audio streams to keep. |
@@ -1540,18 +1541,6 @@ long input is still segmented against the frame budget. `thumb` extracts one
 frame -- `thumbnail_seconds` picks the moment, `thumbnail_ext` the format
 (default `png`). `loop=N` repeats the input N times with `-stream_loop`, which
 is an INPUT option and so sits before `-i`.
-
-**`video_composite`** — Combine a SECOND input with the first, or `n`. One of
-`overlay` (a logo or watermark at its own size), `pip` (a second video scaled
-down), `hstack` / `vstack` (the two side by side or stacked), or `mix` (mix a
-second audio source under the first). Corners are `tl`, `tr`, `bl`, `br` or
-`center` (default `br`) with `composite_margin` pixels of inset (default 10);
-`composite_opacity` fades the overlay and `composite_scale` sizes the
-picture-in-picture (default 0.25). For `mix`, `composite_audio_weight` sets how
-far the second source sits under the first (default 0.3). `hstack` and `vstack`
-scale the inputs to a common edge first and say so rather than letterboxing in
-silence. This is not Join: Join plays inputs one after another, these play them
-at the same time.
 
 **`audio_volume`** — Audio gain as a factor (`1.5`), a percentage (`150%`) or
 decibels (`+6dB`), or `n`. Accepted range is 0.01 to 10.0, about -40 dB to

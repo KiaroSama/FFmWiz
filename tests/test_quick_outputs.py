@@ -164,6 +164,58 @@ class TheStepWritesTheKeysTheBuildersRead(unittest.TestCase):
         self.assertIn("wizard_quick.step_quick_output", source)
 
 
+class TheConfigKeyReachesTheSameAnswers(unittest.TestCase):
+    """`video_quick`, documented in Appendix B.
+
+    Mode 2 never asks the question once its config key is filled, so the
+    config key is the ONLY way a non-interactive run reaches it. A key that
+    is documented but not read is worse than one that does not exist.
+    """
+
+    def _applied(self, settings):
+        # `config_value` reads `config["settings"]`, not the top level.
+        config = {"settings": settings}
+        from ffmwiz.support import ext08
+        answers = {
+            "video_streams": [{"codec_type": "video", "width": 640,
+                               "height": 480, "pix_fmt": "yuv420p"}],
+            "audio_streams": [], "format": {"duration": "10.0"},
+            "input_path": FFmWiz.Path("x.mkv"), "packet_sizes": {},
+            "output_ext": "mp4",
+        }
+        real = FFmWiz.services.get_packet_sizes
+        FFmWiz.services.get_packet_sizes = lambda _a: {}
+        try:
+            ext08.apply_config_video_options(answers, config,
+                                             force_video_options=True)
+        finally:
+            FFmWiz.services.get_packet_sizes = real
+        return answers
+
+    def test_video_quick_from_config_reaches_the_answers(self):
+        applied = self._applied({"video_quick": "gif"})
+        self.assertEqual("gif", applied["quick_output"])
+
+    def test_video_quick_also_forces_the_output_container(self):
+        # Setting `quick_output` alone is not the whole feature: the prompt
+        # also forces the container, or the job encodes the wrong file type.
+        applied = self._applied({"video_quick": "gif"})
+        self.assertEqual("gif", applied["output_ext"])
+
+    def test_an_absent_video_quick_leaves_the_job_alone(self):
+        applied = self._applied({})
+        self.assertNotIn("quick_output", applied)
+        self.assertEqual("mp4", applied["output_ext"])
+
+    def test_an_invalid_video_quick_in_config_fails_loudly(self):
+        # `fail()` prints before it exits; keep that off the suite's console.
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self._applied({"video_quick": "sideways"})
+
+
 class TheCommandsHaveTheShapeTheyHaveToHave(NoLeakedArtifacts, unittest.TestCase):
 
     def _answers(self, tmp, **extra):
