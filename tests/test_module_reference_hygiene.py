@@ -222,3 +222,81 @@ class ReExportedNamesDoNotDependOnImportOrder(unittest.TestCase):
                     self.assertEqual(
                         expected, self._all_after_importing(leaf, facade),
                         f"{facade}.__all__ shrinks when {leaf} is imported first")
+
+
+class EveryConfigDrivenSkipHasAReader(unittest.TestCase):
+    """A skip-map key that nothing reads is not a shortcut, it is silent data
+    loss: `cfg_has(key)` skips the question and the value the user wrote in
+    `config.env` is never parsed. `video_quick`, `audio_volume` and
+    `raw_ffmpeg_args` were found in exactly this state -- documented, wired
+    into the skip-map, and never read. `video_composite` was found the same
+    way and made prompt-only instead of wired: its interactive step re-asks
+    on every failure, which a non-interactive config run has nobody to answer.
+
+    This walks the ACTUAL `skip_map` in `wizard_flow.run_wizard` (not a copy
+    of it, which would drift the day someone edits one without the other) and
+    the ACTUAL `config_value(config, "...")` call sites across the package,
+    so the next key added to one without the other fails here instead of
+    shipping a documented setting that does nothing.
+    """
+
+    # Keys allowed to stay in the skip-map with no `config_value` reader,
+    # because the interactive step cannot be reproduced by a bare string
+    # parse -- key -> one-line reason. Empty today: every current skip-map key
+    # has a reader. Add an entry here only after confirming there is really no
+    # way to wire it (a step that recovers from failure by re-asking, with no
+    # way to fail loudly instead, is the standard `video_composite` failed --
+    # it was removed from the skip-map entirely rather than allowlisted here).
+    # Prefer removal from the skip-map over growing this list.
+    PROMPT_ONLY_ALLOWLIST: dict[str, str] = {}
+
+    def _skip_map_config_keys(self) -> set[str]:
+        from ffmwiz import wizard_flow
+        import inspect
+        tree = ast.parse(inspect.getsource(wizard_flow.run_wizard))
+        keys: set[str] = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == "skip_map"):
+                continue
+            for value_node in node.value.values:
+                if isinstance(value_node, ast.Tuple):
+                    for elt in value_node.elts:
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                            keys.add(elt.value)
+        return keys
+
+    def _config_value_reads(self) -> set[str]:
+        read: set[str] = set()
+        for path in sorted(PACKAGE.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "config_value"):
+                    continue
+                if (len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                        and isinstance(node.args[1].value, str)):
+                    read.add(node.args[1].value)
+        return read
+
+    def test_the_sweep_finds_the_skip_map_and_plenty_of_readers(self):
+        # Guard the guard: an extraction that silently found nothing would let
+        # the real assertion below pass for the wrong reason.
+        skip_keys = self._skip_map_config_keys()
+        self.assertGreater(len(skip_keys), 15, sorted(skip_keys))
+        self.assertIn("video_look", skip_keys)
+        reads = self._config_value_reads()
+        self.assertGreater(len(reads), 15, sorted(reads))
+        self.assertIn("video_look", reads)
+
+    def test_every_skip_map_key_has_a_reader_or_is_allowlisted(self):
+        skip_keys = self._skip_map_config_keys()
+        reads = self._config_value_reads()
+        missing = sorted(skip_keys - reads - set(self.PROMPT_ONLY_ALLOWLIST))
+        self.assertEqual(
+            [], missing,
+            "skip-map key(s) with no config_value(config, \"...\") reader and "
+            "no PROMPT_ONLY_ALLOWLIST entry: " + ", ".join(missing))
