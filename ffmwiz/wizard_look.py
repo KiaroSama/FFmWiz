@@ -21,8 +21,6 @@ from ffmwiz.core.colors import Color
 from ffmwiz.core.constants import ROTATE_FILTERS
 from ffmwiz.support.L01_filters import (LOOK_ANSWER_KEYS, describe_look,
                                         parse_look_tokens)
-from ffmwiz.core.exceptions import Back
-from ffmwiz.support.L00_misc_b import is_back_value
 
 def step_video_look(answers: dict[str, Any]) -> None:
     hint = (

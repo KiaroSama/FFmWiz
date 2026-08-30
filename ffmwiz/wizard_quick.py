@@ -25,9 +25,7 @@ from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
 from ffmwiz.core.constants import (GIF_DEFAULT_FPS, GIF_DEFAULT_WIDTH,
                                    QUICK_ANSWER_KEYS, THUMBNAIL_DEFAULT_EXT)
-from ffmwiz.core.exceptions import Back
 from ffmwiz.support.L00_misc import parse_colon_duration_seconds
-from ffmwiz.support.L00_misc_b import is_back_value
 
 # The container each mode forces. A GIF that came out .mp4 and a still frame
 # that came out .mkv are both a broken job, so the mode owns the extension
