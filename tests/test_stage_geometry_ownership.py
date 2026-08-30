@@ -337,12 +337,9 @@ class GeometryOwnership(NoLeakedArtifacts, unittest.TestCase):
                            "the joined picture lost its bands entirely")
 
     # ---- plan 006: orientation, look, fade, volume, raw_args -------------
-    # Expected to fail until the builder gap is closed: build_join_encode_command
-    # never calls build_cpu_video_filter, so a rotation on a joined job is
-    # dropped before ownership is even consulted. Verified on the unmodified
-    # tree. When that is fixed this test becomes an unexpected success and the
-    # suite goes red -- which is the signal to delete this marker.
-    @unittest.expectedFailure
+    # The marker this carried is gone: `build_join_encode_command` now emits
+    # the orientation itself, after the concat, so the forward join can express
+    # the geometry it owns.
     def test_a_joined_reverse_split_rotates_exactly_once(self):
         out, _commands = self._pipeline(
             "joinrotate", separator_points=[2.0], rotate_choice="90cw")
@@ -359,17 +356,9 @@ class GeometryOwnership(NoLeakedArtifacts, unittest.TestCase):
                 (int(stream["width"]), int(stream["height"])),
                 f"{part.name}: expected the once-rotated {HEIGHT}x{WIDTH}")
 
-    # Expected to fail until the builder gap is closed: build_join_encode_command
-    # never calls build_cpu_video_filter, so transpose= never appears in any
-    # issued command on a joined job -- the forward join "owns" orientation but
-    # cannot express it, and ownership correctly stripped it from reverse and
-    # split. Verified on the unmodified tree, where the SAME missing call
-    # produces a different symptom: orientation is never owned by anyone
-    # there, so reverse AND split both apply it, and the doubled rotation
-    # shows up as transpose= in two stages instead of zero. When the builder
-    # gap is fixed this test becomes an unexpected success and the suite goes
-    # red -- which is the signal to delete this marker.
-    @unittest.expectedFailure
+    # The ownership half of the same fix: the forward join owns orientation and
+    # now emits it, so `transpose=` appears in that stage and -- because
+    # `stage_answers` stripped the keys -- in no other.
     def test_the_rotation_appears_in_its_owner_stage_and_nowhere_else(self):
         _out, commands = self._pipeline(
             "joinrotatecmd", separator_points=[2.0], rotate_choice="90cw")

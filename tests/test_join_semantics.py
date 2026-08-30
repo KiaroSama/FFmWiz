@@ -178,5 +178,78 @@ class JoinPromiseHonesty(unittest.TestCase):
         self.assertNotIn("Subtitles:", notes)
 
 
+class JoinPictureFilters(unittest.TestCase):
+    """A plain join -- no reverse, no split -- must still apply the picture
+    edits the user asked for.
+
+    `build_join_encode_command` normalises every input with its own chain
+    (crop, fps, scale, pad, format) and then concatenates. It never called
+    `build_cpu_video_filter`, and there was no second stage behind it to make
+    up the difference, so on this path orientation, colour, denoise, sharpen
+    and BOTH fades were built into no command at all: answered, summarised,
+    and silently absent from the output.
+
+    A staged job hid this. There, ownership hands `look` and `fade` to the
+    reverse stage, which does call the single-input builder -- so the only
+    symptom the staged tests could ever see was the dropped rotation. These
+    tests cover the path where nothing else can compensate.
+    """
+
+    def _graph(self, **extra):
+        with tempfile.TemporaryDirectory() as tmp:
+            items = [make_item(Path(tmp) / "a.mkv"), make_item(Path(tmp) / "b.mkv")]
+            graph, _text, _notes = _build(_answers(tmp, items, **extra), items, tmp)
+        return graph
+
+    def test_a_rotation_reaches_the_command(self):
+        self.assertIn("transpose=1", self._graph(rotate_choice="90cw"))
+
+    def test_both_flips_reach_the_command(self):
+        graph = self._graph(flip_horizontal=True, flip_vertical=True)
+        self.assertIn("hflip", graph)
+        self.assertIn("vflip", graph)
+
+    def test_denoise_reaches_the_command(self):
+        self.assertIn("hqdn3d", self._graph(denoise_level="medium"))
+
+    def test_a_colour_adjustment_reaches_the_command(self):
+        self.assertIn("saturation=0", self._graph(adjust_grayscale=True))
+
+    def test_both_fades_reach_the_command(self):
+        graph = self._graph(fade_in_seconds=1.0, fade_out_seconds=1.0)
+        self.assertIn("fade=t=in", graph)
+        self.assertIn("fade=t=out", graph)
+
+    def test_a_plain_join_adds_none_of_them_unasked(self):
+        # The other direction, and the one that keeps the filters honest: a
+        # join with no picture answers must build no picture stage at all.
+        graph = self._graph()
+        for unwanted in ("transpose=", "hflip", "vflip", "hqdn3d", "eq=", "fade=", "[jvpic]"):
+            self.assertNotIn(unwanted, graph, unwanted)
+
+    def test_the_rotation_lands_after_the_common_scale(self):
+        # Order is the whole reason this is applied once, after the concat,
+        # rather than per input. Every input is normalised INTO one landscape
+        # canvas; rotating before that would fit a portrait frame into it and
+        # pillarbox the picture instead of standing the output on its side.
+        graph = self._graph(rotate_choice="90cw")
+        self.assertLess(graph.index("concat=n=2"), graph.index("transpose=1"),
+                        "the rotation must follow the concat, not precede it")
+
+    def test_the_fade_out_is_timed_against_the_sped_up_output(self):
+        # A fade-out measured from the SOURCE length lands past the end of a
+        # faster output and never renders. Two 10s inputs at 2x are a 10s
+        # output, so a 2s fade-out starts at 8s -- not at 18s.
+        graph = self._graph(fade_out_seconds=2.0,
+                            video_speed_enabled=True, video_speed_factor=2.0)
+        self.assertIn("fade=t=out:st=8.000", graph)
+
+    def test_the_fade_out_is_timed_against_the_whole_joined_timeline(self):
+        # And without a speed change it is the SUM of the inputs, not the
+        # first one: a fade timed from input 1 alone would land halfway.
+        graph = self._graph(fade_out_seconds=2.0)
+        self.assertIn("fade=t=out:st=18.000", graph)
+
+
 if __name__ == "__main__":
     unittest.main()
