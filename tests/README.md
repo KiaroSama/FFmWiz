@@ -57,5 +57,8 @@ Some tests self-skip when a capability is missing: real ffmpeg/ffprobe on `PATH`
 ffmpeg and numpy and passes `--require ffmpeg --require numpy` (plus `--require
 pyside6` in the GUI job), so it **fails** if a test skipped for a reason that job
 should have provided; GPU and symlink skips stay allowed.
-Locally, a run without ffmpeg is green with ~20 fewer tests — check the skip count
-before trusting a green local run.
+Without ffmpeg on `PATH`, a local run is a different run: hundreds of tests
+self-skip, so a green result there proves far less than it looks like it does.
+The check is `python tests/run_suite.py --require ffmpeg --require numpy` —
+the same gate `.github/workflows/python-smoke.yml` uses — which fails the run
+when a suite skipped for a capability the run should have provided.
