@@ -20,8 +20,6 @@ from ffmwiz.core.colors import Color
 from ffmwiz.core.constants import ROTATE_FILTERS
 from ffmwiz.support.L01_filters import (LOOK_ANSWER_KEYS, describe_look,
                                         parse_look_tokens)
-from ffmwiz.core.exceptions import Back
-from ffmwiz.support.L00_misc_b import is_back_value
 
 def step_video_look(answers: dict[str, Any]) -> None:
     hint = (
@@ -30,24 +28,20 @@ def step_video_look(answers: dict[str, Any]) -> None:
         "hflip, vflip, gray, denoise[=light|medium|heavy], sharpen[=...], "
         "blur[=...], bright=N, contrast=N, sat=N, fadein=N, fadeout=N"
     )
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Extra picture filters?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
-        # Re-asking must not leave the previous attempt's keys behind, or a
-        # rejected `sharpen,blur` would keep the sharpen on the second pass.
+
+    def forget(answers):
         for key in LOOK_ANSWER_KEYS:
             answers.pop(key, None)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            answers.update(parse_look_tokens(value))
-        except ValueError as error:
-            appio.error(str(error))
-            continue
-        print(paint(f"Picture filters: {describe_look(answers)}", Color.LIME))
-        return
+
+    def record(value, answers):
+        answers.update(parse_look_tokens(value))
+        return True
+
+    def describe(answers):
+        return f"Picture filters: {describe_look(answers)}"
+
+    appio.ask_optional(answers, "Extra picture filters?", hint,
+                       forget, record, describe)
 
 
 __all__ = ["parse_look_tokens", "describe_look", "step_video_look"]

@@ -20,8 +20,6 @@ from typing import Any
 from ffmwiz import appio
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
-from ffmwiz.core.exceptions import Back
-from ffmwiz.support.L00_misc_b import is_back_value
 
 # ffmpeg's own limits on the `volume` filter are far wider, but a factor
 # outside this range is much more likely to be a typo than an intention: 0.01
@@ -134,46 +132,45 @@ def step_audio_volume(answers: dict[str, Any]) -> None:
     hint = ("n, or a factor / percentage / decibels like "
             + paint("1.5", Color.LIME) + ", " + paint("150%", Color.LIME)
             + ", " + paint("+6dB", Color.LIME))
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Change the audio volume?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
+
+    def forget(answers):
         answers.pop("audio_volume", None)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            answers["audio_volume"] = parse_volume(value)
-        except ValueError as error:
-            appio.error(str(error))
-            continue
-        print(paint(f"Audio volume: {answers['audio_volume']:g}x", Color.LIME))
-        return
+
+    def record(value, answers):
+        answers["audio_volume"] = parse_volume(value)
+        return True
+
+    def describe(answers):
+        return f"Audio volume: {answers['audio_volume']:g}x"
+
+    appio.ask_optional(answers, "Change the audio volume?", hint,
+                       forget, record, describe)
 
 
 def step_raw_ffmpeg_args(answers: dict[str, Any]) -> None:
     hint = ("n, or your own ffmpeg options, e.g. "
             + paint('-metadata title="My film" -tune film', Color.LIME))
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Extra ffmpeg options?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
+
+    def forget(answers):
         answers.pop("raw_ffmpeg_args", None)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            parsed = parse_raw_arguments(value)
-        except ValueError as error:
-            appio.error(str(error))
-            continue
+
+    def record(value, answers):
+        parsed = parse_raw_arguments(value)
         if not parsed:
-            return
+            return parsed
         answers["raw_ffmpeg_args"] = parsed
+        # Printed here rather than left to the helper's single confirmation
+        # line: the warning must come BEFORE "Extra options: ..." so the user
+        # sees why the command deserves a second look before what was added.
         print(paint("These go in unchanged, just before the output path. "
                     "Check the command below before starting.", Color.YELLOW))
-        print(paint("Extra options: " + " ".join(parsed), Color.LIME))
-        return
+        return parsed
+
+    def describe(answers):
+        return "Extra options: " + " ".join(answers["raw_ffmpeg_args"])
+
+    appio.ask_optional(answers, "Extra ffmpeg options?", hint,
+                       forget, record, describe)
 
 
 __all__ = ["VOLUME_MIN", "VOLUME_MAX", "RESERVED_RAW_OPTIONS",

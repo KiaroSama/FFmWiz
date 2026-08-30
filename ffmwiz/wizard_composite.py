@@ -29,7 +29,8 @@ from ffmwiz import appio
 from ffmwiz import services
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
-from ffmwiz.core.constants import (COMPOSITE_DEFAULT_CORNER,
+from ffmwiz.core.constants import (COMPOSITE_ANSWER_KEYS,
+                                   COMPOSITE_DEFAULT_CORNER,
                                    COMPOSITE_DEFAULT_MARGIN,
                                    COMPOSITE_DEFAULT_MIX_WEIGHT,
                                    COMPOSITE_DEFAULT_PIP_SCALE,
@@ -39,15 +40,6 @@ from ffmwiz.support.L00_misc_b import (is_back_value,
                                        looks_like_generated_output_file)
 from ffmwiz.support.L00_paths import paths_same
 from ffmwiz.support.L02 import terminal_path
-
-# Every key this step may write. Listed once so a re-ask can clear the previous
-# attempt instead of leaving half of it behind.
-COMPOSITE_ANSWER_KEYS = (
-    "composite_mode", "composite_corner", "composite_margin",
-    "composite_opacity", "composite_scale", "composite_path",
-    "composite_item", "composite_audio_mix", "composite_audio_weight",
-    "composite_audio_path", "composite_audio_item",
-)
 
 # Spelling -> picture mode. `sbs` because that is what the request is usually
 # called, `hstack` because that is what FFmpeg calls the filter.
@@ -208,22 +200,16 @@ def step_video_composite(answers: dict[str, Any]) -> None:
         "amix; " + "|".join(OVERLAY_CORNERS) + ", margin=N, opacity=N, "
         "size=N, weight=N"
     )
-    while True:
-        value = appio.ask_raw(
-            appio.question_prompt(answers, "Combine with another input?", hint, "n"))
-        if is_back_value(value):
-            raise Back()
-        # A rejected attempt must leave nothing behind, or `overlay,vstack`
-        # would keep the overlay's corner on the second pass.
+
+    def forget(answers):
         for key in COMPOSITE_ANSWER_KEYS:
             answers.pop(key, None)
-        if not value or value.strip().lower() in {"n", "no"}:
-            return
-        try:
-            chosen = parse_composite_tokens(value)
-        except ValueError as error:
-            appio.error(str(error))
-            continue
+
+    def record(value, answers):
+        # `_ask_partner` can send the user 0 (back) out of the file question;
+        # that exception must reach ask_optional's caller unchanged, which is
+        # exactly what letting it propagate out of here, uncaught, does.
+        chosen = parse_composite_tokens(value)
         answers.update(chosen)
         if chosen.get("composite_mode"):
             item = _ask_partner(
@@ -237,8 +223,13 @@ def step_video_composite(answers: dict[str, Any]) -> None:
                 "music or narration to lay under the main audio", True)
             answers["composite_audio_item"] = item
             answers["composite_audio_path"] = item["path"]
-        print(paint(f"Compositing: {describe_composite(answers)}", Color.LIME))
-        return
+        return chosen
+
+    def describe(answers):
+        return f"Compositing: {describe_composite(answers)}"
+
+    appio.ask_optional(answers, "Combine with another input?", hint,
+                       forget, record, describe)
 
 
 __all__ = ["COMPOSITE_ANSWER_KEYS", "parse_composite_tokens",
