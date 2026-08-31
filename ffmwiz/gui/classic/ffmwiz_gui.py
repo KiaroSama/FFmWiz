@@ -2,16 +2,24 @@
 # -*- coding: utf-8 -*-
 """FFmWiz classic PySide6 GUI - subprocess entry point.
 
-The GUI implementation is split across sibling modules for file size:
-  gui_common          - imports, palette/QSS, logging, icons, time/history
-                        helpers, shared state and the main() dispatcher
-  gui_editor_cut      - build_cut_editor
-  gui_editor_crop     - build_crop_editor
-  gui_editor_speed    - build_speed_editor (video/audio speed + reverse)
+The GUI implementation is split across sibling modules for file size. Each
+editor owns a builder and delegates its bulk to `_`-suffixed siblings:
+  gui_editor_cut      - build_cut_editor        (+ _layout, _widgets, _input)
+  gui_editor_crop     - build_crop_editor       (+ _canvas, _layout)
+  gui_editor_speed    - build_speed_editor      (+ _transport, _reverse)
   gui_editor_audio    - build_audio_cut_editor, build_audio_transform_editor
-  gui_editor_unified  - build_unified_video_editor
-  gui_editor_unified_canvas   - preview canvas + frame-extract worker
-  gui_editor_unified_timeline - timeline strip
+                                                (+ _waveform)
+  gui_editor_unified  - build_unified_video_editor, the window shell
+                        (+ _layout, _player, _edits, _input, _canvas,
+                           _timeline, _timeline_input)
+
+`gui_common`, `gui_style` and `gui_geometry` sit one level up, in ffmwiz/gui/,
+because the modern QtQuick engine reads them too.
+
+Only the modules in _MODULES below receive the assembled namespace. A sibling
+that is NOT listed there gets nothing injected -- and `from gui_common import *`
+skips underscore names -- so those modules import their shared helpers by name
+instead, and the parent passes in anything reachable only through the assembly.
 
 This file only wires the modules together and launches main(). Because the
 modules call each other freely at runtime, the fully assembled namespace is

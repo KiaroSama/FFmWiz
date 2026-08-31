@@ -599,6 +599,38 @@ def main() -> int:
     bridge = Bridge(app, request)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", bridge)
+    # The palette as a CONTEXT property, not just a window property. The reusable
+    # controls live in their own .qml files now, and a separate file cannot see
+    # the root window's `theme` -- but every file sees the root context. One
+    # source, still `gui_style.PALETTE`, reachable from all of them.
+    # `Palette.col(key, fallback)` mirrors the window's own `col()` so the
+    # extracted controls read exactly what they read inline. A plain dict cannot
+    # carry a method, so a tiny QObject does -- and it keeps the SAME fallback
+    # contract the palette guard in tests/test_qml_waveform.py enforces.
+    class _Palette(QObject):
+        @Slot(str, str, result=str)
+        def col(self, key: str, fallback: str) -> str:
+            return _PALETTE.get(key, fallback)
+
+        @Slot(str, str, float, result=str)
+        def colA(self, key: str, fallback: str, a: float) -> str:
+            base = _PALETTE.get(key, fallback)
+            if not (isinstance(base, str) and base.startswith("#") and len(base) == 7):
+                return base
+            return "#%02x%s" % (max(0, min(255, int(round(a * 255)))), base[1:])
+
+    # Metrics, so the split files keep the one 4px grid rather than each
+    # inventing its own numbers again.
+    # A plain dict, not a QObject: QML reads a dict's keys as properties, and
+    # `setProperty` on a QObject creates DYNAMIC properties that QML cannot see
+    # at all -- every `Tok.sp2` came back undefined.
+    _TOKENS = {"sp0": 2, "sp1": 4, "sp2": 8, "sp3": 12, "sp4": 16, "sp5": 24,
+               "radSm": 2, "radMd": 3, "fsMicro": 10, "fsBody": 11, "fsLead": 12,
+               "fsTitle": 14, "rowSm": 22, "rowMd": 26, "rowLg": 32}
+
+    _palette_obj = _Palette()
+    engine.rootContext().setContextProperty("Skin", _palette_obj)   # not "Palette": QtQuick owns that name
+    engine.rootContext().setContextProperty("Tok", _TOKENS)
 
     qml_path = _THIS_DIR / "qml" / "UnifiedEditor.qml"
     if not qml_path.exists():

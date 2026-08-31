@@ -31,7 +31,12 @@ def _classic_or_shared(name: str) -> Path:
     return inside if inside.exists() else _GUI_DIR / name
 
 
-_QML = (_GUI_DIR / "modern" / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+# Every .qml of the modern engine, not just its entry file: the reusable
+# controls were split into siblings, and a single-file read would have quietly
+# stopped policing them.
+_QML_DIR = _GUI_DIR / "modern" / "qml"
+_QML = "\n".join(path.read_text(encoding="utf-8")
+                 for path in sorted(_QML_DIR.glob("*.qml")))
 
 # The classic unified editor spans several modules (the builder plus its
 # extracted canvas/timeline widgets). Glob them so these token assertions follow
