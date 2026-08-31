@@ -309,6 +309,15 @@ class EveryBuilderThatRetimesAlsoStatesItsTiming(unittest.TestCase):
     # what turns it into a command, so that is where the option must appear.
     # Mapping, not a bare list: naming the consumer is what keeps this from
     # being an exemption.
+    #
+    # This module also writes the two GIF commands, and those correctly carry
+    # NO -fps_mode. Measured: the GIF chain is
+    #     setpts=(PTS-STARTPTS)/2,fps=15,scale=480:-1:flags=lanczos
+    # -- the `fps=` filter sits AFTER the retiming and regenerates the cadence
+    # outright, so 'keep the input timestamps' would contradict it. The plain
+    # encode chain has no such filter (setpts,format=yuv420p), which is why
+    # wizard_build must state the option there. Do not 'fix' the GIF path by
+    # adding it.
     FILTER_ONLY = {"ffmwiz/wizard_build_filters.py": ("ffmwiz/wizard_build.py",)}
 
     def _source(self, relative):
