@@ -13,12 +13,12 @@ RowLayout {
     Layout.fillWidth: true
     spacing: 8
 
-    Label { text: "Zoom"; color: win.col("text_mute", "#8891b4"); font.pixelSize: Tok.fsBody }
+    Label { text: "Timeline zoom"; color: win.col("text_mute", "#8891b4"); font.pixelSize: Tok.fsBody }
     PadButton { Layout.preferredWidth: 30; text: "−"; onClicked: { win.zoomAt(0.8, cti, 0.5); timelinePanel.canvas.requestPaint() } }
     Track {
         Layout.preferredWidth: 150
         from: 0; to: 100
-        fillColor: win.col("green_text", "#56d364")
+        fillColor: win.col("accent", "#3b82f6")
         value: 100 * Math.log(Math.max(1, win.zoom)) / Math.log(400)
         onMoved: {
             win.zoom = Math.max(1, Math.pow(400, value / 100))
@@ -39,14 +39,14 @@ RowLayout {
     // The second slider the classic has and this bar did not: scrolling the
     // visible window when the timeline is zoomed in. Without it a zoomed view
     // could only be moved by dragging the canvas.
-    Label { text: "View"; color: win.col("text_mute", "#8891b4"); font.pixelSize: Tok.fsBody }
+    Label { text: "Timeline view"; color: win.col("text_mute", "#8891b4"); font.pixelSize: Tok.fsBody }
     Track {
         Layout.fillWidth: true
         Layout.minimumWidth: 120
         from: 0; to: 1
         enabled: win.zoom > 1.0001
         opacity: enabled ? 1.0 : 0.45
-        fillColor: win.col("accent", "#3b82f6")
+        fillColor: win.col("green_text", "#56d364")
         value: {
             var hidden = Math.max(0, win.totalDuration - win.viewSpan())
             return hidden <= 0 ? 0 : Math.min(1, Math.max(0, win.viewStart / hidden))
@@ -57,12 +57,4 @@ RowLayout {
         }
     }
 
-    Rule { Layout.preferredWidth: 1; Layout.fillWidth: false
-           Layout.preferredHeight: 16; Layout.alignment: Qt.AlignVCenter
-           Layout.leftMargin: Tok.sp1; Layout.rightMargin: Tok.sp1 }
-
-    Label { text: "Volume"; color: win.col("text_mute", "#8891b4"); font.pixelSize: Tok.fsBody }
-    PadButton { Layout.preferredWidth: 62; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
-    Track { Layout.preferredWidth: 96; from: 0; to: 1; value: win.volume
-            onMoved: { win.volume = value; win.muted = false } }
 }

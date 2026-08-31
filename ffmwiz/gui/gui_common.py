@@ -113,6 +113,39 @@ def _gui_write_log(level: str, message: str) -> bool:
     return False
 
 
+
+def load_screenshot_fonts() -> list[str]:
+    """Register real fonts when running under the `offscreen` platform.
+
+    Measured on Windows: `QT_QPA_PLATFORM=offscreen` reports **zero** font
+    families (the normal `windows` platform reports 2390), so every glyph
+    renders as an empty box and a screenshot cannot be used to judge type,
+    label widths or anything that depends on text metrics. `addApplicationFont`
+    does work there, so naming the files by path restores real text.
+
+    Called only on the screenshot paths, and only under `offscreen` -- the real
+    editor already has the system font database.
+    """
+    if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+        return []
+    try:
+        from PySide6.QtGui import QFontDatabase
+    except Exception:  # noqa: BLE001
+        return []
+    loaded: list[str] = []
+    root = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    # seguisym carries the transport glyphs the UI labels use; without it they
+    # render as boxes and a screenshot cannot show whether a button reads right.
+    for name in ("segoeui.ttf", "segoeuib.ttf", "consola.ttf", "arial.ttf",
+                 "seguisym.ttf", "seguiemj.ttf"):
+        path = root / name
+        if not path.exists():
+            continue
+        index = QFontDatabase.addApplicationFont(str(path))
+        if index >= 0:
+            loaded.extend(QFontDatabase.applicationFontFamilies(index))
+    return loaded
+
 def _gui_log_debug(message: str, *, force: bool = False) -> None:
     debug_enabled = _debug_enabled()
     if not force and not debug_enabled:
@@ -507,6 +540,9 @@ def main() -> int:
         return 3
 
     app = QApplication.instance() or QApplication(sys.argv)
+    if os.environ.get('FFMWIZ_GUI_SHOT'):
+        _fonts = load_screenshot_fonts()
+        _gui_log_debug(f'screenshot fonts: {_fonts}', force=True)
     # PREVIEW: the native Windows style is pathologically slow on some machines
     # (~30ms per widget create/polish -> multi-second startup). Fusion is pure-Qt,
     # avoids the native theme calls, and our heavy QSS makes it look the same — but
