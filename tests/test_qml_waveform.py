@@ -169,6 +169,26 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
                          "Qt renders `currentColor` as black, which is invisible on the "
                          f"dark surfaces these sit on: {black}")
 
+    def test_both_engines_honour_start_maximized(self):
+        """One request key, two engines, one meaning.
+
+        `guibridge_b` sends `start_maximized` and `gui_common` chooses show()
+        vs showMaximized() on it. The QML engine used to call showMaximized()
+        unconditionally, so it obeyed a flag it never read. That is invisible
+        in the app -- which always sends true -- and surfaced only because the
+        two preview launchers, which send neither, opened at different sizes.
+
+        A request key that only one engine reads is a contract that has already
+        come apart, so this checks the key is present on both sides.
+        """
+        classic = (_GUI_DIR.parent / "gui_common.py").read_text(encoding="utf-8")
+        self.assertIn("start_maximized", classic,
+                      "the classic engine no longer reads the key this guard is about")
+        qml = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+        self.assertIn("start_maximized", qml,
+                      "the QML engine ignores start_maximized, so it will maximise "
+                      "even when the caller asked for a normal window")
+
     def test_classic_log_writer_is_wired(self):
         self.assertIsNotNone(Q._classic_write_log)
 
