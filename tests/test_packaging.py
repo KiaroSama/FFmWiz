@@ -55,7 +55,7 @@ class PyprojectDeclaration(unittest.TestCase):
         self.assertIn("ffmwiz*", find.get("include", []))
 
     def test_namespace_discovery_stays_on(self):
-        # ffmwiz/gui and ffmwiz/gui/qml have no __init__.py. Turning namespaces
+        # ffmwiz/gui and gui/modern/qml have no __init__.py. Turning namespaces
         # off, or listing packages explicitly, silently drops the whole GUI.
         find = self.config["tool"]["setuptools"]["packages"]["find"]
         self.assertNotEqual(find.get("namespaces", True), False)
@@ -66,6 +66,21 @@ class PyprojectDeclaration(unittest.TestCase):
         self.assertTrue(any("assets" in p for p in patterns), "icons/cursors must ship")
         self.assertTrue(any("qml" in p for p in patterns), "the QML scene must ship")
         self.assertTrue(self.config["tool"]["setuptools"].get("include-package-data"))
+
+    def test_the_build_tree_is_staged_where_it_cannot_shadow_a_module(self):
+        """`build/` is a valid identifier and the cwd leads sys.path.
+
+        So setuptools' default staging directory is importable as a
+        namespace package, and `python -m build` then blames the tool
+        instead of reporting that the build package is not installed. It
+        also made a stale staging tree look like ordinary source.
+        """
+        import configparser
+        cfg = configparser.ConfigParser()
+        cfg.read(PROJECT_ROOT / "setup.cfg", encoding="utf-8")
+        base = cfg.get("build", "build_base", fallback="")
+        self.assertTrue(base.startswith("."),
+                        f"build_base={base!r} can be imported as a module name")
 
     def test_the_thin_launcher_is_still_a_top_level_module(self):
         self.assertIn("FFmWiz", self.config["tool"]["setuptools"]["py-modules"])
@@ -210,9 +225,17 @@ class WheelContents(unittest.TestCase):
         # what already existed and remove only what this test created. Leaving
         # them behind would put build residue in the working tree on every run.
         cls._preexisting = {
-            path for path in (PROJECT_ROOT / "build", *PROJECT_ROOT.glob("*.egg-info"))
+            path for path in (PROJECT_ROOT / ".build", PROJECT_ROOT / "build",
+                              *PROJECT_ROOT.glob("*.egg-info"))
             if path.exists()
         }
+        # Clean the staging tree BEFORE building, not only after.
+        # setuptools reuses it incrementally, so a tree left by an earlier
+        # build answers for files the current source no longer has -- which
+        # is exactly how a deleted QML path kept appearing in wheels. This
+        # test may only report on the source it was handed.
+        for path in (PROJECT_ROOT / ".build", PROJECT_ROOT / "build"):
+            shutil.rmtree(path, ignore_errors=True)
         result = subprocess.run(
             [sys.executable, "-m", "pip", "wheel", str(PROJECT_ROOT),
              "--no-deps", "-w", cls._tmp, "--no-build-isolation", "-q"],
@@ -226,7 +249,8 @@ class WheelContents(unittest.TestCase):
     @classmethod
     def _clean(cls):
         shutil.rmtree(cls._tmp, ignore_errors=True)
-        for path in (PROJECT_ROOT / "build", *PROJECT_ROOT.glob("*.egg-info")):
+        for path in (PROJECT_ROOT / ".build", PROJECT_ROOT / "build",
+                     *PROJECT_ROOT.glob("*.egg-info")):
             if path.exists() and path not in cls._preexisting:
                 shutil.rmtree(path, ignore_errors=True)
 
@@ -246,8 +270,36 @@ class WheelContents(unittest.TestCase):
         self.assertIn("ffmwiz/assets/icons/ffmwiz_app.png", self._names)
         self.assertTrue(any("assets/cursors/" in n for n in self._names))
 
-    def test_wheel_contains_the_qml_scene(self):
-        self.assertIn("ffmwiz/gui/qml/UnifiedEditor.qml", self._names)
+    def test_wheel_ships_every_qml_file_the_source_has(self):
+        """Compared against the SOURCE, because one hardcoded path lied.
+
+        This used to assert `ffmwiz/gui/qml/UnifiedEditor.qml` and passed
+        while the live scene shipped nowhere: the editor had moved to
+        `gui/modern/qml/`, the package-data glob still named the old
+        directory, and a stale `build/lib` from before that move still held
+        a file at the old path -- setuptools reuses that tree, so the wheel
+        carried the PRE-SPLIT 102 KB scene (the live one is 37 KB) and the
+        assertion was satisfied by an artefact months out of date.
+
+        Naming a path can only prove that SOMETHING sits there. Counting
+        the source is what proves the right things shipped.
+        """
+        source = {"ffmwiz/" + str(path.relative_to(PROJECT_ROOT / "ffmwiz")).replace("\\", "/")
+                  for path in (PROJECT_ROOT / "ffmwiz").rglob("*.qml")}
+        self.assertTrue(source, "no .qml in the source; this guard is watching nothing")
+        missing = sorted(source - set(self._names))
+        self.assertEqual([], missing,
+                         f"{len(missing)} of {len(source)} QML files are not in the wheel")
+
+    def test_the_wheel_carries_no_qml_the_source_no_longer_has(self):
+        # The other direction: a stale staging tree adds files that were
+        # deleted, which is how the defect above stayed invisible.
+        source = {"ffmwiz/" + str(path.relative_to(PROJECT_ROOT / "ffmwiz")).replace("\\", "/")
+                  for path in (PROJECT_ROOT / "ffmwiz").rglob("*.qml")}
+        stale = sorted(n for n in self._names if n.endswith(".qml") and n not in source)
+        self.assertEqual([], stale,
+                         "the wheel carries QML the source does not have -- "
+                         "almost certainly a stale build tree being reused")
 
     def test_wheel_contains_the_thin_launcher(self):
         self.assertIn("FFmWiz.py", self._names)

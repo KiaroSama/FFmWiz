@@ -36,4 +36,12 @@ namespaces = true
 [tool.setuptools.package-data]
 # Icons, cursors and the QML scene are loaded at runtime from inside the
 # package, so they have to ship with it.
-"ffmwiz" = ["assets/**/*", "gui/qml/*.qml"]
+#
+# `gui/**/*.qml`, not `gui/qml/*.qml`: the editor moved to
+# `gui/modern/qml/` in the classic/modern split and the old glob matched
+# nothing afterwards. It went unnoticed because a stale `build/lib` from
+# before the split still held a file at the old path, and setuptools reuses
+# that tree -- so the wheel kept shipping the PRE-SPLIT 102 KB scene while
+# the live 37 KB one shipped nowhere. Recursive on purpose: the next move
+# must not need this line edited again.
+"ffmwiz" = ["assets/**/*", "gui/**/*.qml"]
