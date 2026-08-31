@@ -91,7 +91,12 @@ def encode_video_speed_factor(answers: dict[str, Any]) -> float:
 
 
 def _ffmwiz_gui_path() -> Path:
-    return script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / FFMWIZ_GUI_FILE_NAME
+    # The two engines live in their own folders under ffmwiz/gui/ now: the
+    # widgets editors in `classic/`, the QtQuick one in `modern/`. Everything
+    # they share -- palette, geometry, common helpers -- stays one level up, so
+    # neither engine can quietly grow a dependency on the other's internals.
+    return (script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / "classic"
+            / FFMWIZ_GUI_FILE_NAME)
 
 
 def _requirements_path() -> Path:
@@ -113,7 +118,8 @@ def _config_setting_for_logging(key: str, fallback: Any) -> Any:
 
 
 def _qml_gui_path() -> Path:
-    return script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / "ffmwiz_gui_qml.py"
+    return (script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / "modern"
+            / "ffmwiz_gui_qml.py")
 
 
 def _visible_len(text: str) -> int:

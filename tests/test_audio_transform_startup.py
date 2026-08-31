@@ -26,7 +26,7 @@ from pathlib import Path
 
 import FFmWiz
 
-MODULE = Path(FFmWiz.__file__).resolve().parent / "ffmwiz" / "gui" / "gui_editor_audio.py"
+MODULE = Path(FFmWiz.__file__).resolve().parent / "ffmwiz" / "gui" / "classic" / "gui_editor_audio.py"
 
 
 def _source():

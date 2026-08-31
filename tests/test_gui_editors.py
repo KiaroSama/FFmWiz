@@ -15,7 +15,8 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _GUI_DIR = _ROOT / "ffmwiz" / "gui"
-for _p in (str(_ROOT), str(_GUI_DIR)):
+for _p in (str(_ROOT), str(_GUI_DIR),
+           str(_GUI_DIR / "classic"), str(_GUI_DIR / "modern")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -28,7 +29,7 @@ def _classic_unified_source() -> str:
     code the moment it moves.
     """
     return "\n".join(path.read_text(encoding="utf-8")
-                     for path in sorted(_GUI_DIR.glob("gui_editor_unified*.py")))
+                     for path in sorted((_GUI_DIR / "classic").glob("gui_editor_unified*.py")))
 
 import gui_geometry  # noqa: E402
 import ffmwiz_gui_qml as Q  # noqa: E402
@@ -140,7 +141,7 @@ class WaveformWithoutNumpyTests(unittest.TestCase):
             self.assertAlmostEqual(a1, b1, places=6)
 
 
-_QML_PATH = _GUI_DIR / "qml" / "UnifiedEditor.qml"
+_QML_PATH = _GUI_DIR / "modern" / "qml" / "UnifiedEditor.qml"
 
 
 def _qml_range_js():
@@ -339,7 +340,7 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.SRC = (_GUI_DIR / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
+        cls.SRC = (_GUI_DIR / "modern" / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
 
     def test_exit_code_and_size_are_checked_before_emitting(self):
         self.assertIn("os.path.getsize(out) > 0", self.SRC)
@@ -465,7 +466,7 @@ class QmlSelfTestWiringTests(unittest.TestCase):
 import json, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(GUI_DIR)))
 from ffmwiz.gui import gui_common
-from ffmwiz.gui import ffmwiz_gui_qml
+from ffmwiz.gui.modern import ffmwiz_gui_qml
 fired = []
 gui_common._set_windows_app_id = lambda: fired.append("app_id")
 gui_common._set_qt_application_icon = lambda app: fired.append("icon")

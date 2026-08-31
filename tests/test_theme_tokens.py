@@ -13,13 +13,25 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _GUI_DIR = _ROOT / "ffmwiz" / "gui"
-for _p in (str(_ROOT), str(_GUI_DIR)):
+for _p in (str(_ROOT), str(_GUI_DIR),
+           str(_GUI_DIR / "classic"), str(_GUI_DIR / "modern")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 import gui_style  # noqa: E402
 
-_QML = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+def _classic_or_shared(name: str) -> Path:
+    """Where a GUI source file lives now.
+
+    The two engines moved into gui/classic and gui/modern, but the palette,
+    geometry and common helpers they SHARE stayed at gui/. A blanket "classic"
+    prefix therefore looks in the wrong place for exactly those three.
+    """
+    inside = _GUI_DIR / "classic" / name
+    return inside if inside.exists() else _GUI_DIR / name
+
+
+_QML = (_GUI_DIR / "modern" / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
 
 # The classic unified editor spans several modules (the builder plus its
 # extracted canvas/timeline widgets). Glob them so these token assertions follow
@@ -27,7 +39,7 @@ _QML = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
 # hex" half covers every file the editor draws from.
 _CLASSIC_UNIFIED = "\n".join(
     path.read_text(encoding="utf-8")
-    for path in sorted(_GUI_DIR.glob("gui_editor_unified*.py")))
+    for path in sorted((_GUI_DIR / "classic").glob("gui_editor_unified*.py")))
 
 
 class BrandAnchorTests(unittest.TestCase):
@@ -102,10 +114,11 @@ class SinglePaletteTests(unittest.TestCase):
         # the editors addressable as `ffmwiz.gui.<name>` (D10) changed the
         # spelling and failed a test whose actual subject -- one shared palette
         # -- was untouched.
-        from ffmwiz.gui import ffmwiz_gui_qml, gui_style
+        from ffmwiz.gui.modern import ffmwiz_gui_qml
+        from ffmwiz.gui import gui_style   # shared: it did not move
         self.assertIs(ffmwiz_gui_qml._PALETTE, gui_style.PALETTE)
         # The old hand-copied 26-key dict is gone.
-        src = (_GUI_DIR / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
+        src = (_GUI_DIR / "modern" / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
         self.assertNotIn('"panel_alt": "#1a1f2a"', src)
 
 
@@ -257,9 +270,10 @@ class NoSecondPaletteTests(unittest.TestCase):
         return found
 
     def test_active_classic_modules_declare_no_colours_of_their_own(self):
+        # ACTIVE names files, and those files are under gui/classic/ now.
         for name in self.ACTIVE:
             with self.subTest(name):
-                found = self._standalone_hexes(_GUI_DIR / name)
+                found = self._standalone_hexes(_classic_or_shared(name))
                 self.assertEqual(
                     [], found,
                     f"{name} hard-codes colours instead of using PALETTE: "
@@ -268,7 +282,7 @@ class NoSecondPaletteTests(unittest.TestCase):
     def test_the_cursor_exemption_stays_documented(self):
         # If the exemption is ever silently widened, the reason must still be
         # written down at the place it applies.
-        src = (_GUI_DIR / "gui_editor_unified_canvas.py").read_text(encoding="utf-8")
+        src = (_classic_or_shared("gui_editor_unified_canvas.py")).read_text(encoding="utf-8")
         self.assertIn("THEME EXEMPTION", src)
         for name in self.EXEMPT_FUNCTIONS:
             self.assertIn(f"def {name}", src)
@@ -276,7 +290,7 @@ class NoSecondPaletteTests(unittest.TestCase):
     def test_the_timeline_is_fully_token_driven(self):
         # The regression that started this: the timeline was the one section
         # painting outside the palette entirely.
-        self.assertEqual([], self._standalone_hexes(_GUI_DIR / "gui_editor_unified_timeline.py"))
+        self.assertEqual([], self._standalone_hexes(_classic_or_shared("gui_editor_unified_timeline.py")))
 
     def test_the_scroll_area_viewport_is_themed(self):
         # Without this rule the side column viewport falls back to Qt's default
@@ -292,7 +306,7 @@ class NoSecondPaletteTests(unittest.TestCase):
                       "the scroll-area rule must paint a palette background")
 
     def test_the_new_tokens_exist_and_are_used(self):
-        timeline = (_GUI_DIR / "gui_editor_unified_timeline.py").read_text(encoding="utf-8")
+        timeline = (_classic_or_shared("gui_editor_unified_timeline.py")).read_text(encoding="utf-8")
         for token in ("cut_bar", "cut_bar_dim", "center_guide", "center_guide_text"):
             with self.subTest(token):
                 self.assertIn(token, gui_style.PALETTE)

@@ -31,11 +31,12 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _GUI_DIR = _ROOT / "ffmwiz" / "gui"
-for _p in (str(_ROOT), str(_GUI_DIR)):
+for _p in (str(_ROOT), str(_GUI_DIR),
+           str(_GUI_DIR / "classic"), str(_GUI_DIR / "modern")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-_ENTRY_SOURCE = (_GUI_DIR / "ffmwiz_gui.py").read_text(encoding="utf-8")
+_ENTRY_SOURCE = (_GUI_DIR / "classic" / "ffmwiz_gui.py").read_text(encoding="utf-8")
 
 # Package-qualified. These stopped being importable as bare top-level
 # modules when the editors were made addressable as `ffmwiz.gui.<name>`
@@ -44,10 +45,14 @@ _ENTRY_SOURCE = (_GUI_DIR / "ffmwiz_gui.py").read_text(encoding="utf-8")
 # produced a SECOND module object, so `assertIs` against the entry
 # point's merged namespace could never match.
 _PACKAGE = "ffmwiz.gui"
-_CHILDREN = [f"{_PACKAGE}.{name}" for name in (
+# Two prefixes now, not one: the palette, geometry and common helpers are
+# SHARED by both engines and stay at `ffmwiz.gui`, while the widgets editors
+# live under `ffmwiz.gui.classic`. A single flat prefix cannot address both.
+_CHILDREN = ([f"{_PACKAGE}.{name}" for name in (
     "gui_common",
     "gui_style",
     "gui_geometry",
+)] + [f"{_PACKAGE}.classic.{name}" for name in (
     "gui_editor_cut",
     "gui_editor_crop",
     "gui_editor_speed",
@@ -55,7 +60,7 @@ _CHILDREN = [f"{_PACKAGE}.{name}" for name in (
     "gui_editor_unified",
     "gui_editor_unified_canvas",
     "gui_editor_unified_timeline",
-)]
+)])
 
 # The public entry point each child exists to provide. Hard-coded on purpose:
 # the exhaustive check below would still pass if a child contributed nothing at
@@ -64,13 +69,13 @@ _REPRESENTATIVE = {  # keyed by the same qualified names
     f"{_PACKAGE}.gui_common": "main",
     f"{_PACKAGE}.gui_style": "QSS",
     f"{_PACKAGE}.gui_geometry": "seconds_to_timecode",
-    f"{_PACKAGE}.gui_editor_cut": "build_cut_editor",
-    f"{_PACKAGE}.gui_editor_crop": "build_crop_editor",
-    f"{_PACKAGE}.gui_editor_speed": "build_speed_editor",
-    f"{_PACKAGE}.gui_editor_audio": "build_audio_cut_editor",
-    f"{_PACKAGE}.gui_editor_unified": "build_unified_video_editor",
-    f"{_PACKAGE}.gui_editor_unified_canvas": "build_unified_preview_widgets",
-    f"{_PACKAGE}.gui_editor_unified_timeline": "build_unified_timeline_widget",
+    f"{_PACKAGE}.classic.gui_editor_cut": "build_cut_editor",
+    f"{_PACKAGE}.classic.gui_editor_crop": "build_crop_editor",
+    f"{_PACKAGE}.classic.gui_editor_speed": "build_speed_editor",
+    f"{_PACKAGE}.classic.gui_editor_audio": "build_audio_cut_editor",
+    f"{_PACKAGE}.classic.gui_editor_unified": "build_unified_video_editor",
+    f"{_PACKAGE}.classic.gui_editor_unified_canvas": "build_unified_preview_widgets",
+    f"{_PACKAGE}.classic.gui_editor_unified_timeline": "build_unified_timeline_widget",
 }
 
 
@@ -88,7 +93,7 @@ def _snapshot(module: types.ModuleType) -> types.ModuleType:
 
 _PRISTINE = {name: _snapshot(importlib.import_module(name)) for name in _CHILDREN}
 
-import ffmwiz.gui.ffmwiz_gui as entry  # noqa: E402  (must follow the snapshot)
+import ffmwiz.gui.classic.ffmwiz_gui as entry  # noqa: E402  (must follow the snapshot)
 
 
 def _fake_module(name: str, **members) -> types.ModuleType:
