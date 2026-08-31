@@ -546,6 +546,27 @@ def execute_encode_plan(answers: dict[str, Any], cmd: list[str], *,
         # of them. Running it alone would read a palette or a half that nothing
         # had written yet.
         return run_quick_output_stages(answers)
+    # Compositing and a reverse cannot be combined, and the honest thing is to
+    # say so rather than produce a plausible file with the overlay missing.
+    # Every reverse route below rebuilds each stage through
+    # `build_ffmpeg_command` or `build_join_encode_command`, and neither has a
+    # composite shape -- the second input is simply never mapped. The one-shot
+    # composite branch (`ffmwiz/wizard_b.py`) owns that graph, and a staged
+    # reverse does not go through it, so the overlay was dropped silently: the
+    # encode succeeded, the output looked finished, and only the missing logo
+    # said otherwise.
+    if ((answers.get("reverse_video") or answers.get("reverse_audio"))
+            and (answers.get("composite_mode") or answers.get("composite_audio_mix"))):
+        appio.error(
+            "Compositing cannot be combined with a reverse. A reversed job is "
+            "built in stages, and no stage can carry the second input, so the "
+            "overlay or mixed track would be missing from the result. Run the "
+            "composite first, then reverse its output as a separate job.")
+        log_warn("Refused composite + reverse: no staged builder maps a second input.")
+        # 0.0 seconds because nothing ran. This function has no start stamp of
+        # its own -- every other path gets its elapsed time from the runner it
+        # delegates to, and a refusal delegates to nothing.
+        return 1, 0.0
     if reverse_video_needs_segmented_main_encode(answers) and not answers.get("separator_points"):
         answers["cmd"] = cmd
         return reverse_pipeline.run_segmented_reverse_main_encode(answers)

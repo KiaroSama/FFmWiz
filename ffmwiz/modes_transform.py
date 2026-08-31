@@ -143,46 +143,6 @@ def _run_video_speed_reverse_mode_impl(base_answers: dict[str, Any]) -> tuple[in
     )
 
 
-def run_audio_cut_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    try:
-        return _run_audio_cut_mode_impl(base_answers)
-    except Back:
-        appio.note("Returning to main menu.")
-        return None
-
-
-def _run_audio_cut_mode_impl(base_answers: dict[str, Any]) -> tuple[int, float] | None:
-    answers = dict(base_answers)
-    answers["_question_number"] = 1
-    steps = [
-        Step("input_path", lambda a: True, wizard.step_input_path),
-        Step("audio_track", lambda a: True, step_audio_track_for_tool),
-        Step("output_location", lambda a: True, wizard.step_output_location),
-        Step("audio_cut_gui", lambda a: True, step_audio_cut_editor),
-        Step("start_now", lambda a: not a.get("_audio_cut_noop"), step_audio_cut_start_now),
-    ]
-    try:
-        run_mode_steps(answers, steps)
-    except ValueError as exc:
-        appio.error(str(exc))
-        return None
-    ensure_audio_input(answers)
-    if answers.get("_audio_cut_noop"):
-        appio.note("Audio cut was canceled. Returning to the first question.")
-        return None
-    if not answers.get("start_now", True):
-        appio.note("FFmpeg was not started. The command above is ready to run manually.")
-        return None
-    print()
-    print(paint("Starting FFmpeg...", Color.GREEN))
-    total_duration = total_keep_duration(answers.get("audio_keep_ranges") or [])
-    return run_ffmpeg_with_progress(
-        answers["cmd"],
-        total_duration=(total_duration if total_duration > 0 else None),
-        label="Audio Cut",
-    )
-
-
 def run_audio_speed_reverse_mode(base_answers: dict[str, Any]) -> tuple[int, float] | None:
     try:
         return _run_audio_speed_reverse_mode_impl(base_answers)
@@ -299,8 +259,6 @@ def _run_audio_transform_mode_impl(base_answers: dict[str, Any]) -> tuple[int, f
 __all__ = [
     'run_video_speed_reverse_mode',
     '_run_video_speed_reverse_mode_impl',
-    'run_audio_cut_mode',
-    '_run_audio_cut_mode_impl',
     'run_audio_speed_reverse_mode',
     '_run_audio_speed_reverse_mode_impl',
     'run_audio_transform_mode',

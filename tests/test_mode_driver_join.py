@@ -49,7 +49,7 @@ Deferred, with reason:
     the shared `run_mode_steps`, and its reverse path is already covered at
     the pipeline level by `test_bounded_reverse_pipeline.py` and
     `test_stage_geometry_ownership.py`.
-  - `run_audio_cut_mode` (`ffmwiz/modes_transform.py:146`) -- not reachable.
+  - `run_audio_cut_mode` -- deleted; the unified audio editor superseded it.
     `FFmWiz.run_one_job` never dispatches to it; testing it would pin dead
     code. Whether to delete it or wire it to a menu entry is a decision for a
     separate plan, not a test.

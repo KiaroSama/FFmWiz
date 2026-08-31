@@ -99,25 +99,14 @@ class AudioCutStreamCopy(unittest.TestCase):
         self.assertIn("-c:a flac", text)
         self.assertNotIn("-c:a copy", text)
 
-    def test_the_step_offers_the_copy_only_when_it_is_safe(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = _answers(tmp)
-            with contextlib.redirect_stdout(io.StringIO()), \
-                 mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[True, True]) as ask:
-                FFmWiz.step_audio_cut_start_now(answers)
-            self.assertEqual(ask.call_count, 2, "the lossless question must be asked")
-            self.assertTrue(answers["audio_cut_stream_copy"])
-            self.assertIn("-c:a copy", _text(answers["cmd"]))
-
-    def test_the_step_does_not_offer_a_copy_that_cannot_work(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            answers = _answers(tmp, audio_keep_ranges=[(1.0, 4.0), (6.0, 9.0)])
-            with contextlib.redirect_stdout(io.StringIO()), \
-                 mock.patch.object(FFmWiz.appio, "ask_yes_no", side_effect=[True]) as ask:
-                FFmWiz.step_audio_cut_start_now(answers)
-            self.assertEqual(ask.call_count, 1, "only the start question belongs here")
-            self.assertNotIn("-c:a copy", _text(answers["cmd"]))
-
+    # The two step-level tests that stood here are gone with
+    # `step_audio_cut_start_now`: it was the question-asking wrapper for the
+    # standalone Audio Cut mode, which no menu has dispatched since the
+    # unified editor replaced it. The rule they cared about is enforced in
+    # the BUILDER, not the question -- `build_audio_cut_command` calls
+    # `audio_cut_stream_copy_available` itself and drops an unsafe copy
+    # whatever the answer says, which is what
+    # `test_an_unsafe_copy_request_is_ignored_by_the_builder` above pins.
 
 class AudioToolCoverArt(unittest.TestCase):
     """USER-5-5: keep an existing attached picture where the container can."""
