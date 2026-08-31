@@ -53,7 +53,9 @@ ffmwiz/                # the application package (all implementation lives here)
   guibridge_tk_common.py # palette, theme and key-binding helpers the two Tk
                        #   editors share, so neither imports guibridge back
   metadata.py, trackmanager.py, runner.py, encoding.py
-  reverse_pipeline.py   # the staged reverse pipeline: plan it, export it, run it
+  reverse_pipeline*.py  # the staged reverse pipeline: plan it, export it, run
+                       #   it. `_sources` holds the subtitle/span helpers it
+                       #   calls and that call nothing back.
                        #   (`reverse` buffers every decoded frame, so a Join,
                        #    a Split or a long input runs as bounded stages)
   reverse_stages.py     # what ONE stage is: the transformations it owns, the
