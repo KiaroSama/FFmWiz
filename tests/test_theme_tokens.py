@@ -31,11 +31,17 @@ _CLASSIC_UNIFIED = "\n".join(
 
 
 class BrandAnchorTests(unittest.TestCase):
-    """USER-12-5: the app used GitHub's dark palette; the logo is neon
-    cyan/blue/violet/magenta on deep navy."""
+    """USER-12-5: the logo is neon cyan/blue/violet/magenta, and those four
+    accents are pinned here.
+
+    The FIELD they sit on is not pinned any more. `bg` was `#0a0f2e` (deep
+    navy) to match the logo's background; the user asked for the near-black
+    ground back, so `bg` and its panel/border/timeline family returned to the
+    pre-8fc3bbc GitHub-dark values. Pinning it here would have made this test
+    the thing that vetoes a user's own colour choice, which is not what a brand
+    ratchet is for -- the accents are the brand, the field is a preference."""
 
     ANCHORS = {
-        "bg": "#0a0f2e",        # deep navy field
         "accent": "#3b82f6",    # logo blue
         "waveform": "#22d3ee",  # logo cyan
         "purple": "#7c3aed",    # logo violet

@@ -189,36 +189,36 @@ ApplicationWindow {
         return "rgba(" + parseInt(c.substr(1, 2), 16) + "," + parseInt(c.substr(3, 2), 16)
                + "," + parseInt(c.substr(5, 2), 16) + "," + a + ")"
     }
-    color: col("bg", "#0a0f2e")
+    color: col("bg", "#0d1117")
 
-    palette.window: col("bg", "#0a0f2e")
+    palette.window: col("bg", "#0d1117")
     palette.windowText: col("text", "#e8edfb")
-    palette.base: col("panel_alt", "#16204f")
+    palette.base: col("panel_alt", "#1a1f2a")
     palette.text: col("text", "#e8edfb")
-    palette.button: col("surface", "#1b2760")
+    palette.button: col("surface", "#21262d")
     palette.buttonText: col("text", "#e8edfb")
     palette.highlight: col("accent", "#3b82f6")
     palette.highlightedText: "#ffffff"
-    palette.mid: col("border", "#2a3566")
+    palette.mid: col("border", "#30363d")
 
     // ---------- Reusable styled components ----------
     component Card: Rectangle {
         radius: 10
-        color: win.col("panel", "#121a44")
-        border.color: win.col("border", "#2a3566")
+        color: win.col("panel", "#161b22")
+        border.color: win.col("border", "#30363d")
     }
 
     component PadButton: Button {
         id: pb
-        property color baseColor: win.col("surface", "#1b2760")
+        property color baseColor: win.col("surface", "#21262d")
         // Tokenised interaction states. Computing them with Qt.lighter/darker
         // produced different hexes from the Qt QSS for the same role, so the two
         // engines hovered differently (USER-12-2). The computed values remain the
         // default for buttons whose base colour has no hover/pressed token.
-        property color hoverColor: (pb.baseColor == win.col("surface", "#1b2760"))
-                                   ? win.col("surface_hover", "#24327a") : Qt.lighter(pb.baseColor, 1.18)
-        property color pressedColor: (pb.baseColor == win.col("surface", "#1b2760"))
-                                     ? win.col("surface_pressed", "#16204f") : Qt.darker(pb.baseColor, 1.25)
+        property color hoverColor: (pb.baseColor == win.col("surface", "#21262d"))
+                                   ? win.col("surface_hover", "#2e353d") : Qt.lighter(pb.baseColor, 1.18)
+        property color pressedColor: (pb.baseColor == win.col("surface", "#21262d"))
+                                     ? win.col("surface_pressed", "#1c2128") : Qt.darker(pb.baseColor, 1.25)
         property color textColor: win.col("text", "#e8edfb")
         property url iconSource: ""
         implicitHeight: 34
@@ -229,7 +229,7 @@ ApplicationWindow {
         background: Rectangle {
             radius: 7
             color: pb.down ? pb.pressedColor : (pb.hovered ? pb.hoverColor : pb.baseColor)
-            border.color: win.col("border_strong", "#3a4a85")
+            border.color: win.col("border_strong", "#3a4150")
             border.width: 1
         }
         contentItem: RowLayout {
@@ -388,6 +388,54 @@ ApplicationWindow {
         playerA.source = ""; playerB.source = ""
     }
 
+    // Which audio track the PREVIEW plays. A dual-language release carries one
+    // track per language, and with only the first one audible you cannot hear
+    // what you are cutting. Preview only: which track ends up in the OUTPUT is
+    // the wizard's own audio-track question, and answering it in two places
+    // would give the job two sources of truth.
+    //
+    // Held here rather than on a player because the join path swaps between
+    // playerA and playerB, and a choice stored on one is lost at the swap.
+    property int audioTrack: 0
+
+    function audioTrackCount() {
+        var t = playerA.audioTracks
+        return t ? t.length : 0
+    }
+
+    // "2 - jpn - AAC" from whatever the file actually declares. Qt hands back
+    // metadata keys, not a formatted string, and a track may declare none of
+    // them -- hence the numbered fallback rather than a blank row.
+    function audioTrackLabel(i) {
+        var t = playerA.audioTracks
+        if (!t || i < 0 || i >= t.length) return "Track " + (i + 1)
+        var md = t[i], bits = []
+        try {
+            var lang = md.stringValue(MediaMetaData.Language)
+            if (lang) bits.push(lang)
+            var codec = md.stringValue(MediaMetaData.AudioCodec)
+            if (codec) bits.push(codec)
+            var title = md.stringValue(MediaMetaData.Title)
+            if (title) bits.push(title)
+        } catch (e) { }
+        return (i + 1) + (bits.length ? "  " + bits.join("  •  ") : "")
+    }
+
+    function audioTrackModel() {
+        var out = []
+        for (var i = 0; i < audioTrackCount(); i++) out.push(audioTrackLabel(i))
+        return out
+    }
+
+    // Both players, so the selection survives the join hand-off mid-playback.
+    function applyAudioTrack() {
+        var n = audioTrackCount()
+        if (n <= 0) return
+        var idx = Math.max(0, Math.min(n - 1, audioTrack))
+        playerA.activeAudioTrack = idx
+        playerB.activeAudioTrack = idx
+    }
+
     function actP() { return activeAB === 0 ? playerA : playerB }
     function idleP() { return activeAB === 0 ? playerB : playerA }
     function srcOf(i) { return "file:///" + String(segs[i].path).replace(/\\/g, "/") }
@@ -399,6 +447,11 @@ ApplicationWindow {
 
     MediaPlayer {
         id: playerA
+        // Re-assert the chosen track: loading media resets
+        // activeAudioTrack to 0, and the join path loads a new segment
+        // on every hand-off, so a choice made once would not survive
+        // the first seam.
+        onTracksChanged: win.applyAudioTrack()
         videoOutput: voA
         audioOutput: AudioOutput { id: aoA; volume: win.muted ? 0.0 : win.volume }
         onPositionChanged: {
@@ -410,6 +463,11 @@ ApplicationWindow {
     }
     MediaPlayer {
         id: playerB
+        // Re-assert the chosen track: loading media resets
+        // activeAudioTrack to 0, and the join path loads a new segment
+        // on every hand-off, so a choice made once would not survive
+        // the first seam.
+        onTracksChanged: win.applyAudioTrack()
         videoOutput: voB
         audioOutput: AudioOutput { id: aoB; volume: win.muted ? 0.0 : win.volume }
         onPositionChanged: {
@@ -695,7 +753,15 @@ ApplicationWindow {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
                 Label { text: "FFmWiz  •  Unified Video Editor"; color: win.col("accent_text", "#7db3ff"); font.pixelSize: 15; font.bold: true }
-                Label { text: segs.length > 1 ? (segs.length + " joined videos") : "1 video"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 12 }
+                Label {
+                    // The classic engine puts the source filename here. This one showed
+                    // only a count, so on a join there was nothing on screen saying WHICH
+                    // timeline you were editing.
+                    text: segs.length > 1 ? (segs.length + " joined videos  \u2022  " + (segs[0].name || ""))
+                                          : (segs.length ? segs[0].name : "1 video")
+                    color: win.col("text_mute", "#8891b4"); font.pixelSize: 12
+                    elide: Text.ElideMiddle; Layout.maximumWidth: 440
+                }
                 Label { text: win.notice; visible: win.notice !== ""; color: win.col("danger_text", "#ff7b72"); font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 520 }
                 Item { Layout.fillWidth: true }
                 PadButton { text: "↶ Undo"; implicitWidth: 92; enabled: histUndo.length > 0; onClicked: doUndo() }
@@ -739,18 +805,23 @@ ApplicationWindow {
                         Switch { text: "Edit crop on preview"; checked: cropEdit; onToggled: cropEdit = checked }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Reset Crop"; onClicked: resetCrop() }
-                            Switch { text: "Overlay"; checked: cropOverlayOn; onToggled: cropOverlayOn = checked }
+                            PadButton { Layout.fillWidth: true; text: "Reset Crop (Ctrl+R)"; onClicked: resetCrop() }
+                            Switch { text: "Overlay (Ctrl+U)"; checked: cropOverlayOn; onToggled: cropOverlayOn = checked }
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface", "#1b2760"); onClicked: win.tool = "hand" }
-                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface", "#1b2760"); onClicked: win.tool = "zoom" }
+                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
+                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
                             PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
                         }
                         Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#8891b4"); font.pixelSize: 11 }
+                        Label {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 10
+                            color: win.col("text_mute", "#8891b4")
+                            text: "Crop is auto-aligned to even dimensions to keep the chroma phase correct so the video colors are not damaged."
+                        }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#2a3566") }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
                         SectionLabel { text: "SPEED & AUDIO" }
                         RowLayout {
@@ -782,32 +853,63 @@ ApplicationWindow {
                                 }
                             }
                         }
+                        // `applyText` above takes "2x" as readily as "200%", but nothing
+                        // said so, so the factor spelling the classic engine offers as its
+                        // own dropdown looked missing here.
+                        Label { text: "percent or factor \u2014 200% and 2x are the same"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 10 }
                         Switch { text: "Reverse video"; checked: reverse; onToggled: {
                                 reverse = checked; commit()
                                 if (!checked) { revActive = false; bridge.cancelReverse(); actP().playbackRate = 1.0; var s = segmentForTime(cti); loadSegment(s.index, s.local, false) }
                             } }
                         Switch { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: { includeAudio = checked; commit() } }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 8
+                            // Only worth the space when there is a choice to make.
+                            visible: audioTrackCount() > 1
+                            Label { text: "Track"; color: win.col("text", "#e8edfb") }
+                            ComboBox {
+                                id: audioTrackBox
+                                Layout.fillWidth: true
+                                model: audioTrackModel()
+                                currentIndex: audioTrack
+                                onActivated: { audioTrack = currentIndex; applyAudioTrack() }
+                            }
+                        }
+                        Label {
+                            visible: audioTrackCount() > 1
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 10
+                            color: win.col("text_mute", "#8891b4")
+                            text: "Preview only — which track is encoded stays the wizard's audio question."
+                        }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#2a3566") }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
 
                         SectionLabel { text: "CUTS & SPLIT" }
                         Switch { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
                         GridLayout {
                             Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Mark In (I)"; onClicked: setMarkIn() }
-                            PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; onClicked: setMarkOut() }
-                            PadButton { Layout.fillWidth: true; text: "Cut Selection"; baseColor: win.col("danger_cut", "#7f123f"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: cutSelection() }
-                            PadButton { Layout.fillWidth: true; text: "Delete Cut"; onClicked: deleteCutAtCti() }
-                            PadButton { Layout.fillWidth: true; text: "Add Split"; onClicked: addSplit() }
-                            PadButton { Layout.fillWidth: true; text: "Del Split"; onClicked: deleteSplitAtCti() }
+                            PadButton { Layout.fillWidth: true; text: "Mark In (I)"; baseColor: win.col("marker_in", "#2ddc7f"); hoverColor: win.col("marker_in_hover", "#4ee89a"); pressedColor: win.col("marker_in_pressed", "#1fa860"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: setMarkIn() }
+                            PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; baseColor: win.col("marker_out", "#d29922"); hoverColor: win.col("marker_out_hover", "#e8b13c"); pressedColor: win.col("marker_out_pressed", "#a8760f"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: setMarkOut() }
+                            PadButton { Layout.fillWidth: true; text: "Cut Selection (A)"; baseColor: win.col("danger_cut", "#7f123f"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: cutSelection() }
+                            PadButton { Layout.fillWidth: true; text: "Delete Cut"; baseColor: win.col("danger_cut", "#7f123f"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: deleteCutAtCti() }
+                            PadButton { Layout.fillWidth: true; text: "Add Split (S)"; baseColor: win.col("accent", "#3b82f6"); hoverColor: win.col("accent_hover", "#5b9bff"); pressedColor: win.col("accent_pressed", "#2563eb"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: addSplit() }
+                            PadButton { Layout.fillWidth: true; text: "Del Split"; baseColor: win.col("danger_alt", "#643618"); hoverColor: win.col("danger_alt_hover", "#8a4a1f"); pressedColor: win.col("danger_alt_pressed", "#4d2812"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: deleteSplitAtCti() }
                         }
-                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; onClicked: { cuts = []; selCut = -1; tl.requestPaint(); commit() } }
+                        PadButton { Layout.fillWidth: true; text: "Clear Cuts"; baseColor: win.col("danger", "#a40e26"); hoverColor: win.col("danger_hover", "#c9303f"); pressedColor: win.col("danger_pressed", "#7d0a1c"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: { cuts = []; selCut = -1; tl.requestPaint(); commit() } }
+                        // One column, not two: these four labels carry their shortcut and
+                        // a half-width button elides them to "Invert Cuts (Ctrl+S...",
+                        // which is worse than printing no shortcut at all.
                         GridLayout {
-                            Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Invert Cuts"; onClicked: invertCutsAll() }
-                            PadButton { Layout.fillWidth: true; text: "Convert In/Out"; onClicked: convertMarker() }
-                            PadButton { Layout.fillWidth: true; text: "Delete Selected"; onClicked: deleteSelection() }
-                            PadButton { Layout.fillWidth: true; text: "Prev/Next edge"; onClicked: seekCutEdge(1) }
+                            Layout.fillWidth: true; columns: 1; rowSpacing: 8; columnSpacing: 8
+                            PadButton { Layout.fillWidth: true; text: "Invert Cuts (Ctrl+Shift+I)"; baseColor: win.col("purple", "#7c3aed"); hoverColor: win.col("purple_hover", "#8b5cf6"); pressedColor: win.col("purple_pressed", "#6d28d9"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: invertCutsAll() }
+                            PadButton { Layout.fillWidth: true; enabled: selMarker !== ""
+                                // Disabled it reads "Select Marker": the classic engine
+                                // relabels the same button, which is how you learn the
+                                // action needs a selected mark first.
+                                text: selMarker !== "" ? "Convert In/Out (Ctrl+I)" : "Select Marker"
+                                onClicked: convertMarker() }
+                            PadButton { Layout.fillWidth: true; text: "Delete Selected (Del)"; baseColor: win.col("danger", "#a40e26"); hoverColor: win.col("danger_hover", "#c9303f"); pressedColor: win.col("danger_pressed", "#7d0a1c"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: deleteSelection() }
+                            PadButton { Layout.fillWidth: true; text: "Prev/Next edge (Ctrl+Alt+\u2190/\u2192)"; onClicked: seekCutEdge(1) }
                         }
                         Label {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap
@@ -817,6 +919,8 @@ ApplicationWindow {
                                 return cropTxt + "  \u2022  Speed " + Math.round(speed * 100) + "%" + (reverse ? "  \u2022  Reversed" : "")
                                     + "\n" + cuts.length + " cut(s) \u2022 " + separatorPoints.length + " split(s) \u2022 " + chapters.length + " chapter(s)"
                                     + "\nKept: " + fmt(keepTotal()) + " of " + fmt(totalDuration)
+                                    + "\nIn " + (markIn > 0 ? fmt(markIn) : "--")
+                                    + "   \u2022   Out " + (markOut < totalDuration ? fmt(markOut) : "--")
                             }
                             color: win.col("marker_in", "#2ddc7f"); font.pixelSize: 11
                         }
@@ -842,8 +946,8 @@ ApplicationWindow {
                 Card {
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: 220
-                    color: win.col("timeline_bg", "#070b22")
-                    border.color: win.col("border_strong", "#3a4a85")
+                    color: win.col("timeline_bg", "#0a0d12")
+                    border.color: win.col("border_strong", "#3a4150")
                     clip: true
                     // previewArea hosts both video outputs and the crop overlay in
                     // ONE coordinate space, so contentRect maps 1:1 to overlay pixels.
@@ -1079,8 +1183,8 @@ ApplicationWindow {
                 Card {
                     SplitView.preferredHeight: 140
                     SplitView.minimumHeight: 72
-                    color: win.col("timeline_bg", "#070b22")
-                    border.color: win.col("border_strong", "#3a4a85")
+                    color: win.col("timeline_bg", "#0a0d12")
+                    border.color: win.col("border_strong", "#3a4150")
                     Canvas {
                         id: tl
                         anchors.fill: parent; anchors.margins: 8
@@ -1092,7 +1196,7 @@ ApplicationWindow {
                         onPaint: {
                             var ctx = getContext("2d"); ctx.reset()
                             var midY = height * 0.52
-                            ctx.strokeStyle = win.col("timeline_track", "#141c46"); ctx.lineWidth = 1
+                            ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
                             ctx.beginPath(); ctx.moveTo(pad, midY); ctx.lineTo(width - pad, midY); ctx.stroke()
                             // Time ruler: gridlines + absolute timecode labels for the
                             // visible window, at a "nice" step so labels never overlap
@@ -1108,9 +1212,9 @@ ApplicationWindow {
                             for (var tr = t0r; tr <= win.viewStart + span + 1e-6; tr += rstep) {
                                 var trx = t2x(tr)
                                 if (trx < pad - 1 || trx > width - pad + 1) continue
-                                ctx.strokeStyle = win.col("timeline_track", "#141c46"); ctx.lineWidth = 1
+                                ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
                                 ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(trx, 12); ctx.lineTo(trx, height - 4); ctx.stroke(); ctx.globalAlpha = 1.0
-                                ctx.fillStyle = win.col("tick_lo", "#8891b4"); ctx.fillText(win.fmtShort(tr), trx + 2, 9)
+                                ctx.fillStyle = win.col("tick_lo", "#7d8590"); ctx.fillText(win.fmtShort(tr), trx + 2, 9)
                             }
                             var xi = t2x(markIn), xo = t2x(markOut)
                             ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1b3468")
@@ -1243,11 +1347,11 @@ ApplicationWindow {
                             property real hx: -1
                             Rectangle {
                                 visible: hov.hx >= 0; width: 1; x: hov.hx; y: 0; height: tl.height
-                                color: win.col("tick_lo", "#8891b4"); opacity: 0.7
+                                color: win.col("tick_lo", "#7d8590"); opacity: 0.7
                             }
                             Rectangle {
                                 visible: hov.hx >= 0
-                                color: win.col("surface", "#1b2760"); border.color: win.col("border_strong", "#3a4a85")
+                                color: win.col("surface", "#21262d"); border.color: win.col("border_strong", "#3a4150")
                                 radius: 4; height: 16; width: hovLbl.implicitWidth + 10
                                 x: Math.max(0, Math.min(tl.width - width, hov.hx - width / 2)); y: 2
                                 Label {
@@ -1319,6 +1423,38 @@ ApplicationWindow {
                     Label { text: (Math.round(win.zoom * 100) / 100) + "\u00d7"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 11 }
                     PadButton { Layout.preferredWidth: 34; text: "+"; onClicked: { win.zoomAt(1.25, cti, 0.5); tl.requestPaint() } }
                     PadButton { Layout.preferredWidth: 46; text: "Fit"; onClicked: { win.fitZoom(); tl.requestPaint() } }
+                }
+            }
+        }
+
+        // ---- Guidance ----
+        // Two lines the classic engine has and this one did not: what to do next,
+        // and what the keys are. Everything listed is a Shortcut that actually
+        // exists at the bottom of this file -- a printed key that does nothing is
+        // worse than no help at all.
+        Card {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 48
+            ColumnLayout {
+                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12
+                anchors.topMargin: 5; anchors.bottomMargin: 5; spacing: 2
+                Label {
+                    Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 11
+                    color: win.col("text", "#e8edfb")
+                    text: {
+                        if (cuts.length === 0 && separatorPoints.length === 0)
+                            return "Cut ranges and Splits: none. Mark In/Out and press Cut Selection (A), or press S at the playhead to split the final output into parts."
+                        return "Cut ranges: " + cuts.length + "  \u2022  Splits: " + separatorPoints.length
+                             + "  \u2022  the output keeps " + fmt(keepTotal()) + " of " + fmt(totalDuration)
+                             + (separatorPoints.length > 0 ? " across " + (separatorPoints.length + 1) + " parts." : ".")
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 10
+                    color: win.col("text_mute", "#8891b4")
+                    text: "Space play/pause  \u2022  I/O mark  \u2022  A cut  \u2022  S split  \u2022  Del remove  "
+                        + "\u2022  Ctrl+I convert mark  \u2022  Ctrl+Shift+I invert cuts  \u2022  Ctrl+U overlay  \u2022  Ctrl+R reset crop  "
+                        + "\u2022  , / . frame step  \u2022  Shift+\u2190/\u2192 5s  \u2022  Ctrl+Alt+\u2190/\u2192 cut edge  \u2022  M mute  \u2022  Ctrl+Z/Y undo/redo"
                 }
             }
         }
