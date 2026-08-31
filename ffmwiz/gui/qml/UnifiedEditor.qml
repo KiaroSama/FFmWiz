@@ -271,7 +271,10 @@ ApplicationWindow {
             // button turns a control panel into a grid of boxes; the fill
             // already separates the button from the panel, and the outline is
             // then free to mean "you are pointing at this".
-            border.color: pb.hovered ? win.col("border_strong", "#3a4150") : "transparent"
+            // Hover outlines; keyboard focus outlines in the accent. Without the
+            // second case, tabbing through the panel moved an invisible cursor.
+            border.color: pb.visualFocus ? win.col("accent", "#3b82f6")
+                        : (pb.hovered ? win.col("border_strong", "#3a4150") : "transparent")
             border.width: 1
         }
         contentItem: RowLayout {
@@ -301,6 +304,99 @@ ApplicationWindow {
     // A panel title, not a headline. Bright accent-blue at 12px competed with
     // the controls under it; a muted, letter-spaced 10px label sits behind them
     // and lets the eye go straight to what is actionable.
+    // ---- the non-button controls ----------------------------------------
+    // PadButton was styled and everything else was left as stock Qt Quick
+    // Controls, so a designed button sat beside a default switch and a default
+    // combo in the same column. That mismatch is what reads as assembled
+    // rather than designed -- more than any single control being plain.
+    //
+    // These four take the same tokens the buttons do, plus a focus ring, which
+    // nothing in this window had at all.
+
+    component Toggle: Switch {
+        id: sw
+        implicitHeight: win.rowMd
+        font.pixelSize: win.fsBody
+        indicator: Rectangle {
+            implicitWidth: 30; implicitHeight: 16
+            x: sw.leftPadding; y: (sw.height - height) / 2
+            radius: height / 2
+            color: sw.checked ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d")
+            border.color: sw.visualFocus ? win.col("accent_hover", "#5b9bff")
+                                         : win.col("border_strong", "#3a4150")
+            border.width: 1
+            opacity: sw.enabled ? 1.0 : 0.45
+            Behavior on color { ColorAnimation { duration: 110 } }
+            Rectangle {
+                x: sw.checked ? parent.width - width - 2 : 2
+                y: 2; width: 12; height: 12; radius: 6
+                color: win.col("text", "#e8edfb")
+                Behavior on x { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+            }
+        }
+        contentItem: Label {
+            text: sw.text; font: sw.font
+            color: win.col("text", "#e8edfb")
+            opacity: sw.enabled ? 1.0 : 0.45
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: sw.indicator.width + win.sp2
+        }
+    }
+
+    component Picker: ComboBox {
+        id: cb
+        implicitHeight: win.rowMd
+        font.pixelSize: win.fsBody
+        background: Rectangle {
+            radius: win.radSm
+            color: win.col("surface", "#21262d")
+            border.color: cb.activeFocus ? win.col("accent", "#3b82f6")
+                                         : win.col("border_strong", "#3a4150")
+            border.width: 1
+        }
+        contentItem: Label {
+            text: cb.editable ? cb.editText : cb.displayText
+            color: win.col("text", "#e8edfb"); font: cb.font
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: win.sp2; rightPadding: win.sp2
+            elide: Text.ElideRight
+        }
+    }
+
+    component Stepper: SpinBox {
+        id: sb
+        implicitHeight: win.rowMd
+        font.pixelSize: win.fsBody
+        background: Rectangle {
+            radius: win.radSm
+            color: win.col("surface", "#21262d")
+            border.color: sb.activeFocus ? win.col("accent", "#3b82f6")
+                                         : win.col("border_strong", "#3a4150")
+            border.width: 1
+        }
+    }
+
+    component Track: Slider {
+        id: sl
+        implicitHeight: win.rowSm
+        background: Rectangle {
+            x: sl.leftPadding; y: sl.topPadding + sl.availableHeight / 2 - height / 2
+            width: sl.availableWidth; height: 3; radius: 1.5
+            color: win.col("surface", "#21262d")
+            Rectangle {
+                width: sl.visualPosition * parent.width; height: parent.height
+                radius: parent.radius; color: win.col("accent", "#3b82f6")
+            }
+        }
+        handle: Rectangle {
+            x: sl.leftPadding + sl.visualPosition * (sl.availableWidth - width)
+            y: sl.topPadding + sl.availableHeight / 2 - height / 2
+            width: 12; height: 12; radius: 6
+            color: sl.pressed ? win.col("accent_hover", "#5b9bff") : win.col("text", "#e8edfb")
+            border.color: win.col("border_strong", "#3a4150")
+        }
+    }
+
     // A group break as one word. It was a Rectangle literal with a hand-picked
     // colour each time, and it used `border` -- a weight meant for outlining a
     // shape, which reads a shade too strong drawn as a rule across a panel.
@@ -327,7 +423,7 @@ ApplicationWindow {
         signal edited(int value)
         spacing: 6
         Label { text: parent.label; color: win.col("text_mute", "#8891b4"); Layout.preferredWidth: 14 }
-        SpinBox {
+        Stepper {
             from: 0; to: parent.maxv; value: parent.v; editable: true
             Layout.fillWidth: true
             onValueModified: parent.edited(value)
@@ -851,7 +947,7 @@ ApplicationWindow {
                         width: leftScroll.availableWidth
                         spacing: 16
 
-                        SectionLabel { text: "CROP (pixels)" }
+                        SectionLabel { text: "CROP (pixels)"; Layout.bottomMargin: win.sp1 }
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 2; rowSpacing: 8; columnSpacing: 10
@@ -860,11 +956,11 @@ ApplicationWindow {
                             CropField { Layout.fillWidth: true; label: "L"; maxv: sourceW; v: cropLeft; onEdited: (value) => { cropLeft = value; commit() } }
                             CropField { Layout.fillWidth: true; label: "R"; maxv: sourceW; v: cropRight; onEdited: (value) => { cropRight = value; commit() } }
                         }
-                        Switch { text: "Edit crop on preview"; checked: cropEdit; onToggled: cropEdit = checked }
+                        Toggle { text: "Edit crop on preview"; checked: cropEdit; onToggled: cropEdit = checked }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
                             PadButton { Layout.fillWidth: true; text: "Reset Crop (Ctrl+R)"; onClicked: resetCrop() }
-                            Switch { text: "Overlay (Ctrl+U)"; checked: cropOverlayOn; onToggled: cropOverlayOn = checked }
+                            Toggle { text: "Overlay (Ctrl+U)"; checked: cropOverlayOn; onToggled: cropOverlayOn = checked }
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
@@ -881,11 +977,11 @@ ApplicationWindow {
 
                         Rule { Layout.topMargin: win.sp1; Layout.bottomMargin: win.sp1 }
 
-                        SectionLabel { text: "SPEED & AUDIO" }
+                        SectionLabel { text: "SPEED & AUDIO"; Layout.topMargin: win.sp2; Layout.bottomMargin: win.sp1 }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
                             Label { text: "Speed"; color: win.col("text", "#e8edfb") }
-                            ComboBox {
+                            Picker {
                                 id: speedBox
                                 Layout.fillWidth: true
                                 editable: true
@@ -915,17 +1011,17 @@ ApplicationWindow {
                         // said so, so the factor spelling the classic engine offers as its
                         // own dropdown looked missing here.
                         Label { text: "percent or factor \u2014 200% and 2x are the same"; color: win.col("text_mute", "#8891b4"); font.pixelSize: 10 }
-                        Switch { text: "Reverse video"; checked: reverse; onToggled: {
+                        Toggle { text: "Reverse video"; checked: reverse; onToggled: {
                                 reverse = checked; commit()
                                 if (!checked) { revActive = false; bridge.cancelReverse(); actP().playbackRate = 1.0; var s = segmentForTime(cti); loadSegment(s.index, s.local, false) }
                             } }
-                        Switch { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: { includeAudio = checked; commit() } }
+                        Toggle { text: "Include audio"; checked: includeAudio; enabled: hasAudio; onToggled: { includeAudio = checked; commit() } }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
                             // Only worth the space when there is a choice to make.
                             visible: audioTrackCount() > 1
                             Label { text: "Track"; color: win.col("text", "#e8edfb") }
-                            ComboBox {
+                            Picker {
                                 id: audioTrackBox
                                 Layout.fillWidth: true
                                 model: audioTrackModel()
@@ -942,8 +1038,8 @@ ApplicationWindow {
 
                         Rule { Layout.topMargin: win.sp1; Layout.bottomMargin: win.sp1 }
 
-                        SectionLabel { text: "CUTS & SPLIT" }
-                        Switch { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
+                        SectionLabel { text: "CUTS & SPLIT"; Layout.topMargin: win.sp2; Layout.bottomMargin: win.sp1 }
+                        Toggle { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
                         GridLayout {
                             Layout.fillWidth: true; columns: 2; rowSpacing: win.sp2; columnSpacing: win.sp2
                             PadButton { Layout.fillWidth: true; text: "Mark In (I)"; baseColor: win.col("marker_in", "#2ddc7f"); hoverColor: win.col("marker_in_hover", "#4ee89a"); pressedColor: win.col("marker_in_pressed", "#1fa860"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: setMarkIn() }
@@ -1481,7 +1577,7 @@ ApplicationWindow {
                            Layout.preferredHeight: 16; Layout.alignment: Qt.AlignVCenter
                            Layout.leftMargin: win.sp1; Layout.rightMargin: win.sp1 }
                     PadButton { Layout.preferredWidth: 66; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
-                    Slider { Layout.preferredWidth: 88; from: 0; to: 1; value: win.volume; onMoved: { win.volume = value; win.muted = false } }
+                    Track { Layout.preferredWidth: 88; from: 0; to: 1; value: win.volume; onMoved: { win.volume = value; win.muted = false } }
                     PadButton { Layout.preferredWidth: 34; text: "\u2212"; onClicked: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
                     Rule { Layout.preferredWidth: 1; Layout.fillWidth: false
                            // A FIXED height, never fillHeight: a filling child makes the
@@ -1490,7 +1586,7 @@ ApplicationWindow {
                            // with the controls floating in the middle of the gap.
                            Layout.preferredHeight: 16; Layout.alignment: Qt.AlignVCenter
                            Layout.leftMargin: win.sp1; Layout.rightMargin: win.sp1 }
-                    Slider {
+                    Track {
                         Layout.preferredWidth: 120
                         from: 0; to: 100
                         value: 100 * Math.log(Math.max(1, win.zoom)) / Math.log(400)
