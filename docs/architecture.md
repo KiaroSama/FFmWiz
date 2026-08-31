@@ -182,31 +182,45 @@ are grouped the way they are.
 
 The graphical editors run in a **separate process** so the Qt event loop never
 shares a thread with the CLI. `ffmwiz/guibridge.py` writes a small JSON request
-file, launches `ffmwiz/gui/ffmwiz_gui.py` (classic) or the QML driver, and reads
+file, launches `ffmwiz/gui/classic/ffmwiz_gui.py` or the QML driver, and reads
 a JSON reply.
 
-The classic GUI is split under `ffmwiz/gui/`:
+`ffmwiz/gui/` holds what BOTH engines share, and one folder per engine:
 
-- `ffmwiz_gui.py` — thin subprocess entry point. It imports the modules below
+- `gui_common.py`, `gui_style.py`, `gui_geometry.py` — imports, palette/QSS,
+  logging, icons, time/history helpers, shared state, and the `main()`
+  dispatcher. Shared deliberately: neither engine may reach into the other's
+  folder, so anything both need lives here.
+- `classic/` — the PySide6-widgets engine.
+- `modern/` — the QtQuick engine and its `qml/`.
+
+Inside `classic/`:
+
+- `ffmwiz_gui.py` — thin subprocess entry point. It imports the editor modules
   and injects the fully assembled namespace into each so a function in one file
   can call names defined in another. This is safe because the GUI is never
   imported by tests and is not monkeypatched.
-- `gui_common.py` — imports, palette/QSS, logging, icons, time/history helpers,
-  shared state, and the `main()` dispatcher.
-- `gui_editor_cut.py`, `gui_editor_crop.py`, `gui_editor_speed.py`,
-  `gui_editor_audio.py`, `gui_editor_unified.py` — one module per editor
-  builder.
-- `gui_editor_unified_canvas.py` (preview canvas + frame-extract worker) and
-  `gui_editor_unified_timeline.py` (timeline strip) — extracted from
-  `gui_editor_unified.py`, which was a single 3993-line function. Each holds a
-  factory that defines and returns its widget class, so PySide6 is still
-  imported on demand. The classes captured no state from the builder, only Qt
-  symbols, which is what made the move safe; it was verified by comparing the
-  built window's whole widget tree and public API before and after.
-  The remaining builders are each one large Qt function whose nested pieces do
-  close over builder state, so they cannot be moved the same way.
+- One module per editor builder, each split further by responsibility so no file
+  runs long: `gui_editor_cut{,_layout,_widgets,_input}.py`,
+  `gui_editor_crop{,_canvas,_layout}.py`,
+  `gui_editor_speed{,_transport,_reverse}.py`,
+  `gui_editor_audio{,_waveform}.py`, and the unified family below.
+- `gui_editor_unified.py` is the window shell; `_layout` builds the widget tree,
+  `_player` owns QtMultimedia and join-segment routing, `_edits` holds the edit
+  model and undo/redo, `_input` the key handling, `_canvas` the preview canvas
+  and frame-extract worker, and `_timeline{,_input}` the timeline strip and its
+  pointer interaction.
 
-The modern engine (`ffmwiz_gui_qml.py` + `qml/UnifiedEditor.qml`) is opt-in via
+**The trap when adding a module here.** Only the modules listed in
+`ffmwiz_gui.py`'s `_MODULES` receive the assembled namespace. A new sibling gets
+nothing injected, and `from gui_common import *` skips underscore names — so a
+helper like `_import_qt` is a `NameError` on first run. New modules therefore
+import their shared helpers by name from `gui_common`/`gui_geometry`/`gui_style`,
+and the few names reachable ONLY through the assembled namespace are passed in
+as factory arguments by the parent.
+
+The modern engine (`modern/ffmwiz_gui_qml.py` + `modern/qml/`, whose
+reusable controls and panels are one file each) is opt-in via
 `gui_engine=qml` (or `FFMWIZ_GUI_ENGINE=qml`) and only handles the unified video
 editor; every other GUI mode uses the classic engine.
 
@@ -247,8 +261,9 @@ siblings of `constants.py`.
 
 The only files intentionally left above 800 lines are single-function GUI
 builders that cannot be split without visual/runtime verification of the Qt/Tk
-window: `gui/gui_editor_unified.py`, `gui/gui_editor_cut.py`,
-`gui/gui_editor_speed.py`, `gui/gui_editor_crop.py`, `guibridge_crop_tk.py`,
+window: `gui/classic/gui_editor_unified*.py`, `gui/classic/gui_editor_cut*.py`,
+`gui/classic/gui_editor_speed*.py`, `gui/classic/gui_editor_crop*.py`,
+`guibridge_crop_tk.py`,
 and `guibridge_cut_tk.py`.
 
 ## Test layout

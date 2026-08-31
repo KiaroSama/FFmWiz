@@ -141,7 +141,19 @@ class WaveformWithoutNumpyTests(unittest.TestCase):
             self.assertAlmostEqual(a1, b1, places=6)
 
 
-_QML_PATH = _GUI_DIR / "modern" / "qml" / "UnifiedEditor.qml"
+_QML_DIR = _GUI_DIR / "modern" / "qml"
+_QML_PATH = _QML_DIR / "UnifiedEditor.qml"
+
+
+def _all_qml() -> str:
+    """Every .qml of the modern engine.
+
+    These guards count occurrences of a call, and the engine is several files
+    now -- a single-file read counts one of a pair that lives across two and
+    fails without anything being wrong.
+    """
+    return "\n".join(path.read_text(encoding="utf-8")
+                     for path in sorted(_QML_DIR.glob("*.qml")))
 
 
 def _qml_range_js():
@@ -208,7 +220,7 @@ class QmlRangeMathTests(unittest.TestCase):
         )
 
     def test_result_carries_the_cut_flag(self):
-        qml = _QML_PATH.read_text(encoding="utf-8")
+        qml = _all_qml()
         self.assertIn("cuts_applied: cuts.length > 0", qml)
 
 
@@ -325,7 +337,7 @@ class ReverseProxyTests(unittest.TestCase):
         self.assertEqual(gui_geometry.reverse_chunk_spec([], 3.0, 8.0), (0, 3.0, 5.0, 3.0))
 
     def test_qml_clips_the_window_to_the_end_segment(self):
-        qml = _QML_PATH.read_text(encoding="utf-8")
+        qml = _all_qml()
         self.assertIn("var eff = Math.max(winStart, segs[s.index].start)", qml)
         self.assertIn("revWinStart = eff", qml)
 
@@ -359,11 +371,11 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
         self.assertIn("self._rev_temp.cleanup()", self.SRC)
 
     def test_qml_cancels_the_render_when_reverse_is_abandoned(self):
-        qml = _QML_PATH.read_text(encoding="utf-8")
+        qml = _all_qml()
         self.assertEqual(qml.count("bridge.cancelReverse()"), 2)
 
     def test_qml_leaves_reverse_mode_when_a_chunk_fails(self):
-        qml = _QML_PATH.read_text(encoding="utf-8")
+        qml = _all_qml()
         self.assertIn('if (path === "") {', qml)
         self.assertIn("Reverse preview couldn't render here", qml)
 
@@ -445,7 +457,7 @@ class QmlChapterNormalisationTests(unittest.TestCase):
         self.assertEqual(once, twice)
 
     def test_qml_reads_the_normalised_shape(self):
-        qml = _QML_PATH.read_text(encoding="utf-8")
+        qml = _all_qml()
         self.assertIn("var ct = Number(chs[ci].start)", qml)
         self.assertNotIn("chs[ci].name", qml)
 

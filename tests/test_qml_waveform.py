@@ -146,7 +146,8 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
     def test_qml_palette_covers_every_col_key(self):
         """USER-12-2: every col("key") used by the QML must exist in the palette."""
         import re
-        qml = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+        qml = "\n".join(p.read_text(encoding="utf-8")
+                      for p in sorted((_GUI_DIR / "qml").glob("*.qml")))
         keys = set(re.findall(r'col\("([a-z_0-9]+)"', qml))
         self.assertTrue(keys)
         missing = sorted(k for k in keys if k not in Q._PALETTE)
@@ -155,7 +156,8 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
     def test_qml_col_literals_match_palette(self):
         """The inline fallback literal must not drift from the palette value."""
         import re
-        qml = (_GUI_DIR / "qml" / "UnifiedEditor.qml").read_text(encoding="utf-8")
+        qml = "\n".join(p.read_text(encoding="utf-8")
+                      for p in sorted((_GUI_DIR / "qml").glob("*.qml")))
         drift = []
         for key, literal in re.findall(r'col\("([a-z_0-9]+)",\s*"(#[0-9a-fA-F]{6})"\)', qml):
             want = Q._PALETTE.get(key)

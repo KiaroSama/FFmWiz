@@ -310,7 +310,12 @@ class ClassicEditorModel(unittest.TestCase):
     def test_the_reverse_proxy_call_site_uses_the_active_segment(self):
         # The helper above is only worth anything if _render_reverse_proxy calls
         # it; a short pattern would match elsewhere, so anchor on the assignment.
-        source = (_GUI_DIR / "gui_editor_unified.py").read_text(encoding="utf-8")
+        # The whole unified family, not one file. `_render_reverse_proxy` moved
+        # into `..._player.py` when the 2511-line module was split, and a
+        # single-file read would have gone quiet rather than failing.
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((_GUI_DIR / "classic").glob("gui_editor_unified*.py")))
         self.assertIn("want_audio = active_segment_has_audio(", source)
         self.assertNotIn('want_audio = bool(self.request.get("has_audio"))', source)
 
