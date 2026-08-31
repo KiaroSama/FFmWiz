@@ -424,6 +424,26 @@ def additional_source_video_drop_reason(answers: dict[str, Any]) -> str:
         return "a speed/reverse change rebuilds the video timeline"
     if answers.get("cut_keep_ranges"):
         return "frame-accurate cuts rebuild the video timeline"
+    # ...and one reason that is not about the timeline at all: they are
+    # STREAM-COPIED, so the target container has to accept the source codec as
+    # it stands. Every reason above named a timeline rebuild while the chain
+    # behind this gate emitted `-map 0:v:N -c:v:N copy` for any codec, so an
+    # .mkv carrying an mjpeg cover re-encoded to .webm produced a command real
+    # ffmpeg 8.1.1 refuses: "Only VP8 or VP9 or AV1 video and Vorbis or Opus
+    # audio and WebVTT subtitles are supported for WebM" / "Could not write
+    # header". Deciding it here, not in the builder, is what keeps the summary
+    # and the resolved keep-flag honest.
+    output_ext = answers.get("output_ext", "")
+    unstorable = sorted({
+        str(stream.get("codec_name") or "?").lower()
+        for stream in additional_source_video_streams(answers)
+        if container_video_codec(output_ext, str(stream.get("codec_name") or ""))[1]
+    })
+    if unstorable:
+        return (
+            f".{str(output_ext).lstrip('.').lower()} cannot store a copied "
+            f"{'/'.join(unstorable)} stream"
+        )
     return ""
 
 

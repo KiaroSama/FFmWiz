@@ -609,16 +609,31 @@ def build_ffmpeg_command(answers: dict[str, Any]) -> list[str]:
             audio_codec_for_stats = audio_codec
         # Every constrained container, not just WebM: aac into .flac/.ogg/.opus
         # was emitted happily and then rejected by the muxer.
+        #
+        # Asking the shared resolver, not the raw allow-list: the list contains
+        # the literal token "copy", so a bare membership test waved `-c:a copy`
+        # through for ANY source codec. A .webm/.flac/.opus output of an AAC
+        # source therefore still emitted `-c:a copy` and died at header write
+        # ("Only VP8 or VP9 or AV1 video and Vorbis or Opus audio ... are
+        # supported for WebM" / "Exactly one FLAC audio stream is required" /
+        # "Unsupported codec id in stream 0"). `container_audio_codec` decides
+        # copy against the SOURCE codec, which is the question that matters.
+        # Every mapped track is checked, because one unstorable track is enough
+        # to fail the mux.
         container_ext = str(answers.get("output_ext", "")).lower().lstrip(".")
-        allowed_audio = AUDIO_CODECS_BY_FORMAT.get(container_ext)
-        if allowed_audio and audio_codec not in allowed_audio:
-            replacement = default_audio_codec_for_ext(container_ext)
-            appio.note(
-                f".{container_ext} cannot store {audio_codec} audio; "
-                f"{replacement} was selected for container compatibility."
-            )
-            audio_codec = replacement
-            audio_codec_for_stats = audio_codec
+        source_codecs = [
+            str((answers.get("audio_streams") or [{}])[index].get("codec_name") or "") or None
+            for index in audio_indices
+            if index < len(answers.get("audio_streams") or [])
+        ] or [None]
+        for source_codec in source_codecs:
+            resolved, codec_note = container_audio_codec(container_ext, audio_codec, source_codec)
+            if resolved != audio_codec:
+                if codec_note:
+                    appio.note(codec_note)
+                audio_codec = resolved
+                audio_codec_for_stats = audio_codec
+                break
         # One write, at the end, of whatever the chain settled on -- the
         # normalization AND every fallback. `answers["audio_codec"]` stays the
         # user's request so Back can still show it (D15).

@@ -472,5 +472,61 @@ class CommandAudioTests(CommandGenBase):
         self.assertLess(aresample_pos, asetpts_pos)
 
 
+    def _audio_container_answers(self, out_dir, output_ext, source_codec, chosen_codec):
+        answers = self.base_answers(out_dir)
+        answers["output_ext"] = output_ext
+        answers["video_codec"] = "H264"
+        answers["use_gpu"] = False
+        answers["gpu_available"] = False
+        answers["crop_enabled"] = False
+        answers["audio_streams"] = [{"codec_type": "audio", "codec_name": source_codec,
+                                     "bit_rate": "128000"}]
+        answers["audio_tracks"] = [0]
+        answers["audio_codec"] = chosen_codec
+        return answers
+
+    def _audio_codec_of(self, answers):
+        cmd = self.command_for(answers)
+        self.assertIn("-c:a", cmd)
+        return cmd[cmd.index("-c:a") + 1]
+
+    def test_audio_copy_is_refused_when_the_container_cannot_store_the_source_codec(self):
+        # AUDIO_CODECS_BY_FORMAT lists the literal token "copy", so a plain
+        # membership test waved `-c:a copy` through for ANY source codec.
+        # Verified against ffmpeg 8.1.1: copying an AAC track into .webm gives
+        # "Only VP8 or VP9 or AV1 video and Vorbis or Opus audio ... are
+        # supported for WebM", into .flac "Exactly one FLAC audio stream is
+        # required", into .opus "Unsupported codec id in stream 0" -- all at
+        # header-write time. The decision has to consult the SOURCE codec.
+        with tempfile.TemporaryDirectory() as tmp:
+            for output_ext, expected in (("webm", "libopus"), ("flac", "flac"),
+                                         ("opus", "libopus")):
+                with self.subTest(output_ext=output_ext):
+                    answers = self._audio_container_answers(tmp, output_ext, "aac", "copy")
+                    self.assertEqual(self._audio_codec_of(answers), expected)
+
+    def test_audio_copy_survives_when_the_container_accepts_the_source_codec(self):
+        # The guard must not over-tighten: these all mux on ffmpeg 8.1.1.
+        with tempfile.TemporaryDirectory() as tmp:
+            for output_ext, source_codec in (("webm", "opus"), ("webm", "vorbis"),
+                                             ("flac", "flac"), ("mp4", "aac"),
+                                             ("mkv", "aac")):
+                with self.subTest(output_ext=output_ext, source_codec=source_codec):
+                    answers = self._audio_container_answers(tmp, output_ext, source_codec, "copy")
+                    self.assertEqual(self._audio_codec_of(answers), "copy")
+
+    def test_audio_encode_container_substitution_still_applies(self):
+        # The non-copy half of the same guard (aac into .flac/.opus), and the
+        # unconstrained containers it must leave alone.
+        with tempfile.TemporaryDirectory() as tmp:
+            for output_ext, chosen, expected in (("flac", "aac", "flac"),
+                                                 ("opus", "aac", "libopus"),
+                                                 ("mp4", "flac", "flac"),
+                                                 ("mp4", "aac", "aac")):
+                with self.subTest(output_ext=output_ext, chosen=chosen):
+                    answers = self._audio_container_answers(tmp, output_ext, "aac", chosen)
+                    self.assertEqual(self._audio_codec_of(answers), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

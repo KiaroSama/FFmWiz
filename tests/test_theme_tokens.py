@@ -185,10 +185,29 @@ class TerminalPaletteTests(unittest.TestCase):
         self.assertEqual(len(set(LANGUAGE_COLORS)), len(LANGUAGE_COLORS))
 
     # Color.MUX_* existed only to re-declare a muxcleanup value on the wizard
-    # side. Every one of them WITHOUT a caller is gone; these six still have
-    # call sites outside this file's reach (ffmwiz/support/ext00b.py,
-    # ext00c.py, ext01c.py, L00_metadata.py) and go when those
-    # switch to importing C directly. This bound may shrink, never grow.
+    # side. Every one of them WITHOUT a caller is gone. These six STAY, and
+    # the reason is measured, not assumed -- 'switch the call sites to import
+    # C directly' was proposed and does not work:
+    #
+    # 1. Only three are the same string as the constant they supposedly
+    #    mirror. The other three are `C.BOLD + <a DIFFERENTLY NAMED one>`:
+    #      MUX_HEADER        == C.BOLD + C.LAUNCHER_PINK      (not C.HEADER;
+    #                                                          there is none)
+    #      MUX_SEPARATOR     == C.BOLD + C.ACTION_SEPARATOR
+    #      MUX_SETTING_LABEL == C.BOLD + C.SETTING_LABEL
+    #    so it is not a rename.
+    #
+    # 2. `muxcleanup/` sits ABOVE `support/` in the layer order, so
+    #    `support/` cannot import it at module level -- ext00b.py:174 does
+    #    its muxcleanup imports INSIDE the function for exactly that reason.
+    #    Six of the nine references are default argument values, which are
+    #    evaluated at import time, so a deferred import cannot supply them.
+    #    Rewriting them as `= None` and resolving in the body would change
+    #    public signatures for no behavioural gain, and L00_metadata.py:146
+    #    sits in a dict of Color.* constants where one C.* entry reads worse.
+    #
+    # The bound may shrink if a call site genuinely disappears; it may never
+    # grow.
     MUX_MIRRORS_LEFT = {
         "MUX_EMERALD", "MUX_LAVENDER", "MUX_HEADER", "MUX_SEPARATOR",
         "MUX_SETTING_LABEL", "MUX_SETTING_VALUE",
@@ -245,8 +264,13 @@ class NoSecondPaletteTests(unittest.TestCase):
 
     # Modules a user actually looks at. The Tk bridges are an archived fallback
     # reached only when PySide6 is missing, so they are out of scope here.
-    ACTIVE = ["gui_editor_unified.py", "gui_editor_unified_canvas.py",
-              "gui_editor_unified_timeline.py", "gui_common.py"]
+    #
+    # Globbed, not listed: the classic editor is ~20 modules now and a four-name
+    # list policed four of them, so a hard-coded colour in any of the sixteen
+    # others (the cut/crop/speed/audio editors, the extracted layout and input
+    # halves) was invisible to this ratchet -- which is the whole failure mode
+    # USER-12-3 exists to stop.
+    ACTIVE = sorted(p.name for p in (_GUI_DIR / "classic").glob("*.py")) + ["gui_common.py"]
 
     # The zoom cursor is drawn over arbitrary video frames and must stay legible
     # against any content, so it is exempt BY DESIGN. See the THEME EXEMPTION
@@ -290,6 +314,44 @@ class NoSecondPaletteTests(unittest.TestCase):
                     [], found,
                     f"{name} hard-codes colours instead of using PALETTE: "
                     + "; ".join(f"L{ln} {hx} -> {snip}" for ln, hx, snip in found))
+
+    # Pure black/white are contrast-critical and theme-independent: the crop
+    # scrim, the crop rectangle and its rule-of-thirds guides sit over arbitrary
+    # video frames, so they are literals BY DESIGN.
+    QML_LITERAL_ALLOWLIST = {"#000000", "#ffffff"}
+
+    def test_every_qml_colour_is_a_token_fallback(self):
+        """USER-12-3: a hex in the QML must be the fallback for the token that
+        already owns that colour, so retinting gui_style reaches both engines.
+
+        Covers the helper spellings a `col("k", "#hex")` pattern misses -- the
+        timeline draws its IN/OUT/SPLIT/CENTER chips through
+        `chip(x, key, fallback, ...)`, which forwards to win.col() but does not
+        look like a col() call to a regex.
+        """
+        by_value: dict[str, list[str]] = {}
+        for key, value in gui_style.PALETTE.items():
+            by_value.setdefault(value.lower(), []).append(key)
+        bad = []
+        for path in sorted(_QML_DIR.glob("*.qml")):
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(r'"(#[0-9a-fA-F]{6})"', text):
+                literal = match.group(1).lower()
+                if literal in self.QML_LITERAL_ALLOWLIST:
+                    continue
+                line = text[:match.start()].count("\n") + 1
+                owners = by_value.get(literal)
+                if not owners:
+                    bad.append(f"{path.name}:{line} {literal} is in no palette token")
+                    continue
+                # The token naming that colour must be right there, so the
+                # literal is demonstrably a fallback and not a second palette.
+                near = set(re.findall(r'"([a-z][a-z_0-9]+)"',
+                                      text[max(0, match.start() - 160):match.start()]))
+                if not near & set(owners):
+                    bad.append(f"{path.name}:{line} {literal} names no token "
+                               f"(expected one of {owners})")
+        self.assertEqual([], bad, "; ".join(bad))
 
     def test_the_cursor_exemption_stays_documented(self):
         # If the exemption is ever silently widened, the reason must still be

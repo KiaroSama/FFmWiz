@@ -40,7 +40,7 @@ if ($resp -match '^(?i:y|yes|1|true)$') {
             if (Test-Path -LiteralPath $requirements) {
                 & $pythonExe @pythonArgs -m pip install --upgrade -r $requirements
             } else {
-                & $pythonExe @pythonArgs -m pip install --upgrade PySide6==6.11.1
+                & $pythonExe @pythonArgs -m pip install --upgrade PySide6==6.11.2
             }
             $pipExit = $LASTEXITCODE
         } catch {

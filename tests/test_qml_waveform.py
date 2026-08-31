@@ -197,7 +197,9 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
         import re
         qml = "\n".join(p.read_text(encoding="utf-8")
                       for p in sorted((_GUI_DIR / "qml").glob("*.qml")))
-        keys = set(re.findall(r'col\("([a-z_0-9]+)"', qml))
+        # colA() is the same lookup with an alpha, so it must be policed too --
+        # a `col(`-only pattern let colA("typo", "#hex", a) through silently.
+        keys = set(re.findall(r'\bcolA?\(\s*"([a-z_0-9]+)"', qml))
         self.assertTrue(keys)
         missing = sorted(k for k in keys if k not in Q._PALETTE)
         self.assertEqual(missing, [])
@@ -208,7 +210,8 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
         qml = "\n".join(p.read_text(encoding="utf-8")
                       for p in sorted((_GUI_DIR / "qml").glob("*.qml")))
         drift = []
-        for key, literal in re.findall(r'col\("([a-z_0-9]+)",\s*"(#[0-9a-fA-F]{6})"\)', qml):
+        for key, literal in re.findall(
+                r'\bcolA?\(\s*"([a-z_0-9]+)",\s*"(#[0-9a-fA-F]{6})"', qml):
             want = Q._PALETTE.get(key)
             if want and want.lower() != literal.lower():
                 drift.append((key, literal, want))

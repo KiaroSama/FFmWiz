@@ -301,7 +301,10 @@ class EveryBuilderThatRetimesAlsoStatesItsTiming(unittest.TestCase):
     # Modules that BUILD A COMMAND and emit the retiming filter: the option has
     # to sit in the same file, because the same function writes both.
     MODULES = ("ffmwiz/wizard_build_b.py",
-               "ffmwiz/support/ext04b.py", "ffmwiz/support/L04.py")
+               "ffmwiz/support/ext04b.py", "ffmwiz/support/L04.py",
+               # The composite builder retimes too, since it started
+               # carrying the picture chain.
+               "ffmwiz/wizard_build_c.py")
 
     # Modules that only COMPOSE THE FILTER STRING and hand it to a command
     # builder that lives elsewhere. build_cpu_video_filter moved here in the

@@ -156,10 +156,21 @@ class SelectionSkipTests(unittest.TestCase):
 
 class ScanResultTests(unittest.TestCase):
     def test_scan_files_reports_failures_separately(self):
-        """NEW-MUX4: unreadable files must not vanish from the run."""
-        result = mux_media.scan_files([])
-        self.assertEqual(list(result.files), [])
-        self.assertEqual(list(result.failures), [])
+        """NEW-MUX4: unreadable files must not vanish from the run.
+
+        Driven through a stubbed probe so the assertion that carries the defect
+        -- the failure is RETURNED, not dropped -- runs without ffprobe too. The
+        empty-list form this replaced passed with `ScanResult(scanned, [])`.
+        """
+        good, bad = Path("good.mkv"), Path("bad.mkv")
+        media = MediaFile(path=good, streams=[StreamInfo(index=0, codec_type="video")])
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), mock.patch.object(
+            mux_media, "probe_file", side_effect=lambda p: media if p == good else None
+        ):
+            result = mux_media.scan_files([good, bad])
+        self.assertEqual(list(result.files), [media])
+        self.assertEqual(list(result.failures), [bad])
 
     @unittest.skipUnless(FFPROBE_AVAILABLE, "ffprobe not found in PATH")
     def test_unreadable_file_is_returned_as_a_failure(self):

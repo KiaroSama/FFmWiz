@@ -236,57 +236,124 @@ class TheCompositeCarriesTheRawOptions(_Quiet):
         self.assertNotIn("-tune", cmd)
 
 
-class TheCompositeSaysWhatItCannotCarry(_Quiet):
-    """The composite builder owns its whole command and applies neither the
-    picture chain nor the audio chain, so crop, resolution, frame rate,
-    picture filters, fades, speed, volume, LoudNorm, cuts and Split are all
-    dropped -- while the summary prints them exactly as for an ordinary
-    encode. Not carried (applying only part of the set desynchronises sound
-    from picture), but no longer dropped in silence.
+class TheCompositeCarriesTheAnswers(_Quiet):
+    """The composite builder now applies the picture and audio chains.
+
+    It used to map `[0:v]` and one audio track straight into the overlay/mix
+    graph, so crop, resolution, frame rate, picture filters, fade, speed,
+    volume and LoudNorm were all dropped while the summary printed them. The
+    chains are inserted around the composite rather than reimplemented inside
+    it, so there is still one definition of each.
+
+    Placement is the part worth pinning: the geometry and look run BEFORE the
+    overlay so the second input lands on the picture the user asked for, while
+    speed and the fade run AFTER it so they act on the finished frame and
+    retime both inputs together.
     """
 
-    def _notes(self, **extra):
+    def _command(self, **extra):
         logo = self.tmp / "logo.png"
         logo.write_bytes(b"")
-        answers = self._answers(composite_mode="overlay", composite_path=logo,
-                                **extra)
-        return FFmWiz.composite_unsupported_answer_notes(answers)
+        extra.setdefault("composite_mode", "overlay")
+        answers = self._answers(composite_path=logo, **extra)
+        return FFmWiz.build_composite_command(answers, self.tmp / "out.mkv")
+
+    def _graph(self, **extra):
+        cmd = self._command(**extra)
+        return cmd[cmd.index("-filter_complex") + 1].split(";")
+
+    def test_the_geometry_reaches_the_command(self):
+        text = " ".join(self._command(
+            crop_enabled=True, crop_top=20, crop_left=10, crop_right=10,
+            crop_bottom=20, resolution=(640, 360), fps=15))
+        for wanted in ("crop=", "scale=640:360", "fps=15"):
+            self.assertIn(wanted, text, f"{wanted} never reached the command")
+
+    def test_the_look_filters_reach_the_command(self):
+        self.assertIn("hqdn3d", " ".join(self._command(denoise_level="medium")))
+        self.assertIn("eq=saturation=0",
+                      " ".join(self._command(adjust_grayscale=True)))
+
+    def test_the_audio_answers_reach_the_command(self):
+        self.assertIn("volume=1.5", " ".join(self._command(audio_volume=1.5)))
+
+    def test_the_geometry_runs_before_the_overlay(self):
+        # The overlay has to land on the cropped, resized picture -- not on the
+        # source with the edit applied afterwards to both of them at once.
+        chains = self._graph(crop_enabled=True, crop_top=20, crop_left=0,
+                             crop_right=0, crop_bottom=20)
+        base = [c for c in chains if c.startswith("[0:v]")]
+        self.assertTrue(base and "crop=" in base[0],
+                        f"the crop is not on the base chain: {chains}")
+        overlay = [c for c in chains if "overlay=" in c]
+        self.assertTrue(overlay and overlay[0].startswith("[cmpbase]"),
+                        f"the overlay does not consume the cropped base: {chains}")
+
+    def test_the_fade_runs_after_the_overlay(self):
+        # A fade in front of the overlay would fade the base while the logo
+        # stayed at full brightness.
+        chains = self._graph(fade_out_seconds=1.0)
+        faded = [c for c in chains if "fade=t=out" in c]
+        self.assertTrue(faded, f"no video fade in the graph: {chains}")
+        self.assertTrue(faded[0].startswith("[vout]"),
+                        f"the fade does not consume the composited frame: {faded}")
+
+    def test_a_stack_is_sized_from_the_transformed_base(self):
+        # hstack needs both halves the same height. Sizing the partner against
+        # the SOURCE height while the base was resized is how a stack breaks.
+        # 640x360 on purpose: the fixture source is 1280x720, so asking for
+        # 720p would make "sized from the source" and "sized from the
+        # transformed base" the same number and the test could not tell
+        # them apart.
+        chains = self._graph(composite_mode="hstack", resolution=(640, 360))
+        partner = [c for c in chains if c.startswith("[1:v]")]
+        self.assertTrue(partner, f"no partner chain: {chains}")
+        self.assertIn("scale=-2:360", partner[0])
+        self.assertNotIn("scale=-2:720", partner[0])
+
+    def test_a_speed_change_retimes_the_sound_with_the_picture(self):
+        text = " ".join(self._command(
+            video_speed_enabled=True, video_speed_factor=2.0,
+            audio_speed_enabled=True, audio_speed_factor=2.0))
+        self.assertIn("setpts", text)
+        self.assertIn("atempo", text)
+
+    def test_a_speed_change_keeps_the_frames_it_spread_out(self):
+        # `setpts` alone is not enough: without -fps_mode passthrough the muxer
+        # resamples back to the source cadence and drops them again.
+        cmd = self._command(video_speed_enabled=True, video_speed_factor=2.0)
+        self.assertIn("-fps_mode", cmd)
+        self.assertEqual("passthrough", cmd[cmd.index("-fps_mode") + 1])
+        # ...and the source-length limit must not survive: a 2x composite is
+        # half as long, so -t on the SOURCE duration would truncate nothing but
+        # would still be a false statement about the output.
+        self.assertNotIn("-t", cmd)
+
+    def test_a_composite_at_normal_speed_still_ends_with_its_first_input(self):
+        cmd = self._command()
+        self.assertIn("-t", cmd)
+        self.assertNotIn("-fps_mode", cmd)
+
+    def test_a_plain_composite_gains_no_chain(self):
+        # Carrying the answers must not mean building a link for a job that
+        # asked for none. The picture chain always ends in a pixel-format
+        # conversion and the overlay already has one.
+        chains = self._graph()
+        self.assertFalse([c for c in chains if "cmpbase" in c],
+                         f"a plain composite grew a base chain: {chains}")
+
+    def test_the_timeline_answers_are_still_named(self):
+        # Cuts and Split are the one thing still not carried, because they
+        # change how many outputs exist.
+        answers = self._answers(composite_mode="overlay",
+                                cut_keep_ranges=[(0.0, 2.0), (4.0, 6.0)])
+        notes = FFmWiz.composite_unsupported_answer_notes(answers)
+        self.assertTrue(any("cut ranges" in note for note in notes))
 
     def test_a_plain_composite_says_nothing(self):
-        self.assertEqual([], self._notes())
-
-    def test_the_geometry_answers_are_named_one_by_one(self):
-        text = " ".join(self._notes(
-            crop_enabled=True, crop_top=20, crop_left=10, crop_right=10,
-            crop_bottom=20, resolution=(640, 360), fps=15,
-            denoise_level="medium", fade_out_seconds=1.0))
-        for wanted in ("crop", "resolution", "frame rate", "picture filters",
-                       "fade"):
-            self.assertIn(wanted, text, f"{wanted} is dropped without a word")
-
-    def test_the_audio_answers_are_named(self):
-        self.assertTrue(any("volume" in note for note in
-                            self._notes(audio_volume=1.5)))
-
-    def test_the_timeline_answers_are_named(self):
-        self.assertTrue(any("cut ranges" in note for note in
-                            self._notes(cut_keep_ranges=[(0.0, 2.0), (4.0, 6.0)])))
-        self.assertTrue(any("Split" in note for note in
-                            self._notes(separator_points=[4.0])))
-
-    def test_the_notes_reach_the_user_before_the_command(self):
-        # Emitted by the builder itself, so every route that builds a
-        # composite -- not just the one the wizard takes -- carries them.
-        logo = self.tmp / "logo.png"
-        logo.write_bytes(b"")
-        said = []
-        FFmWiz.appio.note = lambda message, *a, **k: said.append(str(message))
-        answers = self._answers(composite_mode="overlay", composite_path=logo,
-                                crop_enabled=True, crop_top=20, crop_left=10,
-                                crop_right=10, crop_bottom=20)
-        FFmWiz.build_composite_command(answers, self.tmp / "out.mkv")
-        self.assertTrue(any("NOT applied" in line for line in said),
-                        f"the builder said nothing about the dropped crop: {said}")
+        self.assertEqual(
+            [], FFmWiz.composite_unsupported_answer_notes(
+                self._answers(composite_mode="overlay")))
 
 
 class ChoosingABitrateRetiresTheCrf(unittest.TestCase):
