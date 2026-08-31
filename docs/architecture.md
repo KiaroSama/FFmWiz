@@ -263,12 +263,29 @@ caller. The pure-data modules
 `core/constants_config_template.py` and `core/constants_tables.py` are leaf
 siblings of `constants.py`.
 
-The only files intentionally left above 800 lines are single-function GUI
-builders that cannot be split without visual/runtime verification of the Qt/Tk
-window: `gui/classic/gui_editor_unified*.py`, `gui/classic/gui_editor_cut*.py`,
-`gui/classic/gui_editor_speed*.py`, `gui/classic/gui_editor_crop*.py`,
-`guibridge_crop_tk.py`,
-and `guibridge_cut_tk.py`.
+**No file in the repository is above 800 lines** -- source, tests and the
+manual included. The GUI builders and the Tk crop/cut windows, once listed
+here as permanent exceptions, are split too.
+
+Two traps this pattern hides, both of which cost a debugging round:
+
+- **A sibling does not inherit the source's TAIL imports.** Several modules
+  import a leaf (`wizard_base`, `wizard_build_c`) *after* their `__all__`, to
+  avoid re-entering a facade mid-merge. Copy only the top header into a new
+  sibling and every name from those tail imports is silently unbound until the
+  branch runs. `test_module_reference_hygiene` catches only *qualified*
+  references (`mod.name`), not bare ones -- so after any split, resolve each
+  new module's free names against the imported module and fix what is missing.
+- **Patching a re-export leaves the definer's global intact.** A test doing
+  `wizard_build_b.confirm_bitmap_subtitle_drop = fake` stops working the moment
+  both that function and its caller move to a sibling: the caller reads its own
+  module global, not the facade attribute. Point such tests at the module that
+  DEFINES the name -- the same rule the call sites follow.
+
+A source-text guard must name the SET of files, never one path. Three more
+went stale in this split (`test_split_subtitles`, `test_speed_frame_retention`,
+`test_docs_guards`); each now globs, or names the consumer that carries the
+other half of the pair.
 
 ## Test layout
 
