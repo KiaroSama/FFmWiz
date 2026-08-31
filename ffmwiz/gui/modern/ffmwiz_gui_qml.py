@@ -628,9 +628,14 @@ def main() -> int:
     # A plain dict, not a QObject: QML reads a dict's keys as properties, and
     # `setProperty` on a QObject creates DYNAMIC properties that QML cannot see
     # at all -- every `Tok.sp2` came back undefined.
+    # Type scale raised one step across the board (10/11/12/14 -> 11/12/13/15).
+    # The old scale was set before the editor had real text in review shots; on
+    # a 1600px window the timecodes in particular were unreadable at a glance,
+    # which is the one number this UI exists to show. Rows grew with it so the
+    # larger glyphs are not cramped against the button edge.
     _TOKENS = {"sp0": 2, "sp1": 4, "sp2": 8, "sp3": 12, "sp4": 16, "sp5": 24,
-               "radSm": 6, "radMd": 8, "fsMicro": 10, "fsBody": 11, "fsLead": 12,
-               "fsTitle": 14, "rowSm": 22, "rowMd": 26, "rowLg": 32}
+               "radSm": 6, "radMd": 8, "fsMicro": 11, "fsBody": 12, "fsLead": 13,
+               "fsTitle": 15, "rowSm": 24, "rowMd": 28, "rowLg": 34}
 
     _palette_obj = _Palette()
     engine.rootContext().setContextProperty("Skin", _palette_obj)   # not "Palette": QtQuick owns that name

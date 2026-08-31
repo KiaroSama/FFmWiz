@@ -33,7 +33,10 @@ Card {
                     // ~438px inside a 360px viewport and its right column was
                     // clipped. 24 = the ScrollView margins, 14 = the scrollbar.
                     width: leftScroll.availableWidth
-                    spacing: 16
+                    // 12, not 16: the larger type scale pushed the last two
+                    // rows of the Cuts group below the panel edge. Section
+                    // separation still reads -- the labels carry it.
+                    spacing: 12
 
                     // PLAYBACK -- first, and in the panel, exactly as the classic
                     // lays it out: a full-width primary Play, the CTI clock centred
@@ -60,7 +63,7 @@ Card {
                         horizontalAlignment: Text.AlignHCenter
                         text: win.fmt(win.cti)
                         color: win.col("text", "#e8edfb")
-                        font.pixelSize: 17
+                        font.pixelSize: 23
                         font.family: "Consolas"
                     }
                     Label {
@@ -68,7 +71,7 @@ Card {
                         horizontalAlignment: Text.AlignHCenter
                         text: win.fmt(win.totalDuration) + "   ·   f " + win.curFrame() + "/" + win.totalFrames()
                         color: win.col("text_mute", "#8891b4")
-                        font.pixelSize: Tok.fsMicro
+                        font.pixelSize: Tok.fsBody
                         font.family: "Consolas"
                     }
                     GridLayout {

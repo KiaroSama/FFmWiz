@@ -68,7 +68,7 @@ Button {
             color: pb.enabled ? pb.textColor : Skin.col("text_mute", "#8891b4")
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
-            font.pixelSize: 13
+            font.pixelSize: Tok.fsLead
             elide: Text.ElideRight
         }
     }
