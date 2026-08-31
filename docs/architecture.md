@@ -23,6 +23,8 @@ config.env             # personal Mode-2 defaults (git-ignored; created on first
 config.env.example     # committed sample config (copy to config.env and edit)
 requirements.txt
 pyproject.toml
+setup.cfg              # only `build_base = .build`, so the staging tree
+                       # cannot be imported as a module named `build`
 run.ps1                # canonical local launcher
 install-command.ps1
 docs/
@@ -81,8 +83,14 @@ Missing icon assets are logged but never stop the GUI from opening.
 
 ## Repository conventions
 
-- `requirements.txt` and `pyproject.toml` both pin PySide6, the only runtime
-  Python dependency. The core CLI itself uses only the standard library.
+- PySide6 is the only runtime Python dependency; the core CLI itself uses only
+  the standard library. It is pinned in **four** places, not two:
+  `requirements.txt`, `pyproject.toml`, `PYSIDE6_PIP_SPEC` in
+  `ffmwiz/core/constants.py`, and `install-command.ps1`. The last two are the
+  FALLBACK used when `requirements.txt` is absent -- which is the installed-
+  wheel case, since the wheel does not ship it. They drifted once and a guard
+  that compared only the two manifests stayed green through it;
+  `tests/test_packaging.py` now checks all four.
 - `.github/workflows/python-smoke.yml` compiles `FFmWiz.py` and the bundled GUI,
   compiles the whole `ffmwiz` package, validates `config.env.example`, runs an
   import/API smoke check, and runs the command-generation regression tests on
