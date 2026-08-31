@@ -140,6 +140,35 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
         self.assertEqual(set(Q._PALETTE), set(gui_style.PALETTE))
         self.assertEqual(Q._PALETTE["cut_red"], gui_style.PALETTE["cut_red"])
 
+    def test_every_qml_icon_resolves_and_is_not_currentcolor(self):
+        """An iconSource must exist AND be a colour Qt can actually paint.
+
+        Two separate defects have hidden here. The first was a path that did
+        not resolve (wrong directory and wrong filename), which Qt reports by
+        drawing nothing at all. The second was subtler: the file resolved, but
+        its stroke was `currentColor` -- an SVG 1.1/CSS feature Qt's SVG Tiny
+        renderer does not implement, so it fell back to BLACK and the icon was
+        invisible on a dark button. Measured with QSvgRenderer: lucide_hand.svg
+        painted rgb(0,0,0), tool_hand.svg painted rgb(230,237,243).
+
+        Both failures look identical from the outside -- no icon -- and neither
+        raises. Hence a guard rather than a memory.
+        """
+        import re
+        qml_dir = _GUI_DIR / "qml"
+        sources = []
+        for path in sorted(qml_dir.glob("*.qml")):
+            for rel in re.findall(r'iconSource:\s*"([^"]+)"', path.read_text(encoding="utf-8")):
+                sources.append((path.name, rel, (qml_dir / rel).resolve()))
+        self.assertTrue(sources, "no iconSource found -- is this guard still pointed at the QML?")
+        missing = [f"{q}: {rel}" for q, rel, full in sources if not full.exists()]
+        self.assertEqual([], missing, f"iconSource paths that do not resolve: {missing}")
+        black = [f"{q}: {rel}" for q, rel, full in sources
+                 if "currentcolor" in full.read_text(encoding="utf-8").lower()]
+        self.assertEqual([], black,
+                         "Qt renders `currentColor` as black, which is invisible on the "
+                         f"dark surfaces these sit on: {black}")
+
     def test_classic_log_writer_is_wired(self):
         self.assertIsNotNone(Q._classic_write_log)
 

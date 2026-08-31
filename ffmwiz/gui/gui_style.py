@@ -30,6 +30,16 @@ ASSETS_DIR = ASSETS_ROOT / "icons"
 PALETTE: dict[str, str] = {
     # --- surfaces: the deep-navy field from the logo, lightest last ---
     "bg":              "#0d1117",
+    # The QML editor only. Asked for by name: the modern window read as too
+    # dark against the classic one, whose smaller panels break the field up.
+    # Lighter than `panel`, so its panels read as recessed wells -- the
+    # arrangement Resolve and Premiere use, not an inverted hierarchy.
+    "bg_modern":       "#191d24",
+    "panel_modern":     "#22272f",
+    "panel_alt_modern": "#262b37",
+    "surface_modern":   "#2d323a",
+    "surface_hover_modern":"#3a414a",
+    "surface_pressed_modern":"#282d35",
     "panel":           "#161b22",
     "panel_alt":       "#1a1f2a",
     "surface":         "#21262d",

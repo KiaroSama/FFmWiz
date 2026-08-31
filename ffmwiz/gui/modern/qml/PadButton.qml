@@ -11,15 +11,15 @@ import QtQuick.Layouts
 
 Button {
     id: pb
-    property color baseColor: Skin.col("surface", "#21262d")
+    property color baseColor: Skin.col("surface_modern", "#2d323a")
     // Tokenised interaction states. Computing them with Qt.lighter/darker
     // produced different hexes from the Qt QSS for the same role, so the two
     // engines hovered differently (USER-12-2). The computed values remain the
     // default for buttons whose base colour has no hover/pressed token.
-    property color hoverColor: (pb.baseColor == Skin.col("surface", "#21262d"))
-                               ? Skin.col("surface_hover", "#2e353d") : Qt.lighter(pb.baseColor, 1.18)
-    property color pressedColor: (pb.baseColor == Skin.col("surface", "#21262d"))
-                                 ? Skin.col("surface_pressed", "#1c2128") : Qt.darker(pb.baseColor, 1.25)
+    property color hoverColor: (pb.baseColor == Skin.col("surface_modern", "#2d323a"))
+                               ? Skin.col("surface_hover_modern", "#3a414a") : Qt.lighter(pb.baseColor, 1.18)
+    property color pressedColor: (pb.baseColor == Skin.col("surface_modern", "#2d323a"))
+                                 ? Skin.col("surface_pressed_modern", "#282d35") : Qt.darker(pb.baseColor, 1.25)
     property color textColor: Skin.col("text", "#e8edfb")
     property url iconSource: ""
     implicitHeight: Tok.rowMd

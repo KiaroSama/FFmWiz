@@ -15,7 +15,7 @@ ComboBox {
     font.pixelSize: Tok.fsBody
     background: Rectangle {
         radius: Tok.radSm
-        color: Skin.col("surface", "#21262d")
+        color: Skin.col("surface_modern", "#2d323a")
         border.color: cb.activeFocus ? Skin.col("accent", "#3b82f6")
                                      : Skin.col("border_strong", "#3a4150")
         border.width: 1

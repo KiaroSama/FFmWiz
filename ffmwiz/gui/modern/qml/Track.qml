@@ -15,7 +15,7 @@ Slider {
     background: Rectangle {
         x: sl.leftPadding; y: sl.topPadding + sl.availableHeight / 2 - height / 2
         width: sl.availableWidth; height: 3; radius: 1.5
-        color: Skin.col("surface", "#21262d")
+        color: Skin.col("surface_modern", "#2d323a")
         Rectangle {
             width: sl.visualPosition * parent.width; height: parent.height
             radius: parent.radius; color: Skin.col("accent", "#3b82f6")

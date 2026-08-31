@@ -41,8 +41,8 @@ Card {
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 8
-                        PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../../assets/icons/lucide_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
-                        PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../../assets/icons/lucide_zoom_in.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
+                        PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../../assets/icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface_modern", "#2d323a"); onClicked: win.tool = "hand" }
+                        PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../../assets/icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface_modern", "#2d323a"); onClicked: win.tool = "zoom" }
                         PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
                     }
                     Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#8891b4"); font.pixelSize: 11 }

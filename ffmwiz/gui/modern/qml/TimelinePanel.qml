@@ -99,8 +99,26 @@ Card {
                 ctx.fillStyle = win.col("chapter_text", "#e9a8f2"); ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "left"
                 ctx.fillText(chapters[ch].title, chx + 3, height - 6)
             }
-            function vbar(x, c) { ctx.strokeStyle = c; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke() }
-            vbar(xi, win.col("marker_in", "#2ddc7f")); vbar(xo, win.col("marker_out", "#d29922"))
+            // IN/OUT are not plain vbars. Drawn as one they were the same
+            // shape and weight as a SPLIT marker, so the green IN was easy to miss
+            // entirely. The classic editor gives each a halo, a thicker stem
+            // and a filled triangle flag at the ruler, and grows all three
+            // when it is the selected marker -- copied here for parity.
+            function flag(x, key, fb, isSel) {
+                var c = win.col(key, fb)
+                var half = isSel ? 9 : 7
+                var tip = isSel ? 20 : 17
+                ctx.strokeStyle = win.colA("playhead_halo", "#3b82f6", isSel ? 0.55 : 0.35)
+                ctx.lineWidth = isSel ? 8 : 6
+                ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke()
+                ctx.strokeStyle = c; ctx.lineWidth = isSel ? 4 : 3
+                ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke()
+                ctx.fillStyle = c
+                ctx.beginPath(); ctx.moveTo(x - half, 5); ctx.lineTo(x + half, 5)
+                ctx.lineTo(x, tip); ctx.closePath(); ctx.fill()
+            }
+            flag(xi, "marker_in", "#2ddc7f", win.selMarker === "in")
+            flag(xo, "marker_out", "#d29922", win.selMarker === "out")
             for (var k = 0; k < separatorPoints.length; ++k) {
                 var sx = t2x(Number(separatorPoints[k]))
                 ctx.strokeStyle = (k === win.selSplit) ? win.col("split_marker_sel", "#7dd3fc") : win.col("split_marker", "#38bdf8"); ctx.lineWidth = (k === win.selSplit) ? 3 : 2
@@ -184,7 +202,7 @@ Card {
             }
             Rectangle {
                 visible: hov.hx >= 0
-                color: win.col("surface", "#21262d"); border.color: win.col("border_strong", "#3a4150")
+                color: win.col("surface_modern", "#2d323a"); border.color: win.col("border_strong", "#3a4150")
                 radius: 4; height: 16; width: hovLbl.implicitWidth + 10
                 x: Math.max(0, Math.min(tl.width - width, hov.hx - width / 2)); y: 2
                 Label {
