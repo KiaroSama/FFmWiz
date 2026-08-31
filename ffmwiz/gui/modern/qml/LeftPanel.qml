@@ -16,8 +16,8 @@ Card {
             // column was clipped: nothing about the LAYOUT was wrong, the
             // panel was simply narrower than the content it holds --
             // verified by widening it and watching every column complete.
-            SplitView.preferredWidth: 430
-            SplitView.minimumWidth: 380
+            SplitView.preferredWidth: 470
+            SplitView.minimumWidth: 400
             ScrollView {
                 id: leftScroll
                 anchors.fill: parent
@@ -87,13 +87,23 @@ Card {
                         PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Next Edge  ⟞"; onClicked: seekCutEdge(1) }
                     }
 
+                    RowLayout {
+                        Layout.fillWidth: true; Layout.topMargin: Tok.sp1; spacing: Tok.sp2
+                        PadButton { Layout.preferredWidth: 92; text: win.muted ? "Unmute (M)" : "Mute (M)"
+                                    onClicked: win.muted = !win.muted }
+                        Track { Layout.fillWidth: true; from: 0; to: 1; value: win.volume
+                                onMoved: { win.volume = value; win.muted = false } }
+                        Label { text: Math.round(win.volume * 100) + "%"; color: win.col("text_mute", "#8891b4")
+                                font.pixelSize: Tok.fsBody; Layout.preferredWidth: 34 }
+                    }
+
                     SectionLabel { text: "CUTS & SPLIT"; Layout.topMargin: Tok.sp2; Layout.bottomMargin: Tok.sp1 }
                     Toggle { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
                     GridLayout {
                         Layout.fillWidth: true; columns: 2; rowSpacing: Tok.sp2; columnSpacing: Tok.sp2
                         PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Mark In (I)"; baseColor: win.col("btn_mark_in_bg", "#123a29"); textColor: win.col("btn_mark_in_text", "#d7ffe8"); accentColor: win.col("marker_in", "#2ddc7f"); onClicked: setMarkIn() }
                         PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Mark Out (O)"; baseColor: win.col("btn_mark_out_bg", "#3b2b12"); textColor: win.col("btn_mark_out_text", "#ffe7b8"); accentColor: win.col("marker_out", "#d29922"); onClicked: setMarkOut() }
-                        PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Cut Selection (A)"; baseColor: win.col("danger_cut", "#7f123f"); accentColor: win.col("danger_cut_hover", "#a51b55"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: cutSelection() }
+                        PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Cut Selection (A)"; baseColor: win.col("green", "#238636"); hoverColor: win.col("green_hover", "#2ea043"); pressedColor: win.col("green_pressed", "#196c2e"); accentColor: win.col("green", "#238636"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: cutSelection() }
                         PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Delete Cut"; baseColor: win.col("danger_cut", "#7f123f"); accentColor: win.col("danger_cut_hover", "#a51b55"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: deleteCutAtCti() }
                         PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Add Split (S)"; baseColor: win.col("btn_split_bg", "#075985"); textColor: win.col("text_on_accent", "#ffffff"); accentColor: win.col("btn_split_border", "#0ea5e9"); onClicked: addSplit() }
                         PadButton { Layout.fillWidth: true; Layout.preferredWidth: 1; text: "Del Split"; baseColor: win.col("danger_alt", "#643618"); accentColor: win.col("danger_alt_hover", "#8a4a1f"); hoverColor: win.col("danger_alt_hover", "#8a4a1f"); pressedColor: win.col("danger_alt_pressed", "#4d2812"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: deleteSplitAtCti() }

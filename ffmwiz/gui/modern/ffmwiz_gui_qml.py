@@ -579,6 +579,10 @@ def main() -> int:
                 pass
 
     app = QGuiApplication(sys.argv)
+    if os.environ.get('FFMWIZ_QML_SHOT'):
+        # Same reason as the classic path: offscreen has no font database.
+        from ffmwiz.gui import gui_common  # type: ignore
+        _log('DEBUG', f'screenshot fonts: {gui_common.load_screenshot_fonts()}')
     app.setApplicationName("FFmWiz")
     app.setApplicationDisplayName("FFmWiz Unified Video Editor")
     # Reuse the classic engine's identity wiring instead of a second, weaker
