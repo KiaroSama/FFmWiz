@@ -202,10 +202,48 @@ ApplicationWindow {
     palette.mid: col("border", "#30363d")
 
     // ---------- Reusable styled components ----------
+    // A panel, not a card. radius 10 with a full border made every surface read
+    // as a floating tile, which is the single biggest reason this looked like a
+    // toy next to a real NLE -- Premiere and Resolve separate panels with a
+    // hairline and almost no corner, so the eye reads regions instead of boxes.
+    // ---- design tokens -------------------------------------------------
+    // One place for the values that decide whether a panel reads as designed or
+    // assembled. Before this, spacing was 2/5/6/8/10/16 and radius was 2/4/7/10
+    // with no rule behind either -- an eye reads that inconsistency as cheap
+    // long before it can say why.
+    //
+    // A 4px grid, two radii, and a four-step type scale. Every new control
+    // should take its numbers from here rather than inventing one more.
+    readonly property int sp0: 2          // hairline, icon-to-label
+    readonly property int sp1: 4          // inside a control
+    readonly property int sp2: 8          // between controls in a group
+    readonly property int sp3: 12         // between groups
+    readonly property int sp4: 16         // panel padding
+    readonly property int sp5: 24         // between panels
+
+    // Nested radius: an inner shape inside an outer one, with a gap under
+    // 32px, takes `outer - gap` -- and stays square when that lands at 2 or
+    // below. It is why a 3px panel holding 6px-padded buttons gives those
+    // buttons a square corner instead of a second, competing curve.
+    readonly property int radSm: 2        // controls
+    readonly property int radMd: 3        // panels
+    function radNested(outer, gap) { var r = outer - gap; return r > 2 ? r : 0 }
+    readonly property int fsMicro: 10     // captions, hints, section titles
+    readonly property int fsBody: 11      // labels and button text
+    readonly property int fsLead: 12      // values worth reading first
+    readonly property int fsTitle: 14     // the app title, once
+    readonly property int rowSm: 22       // inline control
+    readonly property int rowMd: 26       // standard button
+    readonly property int rowLg: 32       // primary action
+
+    // Border all the way round or not at all, and a flat fill -- a one-sided
+    // rule reads as a rendering artefact and a gradient ground fights the
+    // video, which is the only thing in this window that should hold colour.
     component Card: Rectangle {
-        radius: 10
+        radius: win.radMd
         color: win.col("panel", "#161b22")
-        border.color: win.col("border", "#30363d")
+        border.color: win.col("border_soft", "#21262d")
+        border.width: 1
     }
 
     component PadButton: Button {
@@ -221,15 +259,19 @@ ApplicationWindow {
                                      ? win.col("surface_pressed", "#1c2128") : Qt.darker(pb.baseColor, 1.25)
         property color textColor: win.col("text", "#e8edfb")
         property url iconSource: ""
-        implicitHeight: 34
-        padding: 8
+        implicitHeight: win.rowMd
+        padding: win.sp1 + 2
         hoverEnabled: true
         // Pointing-hand cursor on hover/click so buttons feel clickable.
         HoverHandler { cursorShape: Qt.PointingHandCursor }
         background: Rectangle {
-            radius: 7
+            radius: win.radSm
             color: pb.down ? pb.pressedColor : (pb.hovered ? pb.hoverColor : pb.baseColor)
-            border.color: win.col("border_strong", "#3a4150")
+            // Outline only while hovered. A permanent 1px border around every
+            // button turns a control panel into a grid of boxes; the fill
+            // already separates the button from the panel, and the outline is
+            // then free to mean "you are pointing at this".
+            border.color: pb.hovered ? win.col("border_strong", "#3a4150") : "transparent"
             border.width: 1
         }
         contentItem: RowLayout {
@@ -256,10 +298,17 @@ ApplicationWindow {
         }
     }
 
+    // A panel title, not a headline. Bright accent-blue at 12px competed with
+    // the controls under it; a muted, letter-spaced 10px label sits behind them
+    // and lets the eye go straight to what is actionable.
     component SectionLabel: Label {
-        color: win.col("accent_text", "#7db3ff")
+        color: win.col("text_mute", "#8891b4")
         font.bold: true
-        font.pixelSize: 12
+        font.pixelSize: win.fsMicro
+        font.letterSpacing: 0.8
+        font.capitalization: Font.AllUppercase
+        topPadding: 2
+        bottomPadding: 2
     }
 
     component CropField: RowLayout {
@@ -887,7 +936,7 @@ ApplicationWindow {
                         SectionLabel { text: "CUTS & SPLIT" }
                         Switch { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
                         GridLayout {
-                            Layout.fillWidth: true; columns: 2; rowSpacing: 8; columnSpacing: 8
+                            Layout.fillWidth: true; columns: 2; rowSpacing: win.sp2; columnSpacing: win.sp2
                             PadButton { Layout.fillWidth: true; text: "Mark In (I)"; baseColor: win.col("marker_in", "#2ddc7f"); hoverColor: win.col("marker_in_hover", "#4ee89a"); pressedColor: win.col("marker_in_pressed", "#1fa860"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: setMarkIn() }
                             PadButton { Layout.fillWidth: true; text: "Mark Out (O)"; baseColor: win.col("marker_out", "#d29922"); hoverColor: win.col("marker_out_hover", "#e8b13c"); pressedColor: win.col("marker_out_pressed", "#a8760f"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: setMarkOut() }
                             PadButton { Layout.fillWidth: true; text: "Cut Selection (A)"; baseColor: win.col("danger_cut", "#7f123f"); hoverColor: win.col("danger_cut_hover", "#a51b55"); pressedColor: win.col("danger_cut_pressed", "#5e0d2e"); textColor: win.col("text_on_accent", "#ffffff"); onClicked: cutSelection() }
@@ -900,7 +949,7 @@ ApplicationWindow {
                         // a half-width button elides them to "Invert Cuts (Ctrl+S...",
                         // which is worse than printing no shortcut at all.
                         GridLayout {
-                            Layout.fillWidth: true; columns: 1; rowSpacing: 8; columnSpacing: 8
+                            Layout.fillWidth: true; columns: 1; rowSpacing: win.sp2; columnSpacing: win.sp2
                             PadButton { Layout.fillWidth: true; text: "Invert Cuts (Ctrl+Shift+I)"; baseColor: win.col("purple", "#7c3aed"); hoverColor: win.col("purple_hover", "#8b5cf6"); pressedColor: win.col("purple_pressed", "#6d28d9"); textColor: win.col("text_on_accent", "#ffffff");  onClicked: invertCutsAll() }
                             PadButton { Layout.fillWidth: true; enabled: selMarker !== ""
                                 // Disabled it reads "Select Marker": the classic engine
