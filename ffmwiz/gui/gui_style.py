@@ -29,20 +29,20 @@ ASSETS_DIR = ASSETS_ROOT / "icons"
 
 PALETTE: dict[str, str] = {
     # --- surfaces: the deep-navy field from the logo, lightest last ---
-    "bg":              "#0a0f2e",
-    "panel":           "#121a44",
-    "panel_alt":       "#16204f",
-    "surface":         "#1b2760",
-    "surface_hover":   "#24327a",
-    "surface_pressed": "#16204f",
-    "surface_disabled":"#121a44",
-    "border":          "#2a3566",
-    "border_strong":   "#3a4a85",
-    "border_soft":     "#1b2760",
-    "timeline_bg":     "#070b22",
-    "timeline_track":  "#141c46",
-    "tick_hi":         "#e8edfb",
-    "tick_lo":         "#8891b4",
+    "bg":              "#0d1117",
+    "panel":           "#161b22",
+    "panel_alt":       "#1a1f2a",
+    "surface":         "#21262d",
+    "surface_hover":   "#2e353d",
+    "surface_pressed": "#1c2128",
+    "surface_disabled":"#161b22",
+    "border":          "#30363d",
+    "border_strong":   "#3a4150",
+    "border_soft":     "#21262d",
+    "timeline_bg":     "#0a0d12",
+    "timeline_track":  "#1c2128",
+    "tick_hi":         "#e6edf3",
+    "tick_lo":         "#7d8590",
     # --- brand accents: logo blue / violet / magenta / cyan ---
     "accent":          "#3b82f6",
     "accent_hover":    "#5b9bff",
@@ -77,6 +77,13 @@ PALETTE: dict[str, str] = {
     "warn":            "#d29922",
     "marker_in":       "#2ddc7f",
     "marker_out":      "#d29922",
+    # Interaction states for the two mark buttons. The QML editor colours
+    # them like the classic one, and every col() key it uses has to exist
+    # here (test_qml_palette_covers_every_col_key).
+    "marker_in_hover":    "#4ee89a",
+    "marker_in_pressed":  "#1fa860",
+    "marker_out_hover":   "#e8b13c",
+    "marker_out_pressed": "#a8760f",
     "cut_red":         "#f85149",
     "cut_red_dim":     "#a92927",
     # Cut chip on the timeline bar: a very dark maroon so the white "Cut #n"
