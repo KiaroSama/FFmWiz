@@ -419,10 +419,10 @@ The check, for every module `_package_modules()` returns:
    in this class, so this skip is the difference between a useful check and an
    unusable one. Say that in a comment.
 2. **Skip any file under `ffmwiz/gui/`** (`"gui" in path.parts`).
-   `ffmwiz/gui/ffmwiz_gui.py:59-81` assembles ONE namespace out of every GUI
+   `ffmwiz/gui/classic/ffmwiz_gui.py:59-81` assembles ONE namespace out of every GUI
    module and `setattr`s it onto all of them, and its `_exported_names` helper
    falls back to `vars(module)` when a module declares no `__all__` — which
-   none of the 12 GUI modules does. An import that looks unused in
+   none of the 25 GUI modules does. An import that looks unused in
    `gui_geometry.py` may therefore be the only binding another GUI file
    resolves through. Say that in a comment; it is the reason, and a future
    reader will otherwise "fix" the skip.
@@ -535,7 +535,7 @@ Stop and report (do not improvise) if:
     inside the AST-walking test that already exists.
 - The unused-import check's two skips are load-bearing, not laziness. If
   someone later gives each GUI module an `__all__`,
-  `ffmwiz/gui/ffmwiz_gui.py:67-71` stops sharing their private imports and the
+  `ffmwiz/gui/classic/ffmwiz_gui.py:67-71` stops sharing their private imports and the
   `gui` skip can be dropped — at which point 13 unused imports in
   `gui_common.py` and `gui_geometry.py` become deletable. Until then, deleting
   them can break a sibling GUI file at runtime with no test to catch it.
