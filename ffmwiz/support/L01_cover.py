@@ -10,9 +10,33 @@ really muxing them with ffmpeg 8.1.1 and reading the result back with ffprobe:
   mp3             : ID3v2 APIC frame, needs `-id3v2_version 3`
   flac            : METADATA_BLOCK_PICTURE, written as a mapped stream
   opus / ogg      : a base64 METADATA_BLOCK_PICTURE VorbisComment -- NOT a stream
+                    on the WRITE side. It reads back as one, which is not a
+                    contradiction; see the note below before 'fixing' it.
   mov             : refused; the QuickTime brand silently discards the picture
   wav/webm/avi    : refused; no cover-art mechanism at all
 """
+
+# Opus/Ogg: written as a tag, read back as a stream.
+#
+# Measured on ffmpeg 8.1.1 by really muxing one and probing the result three
+# ways, because the three answers disagree and only together do they make sense:
+#
+#   raw bytes      METADATA_BLOCK_PICTURE is present
+#   format_tags    EMPTY -- ffprobe reports no tag at all
+#   streams        an extra mjpeg/png stream with disposition attached_pic=1
+#
+# So the demuxer DECODES the VorbisComment on read and surfaces it as a virtual
+# attached picture. The tag is what is stored; the stream is a convenience the
+# reader synthesises. Two consequences worth writing down:
+#
+#   1. Do NOT verify an opus/ogg cover through `format_tags` -- it is empty
+#      there and the check fails against a file that is perfectly correct.
+#      Check the raw bytes, or the attached_pic stream (which is what
+#      tests/test_cover_art.py::CoverArtRealMux does).
+#   2. Seeing that stream in ffprobe output is NOT evidence that this module
+#      mapped an image stream. It does not: `cover_art_input_args` returns []
+#      for these containers and the output args carry no -map. Mapping one
+#      really is rejected by the muxer, which is why the tag path exists.
 from __future__ import annotations
 
 import base64
