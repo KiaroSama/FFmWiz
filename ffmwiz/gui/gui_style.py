@@ -35,6 +35,20 @@ PALETTE: dict[str, str] = {
     # Lighter than `panel`, so its panels read as recessed wells -- the
     # arrangement Resolve and Premiere use, not an inverted hierarchy.
     "bg_modern":       "#191d24",
+
+    # The classic editor's tinted button fills, lifted out of QSS literals so
+    # the QML engine can name the SAME colours instead of approximating them.
+    # The pattern that makes these readable is a dark fill with a BRIGHT border
+    # in the accent colour -- a solid bright fill loses the label.
+    "btn_mark_in_bg":    "#123a29",
+    "btn_mark_in_text":  "#d7ffe8",
+    "btn_mark_out_bg":   "#3b2b12",
+    "btn_mark_out_text": "#ffe7b8",
+    "btn_split_bg":      "#075985",
+    "btn_split_border":  "#0ea5e9",
+    "btn_convert_bg":    "#243449",
+    "btn_convert_text":  "#e8f2ff",
+    "btn_convert_border": "#5aa9ff",
     "panel_modern":     "#22272f",
     "panel_alt_modern": "#262b37",
     "surface_modern":   "#2d323a",

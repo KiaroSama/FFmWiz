@@ -21,6 +21,10 @@ Button {
     property color pressedColor: (pb.baseColor == Skin.col("surface_modern", "#2d323a"))
                                  ? Skin.col("surface_pressed_modern", "#282d35") : Qt.darker(pb.baseColor, 1.25)
     property color textColor: Skin.col("text", "#e8edfb")
+    // The classic pairs a DARK tinted fill with a BRIGHT border in the role
+    // colour; that border is what makes the button read as green/red/blue at a
+    // glance. Outlining only on hover left every button the same grey shape.
+    property color accentColor: "transparent"
     property url iconSource: ""
     implicitHeight: Tok.rowMd
     padding: Tok.sp1 + 2
@@ -37,7 +41,7 @@ Button {
         // Hover outlines; keyboard focus outlines in the accent. Without the
         // second case, tabbing through the panel moved an invisible cursor.
         border.color: pb.visualFocus ? Skin.col("accent", "#3b82f6")
-                    : (pb.hovered ? Skin.col("border_strong", "#3a4150") : "transparent")
+                    : (pb.hovered ? Skin.col("border_strong", "#3a4150") : pb.accentColor)
         border.width: 1
     }
     contentItem: RowLayout {
@@ -54,6 +58,12 @@ Button {
         }
         Label {
             Layout.fillWidth: true
+            // Zero, so the caption cannot impose its full text width as the
+            // button's implicit minimum. It could, and a long label like
+            // "Invert Cuts (Ctrl+Shift+I)" then widened its whole GRID column
+            // past the panel, clipping the right-hand column. Elide handles
+            // the overflow; this just stops it dictating the layout.
+            Layout.preferredWidth: 0
             text: pb.text
             color: pb.enabled ? pb.textColor : Skin.col("text_mute", "#8891b4")
             horizontalAlignment: Text.AlignHCenter

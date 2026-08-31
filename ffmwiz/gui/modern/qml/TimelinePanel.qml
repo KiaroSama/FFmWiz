@@ -104,25 +104,48 @@ Card {
             // entirely. The classic editor gives each a halo, a thicker stem
             // and a filled triangle flag at the ruler, and grows all three
             // when it is the selected marker -- copied here for parity.
-            function flag(x, key, fb, isSel) {
+            // The classic also writes the marker's name beside the flag, so
+            // IN/OUT/SPLIT are readable without hovering -- copied here too.
+            function flag(x, key, fb, isSel, label) {
                 var c = win.col(key, fb)
                 var half = isSel ? 9 : 7
                 var tip = isSel ? 20 : 17
+                // Stem hangs from the flag's tip (not from its base), as in the
+                // classic: markers stay shorter than the CTI and centre guide.
                 ctx.strokeStyle = win.colA("playhead_halo", "#3b82f6", isSel ? 0.55 : 0.35)
                 ctx.lineWidth = isSel ? 8 : 6
-                ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke()
+                ctx.beginPath(); ctx.moveTo(x, tip); ctx.lineTo(x, height - 6); ctx.stroke()
                 ctx.strokeStyle = c; ctx.lineWidth = isSel ? 4 : 3
-                ctx.beginPath(); ctx.moveTo(x, 6); ctx.lineTo(x, height - 6); ctx.stroke()
+                ctx.beginPath(); ctx.moveTo(x, tip); ctx.lineTo(x, height - 6); ctx.stroke()
                 ctx.fillStyle = c
                 ctx.beginPath(); ctx.moveTo(x - half, 5); ctx.lineTo(x + half, 5)
                 ctx.lineTo(x, tip); ctx.closePath(); ctx.fill()
+                ctx.font = "bold " + (isSel ? 10 : 9) + "px 'Segoe UI'"; ctx.textAlign = "left"
+                ctx.fillText(label, x + 5, tip + 2)
             }
-            flag(xi, "marker_in", "#2ddc7f", win.selMarker === "in")
-            flag(xo, "marker_out", "#d29922", win.selMarker === "out")
+            flag(xi, "marker_in", "#2ddc7f", win.selMarker === "in", "IN")
+            flag(xo, "marker_out", "#d29922", win.selMarker === "out", "OUT")
+            // Splits get the same flag as IN/OUT (the classic draws all three
+            // identically); as a bare line they read as a gridline.
             for (var k = 0; k < separatorPoints.length; ++k) {
-                var sx = t2x(Number(separatorPoints[k]))
-                ctx.strokeStyle = (k === win.selSplit) ? win.col("split_marker_sel", "#7dd3fc") : win.col("split_marker", "#38bdf8"); ctx.lineWidth = (k === win.selSplit) ? 3 : 2
-                ctx.beginPath(); ctx.moveTo(sx, 6); ctx.lineTo(sx, height - 6); ctx.stroke()
+                var kSel = (k === win.selSplit)
+                flag(t2x(Number(separatorPoints[k])),
+                     kSel ? "split_marker_sel" : "split_marker",
+                     kSel ? "#7dd3fc" : "#38bdf8", kSel, "SPLIT")
+            }
+            // Centre-of-video guide: fixed at totalDuration/2, shaped like the
+            // CTI (arrow head + full-height line) but violet and dashed, so it
+            // is never confused with the red playhead. Straight from the classic.
+            var cgx = t2x(totalDuration / 2)
+            if (totalDuration > 0 && cgx >= pad - 2 && cgx <= width - pad + 2) {
+                ctx.strokeStyle = win.colA("timeline_bg", "#0a0d12", 0.86); ctx.lineWidth = 3
+                ctx.beginPath(); ctx.moveTo(cgx, 18); ctx.lineTo(cgx, height); ctx.stroke()
+                ctx.strokeStyle = win.col("center_guide", "#c084fc"); ctx.lineWidth = 2; ctx.setLineDash([4, 4])
+                ctx.beginPath(); ctx.moveTo(cgx, 18); ctx.lineTo(cgx, height); ctx.stroke(); ctx.setLineDash([])
+                ctx.fillStyle = win.col("center_guide", "#c084fc")
+                ctx.strokeStyle = win.col("bg", "#0d1117"); ctx.lineWidth = 1
+                ctx.beginPath(); ctx.moveTo(cgx - 9, 1); ctx.lineTo(cgx + 9, 1)
+                ctx.lineTo(cgx, 18); ctx.closePath(); ctx.fill(); ctx.stroke()
             }
             // NOTE: the CTI/playhead is drawn as a separate overlay
             // item (below) so playback moves it WITHOUT repainting
@@ -184,12 +207,49 @@ Card {
         // CTI / playhead overlay — bound to cti, so playback moves
         // it WITHOUT repainting the waveform canvas (the heavy paint
         // only runs on edits/zoom/pan, never on a playback tick).
-        Rectangle {
-            width: 2; color: win.col("playhead", "#ff4d55")
-            y: 0; height: tl.height
-            x: Math.max(0, Math.min(tl.width, tl.t2x(win.cti))) - 1
+        // Weight and shape copied from the classic: a wide blue halo behind a
+        // thick red stem, topped by a broad triangular head at the ruler. A 2px
+        // hairline was invisible over the waveform.
+        Item {
+            id: cti
+            y: 0; width: 0; height: tl.height
+            x: Math.max(0, Math.min(tl.width, tl.t2x(win.cti)))
             visible: win.ready && win.cti >= win.viewStart - 1e-6
                      && win.cti <= win.viewStart + win.viewSpan() + 1e-6
+            Rectangle {
+                x: -4.5; y: 17; width: 9; height: cti.height - 17
+                // colA() is a CSS rgba() string -- Canvas-only; a QML color
+                // property cannot parse it, so the alpha lives on opacity.
+                color: win.col("playhead_halo", "#3b82f6"); opacity: 0.82
+            }
+            Rectangle {
+                x: -2.5; y: 17; width: 5; height: cti.height - 17
+                color: win.col("playhead", "#ff4d55")
+            }
+            Canvas {   // the head; painted once, the parent Item does the moving
+                x: -14; y: 0; width: 28; height: 20
+                onPaint: {
+                    var c = getContext("2d"); c.reset()
+                    c.fillStyle = win.col("playhead", "#ff4d55")
+                    c.strokeStyle = win.colA("playhead_halo", "#3b82f6", 0.82); c.lineWidth = 2
+                    c.beginPath(); c.moveTo(2, 1); c.lineTo(26, 1); c.lineTo(14, 18)
+                    c.closePath(); c.fill(); c.stroke()
+                }
+            }
+        }
+        // "Center hh:mm:ss" pill under the centre guide's arrow, like the
+        // classic's. Reuses the hover tooltip's shape so the two read as one set.
+        Rectangle {
+            property real cgx: tl.t2x(totalDuration / 2)
+            visible: win.ready && totalDuration > 0 && cgx >= tl.pad - 2 && cgx <= tl.width - tl.pad + 2
+            color: win.col("bg", "#0d1117"); border.color: win.col("center_guide", "#c084fc")
+            radius: 4; height: 16; width: cgLbl.implicitWidth + 12
+            x: Math.max(0, Math.min(tl.width - width, cgx - width / 2)); y: 12
+            Label {
+                id: cgLbl; anchors.centerIn: parent
+                color: win.col("center_guide_text", "#e9d5ff"); font.pixelSize: 9; font.bold: true
+                text: "Center  " + fmt(totalDuration / 2)
+            }
         }
         // Hover marker + timestamp tooltip following the cursor.
         Item {

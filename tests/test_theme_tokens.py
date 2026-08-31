@@ -140,7 +140,14 @@ class CrossEngineColourTests(unittest.TestCase):
     def test_selected_split_marker_is_one_token(self):
         classic = _CLASSIC_UNIFIED
         self.assertIn('PALETTE["split_marker_sel" if selected else "split_marker"]', classic)
-        self.assertIn('col("split_marker_sel"', _QML)
+        # The TOKEN must reach a col() lookup; the exact spelling is not the
+        # contract. `col("split_marker_sel", ...)` and
+        # `col(sel ? "split_marker_sel" : "split_marker", ...)` both satisfy it,
+        # and pinning one of the two spellings makes this guard fail on a
+        # refactor that kept the token -- the failure mode this file exists to
+        # prevent is a HARDCODED colour, not a ternary.
+        self.assertIn('"split_marker_sel"', _QML,
+                      "the selected split marker must name the palette token")
         # QML used to draw the selected marker white while classic used #7dd3fc.
         self.assertNotIn('(k === win.selSplit) ? "#ffffff"', _QML)
 
