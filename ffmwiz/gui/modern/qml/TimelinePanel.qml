@@ -36,7 +36,10 @@ Card {
             // (parity with the classic editor's ruler).
             var span = win.viewSpan()
             var niceSteps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200]
-            var targetTicks = Math.max(2, Math.floor((width - 2 * pad) / 90))
+            // 132px per tick, not 90: the labels below are FULL timecodes
+            // (00:01:40.000, as the classic writes them) and at 90 they
+            // collided. Fewer, readable labels beat more, overlapping ones.
+            var targetTicks = Math.max(2, Math.floor((width - 2 * pad) / 132))
             var rawStep = span / targetTicks
             var rstep = niceSteps[niceSteps.length - 1]
             for (var ni = 0; ni < niceSteps.length; ++ni) { if (niceSteps[ni] >= rawStep) { rstep = niceSteps[ni]; break } }
@@ -47,7 +50,7 @@ Card {
                 if (trx < pad - 1 || trx > width - pad + 1) continue
                 ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
                 ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(trx, 12); ctx.lineTo(trx, height - 4); ctx.stroke(); ctx.globalAlpha = 1.0
-                ctx.fillStyle = win.col("tick_lo", "#7d8590"); ctx.fillText(win.fmtShort(tr), trx + 2, 9)
+                ctx.fillStyle = win.col("tick_lo", "#7d8590"); ctx.fillText(win.fmt(tr), trx + 2, 9)
             }
             var xi = t2x(markIn), xo = t2x(markOut)
             ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1b3468")
@@ -82,6 +85,15 @@ Card {
                 ctx.fillRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
                 ctx.strokeStyle = (c1 === win.selCut) ? "rgba(255,255,255,0.95)" : win.colA("cut_red", "#f85149", 0.9); ctx.lineWidth = (c1 === win.selCut) ? 2 : 1
                 ctx.strokeRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
+                // Name the range, as the classic does. Without it a red block
+                // says only "something was removed here", not WHICH cut -- and
+                // the delete/select buttons refer to cuts by number.
+                var cw = cx1 - cx0
+                if (cw > 44) {
+                    ctx.font = "600 10px 'Segoe UI'"; ctx.textAlign = "center"
+                    ctx.fillStyle = win.col("text", "#e8edfb")
+                    ctx.fillText("Cut #" + (c1 + 1), cx0 + cw / 2, 20)
+                }
             }
             ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "center"
             for (var i = 1; i < segs.length; ++i) {
