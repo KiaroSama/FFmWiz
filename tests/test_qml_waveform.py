@@ -13,9 +13,13 @@ from pathlib import Path
 # The QML driver lives in ffmwiz/gui; add it so we can import the pure
 # waveform helpers. Importing it does NOT require PySide6 (its Qt imports are
 # inside main(); the palette import is guarded).
-_GUI_DIR = Path(__file__).resolve().parents[1] / "ffmwiz" / "gui"
-if str(_GUI_DIR) not in sys.path:
-    sys.path.insert(0, str(_GUI_DIR))
+_ROOT = Path(__file__).resolve().parents[1]
+# The QML engine lives in gui/modern; the palette it reads is SHARED and
+# stays at gui/, so both directories go on the path.
+_GUI_DIR = _ROOT / "ffmwiz" / "gui" / "modern"
+for _p in (str(_ROOT / "ffmwiz" / "gui"), str(_GUI_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import ffmwiz_gui_qml as Q  # noqa: E402
 

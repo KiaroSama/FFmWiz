@@ -3,7 +3,7 @@
 The launcher imports the `FFmWiz` facade first, and that one order happens to
 work. Nothing else does. Importing each packaged module in its OWN fresh
 interpreter -- which is what an installed wheel's consumer does, and what a
-`python -m ffmwiz.gui.ffmwiz_gui` launch does -- failed for 24 of 119:
+`python -m ffmwiz.gui.classic.ffmwiz_gui` launch does -- failed for 24 of 119:
 
     7   ModuleNotFoundError: No module named 'gui_common'
     17  AttributeError: partially initialized module ... has no attribute '__all__'

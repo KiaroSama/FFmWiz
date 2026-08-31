@@ -31,7 +31,8 @@ from join_test_helpers import make_item
 
 _ROOT = Path(__file__).resolve().parents[1]
 _GUI_DIR = _ROOT / "ffmwiz" / "gui"
-for _p in (str(_ROOT), str(_GUI_DIR)):
+for _p in (str(_ROOT), str(_GUI_DIR),
+           str(_GUI_DIR / "classic"), str(_GUI_DIR / "modern")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -43,7 +44,7 @@ FFPROBE = shutil.which("ffprobe")
 requires_ffmpeg = unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg/ffprobe required")
 
 SILENCE_FLOOR_DB = -60.0
-_QML_PATH = _GUI_DIR / "qml" / "UnifiedEditor.qml"
+_QML_PATH = _GUI_DIR / "modern" / "qml" / "UnifiedEditor.qml"
 
 
 def _answers(items, **extra):
@@ -420,7 +421,7 @@ class QmlReverseProxyAudio(unittest.TestCase):
     def test_the_proxy_call_site_asks_the_helper(self):
         # _do_reverse lives inside main() behind a Qt import, so the helper can
         # only guard the proxy if the proxy actually calls it.
-        source = (_GUI_DIR / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
+        source = (_GUI_DIR / "modern" / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
         self.assertIn("if reverse_proxy_wants_audio(self._req, spec):", source)
         self.assertNotIn('if self._req.get("has_audio"):', source)
 

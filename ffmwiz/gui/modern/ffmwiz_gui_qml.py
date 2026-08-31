@@ -49,7 +49,8 @@ _THIS_DIR = Path(__file__).resolve().parent
 # `ffmwiz.gui.<name>` now, so a bare `sys.path` entry for this folder would
 # import them a second time under different names. Bare imports were also why
 # the installed package could not import a single GUI module (D10).
-_PACKAGE_ROOT = _THIS_DIR.parent.parent
+# Three levels now: this file moved into ffmwiz/gui/modern/.
+_PACKAGE_ROOT = _THIS_DIR.parent.parent.parent
 if str(_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PACKAGE_ROOT))
 

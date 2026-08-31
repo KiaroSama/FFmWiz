@@ -27,21 +27,23 @@ import sys
 # `ffmwiz.gui.<name>` rather than as bare top-level modules. Bare imports
 # only ever worked from this directory, so the installed package could not
 # import a single GUI module (D10).
-_PACKAGE_ROOT = os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))))
+# Four levels now, not three: this file moved into ffmwiz/gui/classic/, so the
+# walk to the directory ABOVE the `ffmwiz` package gained a step.
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
 
 from ffmwiz.gui import gui_common
 from ffmwiz.gui import gui_style
 from ffmwiz.gui import gui_geometry
-from ffmwiz.gui import gui_editor_cut
-from ffmwiz.gui import gui_editor_crop
-from ffmwiz.gui import gui_editor_speed
-from ffmwiz.gui import gui_editor_audio
-from ffmwiz.gui import gui_editor_unified
-from ffmwiz.gui import gui_editor_unified_canvas
-from ffmwiz.gui import gui_editor_unified_timeline
+from ffmwiz.gui.classic import gui_editor_cut
+from ffmwiz.gui.classic import gui_editor_crop
+from ffmwiz.gui.classic import gui_editor_speed
+from ffmwiz.gui.classic import gui_editor_audio
+from ffmwiz.gui.classic import gui_editor_unified
+from ffmwiz.gui.classic import gui_editor_unified_canvas
+from ffmwiz.gui.classic import gui_editor_unified_timeline
 
 _MODULES = [
     gui_common,
