@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 
 import FFmWiz
+from ffmwiz import encoding
 
 from artifact_guard import NoLeakedArtifacts
 
@@ -655,6 +656,103 @@ class TheWizardQuestionReachesTheBuilder(unittest.TestCase):
         from ffmwiz import wizard_flow
         self.assertIn('wizard_base.Step("video_composite"',
                       inspect.getsource(wizard_flow.run_wizard))
+
+
+class CompositingAndReverseAreRefusedTogether(unittest.TestCase):
+    """The combination has no builder, so it must be refused, not attempted.
+
+    Every reverse route rebuilds its stages through `build_ffmpeg_command` or
+    `build_join_encode_command`, and neither maps a second input. The one-shot
+    composite branch owns that graph and a staged reverse never reaches it, so
+    the job used to succeed with the overlay silently missing -- a finished
+    file that is simply wrong, which is worse than a refusal.
+    """
+
+    def _run(self, **extra):
+        answers = {"reverse_video": True, "ffmpeg": "ffmpeg"}
+        answers.update(extra)
+        noise = io.StringIO()
+        with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+            code, elapsed = FFmWiz.execute_encode_plan(
+                answers, ["ffmpeg", "-i", "in.mkv", "out.mkv"],
+                total_duration=None, label="test")
+        return code, elapsed, noise.getvalue()
+
+    def test_an_overlay_with_a_video_reverse_is_refused(self):
+        code, _elapsed, out = self._run(composite_mode="overlay")
+        self.assertEqual(1, code)
+        self.assertIn("cannot be combined", out)
+
+    def test_an_audio_mix_with_a_video_reverse_is_refused(self):
+        # `mix` sets composite_audio_mix and never composite_mode -- the same
+        # asymmetry that made the audio-only composite fall through once
+        # before.
+        code, _elapsed, out = self._run(composite_audio_mix="mix")
+        self.assertEqual(1, code)
+        self.assertIn("cannot be combined", out)
+
+    def test_an_overlay_with_an_audio_reverse_is_refused(self):
+        code, _elapsed, out = self._run(
+            reverse_video=False, reverse_audio=True, composite_mode="overlay")
+        self.assertEqual(1, code)
+        self.assertIn("cannot be combined", out)
+
+    def test_the_refusal_names_the_way_out(self):
+        # A refusal that does not say what to do instead is a dead end. The
+        # user can get the same result in two passes.
+        _code, _elapsed, out = self._run(composite_mode="overlay")
+        self.assertIn("then reverse its output", out)
+
+    def test_a_reverse_without_a_composite_is_untouched(self):
+        # The direction that matters most, and the one a mutation check caught
+        # missing: a guard that lost its composite condition would refuse EVERY
+        # reversed job, and every other test here would still pass.
+        #
+        # BOTH reverse entry points are stubbed. Letting a real reverse run
+        # here cost a 30-minute wall timeout once: the job reached ffmpeg with
+        # a fixture that has no frames and then sat waiting, and the full suite
+        # was killed at its ceiling instead of failing. A test for a GUARD has
+        # no business starting an encode.
+        noise = io.StringIO()
+        reached = []
+        rp = encoding.reverse_pipeline
+        real_segmented = rp.run_segmented_reverse_main_encode
+        real_runner = encoding.runtime.run_ffmpeg_with_progress
+        rp.run_segmented_reverse_main_encode = lambda a: (reached.append("segmented"), (0, 1.0))[1]
+        encoding.runtime.run_ffmpeg_with_progress = (
+            lambda cmd, **kw: (reached.append("one-shot"), (0, 1.0))[1])
+        try:
+            with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+                code, _elapsed = encoding.execute_encode_plan(
+                    {"reverse_video": True, "ffmpeg": "ffmpeg",
+                     "format": {"duration": "600"}},
+                    ["ffmpeg", "-i", "in.mkv", "out.mkv"],
+                    total_duration=None, label="test")
+        finally:
+            rp.run_segmented_reverse_main_encode = real_segmented
+            encoding.runtime.run_ffmpeg_with_progress = real_runner
+        self.assertNotIn("cannot be combined", noise.getvalue())
+        self.assertEqual(0, code)
+        self.assertTrue(reached, "the job should have reached a runner, not a refusal")
+
+    def test_a_composite_without_a_reverse_is_untouched(self):
+        # The guard must not fire on the combination that DOES work, or it
+        # would take the whole feature away.
+        noise = io.StringIO()
+        calls = []
+        real = FFmWiz.runtime.run_ffmpeg_with_progress
+        FFmWiz.runtime.run_ffmpeg_with_progress = (
+            lambda cmd, **kw: (calls.append(cmd), (0, 1.0))[1])
+        try:
+            with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+                code, _elapsed = FFmWiz.execute_encode_plan(
+                    {"composite_mode": "overlay", "ffmpeg": "ffmpeg"},
+                    ["ffmpeg", "-i", "in.mkv", "out.mkv"],
+                    total_duration=None, label="test")
+        finally:
+            FFmWiz.runtime.run_ffmpeg_with_progress = real
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(calls), "the composite command should have run")
 
 
 if __name__ == "__main__":

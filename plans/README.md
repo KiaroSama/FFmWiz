@@ -302,13 +302,19 @@ things the audit had not:
   `stage_answers`.
 - **A staged reverse DROPS compositing rather than repeating it.** Every stage
   rebuilds through `build_ffmpeg_command`, which has no composite shape at all,
-  so an overlay on a reversed job vanishes. Not planned — it needs a decision
-  (refuse the combination, or teach the pipeline to composite) rather than a
-  fix, and refusing is probably right.
-- **`run_audio_cut_mode` is unreachable.** `ffmwiz/modes_transform.py:146`
-  defines it and its `__all__` exports it, but `run_one_job` never dispatches to
-  it. Testing it would pin dead code. Delete-or-wire is a separate decision;
-  recorded here so nobody writes a test for it first.
+  so an overlay on a reversed job vanishes. **Decided and closed 2026-08-31:
+  the combination is REFUSED**, with a message naming the two-pass way round it
+  (composite first, then reverse its output). One guard in `execute_encode_plan`
+  — the file's own "single place that chooses between a bounded plan and
+  one-shot execution" — so every caller is covered. Teaching three builders a
+  composite shape was rejected as a feature, not a bug fix.
+- **`run_audio_cut_mode` is unreachable.** **Deleted 2026-08-31.** Unreachable
+  since `f40eae4`, where the unified editor's `run_audio_transform_mode` took
+  over menu option 11 and covers cut, speed and reverse together. Went with it:
+  `step_audio_cut_editor`, `step_audio_cut_start_now` and two step-level tests
+  that had no other consumer — 106 lines. The cut feature itself is untouched;
+  it stays alive through the encode path, and the lossless-copy rule is
+  enforced in `build_audio_cut_command`, not in the deleted question.
 
 - **A whole suite is ungated.** `tests/test_speed_frame_retention.py:44`
   defines `requires_ffmpeg` and never applies it to anything. Without ffmpeg on

@@ -245,25 +245,6 @@ def step_start_now(answers: dict[str, Any]) -> None:
     )
 
 
-def step_audio_cut_editor(answers: dict[str, Any]) -> None:
-    audio_index = int(answers.get("audio_index", 0))
-    while True:
-        ranges = open_audio_cut_gui(answers, audio_index)
-        if ranges is None:
-            appio.note("Graphical audio cut editor was canceled.")
-            try_again = appio.ask_yes_no(yn_prompt("Open it again?", True), True)
-            if not try_again:
-                answers["_audio_cut_noop"] = True
-                return
-            continue
-        if not ranges:
-            appio.error("No valid audio ranges were selected.")
-            continue
-        answers["audio_keep_ranges"] = ranges
-        answers["_audio_cut_noop"] = False
-        return
-
-
 def _run_gui_audio_transform(answers: dict[str, Any], audio_index: int) -> None:
     """Graphical audio transform path. Sets the transform answers or marks
     _audio_transform_noop. Raises Back to return to the editor menu."""
@@ -470,7 +451,6 @@ __all__ = [
     'open_audio_speed_gui',
     'open_audio_cut_gui',
     'step_start_now',
-    'step_audio_cut_editor',
     '_run_gui_audio_transform',
     '_confirm_audio_transform_start',
     'step_audio_transform_editor',
