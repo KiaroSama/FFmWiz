@@ -301,6 +301,15 @@ ApplicationWindow {
     // A panel title, not a headline. Bright accent-blue at 12px competed with
     // the controls under it; a muted, letter-spaced 10px label sits behind them
     // and lets the eye go straight to what is actionable.
+    // A group break as one word. It was a Rectangle literal with a hand-picked
+    // colour each time, and it used `border` -- a weight meant for outlining a
+    // shape, which reads a shade too strong drawn as a rule across a panel.
+    component Rule: Rectangle {
+        Layout.fillWidth: true
+        implicitHeight: 1
+        color: win.col("border_soft", "#21262d")
+    }
+
     component SectionLabel: Label {
         color: win.col("text_mute", "#8891b4")
         font.bold: true
@@ -859,8 +868,8 @@ ApplicationWindow {
                         }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 8
-                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../icons/tool_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
-                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../icons/tool_zoom.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
+                            PadButton { Layout.fillWidth: true; text: "Hand (H)"; iconSource: "../../assets/icons/lucide_hand.svg"; baseColor: win.tool === "hand" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "hand" }
+                            PadButton { Layout.fillWidth: true; text: "Zoom (Z)"; iconSource: "../../assets/icons/lucide_zoom_in.svg"; baseColor: win.tool === "zoom" ? win.col("accent", "#3b82f6") : win.col("surface", "#21262d"); onClicked: win.tool = "zoom" }
                             PadButton { Layout.preferredWidth: 62; text: "Reset"; onClicked: resetPreviewView() }
                         }
                         Label { text: "Preview zoom: " + Math.round(pvZoom * 100) + "%   \u2022   Tool: " + tool; color: win.col("text_mute", "#8891b4"); font.pixelSize: 11 }
@@ -870,7 +879,7 @@ ApplicationWindow {
                             text: "Crop is auto-aligned to even dimensions to keep the chroma phase correct so the video colors are not damaged."
                         }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
+                        Rule { Layout.topMargin: win.sp1; Layout.bottomMargin: win.sp1 }
 
                         SectionLabel { text: "SPEED & AUDIO" }
                         RowLayout {
@@ -931,7 +940,7 @@ ApplicationWindow {
                             text: "Preview only — which track is encoded stays the wizard's audio question."
                         }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: win.col("border", "#30363d") }
+                        Rule { Layout.topMargin: win.sp1; Layout.bottomMargin: win.sp1 }
 
                         SectionLabel { text: "CUTS & SPLIT" }
                         Switch { text: "Magnetic snapping"; checked: snapEnabled; onToggled: snapEnabled = checked }
@@ -1454,12 +1463,33 @@ ApplicationWindow {
                     PadButton { Layout.preferredWidth: 36; text: "\u23ed"; onClicked: seekTo(totalDuration) }            // End
                     PadButton { Layout.preferredWidth: 32; text: "\u27dd"; onClicked: seekCutEdge(-1) }                  // prev cut edge
                     PadButton { Layout.preferredWidth: 32; text: "\u27de"; onClicked: seekCutEdge(1) }                   // next cut edge
-                    Label { text: fmt(cti) + " / " + fmt(totalDuration); color: win.col("text", "#e8edfb"); font.pixelSize: 12; font.family: "Consolas" }
+                    Rule { Layout.preferredWidth: 1; Layout.fillWidth: false
+                           // A FIXED height, never fillHeight: a filling child makes the
+                           // whole transport row demand vertical space, and it took it
+                           // from the video preview -- which collapsed to a thumbnail
+                           // with the controls floating in the middle of the gap.
+                           Layout.preferredHeight: 16; Layout.alignment: Qt.AlignVCenter
+                           Layout.leftMargin: win.sp1; Layout.rightMargin: win.sp1 }
+                    Label { text: fmt(cti) + " / " + fmt(totalDuration); color: win.col("text", "#e8edfb"); font.pixelSize: win.fsLead; font.family: "Consolas" }
                     Label { text: "f " + curFrame() + "/" + totalFrames(); color: win.col("text_mute", "#8891b4"); font.pixelSize: 10; font.family: "Consolas" }
                     Item { Layout.fillWidth: true }
-                    PadButton { Layout.preferredWidth: 74; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
+                    Rule { Layout.preferredWidth: 1; Layout.fillWidth: false
+                           // A FIXED height, never fillHeight: a filling child makes the
+                           // whole transport row demand vertical space, and it took it
+                           // from the video preview -- which collapsed to a thumbnail
+                           // with the controls floating in the middle of the gap.
+                           Layout.preferredHeight: 16; Layout.alignment: Qt.AlignVCenter
+                           Layout.leftMargin: win.sp1; Layout.rightMargin: win.sp1 }
+                    PadButton { Layout.preferredWidth: 66; text: win.muted ? "Unmute" : "Mute"; onClicked: win.muted = !win.muted }
                     Slider { Layout.preferredWidth: 88; from: 0; to: 1; value: win.volume; onMoved: { win.volume = value; win.muted = false } }
                     PadButton { Layout.preferredWidth: 34; text: "\u2212"; onClicked: { win.zoomAt(0.8, cti, 0.5); tl.requestPaint() } }
+                    Rule { Layout.preferredWidth: 1; Layout.fillWidth: false
+                           // A FIXED height, never fillHeight: a filling child makes the
+                           // whole transport row demand vertical space, and it took it
+                           // from the video preview -- which collapsed to a thumbnail
+                           // with the controls floating in the middle of the gap.
+                           Layout.preferredHeight: 16; Layout.alignment: Qt.AlignVCenter
+                           Layout.leftMargin: win.sp1; Layout.rightMargin: win.sp1 }
                     Slider {
                         Layout.preferredWidth: 120
                         from: 0; to: 100
