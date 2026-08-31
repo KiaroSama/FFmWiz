@@ -12,6 +12,7 @@ when the build backend genuinely is not installed.
 """
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,105 @@ class PyprojectDeclaration(unittest.TestCase):
             "(.github/workflows/python-smoke.yml), so a drift means CI tests a "
             "different Qt than `pip install .` gives a user, and nothing reports it.",
         )
+
+
+class PySide6PinAgreement(unittest.TestCase):
+    """Every file that names a PySide6 version must name the same one.
+
+    Four files pin it. `requirements.txt` and `pyproject.toml` are the
+    manifests. The other two are the FALLBACKS taken when requirements.txt is
+    not on disk -- which is exactly the installed-wheel case, because the wheel
+    does not ship it: `runtime_pyside6.py` installs `PYSIDE6_PIP_SPEC` and
+    `install-command.ps1` installs its own literal. Both had drifted to 6.11.1
+    while the manifests moved to 6.11.2, so a wheel user who accepted the
+    offered install got a Qt the project never tested, silently.
+
+    The older guard compared the two manifests only, which is why it stayed
+    green through that drift.
+    """
+
+    PIN_FILES = (
+        "requirements.txt",
+        "pyproject.toml",
+        "install-command.ps1",
+        "ffmwiz/core/constants.py",
+    )
+
+    def test_every_pyside6_pin_agrees(self):
+        found = {}
+        for name in self.PIN_FILES:
+            # utf-8-sig: the PowerShell installer may carry a BOM.
+            text = (PROJECT_ROOT / name).read_text(encoding="utf-8-sig")
+            pins = sorted(set(re.findall(r"PySide6==[0-9][0-9A-Za-z.-]*", text)))
+            self.assertTrue(
+                pins,
+                f"{name} no longer pins PySide6 -- either the pin moved (update "
+                f"PIN_FILES) or a fallback lost its version and now installs "
+                f"whatever is newest.")
+            found[name] = pins
+        distinct = {pin for pins in found.values() for pin in pins}
+        self.assertEqual(
+            len(distinct), 1,
+            "PySide6 pins disagree across the repo: "
+            + "; ".join(f"{name}={','.join(pins)}" for name, pins in found.items()))
+
+
+class WheelProofIsNotSkippableInCi(unittest.TestCase):
+    """The CI job that runs the whole suite must be unable to skip the build test.
+
+    `WheelContents` below self-skips when the build backend is absent, and since
+    Python 3.12 `ensurepip` installs neither setuptools nor wheel -- verified by
+    creating a 3.13 venv, where both import as ModuleNotFoundError. The workflow
+    installed only numpy and required only ffmpeg/numpy, so the sole proof that
+    the artifact still contains the `ffmwiz` package skipped silently while the
+    job reported OK. That is the exact false green `--require` exists to stop.
+    """
+
+    WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "python-smoke.yml"
+    JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*$")
+    FILTERED = re.compile(r"run_suite\.py[^\n]*\s-k\s")
+
+    @classmethod
+    def _job_blocks(cls, text):
+        """{job name: its yaml body}, split on the two-space `name:` headers."""
+        jobs, name, lines = {}, None, []
+        for line in text.splitlines():
+            header = cls.JOB_HEADER.match(line)
+            if header:
+                if name:
+                    jobs[name] = "\n".join(lines)
+                name, lines = header.group(1), []
+            elif name is not None:
+                lines.append(line)
+        if name:
+            jobs[name] = "\n".join(lines)
+        return jobs
+
+    def test_the_unfiltered_suite_job_installs_and_requires_the_build_backend(self):
+        jobs = self._job_blocks(self.WORKFLOW.read_text(encoding="utf-8"))
+        runners = {name: body for name, body in jobs.items() if "run_suite.py" in body}
+        self.assertTrue(runners, "no CI job runs tests/run_suite.py any more")
+        unfiltered = {name: body for name, body in runners.items()
+                      if not self.FILTERED.search(body)}
+        self.assertTrue(
+            unfiltered,
+            "every CI job now runs a -k filtered subset, so nothing runs the whole "
+            "suite and a module can drop out unnoticed")
+        for name, body in unfiltered.items():
+            with self.subTest(job=name):
+                # assertTrue, not assertIn: assertIn echoes the whole job body.
+                self.assertTrue(
+                    "--require wheel" in body,
+                    f"job `{name}` runs the whole suite but does not require the "
+                    f"wheel capability, so WheelContents can skip and still report OK")
+                installs = " ".join(line for line in body.splitlines()
+                                    if "pip install" in line and "requirements.txt" not in line)
+                for package in ("setuptools", "wheel"):
+                    self.assertTrue(
+                        package in installs,
+                        f"job `{name}` requires the wheel capability but never installs "
+                        f"`{package}`, so the build test would fail the job instead of "
+                        f"proving anything")
 
 
 @unittest.skipIf(not _setuptools_available(), "setuptools/wheel not installed")

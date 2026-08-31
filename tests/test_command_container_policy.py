@@ -160,11 +160,26 @@ class AudioCodecContainerPolicy(unittest.TestCase):
                 cmd = [str(p) for p in FFmWiz.build_ffmpeg_command(_audio_only_answers(ext, codec))]
                 self.assertEqual(cmd[cmd.index("-c:a") + 1], codec)
 
-    def test_copy_is_always_allowed(self):
-        for ext in ("flac", "opus", "ogg", "mp3", "webm"):
+    # `copy` is not a free pass: the allow-list contains the literal token
+    # "copy", so testing membership alone waved `-c:a copy` through for ANY
+    # source codec. The fixture source is FLAC; measured on ffmpeg 8.1.1:
+    #   flac copy -> .flac/.ogg/.oga/.opus  OK
+    #   flac copy -> .mp3   "Invalid audio stream. Exactly one MP3 audio stream
+    #                        is required." / Could not write header
+    #   flac copy -> .webm  "Only VP8 or VP9 or AV1 video and Vorbis or Opus
+    #                        audio ... are supported for WebM."
+    # (.opus is the Ogg muxer under another extension, hence the OK there.)
+    def test_copy_survives_where_the_container_accepts_the_source_codec(self):
+        for ext in ("flac", "opus", "ogg"):
             with self.subTest(container=ext):
                 cmd = [str(p) for p in FFmWiz.build_ffmpeg_command(_audio_only_answers(ext, "copy"))]
                 self.assertEqual(cmd[cmd.index("-c:a") + 1], "copy")
+
+    def test_copy_is_replaced_where_the_container_refuses_the_source_codec(self):
+        for ext, expected in (("mp3", "libmp3lame"), ("webm", "libopus")):
+            with self.subTest(container=ext):
+                cmd = [str(p) for p in FFmWiz.build_ffmpeg_command(_audio_only_answers(ext, "copy"))]
+                self.assertEqual(cmd[cmd.index("-c:a") + 1], expected)
 
 
 class SpeedReverseFormatRestriction(unittest.TestCase):

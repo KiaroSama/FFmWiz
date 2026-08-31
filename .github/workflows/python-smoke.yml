@@ -89,7 +89,13 @@ jobs:
         # numpy is needed by the waveform tests only; requirements.txt is the
         # runtime manifest and stays untouched. PySide6 is not installed here -
         # no test imports it (see the gui-import job).
-        run: python -m pip install --disable-pip-version-check numpy
+        #
+        # setuptools/wheel are NOT optional here: tests/test_packaging.py builds
+        # a real wheel to prove the artifact still contains the ffmwiz package,
+        # and it self-skips when the build backend is missing. Since Python 3.12
+        # `ensurepip` ships neither, so this leg silently skipped the only proof
+        # the wheel works at all.
+        run: python -m pip install --disable-pip-version-check numpy setuptools wheel
 
       - name: Install ffmpeg ${{ matrix.ffmpeg }}
         # Without ffmpeg on PATH the real-encode suites self-skip and this job
@@ -128,7 +134,7 @@ jobs:
         # 16-core machine; a 2-core runner still gains. --require names what THIS
         # job installs, so a skip for ffmpeg or numpy fails the job while a real
         # NVENC-hardware skip stays legitimate.
-        run: python tests/run_suite.py --require ffmpeg --require numpy
+        run: python tests/run_suite.py --require ffmpeg --require numpy --require wheel
 
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
   # module still fails CI now that the other jobs install nothing.

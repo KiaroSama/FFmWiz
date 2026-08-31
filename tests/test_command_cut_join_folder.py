@@ -682,5 +682,62 @@ class CommandCutJoinFolderTests(CommandGenBase):
         self.assertIn("not available", errors[-1])
 
 
+    def test_join_near_quality_nvenc_requires_a_real_gpu_not_just_the_encoder_list(self):
+        # `video_encoders` is the BUILD's capability list: every full FFmpeg
+        # build advertises h264_nvenc whether or not the machine has an NVIDIA
+        # card. Gating on it alone emitted `-c:v h264_nvenc` on a GPU-less box,
+        # which dies at encoder init. Both the encoder choice and the NVENC
+        # multipass question must consult the device probe.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            first = base / "a.mp4"
+            second = base / "b.mp4"
+            first.write_bytes(b"")
+            second.write_bytes(b"")
+            stream = {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "30/1",
+                "pix_fmt": "yuv420p",
+            }
+            items = [
+                {"path": first, "streams": [stream], "video_streams": [stream],
+                 "audio_streams": [], "format": {}, "duration": 1.0},
+                {"path": second, "streams": [dict(stream, width=1920)],
+                 "video_streams": [dict(stream, width=1920)],
+                 "audio_streams": [], "format": {}, "duration": 1.0},
+            ]
+            encoders = ["h264_nvenc", "hevc_nvenc", "libx264"]
+
+            no_gpu = FFmWiz.build_join_near_quality_command(
+                {"ffmpeg": "ffmpeg", "video_encoders": encoders, "gpu_available": False},
+                items, base / "no_gpu.mp4")
+            self.assertNotIn("h264_nvenc", no_gpu)
+            self.assertIn("libx264", no_gpu)
+
+            with_gpu = FFmWiz.build_join_near_quality_command(
+                {"ffmpeg": "ffmpeg", "video_encoders": encoders, "gpu_available": True},
+                items, base / "with_gpu.mp4")
+            self.assertIn("h264_nvenc", with_gpu)
+
+            # The device probe is the only thing that may decide this, and it
+            # must not run before the encoder is even a candidate: a build with
+            # no NVENC at all never pays for the probe.
+            probed = {"count": 0}
+
+            def counting_probe(answers):
+                probed["count"] += 1
+                return True
+
+            with mock.patch.object(FFmWiz.modes_join, "gpu_available_for_answers", counting_probe):
+                cpu_only = FFmWiz.build_join_near_quality_command(
+                    {"ffmpeg": "ffmpeg", "video_encoders": ["libx264"]},
+                    items, base / "cpu_only.mp4")
+            self.assertNotIn("h264_nvenc", cpu_only)
+            self.assertEqual(probed["count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ From the repo root:
 
 `run_suite.py` is what CI runs. It gives each test module its own worker process
 and pulls the next module off the queue as a worker frees up: measured on a
-16-core machine, 2069 tests take ~177 s serial and ~53 s at `-j 7` — the suite is
+16-core machine, ~2170 tests take ~177 s serial and ~99 s at `-j 6` — the suite is
 dominated by real ffmpeg child processes, not CPU. It adds no dependency; the project keeps a
 zero-test-dependency policy, so it is `unittest` plus `concurrent.futures`.
 Module-per-process is also what keeps it safe: several suites monkeypatch module

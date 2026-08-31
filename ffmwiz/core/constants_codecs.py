@@ -42,7 +42,13 @@ VIDEO_CODECS_BY_FORMAT = {
 
 AUDIO_CODECS_BY_FORMAT = {
     "flac": {"flac", "copy"},
-    "opus": {"libopus", "copy"},
+    # .opus is the Ogg muxer under another extension, so it mixes exactly like
+    # .ogg/.oga: measured on ffmpeg 8.1.1, a copied opus, vorbis OR flac stream
+    # all mux into .opus, while mp3 and aac give "Unsupported codec id in
+    # stream 0". Listing only libopus made the container guard reject a copy
+    # the muxer accepts. `default_audio_codec_for_ext` still picks libopus, so
+    # the ENCODE default is unchanged.
+    "opus": {"libopus", "libvorbis", "flac", "copy"},
     "ogg": {"libopus", "libvorbis", "flac", "copy"},
     "oga": {"libopus", "libvorbis", "flac", "copy"},
     "mp3": {"libmp3lame", "copy"},

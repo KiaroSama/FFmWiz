@@ -236,6 +236,51 @@ class ExtraVideoStreams(CommandGenBase):
             self.assertEqual(FFmWiz.source_extra_stream_outcome_notes(answers), [])
 
 
+    # -- and one reason that is not a timeline edit at all -----------------
+    def test_a_container_that_cannot_store_the_copied_codec_drops_them_and_says_so(self):
+        # Every other reason names a timeline rebuild, but the chain behind
+        # this gate emits `-map 0:v:N -c:v:N copy`, so the target container has
+        # to accept the SOURCE codec as it stands. ffmpeg 8.1.1 on an mkv with
+        # an mjpeg extra stream re-encoded to .webm: "Only VP8 or VP9 or AV1
+        # video and Vorbis or Opus audio and WebVTT subtitles are supported for
+        # WebM" / "Could not write header".
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.extras_answers(tmp)
+            answers["output_ext"] = "webm"
+            answers["video_codec"] = "VP9"
+            answers["audio_codec"] = "libopus"
+            answers["video_streams"][1]["codec_name"] = "mjpeg"
+
+            reason = FFmWiz.additional_source_video_drop_reason(answers)
+            self.assertIn("webm", reason)
+            self.assertIn("mjpeg", reason)
+            notes = FFmWiz.source_extra_stream_outcome_notes(answers)
+            self.assertEqual(len(notes), 1, notes)
+            self.assertIn("REMOVED", notes[0])
+
+            text = self.command_text(answers)
+            self.assertIn("-map 0:v:0", text)
+            self.assertNotIn("-map 0:v:1", text)
+
+    def test_a_codec_the_container_accepts_is_still_kept(self):
+        # The guard must not over-tighten: vp9 into .webm and mjpeg into .mkv
+        # both mux, so neither may be dropped.
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.extras_answers(tmp)
+            answers["output_ext"] = "webm"
+            answers["video_codec"] = "VP9"
+            answers["audio_codec"] = "libopus"
+            answers["video_streams"][1]["codec_name"] = "vp9"
+            self.assertEqual(FFmWiz.additional_source_video_drop_reason(answers), "")
+            self.assertIn("-map 0:v:1", self.command_text(answers))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            answers = self.extras_answers(tmp)  # .mkv
+            answers["video_streams"][1]["codec_name"] = "mjpeg"
+            self.assertEqual(FFmWiz.additional_source_video_drop_reason(answers), "")
+            self.assertIn("-map 0:v:1", self.command_text(answers))
+
+
 @requires_ffmpeg
 class RealTwoVideoStreamFile(unittest.TestCase):
     """A real file with two ordinary video streams, through the real builder."""

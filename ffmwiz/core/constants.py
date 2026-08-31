@@ -511,7 +511,10 @@ REQUIREMENTS_FILE_NAME = "requirements.txt"
 
 PYSIDE6_DISPLAY_NAME = "PySide6"
 
-PYSIDE6_PIP_SPEC = "PySide6==6.11.1"
+# Fallback for an installed wheel, which does not ship requirements.txt.
+# Keep in step with requirements.txt/pyproject.toml -- tests/test_packaging.py
+# PySide6PinAgreement fails when it drifts.
+PYSIDE6_PIP_SPEC = "PySide6==6.11.2"
 
 LOGS_DIR_NAME = "Logs"
 

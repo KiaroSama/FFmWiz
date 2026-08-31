@@ -107,6 +107,99 @@ def _even(value: float) -> int:
     return max(2, int(round(value / 2.0)) * 2)
 
 
+def _graph_ref(label: str) -> str:
+    """A `-map` label as a filter_complex INPUT reference.
+
+    The graph returns either a `[name]` pad or a bare `0:a:1` stream
+    specifier, because `-map` takes both. Only the first is already a pad.
+    """
+    return label if label.startswith("[") else f"[{label}]"
+
+
+def composite_base_picture_chain(answers: dict[str, Any]) -> str:
+    """The picture chain that runs BEFORE the composite, as one filter string.
+
+    Everything that describes what the BASE picture should look like -- crop,
+    orientation, frame rate, resize, colour/denoise/sharpen -- belongs in front
+    of the overlay, so the second input lands on the picture the user asked
+    for. Speed and the fade do not: see `composite_tail_picture_chain`.
+
+    Built by calling the ordinary `build_cpu_video_filter` on a copy with those
+    two suppressed, rather than by assembling the parts again here. A second
+    assembly is a second definition, and this codebase's recurring defect is
+    exactly that -- a gate or a chain that names fewer things than its twin.
+    """
+    # Deferred: `wizard_build_filters` imports THIS module, so a module-level
+    # import here is a cycle. Same reason `build_encode_audio_processing_filter`
+    # defers `encode_timeline_map`.
+    from ffmwiz.wizard_build_filters import build_cpu_video_filter
+    pre = dict(answers)
+    pre.pop("fade_in_seconds", None)
+    pre.pop("fade_out_seconds", None)
+    pre.pop("video_speed_enabled", None)
+    chain = build_cpu_video_filter(pre) or ""
+    # That builder always ends with a pixel-format conversion, and the
+    # overlay and stack chains already end with one of their own. A chain
+    # that is ONLY the conversion means the job asked for no picture edit,
+    # so it is dropped rather than emitted as a no-op link.
+    parts = [part for part in chain.split(",") if part]
+    if all(part.startswith("format=") for part in parts):
+        return ""
+    return chain
+
+
+def composite_tail_picture_chain(answers: dict[str, Any]) -> list[str]:
+    """Speed and the fade, which run AFTER the composite.
+
+    A fade in front of the overlay would fade the base while the overlay stayed
+    at full brightness; the user means the finished picture. Speed in front of
+    it would retime only the first input, so an hstack of two clips would
+    drift apart -- applied to the composited stream it retimes both equally,
+    and the audio chain applies the matching `atempo`, so sound and picture
+    stay together.
+    """
+    parts: list[str] = []
+    if video_speed_transform_enabled(answers):
+        parts.append(build_video_speed_filter(
+            encode_video_speed_factor(answers), bool(answers.get("reverse_video"))))
+    from ffmwiz.wizard_build_filters import build_fade_filters
+    # NOT `encode_timeline_map`: `wizard_build_b` imports this module, so
+    # reaching back for it is the cycle `test_module_reference_hygiene`
+    # forbids. It is also not needed -- a composite is as long as its FIRST
+    # input by construction (`build_composite_command` emits `-t` to say so)
+    # and it carries no cuts, so the output duration is the source duration
+    # divided by the speed factor.
+    try:
+        output_seconds = float((answers.get("format") or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        # A genuinely unknown duration; `build_fade_filters` drops the
+        # fade-out and says so.
+        output_seconds = 0.0
+    if output_seconds and video_speed_transform_enabled(answers):
+        factor = encode_video_speed_factor(answers)
+        if factor > 0:
+            output_seconds /= factor
+    parts.extend(build_fade_filters(answers, output_seconds))
+    return parts
+
+
+def composite_base_output_size(answers: dict[str, Any]) -> tuple[int, int]:
+    """The base picture's size AFTER `composite_base_picture_chain`.
+
+    `hstack`/`vstack` need the partner scaled to the base's exact height or
+    width, so the number has to come from the transformed picture, not from the
+    source stream. Read in chain order: crop, then the 90-degree rotations that
+    swap the axes, then the resize target if one was asked for.
+    """
+    width, height = cropped_source_size(answers)
+    if str(answers.get("rotate_choice") or "").strip().lower() in {"90cw", "90ccw"}:
+        width, height = height, width
+    scaled = resolve_scale_dimensions(answers, answers.get("resolution", "n"))
+    if scaled:
+        width, height = scaled
+    return _even(width or 640), _even(height or 360)
+
+
 def build_composite_filter_graph(
     answers: dict[str, Any],
     picture_input: int | None,
@@ -128,12 +221,20 @@ def build_composite_filter_graph(
     chains: list[str] = []
     notes: list[str] = []
     video_streams = list(answers.get("video_streams") or [])
-    base = video_streams[0] if video_streams else {}
-    base_w = _even(int(base.get("width") or 0) or 640)
-    base_h = _even(int(base.get("height") or 0) or 360)
+    # The base picture is transformed FIRST, so the overlay lands on what
+    # the user asked for and a stack is sized against the real result.
+    base_chain = composite_base_picture_chain(answers)
+    base_source = "[0:v]"
+    if base_chain and video_streams:
+        chains.append(f"[0:v]{base_chain}[cmpbase]")
+        base_source = "[cmpbase]"
+    base_w, base_h = composite_base_output_size(answers)
     mode = str(answers.get("composite_mode") or "") if picture_input is not None else ""
 
     video_label = "0:v:0" if video_streams else None
+    if base_source != "[0:v]" and video_streams:
+        video_label = base_source
+
     if mode in {"overlay", "pip"}:
         corner = str(answers.get("composite_corner") or COMPOSITE_DEFAULT_CORNER)
         x_expr, y_expr = OVERLAY_CORNERS.get(corner, OVERLAY_CORNERS[COMPOSITE_DEFAULT_CORNER])
@@ -161,7 +262,7 @@ def build_composite_filter_graph(
         # single decoded frame is held for the whole main input instead of
         # ending the output with it.
         chains.append(
-            f"[0:v]{source}overlay={x_expr.format(m=margin)}:{y_expr.format(m=margin)}"
+            f"{base_source}{source}overlay={x_expr.format(m=margin)}:{y_expr.format(m=margin)}"
             f":eof_action=repeat,format={pix_fmt}[vout]")
         video_label = "[vout]"
     elif mode in {"hstack", "vstack"}:
@@ -175,7 +276,7 @@ def build_composite_filter_graph(
             notes.append(f"Stacked: the second input was scaled to {base_w} px wide "
                          f"to match the first. Its height follows its own aspect ratio, "
                          f"so nothing is letterboxed or squeezed.")
-        chains.append(f"[0:v]scale={base_w}:{base_h},setsar=1,format={pix_fmt}[cmpa]")
+        chains.append(f"{base_source}scale={base_w}:{base_h},setsar=1,format={pix_fmt}[cmpa]")
         chains.append(f"[{picture_input}:v]{partner_scale},setsar=1,format={pix_fmt}[cmpb]")
         chains.append(f"[cmpa][cmpb]{mode}=inputs=2[vout]")
         video_label = "[vout]"
@@ -205,49 +306,35 @@ def build_composite_filter_graph(
             audio_label = f"{audio_input}:a:0"
             notes.append("The main input has no audio, so the second file's "
                          "audio is used on its own.")
+    # Speed and the fade run on the finished picture -- see
+    # `composite_tail_picture_chain` for why they are not in the base chain.
+    tail_parts = composite_tail_picture_chain(answers)
+    if tail_parts and video_label:
+        chains.append(f"{_graph_ref(video_label)}{','.join(tail_parts)}[vfinal]")
+        video_label = "[vfinal]"
+
+    # `audio_transform_enabled` is the gate the audio chain is defined
+    # against, so it covers everything the chain can emit -- volume,
+    # LoudNorm, speed/reverse and the fade. A narrower one here would drop
+    # whichever of them it forgot to name.
+    if audio_label and audio_transform_enabled(answers):
+        chains.append(f"{_graph_ref(audio_label)}"
+                      f"{build_encode_audio_processing_filter(answers)}[afinal]")
+        audio_label = "[afinal]"
+
     return chains, video_label, audio_label, notes
 
 
 def composite_unsupported_answer_notes(answers: dict[str, Any]) -> list[str]:
-    """What a composite job asks for that this command cannot carry.
+    """What a composite job asks for that this command still cannot carry.
 
     Said out loud rather than dropped, on the same rule as
-    `gif_unsupported_answer_notes`. This builder owns its whole command and
-    maps `[0:v]` and one source audio track straight into the overlay/mix
-    graph -- it calls neither the picture-filter chain nor the audio-processing
-    chain, so every answer named here reaches the summary and then nothing
-    else. The summary prints crop, resolution, fps, picture filters and volume
-    for this job exactly as it does for an ordinary encode, so without these
-    lines the printed plan and the printed command disagree in silence.
-
-    Stating it is not the same as carrying it. Applying only PART of the set
-    would be worse than none: an audio speed change without the matching
-    picture speed desynchronises the output, so nothing here is half-applied.
+    `gif_unsupported_answer_notes`. The picture and audio chains ARE carried
+    now -- `composite_base_picture_chain` runs in front of the overlay and
+    `composite_tail_picture_chain` plus the audio chain run behind it -- so the
+    only thing left is the one that would change how many outputs exist.
     """
     notes: list[str] = []
-    geometry: list[str] = []
-    if answers.get("crop_enabled"):
-        geometry.append("crop")
-    if resolve_scale_dimensions(answers, answers.get("resolution", "n")):
-        geometry.append("resolution")
-    if answers.get("fps") is not None:
-        geometry.append("frame rate")
-    if any(key in answers for key in LOOK_ANSWER_KEYS):
-        geometry.append("picture filters")
-    if any(requested_fade_seconds(answers)):
-        geometry.append("fade")
-    if video_speed_transform_enabled(answers):
-        geometry.append("video speed/reverse")
-    if geometry:
-        notes.append(
-            "Compositing builds its own filter graph, so these answers are NOT "
-            "applied to this output: " + ", ".join(geometry)
-            + ". Encode them in a separate pass first, then composite the result.")
-    if audio_transform_enabled(answers):
-        notes.append(
-            "Compositing maps the source audio track straight into the mix, so "
-            "volume, LoudNorm, audio speed/reverse and the audio fade are NOT "
-            "applied to this output.")
     if answers.get("cut_keep_ranges") or answers.get("separator_points"):
         notes.append(
             "Compositing writes ONE output from the whole timeline, so cut "
@@ -323,8 +410,19 @@ def build_composite_command(answers: dict[str, Any], output_path: Path) -> list[
         base_seconds = float((answers.get("format") or {}).get("duration") or 0.0)
     except (TypeError, ValueError):
         base_seconds = 0.0
-    if base_seconds > 0:
+    if base_seconds > 0 and not video_speed_transform_enabled(job):
+        # Skipped when the speed changed: `base_seconds` measures the SOURCE,
+        # and a 2x composite is half that long, so the limit would be a lie
+        # rather than a guard. The overlay's `eof_action=repeat` and the
+        # mix's `duration=first` already end the output with the main input.
         cmd.extend(["-t", f"{base_seconds:.3f}"])
+    if video_speed_transform_enabled(job):
+        # The retiming filter alone is not enough: without this the muxer
+        # resamples back to the source cadence and drops the frames the
+        # `setpts` just spread out (measured 40 -> 22 at 2x on the encode
+        # path). Every builder that emits the filter carries this option;
+        # `test_speed_frame_retention` is the guard that says so.
+        cmd.extend(VIDEO_SPEED_OUTPUT_TIMING_ARGS)
     append_container_options(cmd, job["output_ext"])
     # Last, immediately before the output path -- the same rule
     # `build_ffmpeg_command` follows, so the escape hatch still overrides what

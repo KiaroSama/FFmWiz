@@ -103,6 +103,29 @@ MEDIA_INFO_VALUE_COLORS = [
 ]
 
 
+def join_uses_nvenc_encode(answers: dict[str, Any], target_depth: int) -> bool:
+    """Whether the near-quality join should encode with h264_nvenc.
+
+    `answers["video_encoders"]` is the BUILD's capability list from
+    `ffmpeg -encoders`; every gyan.dev/BtbN full build lists all three *_nvenc
+    encoders whether or not the machine has an NVIDIA card. Gating on that list
+    alone sent a machine with no GPU straight into `-c:v h264_nvenc`, which dies
+    at encoder init -- the main wizard has always gated on the real device probe
+    (wizard_build.build_ffmpeg_command). The device check goes LAST so the probe
+    subprocess only runs once the encoder is actually a candidate.
+
+    h264_nvenc has no 10-bit mode at all, so anything above 8-bit falls through
+    to the software encoders rather than failing at encoder init.
+
+    Both the encoder choice and the NVENC-multipass question read this, so the
+    two cannot answer differently.
+    """
+    available = {str(name).lower() for name in answers.get("video_encoders") or []}
+    return (H264_NVENC_ENCODER in available
+            and target_depth <= 8
+            and gpu_available_for_answers(answers))
+
+
 def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[str, Any]], output_path: Path) -> list[str]:
     output_path = resolve_output_collision_against_inputs(
         output_path,
@@ -119,10 +142,7 @@ def build_join_near_quality_command(answers: dict[str, Any], items: list[dict[st
     target_w = int(first_video.get("width") or 1280)
     target_h = int(first_video.get("height") or 720)
     target_fps = rational_to_float(first_video.get("avg_frame_rate")) or rational_to_float(first_video.get("r_frame_rate")) or 30.0
-    available_video_encoders = {str(name).lower() for name in answers.get("video_encoders") or []}
-    use_nvenc_encode = H264_NVENC_ENCODER in available_video_encoders and target_depth <= 8
-    # h264_nvenc has no 10-bit mode; a >8-bit join falls through to the
-    # software encoders below rather than failing at encoder init.
+    use_nvenc_encode = join_uses_nvenc_encode(answers, target_depth)
     use_cuda_decode_complex = bool(answers.get("use_gpu") and use_nvenc_encode)
     cmd: list[str] = [answers["ffmpeg"], "-hide_banner", "-y" if OVERWRITE_OUTPUT else "-n"]
     for item in items:
@@ -369,8 +389,7 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
         format_answers = dict(answers)
         format_answers["video_streams"] = [first_video]
         target_depth = output_video_bit_depth(format_answers)
-        available_video_encoders = {str(name).lower() for name in answers.get("video_encoders") or []}
-        if H264_NVENC_ENCODER in available_video_encoders and target_depth <= 8:
+        if join_uses_nvenc_encode(answers, target_depth):
             ask_nvenc_multipass_if_applicable(
                 answers,
                 video_encoder="h264_nvenc",

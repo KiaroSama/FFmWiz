@@ -227,6 +227,17 @@ no `config.env` equivalent. The compositing question (`overlay`/`pip`/`hstack`/`
 formerly the `video_composite` key) is also always asked interactively, even on a config run,
 because it needs to probe a second input file and has nobody to answer for it non-interactively.
 
+A composite carries the rest of your answers. The geometry and look -- crop, resize,
+frame rate, rotation/flip, colour, denoise/sharpen/blur -- are applied to the main
+picture **before** the second input is placed on it, so the overlay lands on the
+picture you asked for and a side-by-side is sized against the real result. Speed and
+the fade are applied **after**, to the finished frame, so the fade covers the whole
+composite and a speed change retimes both inputs together with the sound. Volume,
+LoudNorm and the audio fade are applied to the mixed audio.
+
+Cut ranges and Split points are the exception: a composite writes ONE output from the
+whole timeline, so it says so and leaves them out.
+
 `input_path` is **not** required. If it is set, the file is loaded and validated before the
 first question (a path that does not exist stops the run with a clear error); if it is blank,
 Mode 2 simply asks for the input file like Mode 1 does.
