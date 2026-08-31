@@ -96,6 +96,38 @@ class CommandHardsubAndEncodeTests2(CommandGenBase):
         self.assertTrue(answers["reverse_video"])
         self.assertTrue(answers["audio_speed_from_video"])
 
+    def test_config_loudnorm_over_copy_still_applies_the_audio_sample_rate(self):
+        # LoudNorm turns `audio_codec=copy` into an AAC re-encode. The sample
+        # rate gate asks "is the audio re-encoded"; read before that flip it saw
+        # the stale `copy` and dropped the user's rate, so the command came out
+        # `-c:a aac -b:a 128k` with no `-ar` at all.
+        answers = self._extra_recipe_answers()
+        answers["audio_codec"] = "copy"
+        cfg = FFmWiz.parse_env_config(
+            "audio_codec=copy\naudio_sample_rate=48000\nloudnorm=on")
+        with contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz.apply_config_extra_recipe_options(answers, cfg)
+        self.assertEqual(answers["audio_codec"], FFmWiz.DEFAULT_AUDIO_CODEC)
+        self.assertEqual(answers["audio_sample_rate"], 48000)
+        self.assertFalse(answers.get("audio_sample_rate_keep"))
+        cmd = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz.append_audio_encode_options(cmd, answers, True)
+        self.assertIn("-ar", cmd)
+        self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
+
+    def test_config_audio_copy_without_loudnorm_keeps_dropping_the_sample_rate(self):
+        # The other side of the same gate: a real stream copy re-encodes
+        # nothing, so an output sample rate is not applicable and must not be
+        # recorded as if it were.
+        answers = self._extra_recipe_answers()
+        answers["audio_codec"] = "copy"
+        cfg = FFmWiz.parse_env_config(
+            "audio_codec=copy\naudio_sample_rate=48000\nloudnorm=off")
+        with contextlib.redirect_stdout(io.StringIO()):
+            FFmWiz.apply_config_extra_recipe_options(answers, cfg)
+        self.assertIsNone(answers.get("audio_sample_rate"))
+
     def test_apply_config_extra_recipe_options_defaults_change_nothing(self):
         # Empty / default config must not enable any optional transform.
         answers = self._extra_recipe_answers()

@@ -390,8 +390,9 @@ Defaults are 15 fps and 480 px wide; `gif_fps` and `gif_width` override them,
 and a GIF carries no audio. `boomerang` plays the clip forward then reversed,
 reusing the bounded reverse pipeline rather than a second implementation, so a
 long input is still segmented against the frame budget. `thumb` extracts one
-frame -- `thumbnail_seconds` picks the moment, `thumbnail_ext` the format
-(default `png`). `loop=N` repeats the input N times with `-stream_loop`, which
+frame -- `thumbnail_seconds` picks the moment; the format is always PNG
+(`THUMBNAIL_DEFAULT_EXT`). `thumbnail_ext` is recorded alongside it but no
+prompt sets it and no builder reads it, so it does not choose anything. `loop=N` repeats the input N times with `-stream_loop`, which
 is an INPUT option and so sits before `-i`.
 
 **`audio_volume`** — Audio gain as a factor (`1.5`), a percentage (`150%`) or

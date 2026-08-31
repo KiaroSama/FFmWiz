@@ -495,7 +495,21 @@ def join_copy_stream_maps(answers: dict[str, Any], items: list[dict[str, Any]]) 
             targets.append(f"0:s:{index}")
     if source_data_keep_enabled(answers) and any(item.get("data_streams") for item in items):
         targets.append("0:d?")
-    if answers.get("keep_embedded_attachments") and any(item.get("attachment_streams") for item in items):
+    # Default KEEP, exactly like every sibling class above (`*_keep_enabled`
+    # all default to True) and exactly like the `-map 0` branch this list
+    # replaces. `join_copy_plan` already states the rule -- only an EXPLICIT
+    # answer drops attachments, because the standalone join never asks -- but
+    # this read was the raw key, which defaults falsy. So a join that needed an
+    # explicit map list for an unrelated reason (a subset of audio tracks, say)
+    # silently lost the source's MKV fonts, and `map_reasons` did not even
+    # report them as dropped. Gated on the container as well, matching
+    # `embedded_attachment_keep_enabled`: mapping a font into MP4 is not a
+    # silent drop but a mux-time failure ("Could not find tag for codec ttf").
+    # Last on purpose: Matroska refuses a packet-bearing stream at a higher
+    # output index than an attachment.
+    if (answers.get("keep_embedded_attachments", True)
+            and output_supports_embedded_attachments(answers)
+            and any(item.get("attachment_streams") for item in items)):
         targets.append("0:t?")
     return targets
 

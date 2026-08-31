@@ -516,6 +516,30 @@ class CommandCutJoinFolderTests(CommandGenBase):
         self.assertIn("-map_chapters", cmd)
         self.assertEqual(cmd[cmd.index("-map_chapters") + 1], "0")
 
+    def test_copy_cut_shifts_chapters_no_cut_passed_through(self):
+        # "No chapter was cut through" is not "the clock did not move". A range
+        # WAS removed here (100-200 s), so the chapter after it sits 100 s early
+        # in the output -- and `-map_chapters 0` cannot say that. Across the
+        # multi-range concat demuxer it does not even carry the chapters:
+        # measured on a real 12 s source with chapters A 0-2 and B 8-10 cut to
+        # [(0,4),(8,12)], the output came back with ZERO chapters, while the
+        # metadata plan produced the right A 0-2 / B 4-6.
+        answers = self.copy_cut_answers(
+            [self.chapter(0, 50, "Intro"), self.chapter(250, 300, "Outro")], 300)
+        plan = FFmWiz.analyze_copy_cut_chapter_plan(answers, [(0, 100), (200, 300)])
+        self.assertEqual("metadata", plan["mode"])
+        self.assertEqual(0, plan["overlap_count"], "neither chapter is cut through")
+        self.assertEqual(
+            [(0.0, 50.0, "Intro"), (150.0, 200.0, "Outro")],
+            [(c["start"], c["end"], c["metadata"]["title"]) for c in plan["chapters"]])
+
+    def test_copy_cut_with_nothing_removed_still_copies_source_chapters(self):
+        # The other side of the same branch: no range removed means the clock
+        # never moved, so `-map_chapters 0` is still the right answer.
+        answers = self.copy_cut_answers([self.chapter(0, 100, "Intro")], 300)
+        self.assertEqual(
+            "copy", FFmWiz.analyze_copy_cut_chapter_plan(answers, [(0, 300)])["mode"])
+
     def test_copy_cut_all_chapters_dropped_uses_no_chapters(self):
         answers = self.copy_cut_answers([self.chapter(0, 300, "Removed")])
         plan = FFmWiz.analyze_copy_cut_chapter_plan(answers, [(600, 900)])

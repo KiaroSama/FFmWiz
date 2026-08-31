@@ -141,6 +141,13 @@ def prepare_folder_job_answers(
         packet_sizes = services.get_packet_sizes(job)
         source = stream_bitrate_kbps(job["audio_streams"][first_selected], job.get("format"), packet_sizes)
         job["audio_bitrate_kbps"] = source
+    # The same rule as the bitrate above, for the same reason: "n = keep the
+    # current rate" is a per-FILE answer that was resolved once, against the
+    # representative file. Baked in, it stopped meaning "keep" and started
+    # meaning that one number -- a 44.1 kHz representative silently resampled
+    # every 48 kHz and 96 kHz file in the folder down to 44.1 kHz.
+    if audio_indices and job.get("audio_sample_rate_keep") and job.get("audio_codec") != "copy":
+        job["audio_sample_rate"] = source_audio_sample_rate(job)
 
     if output_is_audio_only(job) and not audio_indices:
         raise ValueError("Audio-only output was selected, but this file has no selected audio stream.")

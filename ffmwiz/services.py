@@ -590,6 +590,16 @@ def join_ordered_items_for_answers(answers: dict[str, Any]) -> list[dict[str, An
     return [primary, *join_extra]
 
 
+# Read budget for the volumedetect scan, the same ceiling `probe_packet_sizes`
+# uses and for the same reason: this decodes the WHOLE audio stream, so a
+# network path or a pathological file can leave it reading forever. It is worse
+# here than in either sibling probe -- `get_audio_volume_stats` submits these
+# into a ThreadPoolExecutor whose `with` block joins on exit, so one wedged
+# child stops the wizard inside `shutdown(wait=True)` with no progress line and
+# nothing to cancel.
+_VOLUMEDETECT_TIMEOUT = 600.0
+
+
 def probe_audio_volume_stats(ffmpeg: str, input_path: Path, audio_index: int) -> dict[str, str]:
     args = [
         ffmpeg,
@@ -615,6 +625,7 @@ def probe_audio_volume_stats(ffmpeg: str, input_path: Path, audio_index: int) ->
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=_VOLUMEDETECT_TIMEOUT,
         )
         stdout_text, stdout_encoding = decode_subprocess_bytes(result.stdout, "utf-8")
         stderr_text, stderr_encoding = decode_subprocess_bytes(result.stderr, "utf-8")

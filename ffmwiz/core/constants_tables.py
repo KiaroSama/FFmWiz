@@ -72,12 +72,21 @@ EXTRACT_SUBTITLE_EXTENSIONS = {
     "xsub": ".avi",
 }
 
+# Containers each audio codec can be stream-COPIED into, most preferred first
+# (entry 0 is the default the extract prompt offers). Verified by really
+# muxing each pair on ffmpeg 8.1.1.
+#
+# `.m4a` is NOT `.mp4`: it selects the `ipod` muxer, which accepts a much
+# narrower codec set. mp3 and eac3 were listed here -- mp3 with `.m4a` FIRST,
+# so the default offer for every extracted MP3 track died with "Could not
+# write header (incorrect codec parameters ?)" and wrote nothing. Both keep
+# their `.mp4` entry, which really does carry them.
 EXTRACT_COPY_CONTAINERS_AUDIO = {
     "aac": ["m4a", "mp4", "aac", "ts", "mov"],
     "alac": ["m4a", "mov", "caf"],
     "ac3": ["m4a", "ac3", "mp4", "ts"],
-    "eac3": ["m4a", "eac3", "mp4", "ts"],
-    "mp3": ["m4a", "mp3", "mp4"],
+    "eac3": ["eac3", "mp4", "ts"],
+    "mp3": ["mp3", "mp4"],
     "mp2": ["mp2", "mpg", "ts"],
     "opus": ["opus", "ogg", "webm"],
     "vorbis": ["ogg", "webm"],
@@ -102,9 +111,13 @@ EXTRACT_COPY_CONTAINERS_VIDEO = {
     "prores": ["mov"],
 }
 
+# Same contract for subtitles: every entry must survive `-c copy`.
+# `.ass` and `.ssa` both select the `ass` muxer, whose only subtitle codec is
+# `ass`, so a subrip stream copied into one fails at header-write time. It is
+# offered only for the sources that already are ASS/SSA.
 EXTRACT_COPY_CONTAINERS_SUBTITLE = {
-    "subrip": ["srt", "ass"],
-    "srt": ["srt", "ass"],
+    "subrip": ["srt"],
+    "srt": ["srt"],
     "text": ["srt"],
     "mov_text": ["srt"],
     "ass": ["ass", "ssa"],

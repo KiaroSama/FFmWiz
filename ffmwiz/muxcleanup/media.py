@@ -174,6 +174,21 @@ def read_robocopy_percent(text: str) -> Optional[float]:
         return None
 
 
+# The code this reports when the child could not be started at all, or its
+# output could not be captured. It was 1 -- and robocopy's convention, which
+# `output.robocopy_success` implements, is that 0-7 all mean SUCCESS. So a
+# robocopy that never launched came back as rc=1 and both call sites in
+# copying.py read it as a clean run: one logged "Extra files copied ... rc=1"
+# having copied nothing, the other skipped its "robocopy failed" raise and
+# died later on the misleading "robocopy did not create the output file".
+#
+# 127 is the shell convention for "command not found" and, more to the point,
+# it is outside robocopy's success range. Every consumer here treats any
+# non-zero code as failure (`!= 0` in logsetup and processing), so raising the
+# value costs them nothing.
+LAUNCH_FAILED_RETURNCODE = 127
+
+
 def run_with_progress(
     args: Sequence[str],
     total_started_at: Optional[float] = None,
@@ -203,7 +218,8 @@ def run_with_progress(
                 )
             except OSError as exc:
                 LOGGER.error("Could not start %s: %s", label, exc)
-                return subprocess.CompletedProcess(list(args), 1, "", str(exc))
+                return subprocess.CompletedProcess(
+                    list(args), LAUNCH_FAILED_RETURNCODE, "", str(exc))
 
             timed_out = False
             capture_offset = 0
@@ -235,7 +251,8 @@ def run_with_progress(
             stderr = stderr_file.read()
     except OSError as exc:
         LOGGER.exception("Failed to capture output of %s", label)
-        return subprocess.CompletedProcess(list(args), 1, "", str(exc))
+        return subprocess.CompletedProcess(
+            list(args), LAUNCH_FAILED_RETURNCODE, "", str(exc))
 
     if timed_out:
         return subprocess.CompletedProcess(
@@ -257,10 +274,18 @@ def tool_version(binary: str) -> str:
 
     Which build of FFmpeg ran is the first question any report about a bad
     output raises, and it is not something the user can reconstruct later.
+
+    UTF-8 explicitly, like `run_command` above. `text=True` alone decodes with
+    the OS code page, and a build whose `configuration:` line names a non-ASCII
+    path emits bytes that page has no character for. Measured on cp1252 with a
+    Cyrillic prefix: the decode raised inside subprocess's own reader thread, so
+    `except (OSError, SubprocessError)` never saw it -- a UnicodeDecodeError
+    traceback went to the console and the version came back "unknown".
     """
     try:
         proc = subprocess.run(
             [binary, "-version"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=PROBE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError) as exc:

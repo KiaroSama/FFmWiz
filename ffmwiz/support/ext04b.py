@@ -611,10 +611,13 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
         source_join_duration,
     )
     label = append_join_trim_concat_filter(filters, "acat", keep_ranges, "audio", "acut")
-    if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
-        filters.append(f"[{label}]{build_encode_audio_speed_filter(answers)}[a]")
-    else:
-        filters.append(f"[{label}]asetpts=PTS-STARTPTS[a]")
+    # No gate: `build_encode_audio_speed_filter` already returns a bare
+    # `asetpts=PTS-STARTPTS` when the job asked for nothing, so the guard this
+    # replaces could only ever agree with it or drop a filter it does emit --
+    # a volume-only or fade-only join lost its gain because the guard named
+    # speed and LoudNorm alone. `ext04b` gates the per-part chain wide for the
+    # same reason.
+    filters.append(f"[{label}]{build_encode_audio_speed_filter(answers)}[a]")
     cmd.extend([
         "-filter_complex", ";".join(filters),
         "-map", "[a]",
@@ -631,6 +634,8 @@ def build_join_audio_encode_command(answers: dict[str, Any], items: list[dict[st
     cmd.extend(join_audio_args)
     if output_path.suffix.lower() in {".mp4", ".m4a", ".mov"}:
         cmd.extend(["-movflags", "+faststart"])
+    cmd.extend(answers.get("raw_ffmpeg_args") or [])
+
     cmd.append(str(output_path))
     return cmd
 

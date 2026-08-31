@@ -486,6 +486,79 @@ class CopyPlan(unittest.TestCase):
         self.assertFalse(plan["maps_every_source_stream"])
         self.assertEqual([], plan["reasons"])
 
+    def test_an_unasked_attachment_survives_the_explicit_map_list(self):
+        # The standalone join never asks about attachments, and `join_copy_plan`
+        # says so: only an EXPLICIT answer drops them. The map builder read the
+        # raw key instead, which defaults falsy -- so a join that needed an
+        # explicit map list for an UNRELATED reason (here: a subset of the audio
+        # tracks) silently lost the source's MKV fonts, while the very same job
+        # with `-map 0` kept them and `map_reasons` never said they were gone.
+        font = {"codec_type": "attachment", "codec_name": "ttf",
+                "tags": {"filename": "Sub.ttf"}}
+        answers, items = self._copyable(audio_tracks=[0])
+        for item in items:
+            item["audio_streams"] = item["audio_streams"] * 2
+            item["attachment_streams"] = [dict(font)]
+            item["streams"] = item["streams"] + [dict(font)]
+        plan = FFmWiz.join_copy_plan(answers, items)
+        self.assertFalse(plan["maps_every_source_stream"])
+        self.assertNotIn("embedded attachments are dropped", plan["map_reasons"])
+        targets = FFmWiz.join_copy_stream_maps(answers, items)
+        self.assertIn("0:t?", targets,
+                      "an unasked attachment must not be dropped by the map list")
+        self.assertEqual("0:t?", targets[-1],
+                         "Matroska refuses a packet stream after an attachment")
+
+    def test_an_explicitly_dropped_attachment_stays_out_of_the_map_list(self):
+        font = {"codec_type": "attachment", "codec_name": "ttf",
+                "tags": {"filename": "Sub.ttf"}}
+        answers, items = self._copyable(audio_tracks=[0],
+                                        keep_embedded_attachments=False)
+        for item in items:
+            item["audio_streams"] = item["audio_streams"] * 2
+            item["attachment_streams"] = [dict(font)]
+            item["streams"] = item["streams"] + [dict(font)]
+        self.assertNotIn("0:t?", FFmWiz.join_copy_stream_maps(answers, items))
+        self.assertIn("embedded attachments are dropped",
+                      FFmWiz.join_copy_plan(answers, items)["map_reasons"])
+
+    def test_a_container_that_cannot_hold_fonts_never_maps_them(self):
+        # Default-keep must not become a mux-time failure: mapping a ttf into
+        # MP4 dies with "Could not find tag for codec ttf", so the container
+        # gates the map exactly as `embedded_attachment_keep_enabled` does.
+        font = {"codec_type": "attachment", "codec_name": "ttf",
+                "tags": {"filename": "Sub.ttf"}}
+        for ext, expected in (("mkv", True), ("mp4", False)):
+            with self.subTest(output_ext=ext):
+                answers, items = self._copyable(audio_tracks=[0], output_ext=ext)
+                for item in items:
+                    item["audio_streams"] = item["audio_streams"] * 2
+                    item["attachment_streams"] = [dict(font)]
+                    item["streams"] = item["streams"] + [dict(font)]
+                targets = FFmWiz.join_copy_stream_maps(answers, items)
+                self.assertEqual(expected, "0:t?" in targets, f"got {targets}")
+
+    def test_input_ones_attachment_reaches_the_rebuilt_item_list(self):
+        # `join_items_from_answers` rebuilds input 1 from the top-level answers.
+        # It spliced the attachments into `streams` but never created the
+        # `attachment_streams` KEY -- the same omission R04 cost for subtitles.
+        # Both join-copy readers ask items for that key, so fonts carried by
+        # input 1 alone were invisible to them and the explicit map list dropped
+        # them even with `keep_embedded_attachments=y`.
+        font = {"codec_type": "attachment", "codec_name": "ttf",
+                "tags": {"filename": "Sub.ttf"}}
+        items = [make_item("a.mkv", 2.0), make_item("b.mkv", 2.0)]
+        for item in items:
+            item["audio_streams"] = item["audio_streams"] * 2
+        items[0]["attachment_streams"] = [dict(font)]
+        items[0]["streams"] = items[0]["streams"] + [dict(font)]
+        answers = _answers(items, video_codec="copy", audio_codec="copy",
+                           audio_tracks=[0], fps=None,
+                           keep_embedded_attachments=True)
+        rebuilt = FFmWiz.join_items_from_answers(answers)
+        self.assertEqual([dict(font)], rebuilt[0]["attachment_streams"])
+        self.assertIn("0:t?", FFmWiz.join_copy_stream_maps(answers, rebuilt))
+
     def test_dropping_subtitles_data_or_attachments_blocks_the_blanket_map(self):
         for key, stream_key, stream in (
                 ("keep_source_subtitles", "subtitle_streams",

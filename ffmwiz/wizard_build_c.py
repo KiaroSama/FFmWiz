@@ -208,6 +208,53 @@ def build_composite_filter_graph(
     return chains, video_label, audio_label, notes
 
 
+def composite_unsupported_answer_notes(answers: dict[str, Any]) -> list[str]:
+    """What a composite job asks for that this command cannot carry.
+
+    Said out loud rather than dropped, on the same rule as
+    `gif_unsupported_answer_notes`. This builder owns its whole command and
+    maps `[0:v]` and one source audio track straight into the overlay/mix
+    graph -- it calls neither the picture-filter chain nor the audio-processing
+    chain, so every answer named here reaches the summary and then nothing
+    else. The summary prints crop, resolution, fps, picture filters and volume
+    for this job exactly as it does for an ordinary encode, so without these
+    lines the printed plan and the printed command disagree in silence.
+
+    Stating it is not the same as carrying it. Applying only PART of the set
+    would be worse than none: an audio speed change without the matching
+    picture speed desynchronises the output, so nothing here is half-applied.
+    """
+    notes: list[str] = []
+    geometry: list[str] = []
+    if answers.get("crop_enabled"):
+        geometry.append("crop")
+    if resolve_scale_dimensions(answers, answers.get("resolution", "n")):
+        geometry.append("resolution")
+    if answers.get("fps") is not None:
+        geometry.append("frame rate")
+    if any(key in answers for key in LOOK_ANSWER_KEYS):
+        geometry.append("picture filters")
+    if any(requested_fade_seconds(answers)):
+        geometry.append("fade")
+    if video_speed_transform_enabled(answers):
+        geometry.append("video speed/reverse")
+    if geometry:
+        notes.append(
+            "Compositing builds its own filter graph, so these answers are NOT "
+            "applied to this output: " + ", ".join(geometry)
+            + ". Encode them in a separate pass first, then composite the result.")
+    if audio_transform_enabled(answers):
+        notes.append(
+            "Compositing maps the source audio track straight into the mix, so "
+            "volume, LoudNorm, audio speed/reverse and the audio fade are NOT "
+            "applied to this output.")
+    if answers.get("cut_keep_ranges") or answers.get("separator_points"):
+        notes.append(
+            "Compositing writes ONE output from the whole timeline, so cut "
+            "ranges and Split points are NOT applied to it.")
+    return notes
+
+
 def build_composite_command(answers: dict[str, Any], output_path: Path) -> list[str]:
     """One FFmpeg command that composites the extra input(s) onto the first.
 
@@ -256,7 +303,7 @@ def build_composite_command(answers: dict[str, Any], output_path: Path) -> list[
     chains, video_label, audio_label, notes = build_composite_filter_graph(
         job, picture_input, audio_input,
         cpu_graph_pixel_format_for_encoder(job, video_encoder))
-    for line in notes:
+    for line in notes + composite_unsupported_answer_notes(job):
         appio.note(line)
     if chains:
         cmd.extend(["-filter_complex", ";".join(chains)])
@@ -279,6 +326,11 @@ def build_composite_command(answers: dict[str, Any], output_path: Path) -> list[
     if base_seconds > 0:
         cmd.extend(["-t", f"{base_seconds:.3f}"])
     append_container_options(cmd, job["output_ext"])
+    # Last, immediately before the output path -- the same rule
+    # `build_ffmpeg_command` follows, so the escape hatch still overrides what
+    # the wizard chose. This builder owns the whole command, so without this
+    # line a composite dropped the raw options the wizard had just asked for.
+    cmd.extend(job.get("raw_ffmpeg_args") or [])
     cmd.append(str(output_path))
     log_info(f"Composite command built: mode={answers.get('composite_mode') or 'none'}; "
              f"picture_input={picture_input}; audio_input={audio_input}")
@@ -429,6 +481,7 @@ def build_thumbnail_command(answers: dict[str, Any], source: Path,
 __all__ = [
     'composite_active',
     'build_composite_filter_graph',
+    'composite_unsupported_answer_notes',
     'build_composite_command',
     'QUICK_OUTPUT_MODES',
     'quick_output_mode',

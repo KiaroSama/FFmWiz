@@ -329,7 +329,16 @@ def run_bounded_audio_reverse_encode(answers: dict[str, Any], cmd: list[str], *,
     has_join = bool(answers.get("join_input_items"))
     forward_owns = GEOMETRY_TRANSFORMATIONS if has_join else ()
     reverse_owns = ("audio_reverse", "audio_cuts")
-    final_owns = ("cuts", "video_speed", "audio_speed", "loudnorm", "split")
+    # `look`, `fade`, `volume` and `raw_args` belong to the final rebuild: it is
+    # the only stage that writes the user's own file, and none of them may reach
+    # a scratch intermediate. Leaving them unowned did not make them neutral --
+    # `validate_stage_plan` refuses an unowned REQUESTED transformation, so a
+    # bounded audio reverse carrying any one of them raised
+    #     ValueError: transformation(s) ['volume'] are requested but owned by no stage
+    # out of the encode instead of running. A plain gain change on a track long
+    # enough to need staging is the ordinary case, so this refused ordinary jobs.
+    final_owns = ("cuts", "video_speed", "audio_speed", "loudnorm", "split",
+                  "look", "fade", "volume", "raw_args")
     if not has_join:
         final_owns = final_owns + GEOMETRY_TRANSFORMATIONS
     # Before the join, not after: a plan that cannot be executed correctly

@@ -121,6 +121,13 @@ def join_items_from_answers(answers: dict[str, Any]) -> list[dict[str, Any]]:
         "video_streams": answers.get("video_streams") or [],
         "audio_streams": answers.get("audio_streams") or [],
         "subtitle_streams": answers.get("subtitle_streams") or [],
+        # The same omission R04 cost, one stream class later. `streams` above
+        # already splices the attachments in, but `join_copy_plan` and
+        # `join_copy_stream_maps` ask each item for the KEY -- so fonts carried
+        # by input 1 alone were invisible to both, and a join that needed an
+        # explicit map list dropped them even when the user had answered
+        # `keep_embedded_attachments=y`.
+        "attachment_streams": answers.get("attachment_streams") or [],
         "data_streams": answers.get("data_streams") or [],
         # The container duration, which stays the answer only for an audio-only
         # join item: with no picture there is nothing else to measure.

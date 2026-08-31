@@ -298,7 +298,45 @@ def closest_edge_scale_dimensions(
     return final_width, final_height, "height"
 
 
+def look_filters_requested(answers: dict[str, Any]) -> bool:
+    """Did the user ask for a rotate/flip, a colour adjustment, or de/sharpen/blur?
+
+    The single definition of that question, tested against the same tables
+    `build_orientation_filters` and `build_look_filters` read, so the gate and
+    the chain cannot disagree about what counts.
+    """
+    if str(answers.get("rotate_choice") or "none").strip().lower() in ROTATE_FILTERS:
+        return True
+    if answers.get("flip_horizontal") or answers.get("flip_vertical"):
+        return True
+    if answers.get("adjust_grayscale"):
+        return True
+    for key, table in (("denoise_level", DENOISE_FILTERS),
+                       ("sharpen_level", SHARPEN_FILTERS),
+                       ("blur_level", BLUR_FILTERS)):
+        if str(answers.get(key) or "off").strip().lower() in table:
+            return True
+    for key, (_low, _high, neutral) in ADJUST_RANGES.items():
+        try:
+            if float(answers.get(key, neutral)) != neutral:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def video_filters_required(answers: dict[str, Any]) -> bool:
+    """Whether the picture chain has to be built at all -- the video twin of
+    `audio_transform_enabled`, and it must cover everything that chain emits.
+
+    It used to ask only about crop, fps, resize, cuts, split points and speed,
+    while `build_cpu_video_filter` behind it also emits the orientation, the
+    look and the fades. So a `-c:v copy` job with a rotation, a flip, a
+    grayscale, a denoise/sharpen/blur or a fade never tripped the "copy cannot
+    be used with filters" fallback: the command came out `-c:v copy` with no
+    `-vf` at all and the edit was silently dropped. A gate narrower than its
+    own body drops the request silently.
+    """
     return bool(
         answers.get("crop_enabled")
         or answers.get("fps") is not None
@@ -306,6 +344,8 @@ def video_filters_required(answers: dict[str, Any]) -> bool:
         or answers.get("cut_keep_ranges")
         or answers.get("separator_points")
         or video_speed_transform_enabled(answers)
+        or look_filters_requested(answers)
+        or any(requested_fade_seconds(answers))
     )
 
 
@@ -339,6 +379,7 @@ __all__ = [
     'source_sar',
     'crop_margins_validation_message',
     'closest_edge_scale_dimensions',
+    'look_filters_requested',
     'video_filters_required',
     'hardsub_subtitle_filter',
 ]

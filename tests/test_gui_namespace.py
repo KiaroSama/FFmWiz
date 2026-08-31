@@ -207,3 +207,89 @@ class NothingRealWasRemoved(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnUninjectedSiblingIsSelfSufficient(unittest.TestCase):
+    """The other half of the `_MODULES` contract, which nothing guarded.
+
+    `ffmwiz_gui.py`'s own docstring states it: a sibling NOT listed in
+    `_MODULES` "gets nothing injected ... so those modules import their shared
+    helpers by name instead". Ten of the twenty classic modules are listed; the
+    other ten-plus rely on that promise.
+
+    Nothing checked it. `test_module_reference_hygiene` catches only QUALIFIED
+    references (`gui_common.helper`) -- a BARE `helper(...)` in an uninjected
+    module imports fine, passes every existing test, and raises `NameError` the
+    first time a user opens that editor. The failure lands in a GUI subprocess,
+    where the traceback goes to a log rather than to anyone watching.
+
+    Measured when this was written: the seven modules with unresolved bare names
+    are exactly the seven that ARE injected, and every uninjected sibling
+    resolved cleanly. This pins that split so the next module added on the wrong
+    side of it fails here instead of in front of a user.
+    """
+
+    @staticmethod
+    def _free_names(tree):
+        """Names a module reads inside its defs but binds nowhere at module level."""
+        import builtins
+        local = {x.name for x in tree.body
+                 if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        for node in tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = ([node.target] if isinstance(getattr(node, "target", None), ast.Name)
+                           else getattr(node, "targets", []))
+                local.update(t.id for t in targets if isinstance(t, ast.Name))
+            elif isinstance(node, (ast.Import, ast.ImportFrom, ast.If, ast.Try)):
+                for sub in ast.walk(node):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        local.update((a.asname or a.name).split(".")[0] for a in sub.names)
+                    elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                        local.add(sub.id)
+        free = set()
+        for fn in tree.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            bound = set()
+            for w in ast.walk(fn):
+                if isinstance(w, ast.Name) and isinstance(w.ctx, ast.Store):
+                    bound.add(w.id)
+                elif isinstance(w, ast.arg):
+                    bound.add(w.arg)
+                elif isinstance(w, (ast.Import, ast.ImportFrom)):
+                    bound.update((a.asname or a.name).split(".")[0] for a in w.names)
+                elif isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    bound.add(w.name)
+                elif isinstance(w, ast.ExceptHandler) and w.name:
+                    bound.add(w.name)
+            for w in ast.walk(fn):
+                if (isinstance(w, ast.Name) and isinstance(w.ctx, ast.Load)
+                        and w.id not in local and w.id not in bound
+                        and not hasattr(builtins, w.id)):
+                    free.add(w.id)
+        return free
+
+    def test_every_uninjected_classic_module_binds_what_it_reads(self):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        classic = Path(importlib.import_module("ffmwiz.gui.classic.ffmwiz_gui").__file__).parent
+        injected = {m.__name__.rsplit(".", 1)[-1]
+                    for m in importlib.import_module("ffmwiz.gui.classic.ffmwiz_gui")._MODULES}
+        self.assertTrue(injected, "_MODULES is empty; this guard is pointed at the wrong thing")
+        offenders = {}
+        checked = 0
+        for path in sorted(classic.glob("*.py")):
+            if path.stem in ("__init__", "ffmwiz_gui") or path.stem in injected:
+                continue
+            checked += 1
+            module = importlib.import_module(f"ffmwiz.gui.classic.{path.stem}")
+            free = self._free_names(ast.parse(path.read_text(encoding="utf-8")))
+            unresolved = sorted(n for n in free if not hasattr(module, n))
+            if unresolved:
+                offenders[path.name] = unresolved
+        self.assertGreater(checked, 5, "found almost no uninjected siblings to check")
+        self.assertEqual(
+            {}, offenders,
+            "these modules are NOT in _MODULES, so nothing is injected into them, "
+            "yet they read names they never bind -- each is a NameError waiting for "
+            f"a user to open that editor: {offenders}")
