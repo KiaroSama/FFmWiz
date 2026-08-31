@@ -194,7 +194,9 @@ class BitmapTracksAreDeclaredNotSilentlyLost(NoLeakedArtifacts, unittest.TestCas
         })
 
     def _build(self, codec, confirm):
-        from ffmwiz import wizard_build_b as wb
+        # The definer, not the facade: wizard_build_b re-exports these two, and
+        # patching a re-export leaves the defining module's own global intact.
+        from ffmwiz import wizard_build_subtitles as wb
         asked = []
         real = wb.confirm_bitmap_subtitle_drop
         wb.confirm_bitmap_subtitle_drop = lambda a, t: (asked.append(t) or confirm)
@@ -211,7 +213,9 @@ class BitmapTracksAreDeclaredNotSilentlyLost(NoLeakedArtifacts, unittest.TestCas
         self.assertEqual([], tracks)
 
     def test_declining_stops_the_build_instead_of_dropping_it(self):
-        from ffmwiz import wizard_build_b as wb
+        # The definer, not the facade: wizard_build_b re-exports these two, and
+        # patching a re-export leaves the defining module's own global intact.
+        from ffmwiz import wizard_build_subtitles as wb
         real = wb.confirm_bitmap_subtitle_drop
         wb.confirm_bitmap_subtitle_drop = lambda a, t: False
         try:
@@ -228,12 +232,20 @@ class BitmapTracksAreDeclaredNotSilentlyLost(NoLeakedArtifacts, unittest.TestCas
 
 class TheBuilderDoesNotAssumeItOwnsInputOne(unittest.TestCase):
     def test_the_chapter_base_is_counted_not_hardcoded(self):
-        source = (Path(FFmWiz.__file__).resolve().parent
-                  / "ffmwiz" / "wizard_build.py").read_text(encoding="utf-8")
-        self.assertNotIn("chapter_input_base = 1", source,
-                         "a literal base ignores the caller's inputs")
-        self.assertIn('chapter_input_base = sum(1 for arg in cmd if arg == "-i")',
-                      source)
+        # Scan the package, not one named file. This guard used to read
+        # wizard_build.py alone and would have gone quiet the moment the
+        # builder moved -- which it then did, into wizard_build_split_outputs.
+        root = Path(FFmWiz.__file__).resolve().parent / "ffmwiz"
+        sources = {path: path.read_text(encoding="utf-8")
+                   for path in root.rglob("*.py") if "__pycache__" not in path.parts}
+        self.assertTrue(sources, "found no package sources to scan")
+        literal = sorted(str(p) for p, text in sources.items()
+                         if "chapter_input_base = 1" in text)
+        self.assertEqual([], literal, "a literal base ignores the caller's inputs")
+        counted = sorted(str(p) for p, text in sources.items()
+                         if 'chapter_input_base = sum(1 for arg in cmd if arg == "-i")' in text)
+        self.assertEqual(1, len(counted),
+                         "the counted base must exist exactly once; found: " + str(counted))
 
 
 if __name__ == "__main__":

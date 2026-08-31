@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTRY = ROOT / "FFmWiz.py"
 README = ROOT / "README.md"
 DOCUMENTATION = ROOT / "docs" / "DOCUMENTATION.md"
+# The manual is split across files; Appendix K moved out of the entry file.
+DOC_RECIPES = ROOT / "docs" / "DOCUMENTATION-RECIPES.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
 
 
@@ -114,17 +116,17 @@ class EnvironmentVariablesDocumentedTests(unittest.TestCase):
         appendix's explicit internal-constants note -- what is not allowed is
         for it to be absent, which is how nine names once went unmentioned.
         """
-        text = appendix_k(_read(DOCUMENTATION))
+        text = appendix_k(_read(DOC_RECIPES))
         names = env_names()
         self.assertGreater(len(names), 10, "FFMWIZ_* scan found suspiciously few names")
         missing = sorted(n for n in names if n not in text)
         self.assertEqual([], missing,
                          "FFMWIZ_* names read by the code but absent from "
-                         f"docs/DOCUMENTATION.md Appendix K: {missing}")
+                         f"docs/DOCUMENTATION-RECIPES.md Appendix K: {missing}")
 
     def test_internal_only_names_are_declared_as_such(self):
         """Names excluded from the tables must be called out, not just omitted."""
-        text = appendix_k(_read(DOCUMENTATION))
+        text = appendix_k(_read(DOC_RECIPES))
         note = "internal Python constants"
         self.assertIn(note, text)
         for name in ("FFMWIZ_GUI_DIR_NAME", "FFMWIZ_GUI_FILE_NAME", "FFMWIZ_RUNTIME_DIR_NAME"):

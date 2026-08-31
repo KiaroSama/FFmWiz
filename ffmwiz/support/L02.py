@@ -331,51 +331,6 @@ def stream_statistics_tags_conflict_with_container(
     return False
 
 
-def media_info_seconds_text(value: Any) -> str | None:
-    seconds = _as_float_value(value)
-    if seconds is None:
-        text = str(value).strip()
-        colon_seconds = parse_colon_duration_seconds(text)
-        if colon_seconds is not None:
-            precision = "hh:mm:ss.fraction" if "." in text else "hh:mm:ss"
-            return f"{text} ({precision}; {_trim_float(colon_seconds)} s)"
-        return None
-    return f"{format_duration(seconds)} ({_trim_float(seconds)} s)"
-
-
-def media_info_bitrate_text(value: Any) -> str | None:
-    bit_rate = _as_int_value(value)
-    if bit_rate is None:
-        return None
-    return f"{bit_rate} bit/s ({describe_bitrate(max(1, round(bit_rate / 1000)))})"
-
-
-def media_info_bytes_text(value: Any) -> str | None:
-    size = _as_int_value(value)
-    if size is None:
-        return None
-    return f"{size} B ({format_bytes(size)})"
-
-
-def info_stream_header(stream: dict[str, Any], relative_index: int, chapter_count: int = 0) -> str:
-    codec_type = stream.get("codec_type", "unknown")
-    codec_name = stream.get("codec_name", "unknown")
-    global_index = stream.get("index", "?")
-    title = stream_tag_value(stream, "title", "")
-    language = display_language(stream_tag_value(stream, "language", ""))
-    suffix = []
-    if codec_type == "video":
-        suffix.append(f"bit_depth={describe_video_bit_depth(stream)}")
-        suffix.append(f"Color range={display_color_range(stream.get('color_range'))}")
-        suffix.append(f"chapters={'yes' if chapter_count else 'no'}")
-    if language:
-        suffix.append(f"language={language}")
-    if title:
-        suffix.append(f"title={title}")
-    suffix_text = " | " + " | ".join(suffix) if suffix else ""
-    return f"Stream {relative_index} / #{global_index}: {codec_type} | codec={codec_name}{suffix_text}"
-
-
 def wizard_join_inputs_applicable(answers: dict[str, Any]) -> bool:
     """The wizard offers join-another for video inputs (existing) and for
     audio-only inputs (join more audio)."""
@@ -476,24 +431,6 @@ def normalize_cpu_two_pass_selection(answers: dict[str, Any]) -> str:
     # the notice with the caller that owns the user's screen. A second call
     # returns "" because the flag is already off, so the message appears once.
     return reason
-
-
-def embedded_attachment_display_line(stream: dict[str, Any], relative_index: int) -> str:
-    filename = stream_tag_value(stream, "filename", "")
-    mimetype = stream_tag_value(stream, "mimetype", "")
-    title = stream_tag_value(stream, "title", "")
-    pieces = [
-        f"{relative_index}: stream #{stream.get('index', '?')}",
-        f"codec={stream.get('codec_name', 'unknown')}",
-        f"kind={media_info_attachment_kind(stream)}",
-    ]
-    if filename:
-        pieces.append(f"filename={filename}")
-    if mimetype:
-        pieces.append(f"mimetype={mimetype}")
-    if title:
-        pieces.append(f"title={title}")
-    return " | ".join(pieces)
 
 
 def separator_output_path(answers: dict[str, Any], index: int) -> Path:
@@ -720,38 +657,6 @@ def _track_manager_loudnorm_summary(answers: dict[str, Any]) -> str:
     return f"{label}, target I={target} LUFS"
 
 
-def video_hdr_dolby_info(stream: dict[str, Any]) -> dict[str, Any]:
-    side_data = stream.get("side_data_list") or []
-    side_text = json.dumps(side_data, ensure_ascii=False).lower()
-    tags_text = json.dumps(stream.get("tags") or {}, ensure_ascii=False).lower()
-    color_transfer = str(stream.get("color_transfer") or "").lower()
-    color_primaries = str(stream.get("color_primaries") or "").lower()
-    color_space = str(stream.get("color_space") or "").lower()
-    hdr = (
-        color_transfer in {"smpte2084", "arib-std-b67"}
-        or color_primaries == "bt2020"
-        or color_space.startswith("bt2020")
-        or "mastering display metadata" in side_text
-        or "content light level metadata" in side_text
-    )
-    dolby = (
-        "dovi" in side_text
-        or "dolby vision" in side_text
-        or "dv_profile" in side_text
-        or "dovi" in tags_text
-        or "dolby vision" in tags_text
-    )
-    return {
-        "hdr": hdr,
-        "dolby": dolby,
-        "color_transfer": stream.get("color_transfer", "unknown"),
-        "color_primaries": stream.get("color_primaries", "unknown"),
-        "color_space": stream.get("color_space", "unknown"),
-        "color_range": stream.get("color_range", "unknown"),
-        "bit_depth": describe_video_bit_depth(stream),
-    }
-
-
 def choose_hardsub_output_path(input_path: Path, output_ext: str, output_location: Path, output_name_stem: str | None = None) -> Path:
     if output_name_stem:
         candidate = output_location / f"{sanitize_output_stem(output_name_stem)}.{output_ext}"
@@ -837,10 +742,6 @@ __all__ = [
     'resolve_color_range',
     'terminal_path',
     'stream_statistics_tags_conflict_with_container',
-    'media_info_seconds_text',
-    'media_info_bitrate_text',
-    'media_info_bytes_text',
-    'info_stream_header',
     'wizard_join_inputs_applicable',
     'video_reencode_options_applicable',
     'audio_only_transform_prompt_applicable',
@@ -848,7 +749,6 @@ __all__ = [
     'cpu_two_pass_applicable',
     'cpu_two_pass_unsupported_reason',
     'normalize_cpu_two_pass_selection',
-    'embedded_attachment_display_line',
     'separator_output_path',
     'can_use_cuda_fast_path',
     'should_use_cuda_decode_for_complex_graph',
@@ -863,10 +763,20 @@ __all__ = [
     'choose_add_files_output_path',
     'track_manager_output_path',
     '_track_manager_loudnorm_summary',
-    'video_hdr_dolby_info',
     'choose_hardsub_output_path',
     'join_copy_compatibility',
     'join_video_frame_rates',
     'join_signature_without_fps',
     'join_default_output_path',
 ]
+
+
+# L02_media_info holds the probe-description half of this module,
+# split off by responsibility. Bound twice on purpose: the plain name keeps
+# the sibling addressable as a module, and the `_` alias is what
+# tests/test_module_reference_hygiene reads to find re-export pairs. It
+# imports only lower tiers and never reaches back up into here.
+from ffmwiz.support import L02_media_info as _L02_media_info  # noqa: E402
+from ffmwiz.support import L02_media_info  # noqa: E402,F401
+from ffmwiz.support.L02_media_info import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_L02_media_info.__all__)

@@ -386,127 +386,10 @@ def _open_legacy_cut_gui_tk(
                     )
 
             def redraw_timeline() -> None:
-                timeline.delete("all")
-                width = timeline_width()
-                height = timeline_height
-                # Larger, more breathable layout than the original.
-                label_strip_top = 6
-                label_strip_bottom = 24
-                track_top = 30
-                track_bottom = height - 18
-                track_mid = (track_top + track_bottom) // 2
-                pad = 14
-                # Frame around the timeline so it visually reads as a panel.
-                timeline.create_rectangle(
-                    0, 0, width, height,
-                    fill=palette.TIMELINE_BG, outline="",
+                draw_cut_timeline(
+                    timeline, palette, state, timeline_width(), timeline_height,
+                    time_to_x, _view_start(), _view_span(), _view_end(),
                 )
-                timeline.create_rectangle(
-                    pad - 2, track_top, width - pad + 2, track_bottom,
-                    fill=palette.TIMELINE_TRACK, outline=palette.BORDER, width=1,
-                )
-                # Choose a tick step that yields ~7-10 labels regardless of zoom.
-                span = _view_span()
-                approx_step = span / 8.0
-                exponent = math.floor(math.log10(max(approx_step, 0.001)))
-                base = 10 ** exponent
-                step = base
-                for candidate in (1, 2, 5, 10):
-                    step = candidate * base
-                    if span / step <= 10:
-                        break
-                start = _view_start()
-                end = _view_end()
-                first_tick = math.ceil(start / step) * step
-                t = first_tick
-                tick_font = ("Segoe UI Semibold", 10)
-                sub_font = ("Segoe UI", 8)
-                while t <= end + 1e-6:
-                    x_pos = time_to_x(t)
-                    if pad <= x_pos <= width - pad:
-                        timeline.create_line(
-                            x_pos, track_top - 6, x_pos, track_top,
-                            fill=palette.TIMELINE_TICK_HI, width=1,
-                        )
-                        timeline.create_text(
-                            x_pos, label_strip_top + (label_strip_bottom - label_strip_top) // 2,
-                            text=seconds_to_ffmpeg_time(t),
-                            fill=palette.TIMELINE_TICK_HI,
-                            font=tick_font,
-                        )
-                    t += step
-                # Secondary minor ticks (no label) at step / 5.
-                minor_step = step / 5
-                if minor_step > 0:
-                    t = math.ceil(start / minor_step) * minor_step
-                    while t <= end + 1e-6:
-                        x_pos = time_to_x(t)
-                        if pad <= x_pos <= width - pad:
-                            timeline.create_line(
-                                x_pos, track_top - 3, x_pos, track_top,
-                                fill=palette.TIMELINE_TICK, width=1,
-                            )
-                        t += minor_step
-                # Removed cut ranges (red boxes).
-                for idx, (cstart, cend) in enumerate(state["cut_ranges"]):
-                    if cend < start or cstart > end:
-                        continue
-                    x1 = time_to_x(max(cstart, start))
-                    x2 = time_to_x(min(cend, end))
-                    fill = palette.ACCENT_RED if idx == state["selected_cut"] else palette.ACCENT_RED_DK
-                    timeline.create_rectangle(
-                        x1, track_top + 3, x2, track_bottom - 3,
-                        fill=fill, outline=palette.BORDER, width=1, tags=("cut", str(idx)),
-                    )
-                    if x2 - x1 > 36:
-                        timeline.create_text(
-                            (x1 + x2) // 2,
-                            track_mid,
-                            text=f"#{idx + 1}",
-                            fill=palette.TEXT,
-                            font=("Segoe UI Semibold", 10),
-                            tags=("cut", str(idx)),
-                        )
-                # In / Out markers.
-                in_x = time_to_x(state["in_marker"])
-                out_x = time_to_x(state["out_marker"])
-                marker_font = ("Segoe UI Semibold", 9)
-                if pad - 8 <= in_x <= width - pad + 8:
-                    timeline.create_line(in_x, track_top - 4, in_x, track_bottom + 4,
-                                         fill=palette.ACCENT_GREEN, width=3, tags=("marker", "in"))
-                    timeline.create_polygon(
-                        in_x, track_top - 4, in_x - 8, track_top - 14, in_x + 8, track_top - 14,
-                        fill=palette.ACCENT_GREEN, outline=palette.BG, tags=("marker", "in"),
-                    )
-                    timeline.create_text(in_x + 12, track_top - 9, anchor="w",
-                                         text="IN", fill=palette.ACCENT_GREEN, font=marker_font)
-                if pad - 8 <= out_x <= width - pad + 8:
-                    timeline.create_line(out_x, track_top - 4, out_x, track_bottom + 4,
-                                         fill=palette.ACCENT_YELLOW, width=3, tags=("marker", "out"))
-                    timeline.create_polygon(
-                        out_x, track_top - 4, out_x - 8, track_top - 14, out_x + 8, track_top - 14,
-                        fill=palette.ACCENT_YELLOW, outline=palette.BG, tags=("marker", "out"),
-                    )
-                    timeline.create_text(out_x - 12, track_top - 9, anchor="e",
-                                         text="OUT", fill=palette.ACCENT_YELLOW, font=marker_font)
-                # Playhead.
-                ph_x = time_to_x(state["timestamp"])
-                if pad - 6 <= ph_x <= width - pad + 6:
-                    timeline.create_line(ph_x, track_top - 10, ph_x, track_bottom + 10,
-                                         fill=palette.PLAYHEAD, width=2, tags=("playhead",))
-                    timeline.create_polygon(
-                        ph_x - 7, track_bottom + 4,
-                        ph_x + 7, track_bottom + 4,
-                        ph_x, track_bottom + 14,
-                        fill=palette.PLAYHEAD, outline=palette.BG, tags=("playhead",),
-                    )
-                    timeline.create_text(
-                        ph_x, label_strip_bottom - 4,
-                        text=seconds_to_ffmpeg_time(state["timestamp"]),
-                        fill=palette.PLAYHEAD,
-                        font=sub_font,
-                        tags=("playhead",),
-                    )
 
             def redraw_all() -> None:
                 redraw_preview_canvas()
@@ -685,61 +568,12 @@ def _open_legacy_cut_gui_tk(
                 redraw_timeline()
 
             # --- Timeline drag handlers --------------------------------------
-            def begin_timeline_drag(event: Any) -> None:
-                items = timeline.find_overlapping(event.x - 4, event.y - 4, event.x + 4, event.y + 4)
-                target = None
-                for item_id in reversed(items):
-                    tags = timeline.gettags(item_id)
-                    if "marker" in tags and "in" in tags:
-                        target = ("in",)
-                        break
-                    if "marker" in tags and "out" in tags:
-                        target = ("out",)
-                        break
-                    if "playhead" in tags:
-                        target = ("playhead",)
-                        break
-                    if "cut" in tags:
-                        idx = int(tags[tags.index("cut") + 1])
-                        state["selected_cut"] = idx
-                        refresh_cut_listbox()
-                        target = ("cut", idx)
-                        break
-                if target is None:
-                    set_time(x_to_time(event.x))
-                    target = ("playhead",)
-                state["drag_target"] = target
-
-            def drag_timeline(event: Any) -> None:
-                target = state.get("drag_target")
-                if not target:
-                    return
-                t = x_to_time(event.x)
-                if target[0] == "playhead":
-                    set_time(t)
-                elif target[0] == "in":
-                    state["in_marker"] = max(0.0, min(duration, t))
-                    if state["out_marker"] < state["in_marker"]:
-                        state["out_marker"] = state["in_marker"]
-                    redraw_all()
-                elif target[0] == "out":
-                    state["out_marker"] = max(0.0, min(duration, t))
-                    if state["in_marker"] > state["out_marker"]:
-                        state["in_marker"] = state["out_marker"]
-                    redraw_all()
-                elif target[0] == "cut":
-                    idx = target[1]
-                    if 0 <= idx < len(state["cut_ranges"]):
-                        start, end = state["cut_ranges"][idx]
-                        span = end - start
-                        new_start = max(0.0, min(duration - span, t - span / 2))
-                        state["cut_ranges"][idx] = (new_start, new_start + span)
-                        redraw_all()
-
-            def end_timeline_drag(_event: Any) -> None:
-                if state.get("drag_target") and state["drag_target"][0] == "cut":
-                    state["cut_ranges"] = list(normalize_cut_ranges(state["cut_ranges"], duration))
-                state["drag_target"] = None
+            # Built by guibridge_cut_tk_timeline; `state` is shared by reference,
+            # which is what lets them edit the cut list the builder reads back.
+            begin_timeline_drag, drag_timeline, end_timeline_drag = (
+                make_timeline_drag_handlers(
+                    timeline, state, duration, x_to_time, set_time,
+                    refresh_cut_listbox, redraw_all))
 
             # --- Audio controls ----------------------------------------------
             volume_var = tk.IntVar(value=int(state["volume"]))
@@ -917,3 +751,13 @@ def _open_legacy_cut_gui_tk(
 __all__ = [
     '_open_legacy_cut_gui_tk',
 ]
+
+
+# guibridge_cut_tk_timeline holds this editor's timeline painting and pointer
+# handlers (split for file size). Bound twice on purpose: the `_` alias is what
+# tests/test_module_reference_hygiene reads to find re-export pairs, and the
+# plain name keeps the module object addressable.
+from ffmwiz import guibridge_cut_tk_timeline as _guibridge_cut_tk_timeline  # noqa: E402
+from ffmwiz import guibridge_cut_tk_timeline  # noqa: E402,F401
+from ffmwiz.guibridge_cut_tk_timeline import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_guibridge_cut_tk_timeline.__all__)
