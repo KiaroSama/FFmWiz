@@ -72,126 +72,14 @@ from ffmwiz.support.ext03 import *  # noqa: F401,F403
 from ffmwiz.appio import *  # noqa: F401,F403
 from ffmwiz import appio  # noqa: F401
 
-
-_PYSIDE6_AVAILABLE_CACHE: bool | None = None
-
-
-def _pyside6_available() -> bool:
-    """Cached PySide6 detection."""
-    global _PYSIDE6_AVAILABLE_CACHE
-    if _PYSIDE6_AVAILABLE_CACHE is not None:
-        return _PYSIDE6_AVAILABLE_CACHE
-    if not _ffmwiz_gui_path().exists():
-        _PYSIDE6_AVAILABLE_CACHE = False
-        return False
-    _PYSIDE6_AVAILABLE_CACHE = _probe_pyside6()
-    return _PYSIDE6_AVAILABLE_CACHE
+# The PySide6 availability/install subsystem lives in a sibling: it owns its
+# own module-level cache, so it moved whole rather than leaving a `global`
+# split across two files.
+from ffmwiz.runtime_pyside6 import *  # noqa: E402,F401,F403
+from ffmwiz import runtime_pyside6 as _runtime_pyside6  # noqa: E402
+from ffmwiz import runtime_pyside6  # noqa: E402,F401
 
 
-def ensure_pyside6_installed(interactive: bool = True) -> bool:
-    """Make sure PySide6 is importable. On first run, offers to install it
-    automatically with pip. Returns True if PySide6 is available afterwards.
-
-    Environment overrides:
-        FFMWIZ_NO_AUTO_INSTALL=1   Skip the install prompt entirely; active
-                                    GUI prompts remain unavailable.
-        FFMWIZ_AUTO_INSTALL=1      Skip the confirmation and install
-                                    without asking (good for unattended
-                                    setups, CI, scripts).
-    """
-    global _PYSIDE6_AVAILABLE_CACHE
-    if _pyside6_available():
-        return True
-
-    if os.environ.get("FFMWIZ_NO_AUTO_INSTALL"):
-        return False
-
-    # Make sure the GUI file is present; installing the runtime is pointless
-    # if the actual GUI module is missing.
-    if not _ffmwiz_gui_path().exists():
-        return False
-
-    auto = bool(
-        os.environ.get("FFMWIZ_AUTO_INSTALL")
-        or os.environ.get("FFMWIZ_AUTO_INSTALL_PYSIDE")
-    )
-
-    print()
-    appio.note(
-        f"{PYSIDE6_DISPLAY_NAME} is not installed. The active FFmWiz graphical "
-        f"editors need it for smooth playback and a professional UI."
-    )
-
-    proceed = auto
-    if not auto and interactive:
-        try:
-            choice = input(
-                f"Install {PYSIDE6_DISPLAY_NAME} now via pip? [Y/n] "
-                "(Enter=Yes; set FFMWIZ_NO_AUTO_INSTALL=1 to skip in the future): "
-            ).strip().lower()
-            proceed = choice in {"", "y", "yes"}
-        except (EOFError, KeyboardInterrupt):
-            proceed = False
-
-    if not proceed:
-        appio.note(
-            f"Skipping. FFmWiz will keep graphical editor prompts unavailable for now. "
-            f"Install later with:  py -3 -m pip install -r {REQUIREMENTS_FILE_NAME}"
-        )
-        return False
-
-    # Try the system-wide install first. If pip cannot write to the
-    # interpreter's site-packages (very common on Windows for
-    # installations under "Program Files"), automatically retry with
-    # --user so the install succeeds for the current user.
-    requirements_path = _requirements_path()
-    install_target = ["-r", str(requirements_path)] if requirements_path.exists() else [PYSIDE6_PIP_SPEC]
-    base_cmd = [sys.executable, "-m", "pip", "install", "--upgrade"]
-    attempts: list[list[str]] = [
-        base_cmd + install_target,
-        base_cmd + ["--user"] + install_target,
-    ]
-    install_ok = False
-    for attempt_idx, cmd in enumerate(attempts):
-        print()
-        appio.note("Running: " + " ".join(cmd))
-        print()
-        try:
-            # Inherit stdout/stderr so the user sees pip's progress live.
-            # The install can be ~150 MB and the user needs visibility.
-            result = subprocess.run(cmd, check=False)
-        except FileNotFoundError as exc:
-            appio.error(f"Could not run pip ({exc}). Graphical editor prompts will remain unavailable.")
-            return False
-        except Exception as exc:
-            appio.error(f"Pip install failed: {exc}.")
-            continue
-        if result.returncode == 0:
-            install_ok = True
-            break
-        if attempt_idx + 1 < len(attempts):
-            appio.note(
-                f"pip install exited with code {result.returncode}. "
-                "Retrying with --user (per-user install) ..."
-            )
-
-    if not install_ok:
-        appio.error(
-            f"{PYSIDE6_DISPLAY_NAME} install failed. Graphical editor prompts will remain unavailable. "
-            f"You can retry manually with:  py -3 -m pip install --user -r {REQUIREMENTS_FILE_NAME}"
-        )
-        return False
-
-    # Re-probe so the cache picks up the newly installed package.
-    _PYSIDE6_AVAILABLE_CACHE = None
-    if _pyside6_available():
-        appio.note(f"{PYSIDE6_DISPLAY_NAME} installed. The new GUI is now active.")
-        return True
-    appio.error(
-        f"{PYSIDE6_DISPLAY_NAME} install completed but the package still cannot "
-        "be imported. Graphical editor prompts will remain unavailable."
-    )
-    return False
 
 
 # ponytail: single-renderer module state, deliberately not thread-safe. Every
@@ -804,13 +692,11 @@ def run_ffmpeg_with_progress(
 
 
 __all__ = [
-    'ensure_pyside6_installed',
     'reap_subprocess',
     'run_ffmpeg_with_progress',
     '_begin_progress_render',
     '_enable_windows_vt_mode',
     '_finish_progress_line',
-    '_pyside6_available',
     '_render_initial_progress_line',
     '_stdout_supports_in_place_progress',
     '_write_progress_line',
@@ -821,3 +707,4 @@ __all__ = [
 from ffmwiz import runtime_render as _runtime_render  # noqa: E402
 from ffmwiz.runtime_render import *  # noqa: E402,F401,F403
 __all__ = list(__all__) + list(_runtime_render.__all__)
+__all__ = list(__all__) + list(_runtime_pyside6.__all__)

@@ -298,8 +298,18 @@ class EveryBuilderThatRetimesAlsoStatesItsTiming(unittest.TestCase):
     here until the list follows it.
     """
 
+    # Modules that BUILD A COMMAND and emit the retiming filter: the option has
+    # to sit in the same file, because the same function writes both.
     MODULES = ("ffmwiz/wizard_build_b.py",
                "ffmwiz/support/ext04b.py", "ffmwiz/support/L04.py")
+
+    # Modules that only COMPOSE THE FILTER STRING and hand it to a command
+    # builder that lives elsewhere. build_cpu_video_filter moved here in the
+    # 800-line split and returns a chain; wizard_build.build_ffmpeg_command is
+    # what turns it into a command, so that is where the option must appear.
+    # Mapping, not a bare list: naming the consumer is what keeps this from
+    # being an exemption.
+    FILTER_ONLY = {"ffmwiz/wizard_build_filters.py": ("ffmwiz/wizard_build.py",)}
 
     def _source(self, relative):
         return (Path(FFmWiz.__file__).resolve().parent / relative).read_text(encoding="utf-8")
@@ -323,7 +333,24 @@ class EveryBuilderThatRetimesAlsoStatesItsTiming(unittest.TestCase):
             for path in root.rglob("*.py")
             if "build_video_speed_filter(" in path.read_text(encoding="utf-8")
             and "def build_video_speed_filter" not in path.read_text(encoding="utf-8"))
-        self.assertEqual(sorted(self.MODULES), emitting)
+        self.assertEqual(sorted(self.MODULES) + sorted(self.FILTER_ONLY), sorted(emitting))
+
+    def test_a_filter_only_module_has_a_consumer_that_states_the_timing(self):
+        # The pair may cross a file boundary, but it may not simply vanish:
+        # every filter-only module names the command builder that carries the
+        # option, and that builder is checked here.
+        for relative, consumers in self.FILTER_ONLY.items():
+            with self.subTest(module=relative):
+                self.assertIn("build_video_speed_filter(", self._source(relative),
+                              "this module is listed as filter-only but emits no filter")
+                self.assertNotIn("VIDEO_SPEED_OUTPUT_TIMING_ARGS", self._source(relative),
+                                 "this module states the timing itself, so it belongs "
+                                 "in MODULES rather than FILTER_ONLY")
+                self.assertTrue(consumers, "a filter-only module must name its consumer")
+                for consumer in consumers:
+                    self.assertIn("VIDEO_SPEED_OUTPUT_TIMING_ARGS", self._source(consumer),
+                                  f"{consumer} turns {relative}'s chain into a command "
+                                  "but never says to keep the retimed frames")
 
 
 if __name__ == "__main__":

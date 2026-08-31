@@ -211,132 +211,29 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
             volume_slider: Any | None = None
 
             def load_icon(name: str) -> Any | None:
-                if name in icon_cache:
-                    return icon_cache[name]
-                path = asset_path(ICON_DIR_NAME, f"{name}.png")
-                if not path.exists():
-                    icon_cache[name] = None
-                    return None
-                try:
-                    icon_cache[name] = tk.PhotoImage(file=str(path))
-                except tk.TclError:
-                    icon_cache[name] = None
-                return icon_cache[name]
-
-            def draw_round_rect(target: Any, x1: int, y1: int, x2: int, y2: int, radius: int, fill: str, outline: str) -> None:
-                radius = min(radius, max(1, (x2 - x1) // 2), max(1, (y2 - y1) // 2))
-                centers = [
-                    (x2 - radius, y1 + radius, -90, 0),
-                    (x2 - radius, y2 - radius, 0, 90),
-                    (x1 + radius, y2 - radius, 90, 180),
-                    (x1 + radius, y1 + radius, 180, 270),
-                ]
-                points: list[float] = []
-                for cx, cy, start, end in centers:
-                    for angle in range(start, end + 1, 15):
-                        radians = math.radians(angle)
-                        points.extend([cx + math.cos(radians) * radius, cy + math.sin(radians) * radius])
-                target.create_polygon(points, fill=fill, outline=outline, width=1, smooth=True)
+                return load_tk_icon(tk, icon_cache, name)
 
             def make_round_button(parent: Any, text: str, command: Callable[[], None], width: int = 92, height: int = 32) -> Any:
-                button = tk.Canvas(parent, width=width, height=height, bg="#0b0f17", highlightthickness=0, bd=0, relief="flat")
-                label = {"text": text}
-
-                def draw(active: bool = False) -> None:
-                    button.delete("all")
-                    draw_round_rect(button, 2, 2, width - 3, height - 3, 12, "#263550" if active else "#1b2433", "#5b6f91")
-                    button.create_text(width // 2, height // 2, text=label["text"], fill="#f5f7fb", font=("Segoe UI", 9))
-
-                def set_text(new_text: str) -> None:
-                    label["text"] = new_text
-                    draw(False)
-
-                def on_press(_event: Any) -> None:
-                    draw(True)
-
-                def on_release(_event: Any) -> None:
-                    draw(False)
-                    command()
-
-                button.bind("<ButtonPress-1>", on_press)
-                button.bind("<ButtonRelease-1>", on_release)
-                button.bind("<Enter>", lambda _event: button.configure(cursor="hand2"))
-                button.bind("<Leave>", lambda _event: draw(False))
-                button.set_text = set_text  # type: ignore[attr-defined]
-                draw(False)
-                return button
+                return make_round_canvas_button(tk, parent, text, command, width, height)
 
             def make_icon_button(parent: Any, kind: str, command: Callable[[], None], width: int = 46, height: int = 36) -> Any:
-                button = tk.Canvas(parent, width=width, height=height, bg="#0b0f17", highlightthickness=0, bd=0, relief="flat")
-                button.pack_propagate(False)
+                return make_icon_canvas_button(tk, load_icon, volume_var, mute_var,
+                                               parent, kind, command, width, height)
 
-                def draw_icon(active: bool = False) -> None:
-                    button.delete("all")
-                    bg = "#263550" if active else "#1b2433"
-                    fg = "#f8fbff"
-                    accent = "#f5d66a"
-                    muted_line = "#46556d"
-                    draw_round_rect(button, 2, 2, width - 3, height - 3, 12, bg, "#5b6f91")
-                    icon_name = kind
-                    if kind == "speaker":
-                        volume = int(volume_var.get())
-                        level = 0 if mute_var.get() or volume <= 0 else 1 if volume < 34 else 2 if volume < 67 else 3
-                        icon_name = f"volume_{level}"
-                    icon = load_icon(icon_name)
-                    if icon is not None:
-                        button.create_image(width // 2, height // 2, image=icon)
-                    elif kind in {"zoom_in", "zoom_out"}:
-                        button.create_oval(9, 6, 23, 20, outline=accent, width=2)
-                        button.create_line(21, 19, 30, 26, fill=accent, width=2)
-                        button.create_line(13, 13, 19, 13, fill=fg, width=2)
-                        if kind == "zoom_in":
-                            button.create_line(16, 10, 16, 16, fill=fg, width=2)
-                    elif kind == "speaker":
-                        volume = int(volume_var.get())
-                        level = 0 if mute_var.get() or volume <= 0 else 1 if volume <= 33 else 2 if volume <= 66 else 3
-                        button.create_polygon(7, 13, 13, 13, 20, 7, 20, 23, 13, 17, 7, 17, fill=accent, outline="")
-                        if mute_var.get():
-                            button.create_line(25, 10, 33, 20, fill="#ff6f6f", width=2)
-                            button.create_line(33, 10, 25, 20, fill="#ff6f6f", width=2)
-                        else:
-                            button.create_arc(21, 11, 28, 19, start=-35, extent=70, style="arc", outline=fg if level >= 1 else muted_line, width=2)
-                            button.create_arc(19, 8, 33, 22, start=-35, extent=70, style="arc", outline=fg if level >= 2 else muted_line, width=2)
-                            button.create_arc(17, 5, 38, 25, start=-35, extent=70, style="arc", outline=fg if level >= 3 else muted_line, width=2)
-
-                def on_press(_event: Any) -> None:
-                    draw_icon(True)
-
-                def on_release(_event: Any) -> None:
-                    draw_icon(False)
-                    command()
-
-                button.bind("<ButtonPress-1>", on_press)
-                button.bind("<ButtonRelease-1>", on_release)
-                button.bind("<Enter>", lambda _event: button.configure(cursor="hand2"))
-                button.bind("<Leave>", lambda _event: draw_icon(False))
-                draw_icon(False)
-                button.redraw_icon = draw_icon  # type: ignore[attr-defined]
-                return button
-
-            def clamp(value: float, low: float, high: float) -> float:
-                return max(low, min(high, value))
-
-            def display_width() -> int:
-                return max(1, round(frame_width * int(state["zoom_percent"]) / 100))
-
-            def display_height() -> int:
-                return max(1, round(frame_height * int(state["zoom_percent"]) / 100))
-
-            def image_bounds() -> tuple[int, int, int, int]:
-                return image_x, image_y, image_x + display_width(), image_y + display_height()
-
-            def format_time(seconds: float) -> str:
-                total = max(0, int(round(seconds)))
-                minutes, secs = divmod(total, 60)
-                hours, minutes = divmod(minutes, 60)
-                if hours:
-                    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-                return f"{minutes:02d}:{secs:02d}"
+            # The pixel maths lives in guibridge_crop_tk_canvas. `state` goes
+            # in BY REFERENCE: the geometry writes the clamped margins back
+            # into it and the builder reads them out again below, so a copy
+            # here would throw away every drag.
+            geo = CropGeometry(
+                state, frame_width, frame_height, source_width, source_height,
+                image_x, image_y, min_size, handle_hit_radius, edge_hit_radius,
+            )
+            # Aliases, so the call sites below read exactly as they did when
+            # these were nested closures.
+            clamp = clamp_value
+            display_width = geo.display_width
+            display_height = geo.display_height
+            current_margins = geo.current_margins
 
             # --- Async preview scheduler -------------------------------------
             # Background-extract frames on a worker thread with debouncing and
@@ -389,296 +286,25 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                 # Else: keep showing the previous frame; the worker will
                 # deliver the new one and trigger a redraw via _crop_on_ready.
 
-            def min_source_width() -> int:
-                return max(1, round(source_width * min_size / display_width()))
-
-            def min_source_height() -> int:
-                return max(1, round(source_height * min_size / display_height()))
-
-            def clamp_margins() -> None:
-                state["left"] = int(clamp(state["left"], 0, max(0, source_width - state["right"] - min_source_width())))
-                state["right"] = int(clamp(state["right"], 0, max(0, source_width - state["left"] - min_source_width())))
-                state["top"] = int(clamp(state["top"], 0, max(0, source_height - state["bottom"] - min_source_height())))
-                state["bottom"] = int(clamp(state["bottom"], 0, max(0, source_height - state["top"] - min_source_height())))
-
-            def current_margins() -> tuple[int, int, int, int]:
-                clamp_margins()
-                return int(state["top"]), int(state["left"]), int(state["right"]), int(state["bottom"])
-
-            def crop_rect() -> tuple[int, int, int, int]:
-                _, _, image_right, image_bottom = image_bounds()
-                left = image_x + round(state["left"] * display_width() / source_width)
-                top = image_y + round(state["top"] * display_height() / source_height)
-                right = image_right - round(state["right"] * display_width() / source_width)
-                bottom = image_bottom - round(state["bottom"] * display_height() / source_height)
-                return left, top, right, bottom
-
-            def handle_points() -> dict[str, tuple[int, int]]:
-                left, top, right, bottom = crop_rect()
-                mid_x = round((left + right) / 2)
-                mid_y = round((top + bottom) / 2)
-                return {
-                    "nw": (left, top),
-                    "n": (mid_x, top),
-                    "ne": (right, top),
-                    "e": (right, mid_y),
-                    "se": (right, bottom),
-                    "s": (mid_x, bottom),
-                    "sw": (left, bottom),
-                    "w": (left, mid_y),
-                }
-
             def redraw(force_image_request: bool = True) -> None:
-                clamp_margins()
-                if force_image_request:
-                    try:
-                        render_photo()
-                    except Exception as exc:
-                        appio.error(f"Could not refresh crop preview frame: {exc}")
-                canvas.delete("all")
-
-                image_left, image_top, image_right, image_bottom = image_bounds()
-                if state.get("photo") is not None:
-                    canvas.create_image(image_left, image_top, image=state["photo"], anchor="nw")
-                else:
-                    # Show a placeholder until the worker delivers the first frame.
-                    canvas.create_rectangle(
-                        image_left, image_top, image_right, image_bottom,
-                        fill="#11151d", outline="#2e3a4f", width=1,
-                    )
-                    canvas.create_text(
-                        (image_left + image_right) // 2,
-                        (image_top + image_bottom) // 2,
-                        text="(loading preview frame...)",
-                        fill="#7c8aa6",
-                    )
-                left, top, right, bottom = crop_rect()
-                canvas.create_rectangle(image_left, image_top, image_right, top, fill="#000000", stipple="gray50", outline="")
-                canvas.create_rectangle(image_left, bottom, image_right, image_bottom, fill="#000000", stipple="gray50", outline="")
-                canvas.create_rectangle(image_left, top, left, bottom, fill="#000000", stipple="gray50", outline="")
-                canvas.create_rectangle(right, top, image_right, bottom, fill="#000000", stipple="gray50", outline="")
-                canvas.create_rectangle(left, top, right, bottom, outline="#ffcc33", width=2)
-
-                third_x = (right - left) / 3
-                third_y = (bottom - top) / 3
-                for pos in (left + third_x, left + third_x * 2):
-                    canvas.create_line(pos, top, pos, bottom, fill="#ffcc33", dash=(4, 5), width=1)
-                for pos in (top + third_y, top + third_y * 2):
-                    canvas.create_line(left, pos, right, pos, fill="#ffcc33", dash=(4, 5), width=1)
-
-                for name, (x_pos, y_pos) in handle_points().items():
-                    fill = "#f8fbff" if len(name) == 1 else "#ffcc33"
-                    canvas.create_rectangle(
-                        x_pos - handle_radius,
-                        y_pos - handle_radius,
-                        x_pos + handle_radius,
-                        y_pos + handle_radius,
-                        fill=fill,
-                        outline="#11151d",
-                        width=1,
-                    )
-                top_m, left_m, right_m, bottom_m = current_margins()
-                crop_width = source_width - left_m - right_m
-                crop_height = source_height - top_m - bottom_m
-                info.configure(
-                    text=(
-                        f"Crop margins: top={top_m}, left={left_m}, right={right_m}, bottom={bottom_m} "
-                        f"| output crop box: {crop_width}x{crop_height} | time {format_time(float(state['timestamp']))}"
-                    )
-                )
-                canvas.configure(scrollregion=(0, 0, image_right + pad, image_bottom + pad))
-                zoom_var.set(str(int(state["zoom_percent"])))
-                time_var.set(float(state["timestamp"]))
-                time_label.configure(text=f"{format_time(float(state['timestamp']))} / {format_time(timeline_duration)}")
-
-            def hit_handle(x_pos: float, y_pos: float) -> str:
-                left, top, right, bottom = crop_rect()
-                in_x = left - edge_hit_radius <= x_pos <= right + edge_hit_radius
-                in_y = top - edge_hit_radius <= y_pos <= bottom + edge_hit_radius
-
-                corner_zones = {
-                    "nw": (left, top),
-                    "ne": (right, top),
-                    "se": (right, bottom),
-                    "sw": (left, bottom),
-                }
-                for name, (corner_x, corner_y) in corner_zones.items():
-                    if abs(x_pos - corner_x) <= handle_hit_radius and abs(y_pos - corner_y) <= handle_hit_radius:
-                        return name
-
-                for name, (handle_x, handle_y) in handle_points().items():
-                    if abs(x_pos - handle_x) <= handle_hit_radius and abs(y_pos - handle_y) <= handle_hit_radius:
-                        return name
-
-                if in_x and abs(y_pos - top) <= edge_hit_radius:
-                    return "n"
-                if in_x and abs(y_pos - bottom) <= edge_hit_radius:
-                    return "s"
-                if in_y and abs(x_pos - left) <= edge_hit_radius:
-                    return "w"
-                if in_y and abs(x_pos - right) <= edge_hit_radius:
-                    return "e"
-                return ""
-
-            def cursor_for_handle(handle: str) -> str:
-                if handle in {"e", "w"}:
-                    return "sb_h_double_arrow"
-                if handle in {"n", "s"}:
-                    return "sb_v_double_arrow"
-                if handle in {"nw", "se"}:
-                    return "size_nw_se"
-                if handle in {"ne", "sw"}:
-                    return "size_ne_sw"
-                return ""
-
-            def point_in_image(x_pos: float, y_pos: float) -> bool:
-                image_left, image_top, image_right, image_bottom = image_bounds()
-                return image_left <= x_pos <= image_right and image_top <= y_pos <= image_bottom
+                draw_crop_view(canvas, geo, state, info, zoom_var, time_var,
+                               time_label, timeline_duration, pad, handle_radius,
+                               render_photo, force_image_request)
 
             def set_canvas_cursor(cursor: str) -> None:
-                try:
-                    if cursor == "open_hand":
-                        cursor_file = asset_path(CURSOR_DIR_NAME, "open_hand.xbm")
-                        if cursor_file.exists():
-                            canvas.configure(cursor=f"@{cursor_file}")
-                            return
-                        canvas.configure(cursor="hand1")
-                        return
-                    canvas.configure(cursor=cursor)
-                except tk.TclError:
-                    fallback = "fleur" if cursor == "open_hand" else "crosshair" if cursor else ""
-                    canvas.configure(cursor=fallback)
-
-            def _alt_held(event: Any) -> bool:
-                """Return True if any Alt modifier is held in the event.state mask."""
-                if event is None:
-                    return False
-                mask = getattr(event, "state", 0) or 0
-                # Windows: Alt = 0x20000. Linux/X11: Mod1 = 0x0008.
-                return bool(mask & 0x20000) or bool(mask & 0x0008)
+                set_crop_canvas_cursor(canvas, tk, cursor)
 
             def update_cursor(event: Any) -> None:
-                if state["drag"]:
-                    return
-                x_pos = canvas.canvasx(event.x)
-                y_pos = canvas.canvasy(event.y)
-                handle = hit_handle(x_pos, y_pos)
-                if handle:
-                    set_canvas_cursor(cursor_for_handle(handle))
-                elif point_in_image(x_pos, y_pos):
-                    if state["tool"] == "zoom":
-                        # Use the universally-supported "crosshair" cursor
-                        # for Zoom Tool. The Tk "icon" cursor used previously
-                        # appeared as a black square on some Windows builds.
-                        set_canvas_cursor("crosshair")
-                    else:
-                        set_canvas_cursor("open_hand")
-                else:
-                    set_canvas_cursor("")
+                update_crop_cursor(event, canvas, geo, state, set_canvas_cursor)
 
             def apply_zoom_centered_on(x_pos: float, y_pos: float, factor: float) -> None:
-                """Zoom the preview by 'factor' (>1 zoom in, <1 zoom out)
-                keeping the canvas point (x_pos, y_pos) at the same screen
-                location after the zoom."""
-                if factor <= 0 or abs(factor - 1.0) < 1e-6:
-                    return
-                old_width = display_width()
-                old_height = display_height()
-                if old_width <= 0 or old_height <= 0:
-                    return
-                # Image-space coordinates of the focused canvas point.
-                rel_x = (canvas.canvasx(x_pos) - image_x) / max(1, old_width)
-                rel_y = (canvas.canvasy(y_pos) - image_y) / max(1, old_height)
-                rel_x = max(0.0, min(1.0, rel_x))
-                rel_y = max(0.0, min(1.0, rel_y))
+                apply_crop_zoom_centered_on(x_pos, y_pos, factor, canvas, root, geo,
+                                            state, redraw, pad, min_zoom, max_zoom)
 
-                new_zoom = int(round(int(state["zoom_percent"]) * factor))
-                new_zoom = int(clamp(new_zoom, min_zoom, max_zoom))
-                if new_zoom == int(state["zoom_percent"]):
-                    return
-                state["zoom_percent"] = new_zoom
-                state["photo_key"] = None  # force re-render at the new size
-                redraw()
-                # After redraw, re-center scroll so the focused image-relative
-                # point lands under the original mouse position.
-                root.update_idletasks()
-                new_width = display_width()
-                new_height = display_height()
-                target_canvas_x = image_x + rel_x * new_width
-                target_canvas_y = image_y + rel_y * new_height
-                desired_x = target_canvas_x - x_pos
-                desired_y = target_canvas_y - y_pos
-                scroll_w = max(1, new_width + pad * 2)
-                scroll_h = max(1, new_height + pad * 2)
-                canvas.xview_moveto(max(0.0, min(1.0, desired_x / scroll_w)))
-                canvas.yview_moveto(max(0.0, min(1.0, desired_y / scroll_h)))
-
-            def begin_drag(event: Any) -> None:
-                x_pos = canvas.canvasx(event.x)
-                y_pos = canvas.canvasy(event.y)
-                state["drag"] = hit_handle(x_pos, y_pos)
-                if state["drag"]:
-                    set_canvas_cursor(cursor_for_handle(state["drag"]))
-                    canvas.focus_set()
-                    return
-
-                if point_in_image(x_pos, y_pos):
-                    if state["tool"] == "zoom":
-                        # Photoshop-style: clicking zooms in (or out with Alt).
-                        # Hold + drag tracks vertical motion for finer control.
-                        state["zoom_drag_y"] = event.y
-                        state["drag"] = "_zoom"
-                        # Single-click zoom step:
-                        factor = 1.0 / 1.25 if _alt_held(event) else 1.25
-                        apply_zoom_centered_on(event.x, event.y, factor)
-                        update_cursor(event)
-                    else:
-                        # Hand tool: pan.
-                        state["pan"] = True
-                        canvas.scan_mark(event.x, event.y)
-                        set_canvas_cursor("open_hand")
-                canvas.focus_set()
-
-            def drag(event: Any) -> None:
-                if state.get("drag") == "_zoom" and state.get("zoom_drag_y") is not None:
-                    dy = event.y - int(state["zoom_drag_y"])
-                    if abs(dy) >= 6:
-                        # Up = zoom in, down = zoom out. Alt inverts.
-                        zoom_in_dir = dy < 0
-                        if _alt_held(event):
-                            zoom_in_dir = not zoom_in_dir
-                        factor = 1.07 if zoom_in_dir else (1.0 / 1.07)
-                        apply_zoom_centered_on(event.x, event.y, factor)
-                        state["zoom_drag_y"] = event.y
-                    return
-                if state["pan"]:
-                    canvas.scan_dragto(event.x, event.y, gain=1)
-                    return
-                mode = state["drag"]
-                if not mode:
-                    return
-                image_left, image_top, image_right, image_bottom = image_bounds()
-                left, top, right, bottom = crop_rect()
-                x_pos = clamp(canvas.canvasx(event.x), image_left, image_right)
-                y_pos = clamp(canvas.canvasy(event.y), image_top, image_bottom)
-                if "w" in mode:
-                    new_left = clamp(x_pos, image_left, right - min_size)
-                    state["left"] = round((new_left - image_left) * source_width / display_width())
-                if "e" in mode:
-                    new_right = clamp(x_pos, left + min_size, image_right)
-                    state["right"] = round((image_right - new_right) * source_width / display_width())
-                if "n" in mode:
-                    new_top = clamp(y_pos, image_top, bottom - min_size)
-                    state["top"] = round((new_top - image_top) * source_height / display_height())
-                if "s" in mode:
-                    new_bottom = clamp(y_pos, top + min_size, image_bottom)
-                    state["bottom"] = round((image_bottom - new_bottom) * source_height / display_height())
-                redraw(force_image_request=False)
-
-            def end_drag(_event: Any) -> None:
-                state["drag"] = ""
-                state["pan"] = False
-                state["zoom_drag_y"] = None
+            begin_drag, drag, end_drag = make_crop_drag_handlers(
+                canvas, geo, state, set_canvas_cursor, apply_zoom_centered_on,
+                update_cursor, redraw,
+            )
 
             def set_tool_hand(_event: Any = None) -> None:
                 state["tool"] = "hand"
@@ -859,21 +485,9 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
                 set_volume_from_x(event.x, restart=True)
 
             def draw_volume_slider(active: bool = False) -> None:
-                if volume_slider is None:
-                    return
-                width = int(volume_slider["width"])
-                height = int(volume_slider["height"])
-                left = 9
-                right = width - 9
-                center = height // 2
-                volume_slider.delete("all")
-                draw_round_rect(volume_slider, left, center - 4, right, center + 4, 4, "#101827", "#3f5576")
-                fill_right = left + round((right - left) * int(volume_var.get()) / 100)
-                if fill_right > left:
-                    draw_round_rect(volume_slider, left, center - 4, fill_right, center + 4, 4, "#f5d66a", "#f5d66a")
-                thumb_x = max(left, min(right, fill_right))
-                thumb_fill = "#ffffff" if active else "#dfeaff"
-                volume_slider.create_oval(thumb_x - 7, center - 7, thumb_x + 7, center + 7, fill=thumb_fill, outline="#6f8dc1", width=2)
+                # volume_slider is still None until the control row is built,
+                # so it is read HERE, on every call, never captured.
+                draw_crop_volume_slider(volume_slider, volume_var, active)
 
             def set_volume_value(value: float, restart: bool = False) -> None:
                 volume_var.set(int(clamp(round(value), 0, 100)))
@@ -1138,3 +752,13 @@ def _choose_crop_graphically_tk(answers: dict[str, Any]) -> tuple[int, int, int,
 __all__ = [
     '_choose_crop_graphically_tk',
 ]
+
+
+# guibridge_crop_tk_canvas holds this editor's geometry and canvas painting
+# (split for file size). Bound twice on purpose: the `_` alias is what
+# tests/test_module_reference_hygiene reads to find re-export pairs, and the
+# plain name keeps the module object addressable.
+from ffmwiz import guibridge_crop_tk_canvas as _guibridge_crop_tk_canvas  # noqa: E402
+from ffmwiz import guibridge_crop_tk_canvas  # noqa: E402,F401
+from ffmwiz.guibridge_crop_tk_canvas import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_guibridge_crop_tk_canvas.__all__)
