@@ -86,7 +86,7 @@ Menu entry **14. FFmpeg capability cache (diagnostics)** manages that cache:
   directory itself, your settings, and your logs are never touched.
 
 Set `FFMWIZ_CACHE_DIR` to relocate the cache — useful for an isolated or
-throwaway run. See [Appendix K](DOCUMENTATION.md#appendix-k--environment-variables).
+throwaway run. See [Appendix K](DOCUMENTATION-RECIPES.md#appendix-k--environment-variables).
 
 Clearing or re-probing the cache costs a few seconds on the next encode, never
 correctness: an empty cache simply means FFmWiz probes again.
