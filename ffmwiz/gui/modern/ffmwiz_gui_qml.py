@@ -676,7 +676,12 @@ def main() -> int:
                     # The offscreen screen is a fixed 800x800, so the window
                     # is born clamped; the resize only reaches the layout
                     # after the event loop has run once.
-                    for _ in range(6):
+                    # Enough passes for a ScrollView + nested Layouts to settle.
+                    # Six was not: three different width fixes in a row produced
+                    # byte-identical PNGs because the grab captured the FIRST
+                    # layout pass, before any binding that depends on the
+                    # resized window had been re-evaluated.
+                    for _ in range(40):
                         app.processEvents()
                 win.grabWindow().save(shot)
                 _log("INFO", f"QML scene grabbed to {shot}")

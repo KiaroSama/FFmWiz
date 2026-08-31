@@ -669,6 +669,30 @@ def main() -> int:
     # attempt can land before the window is fully mapped/activated by the OS.
     QtCore.QTimer.singleShot(0, grab_initial_keyboard_focus)
     QtCore.QTimer.singleShot(180, grab_initial_keyboard_focus)
+
+    # Render this window to a PNG and quit, instead of running the editor.
+    # The counterpart of FFMWIZ_QML_SHOT, so the two engines can be compared
+    # side by side. Under QT_QPA_PLATFORM=offscreen no native window exists,
+    # so this can never put one in front of the user.
+    shot = os.environ.get('FFMWIZ_GUI_SHOT')
+    if shot:
+        size = os.environ.get('FFMWIZ_GUI_SHOT_SIZE', '')
+        if 'x' in size:
+            w_px, _, h_px = size.partition('x')
+            window.resize(int(w_px), int(h_px))
+
+        def take_shot():
+            try:
+                window.grab().save(shot)
+                _gui_log_debug(f'GUI grabbed to {shot}', force=True)
+            except Exception as exc:  # noqa: BLE001
+                _gui_log_debug(f'Could not grab the GUI: {exc}', force=True)
+            app.quit()
+
+        # After the deferred stylesheet lands, or the capture shows the
+        # unstyled first frame rather than the editor the user sees.
+        QtCore.QTimer.singleShot(2500, take_shot)
+
     app.exec()
 
     payload = getattr(window, "result", {"status": "canceled"})

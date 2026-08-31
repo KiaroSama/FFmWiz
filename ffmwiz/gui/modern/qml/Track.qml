@@ -11,6 +11,9 @@ import QtQuick.Layouts
 
 Slider {
     id: sl
+    // The classic bottom bar has TWO sliders and they are different colours;
+    // one accent for both made zoom and view read as the same control twice.
+    property color fillColor: Skin.col("accent", "#3b82f6")
     implicitHeight: Tok.rowSm
     background: Rectangle {
         x: sl.leftPadding; y: sl.topPadding + sl.availableHeight / 2 - height / 2
@@ -18,7 +21,7 @@ Slider {
         color: Skin.col("surface_modern", "#2d323a")
         Rectangle {
             width: sl.visualPosition * parent.width; height: parent.height
-            radius: parent.radius; color: Skin.col("accent", "#3b82f6")
+            radius: parent.radius; color: sl.fillColor
         }
     }
     handle: Rectangle {
