@@ -458,6 +458,21 @@ def can_use_cuda_fast_path(answers: dict[str, Any], video_encoder: str | None) -
         and not answers.get("_force_cpu_video_filter")
         and not answers.get("separator_points")
         and not video_speed_transform_enabled(answers)
+        # Everything the CUDA path CANNOT express. `build_cuda_video_filter`
+        # emits exactly one filter -- `scale_cuda` -- so a job that also asked
+        # for a rotate/flip, a colour adjustment or denoise/sharpen/blur took
+        # this path and lost it silently: measured on rotate, grayscale and
+        # denoise, the whole video chain was `scale_cuda=...` and nothing else.
+        # A fade was worse than lost -- `afade` was still emitted, so the sound
+        # faded over a picture that did not.
+        #
+        # NOT `not video_filters_required(answers)`: that also covers crop and
+        # resize, which this path DOES handle (decoder crop + scale_cuda), so
+        # rejecting on it would disable the GPU path for the jobs it exists for.
+        # `fps` is not here either: it is applied as the `-r:v` OUTPUT option,
+        # which needs no filter and works on CUDA frames.
+        and not look_filters_requested(answers)
+        and not any(requested_fade_seconds(answers))
     )
 
 

@@ -8,7 +8,8 @@ import FFmWiz
 # `run_wizard` reaches these prompts through their DEFINING module now that the
 # wizard facade is no longer imported by its own leaves, so a patch on the
 # facade would rebind an attribute nothing reads.
-from ffmwiz import wizard_b, wizard_flow_b, wizard_raw, wizard_steps  # noqa: E402
+from ffmwiz import (wizard_b, wizard_flow_b, wizard_quick, wizard_raw,  # noqa: E402
+                    wizard_steps)
 from command_gen_base import CommandGenBase, _home_module
 
 
@@ -18,6 +19,24 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             pass
 
         calls: list[str] = []
+        # Declining the editor no longer hides the picture-filter, quick-output
+        # and compositing questions -- their gate carried the crop questions'
+        # `_unified_video_editor_declined` clause, which (together with the
+        # `used` clause beside it) could never be false on either branch, so
+        # all three prompts were dead. They are `ask_optional` prompts, so
+        # without a stub they read stdin and EOF here. Saved by module: the
+        # `_home_module` map does not list wizard_quick/wizard_composite.
+        from ffmwiz import wizard_composite, wizard_look  # noqa: PLC0415
+        reachable_now = [
+            (wizard_look, "step_video_look", "look"),
+            (wizard_quick, "step_quick_output", "quick"),
+            (wizard_composite, "step_video_composite", "composite"),
+        ]
+        saved_now = [(module, name, getattr(module, name))
+                     for module, name, _label in reachable_now]
+        for module, name, label in reachable_now:
+            setattr(module, name, lambda answers, _l=label: calls.append(_l))
+        self.addCleanup(lambda: [setattr(m, n, o) for m, n, o in saved_now])
         originals = {
             "step_input_path": FFmWiz.wizard.step_input_path,
             "step_join_additional_inputs_for_encode": FFmWiz.wizard.step_join_additional_inputs_for_encode,
@@ -451,6 +470,47 @@ class CommandCutJoinFolderTests2(CommandGenBase):
             self._assert_raw_immutable(s2, None, None)
             self._assert_detected_label_only_when_raw_valid(i1)
             self._assert_detected_label_only_when_raw_valid(i2)
+
+    def test_folder_keep_current_sample_rate_is_resolved_per_file(self):
+        # "n = keep the current rate" is answered once, against the
+        # REPRESENTATIVE file, and stored as that file's number plus a
+        # `_keep` flag. The batch re-resolved the video and audio BITRATE per
+        # file but not this, so a 44.1 kHz representative silently resampled
+        # every 48 kHz and 96 kHz file in the folder down to its own rate.
+        def _item(name, rate):
+            audio = {"codec_type": "audio", "codec_name": "aac",
+                     "sample_rate": str(rate), "bit_rate": "128000",
+                     "duration": "10", "channels": 2}
+            video = {"codec_type": "video", "codec_name": "h264",
+                     "width": 1920, "height": 1080}
+            return {"path": Path(name),
+                    "answers": {"input_path": Path(name), "video_streams": [video],
+                                "audio_streams": [audio], "format": {"duration": "10"}}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = self.base_answers(tmp)
+            settings["use_gpu"] = False
+            settings["crop_enabled"] = False
+            settings["folder_output_location"] = Path(tmp)
+            settings["audio_codec"] = "aac"
+            settings["audio_sample_rate"] = 44100
+            settings["audio_sample_rate_keep"] = True
+            for rate in (44100, 48000, 96000):
+                with self.subTest(rate=rate):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        job = FFmWiz.prepare_folder_job_answers(
+                            dict(settings), _item(f"f{rate}.mkv", rate))
+                    self.assertEqual(rate, job["audio_sample_rate"])
+                    self.assertEqual(rate, FFmWiz.resolve_audio_sample_rate(job))
+
+            # An EXPLICIT rate still applies to every file unchanged.
+            settings["audio_sample_rate"] = 48000
+            settings["audio_sample_rate_keep"] = False
+            for rate in (44100, 96000):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    job = FFmWiz.prepare_folder_job_answers(
+                        dict(settings), _item(f"g{rate}.mkv", rate))
+                self.assertEqual(48000, job["audio_sample_rate"])
 
     def test_workflow_split_reuses_resolved_geometry(self):
         """Split Parts reuse the same resolved geometry/provenance per workflow."""

@@ -340,7 +340,9 @@ def build_cut_filter_complex(
             if audio_for_cut is not None:
                 concat_inputs += f"[a{idx}]"
         if audio_for_cut is not None:
-            if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
+            # The whole gate, not the speed/LoudNorm half of it: the chain
+            # also emits a gain and a fade (see `audio_transform_enabled`).
+            if audio_transform_enabled(answers):
                 fc_parts.append(f"{concat_inputs}concat=n={len(keep_ranges)}:v=1:a=1[vc][ac]")
                 fc_parts.append(f"[ac]{build_encode_audio_speed_filter(answers)}[a]")
             else:
@@ -351,7 +353,7 @@ def build_cut_filter_complex(
     else:
         video_label = "v0"
         if audio_for_cut is not None:
-            if audio_speed_transform_enabled(answers) or loudnorm_transform_enabled(answers):
+            if audio_transform_enabled(answers):
                 fc_parts.append(f"[a0]{build_encode_audio_speed_filter(answers)}[a]")
             else:
                 fc_parts.append("[a0]asetpts=PTS-STARTPTS[a]")

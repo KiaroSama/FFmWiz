@@ -164,17 +164,6 @@ def apply_config_extra_recipe_options(answers: dict[str, Any], config: dict[str,
     has_audio = bool(answers.get("audio_streams")) and bool(selected_audio_streams(answers))
     audio_codec = str(answers.get("audio_codec") or "")
 
-    # --- Output audio sample rate (Hz). 'n'/keep keeps the source rate. ---
-    if has_audio and audio_codec != "copy":
-        rate_value = parse_int_config(config_value(config, "audio_sample_rate"), None, allow_n=True)
-        if rate_value not in (None, ""):
-            if rate_value == "n":
-                answers["audio_sample_rate"] = source_audio_sample_rate(answers)
-                answers["audio_sample_rate_keep"] = True
-            else:
-                answers["audio_sample_rate"] = int(rate_value)
-                answers["audio_sample_rate_keep"] = False
-
     # --- Loudnorm (single-pass only). Two-pass needs a live measurement that a
     # static config cannot supply, so config drives single-pass with a target. ---
     loudnorm_value = config_value(config, "loudnorm").strip().lower()
@@ -193,6 +182,23 @@ def apply_config_extra_recipe_options(answers: dict[str, Any], config: dict[str,
             answers["loudnorm_mode"] = "single"
             answers["loudnorm_target_i"] = float(target if target not in (None, "n") else LOUDNORM_DEFAULT_TARGET_I)
             answers.pop("loudnorm_measured", None)
+
+    # --- Output audio sample rate (Hz). 'n'/keep keeps the source rate. ---
+    # AFTER LoudNorm, and reading the codec back out of `answers`: LoudNorm
+    # turns `audio_codec=copy` into an AAC re-encode, and this gate is the
+    # question "is the audio re-encoded at all". Asked before that flip it read
+    # the stale `copy` and dropped the user's `audio_sample_rate` on the floor,
+    # so the command came out `-c:a aac -b:a 128k` with no `-ar` at all -- the
+    # bitrate survived the same flip only because LoudNorm sets it itself.
+    if has_audio and str(answers.get("audio_codec") or "") != "copy":
+        rate_value = parse_int_config(config_value(config, "audio_sample_rate"), None, allow_n=True)
+        if rate_value not in (None, ""):
+            if rate_value == "n":
+                answers["audio_sample_rate"] = source_audio_sample_rate(answers)
+                answers["audio_sample_rate_keep"] = True
+            else:
+                answers["audio_sample_rate"] = int(rate_value)
+                answers["audio_sample_rate_keep"] = False
 
     # --- Global video speed + reverse (a single factor for the whole clip). ---
     if output_has_video(answers):

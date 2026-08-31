@@ -542,6 +542,15 @@ SAR_DAR_TOLERANCE = 0.01
 
 VOLUMEDETECT_RE = re.compile(r"\b(mean_volume|max_volume):\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*dB")
 
+# Everything `load_input_metadata` reads off ONE file, so `copy_media_metadata`
+# can swap a folder item's media facts in and clear the previous file's.
+# `data_streams` was missing while its five sibling stream lists were all here,
+# and the key list is also the filter `scan_folder_media_files` stores each item
+# through -- so a folder item never carried its data streams at all. Same file,
+# same answers: the single-file path emitted `-map 0:d:0` and the folder path
+# emitted nothing, silently ignoring `keep_source_data_streams`. A key absent
+# from this tuple is also never CLEARED, so whatever value the settings answers
+# already held survived into every per-file job.
 FOLDER_MEDIA_METADATA_KEYS = (
     "input_path",
     "probe",
@@ -550,6 +559,7 @@ FOLDER_MEDIA_METADATA_KEYS = (
     "audio_streams",
     "subtitle_streams",
     "attachment_streams",
+    "data_streams",
     "packet_sizes",
     "audio_volume_stats",
 )

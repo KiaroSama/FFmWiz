@@ -127,8 +127,17 @@ def estimated_encode_duration_seconds(answers: dict[str, Any]) -> float | None:
         kept = 0.0
     if keep_ranges and kept > 0:
         duration = kept
+    # The same reads the COMMAND uses, not the legacy key alone. `speed_factor`
+    # is the standalone speed tool's key; the encode wizard writes
+    # `video_speed_factor`, so a 2x encode estimated its size from the full
+    # source duration -- twice the real output, and half of it at 0.5x. The
+    # audio-bitrate estimate is asked AFTER the speed step, so the factor is
+    # known by then. Tolerant on purpose: an estimate must not raise over a
+    # value the builder would reject later.
     try:
-        speed = float(answers.get("speed_factor") or 1.0)
+        speed = (encode_video_speed_factor(answers)
+                 if video_speed_transform_enabled(answers)
+                 else float(answers.get("speed_factor") or 1.0))
     except (TypeError, ValueError):
         speed = 1.0
     if speed > 0:

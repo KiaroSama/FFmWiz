@@ -390,7 +390,12 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
     for audio_pos, _audio_index in enumerate(selected_audio):
         label = append_join_trim_concat_filter(filters, f"jacat{audio_pos}", keep_ranges, "audio", f"jacut{audio_pos}")
         final_audio_label = f"jafinal{audio_pos}"
-        if audio_speed_transform_enabled(join_answers) or loudnorm_transform_enabled(join_answers):
+        # `audio_transform_enabled`, not the speed/LoudNorm pair this used to
+        # ask: the chain behind the gate also emits a gain and a fade, so a
+        # volume-only or fade-only join never reached it and the answer was
+        # dropped in silence -- with the PICTURE fade still applied, which is
+        # the "black screen over full-volume audio" the chain warns about.
+        if audio_transform_enabled(join_answers):
             filters.append(f"[{label}]{build_encode_audio_speed_filter(join_answers)}[{final_audio_label}]")
         else:
             filters.append(f"[{label}]asetpts=PTS-STARTPTS[{final_audio_label}]")
@@ -505,6 +510,12 @@ def build_join_encode_command(answers: dict[str, Any], items: list[dict[str, Any
         if data_mapped:
             append_source_data_codec_options(cmd, join_answers)
         append_container_options(cmd, join_answers["output_ext"])
+        # Same position and same reason as `build_ffmpeg_command` and the Split
+        # per-part writer: last, immediately before this output, so the user's
+        # own options can override what the wizard chose. This builder owns the
+        # whole command, so without this line a join silently dropped the
+        # escape hatch the wizard had just asked for.
+        cmd.extend(join_answers.get("raw_ffmpeg_args") or [])
         cmd.append(str(part_output))
     if split_active:
         log_info(

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -168,6 +169,52 @@ class ScanResultTests(unittest.TestCase):
             result = mux_media.scan_files([bogus])
             self.assertEqual(list(result.files), [])
             self.assertEqual([Path(p) for p in result.failures], [bogus])
+
+
+class ToolVersionTests(unittest.TestCase):
+    """Which FFmpeg build ran must survive a non-ASCII build banner.
+
+    `tool_version` asked for `text=True` and no encoding, so subprocess decoded
+    with the OS code page. Reproduced on cp1252 against a banner whose
+    `configuration:` line names a Cyrillic prefix: the decode raised inside
+    subprocess's OWN reader thread, which `except (OSError, SubprocessError)`
+    cannot see, so a UnicodeDecodeError traceback went to the console and the
+    version came back "unknown" -- the one fact the docstring says the user
+    cannot reconstruct later. Every other subprocess call in that module already
+    names UTF-8 explicitly.
+    """
+
+    # 0x8F, from the UTF-8 for the Cyrillic lowercase ya, is undefined in cp1252.
+    BANNER = ("ffmpeg version 7.1 Copyright (c) the FFmpeg developers\n"
+              "configuration: --prefix=/c/МояПапка/ffmpeg\n")
+
+    def test_it_names_an_encoding_rather_than_taking_the_code_page(self):
+        # Locale-independent half: on a host that already runs UTF-8 the decode
+        # below would succeed either way, and this would still catch a revert.
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, "ffmpeg version 7.1", "")
+
+        with mock.patch.object(mux_media.subprocess, "run", side_effect=_fake_run):
+            mux_media.tool_version("ffmpeg")
+        self.assertEqual("utf-8", str(seen.get("encoding") or "").lower(),
+                         "tool_version must decode explicitly, not by locale")
+
+    def test_a_non_ascii_build_banner_still_reports_the_version(self):
+        # A REAL child emitting the exact bytes, through the real call: what is
+        # under test is the decode, so stubbing the output would test nothing.
+        child = [sys.executable, "-c",
+                 "import sys; sys.stdout.buffer.write(%r)" % self.BANNER.encode("utf-8")]
+        real_run = subprocess.run
+
+        def _fake_run(args, **kwargs):
+            return real_run(child, **kwargs)
+
+        with mock.patch.object(mux_media.subprocess, "run", side_effect=_fake_run):
+            version = mux_media.tool_version("ffmpeg")
+        self.assertEqual(self.BANNER.splitlines()[0], version)
 
 
 class _FakeProc:
@@ -384,7 +431,7 @@ def _upstream_available() -> bool:
 
 @unittest.skipUnless(_upstream_available(), "upstream MuxCls checkout not present")
 class VendoringContractTests(unittest.TestCase):
-    """USER-8-1: the vendored tree is upstream plus exactly three local edits.
+    """USER-8-1: the vendored tree is upstream plus a declared set of local edits.
 
     Recording the contract here means the next drift is visible immediately
     instead of having to be reconstructed by diffing against every commit.
@@ -497,6 +544,49 @@ class VendoringContractTests(unittest.TestCase):
              "    # C.BLUE is deliberately absent: it now carries the same value as C.SKY\n"
              "    # below, and two identical entries make two languages indistinguishable.\n"
              "    C.ORANGE,\n"),
+        ],
+        # `tool_version` decoded with the OS code page. On cp1252 an FFmpeg
+        # banner whose `configuration:` line names a Cyrillic path raised
+        # UnicodeDecodeError inside subprocess's OWN reader thread, so the
+        # `except (OSError, SubprocessError)` never saw it: a traceback went to
+        # the console and the version came back "unknown". Every other
+        # subprocess call in this module already names UTF-8 explicitly.
+        # Belongs upstream too; declared here so the drift stays visible.
+        "media.py": [
+            ('    output raises, and it is not something the user can reconstruct later.\n'
+             '    """\n'
+             '    try:\n'
+             '        proc = subprocess.run(\n'
+             '            [binary, "-version"], capture_output=True, text=True,\n'
+             '            timeout=PROBE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,\n'
+             '        )\n',
+             '    output raises, and it is not something the user can reconstruct later.\n'
+             '\n'
+             '    UTF-8 explicitly, like `run_command` above. `text=True` alone decodes with\n'
+             '    the OS code page, and a build whose `configuration:` line names a non-ASCII\n'
+             '    path emits bytes that page has no character for. Measured on cp1252 with a\n'
+             '    Cyrillic prefix: the decode raised inside subprocess\'s own reader thread, so\n'
+             '    `except (OSError, SubprocessError)` never saw it -- a UnicodeDecodeError\n'
+             '    traceback went to the console and the version came back "unknown".\n'
+             '    """\n'
+             '    try:\n'
+             '        proc = subprocess.run(\n'
+             '            [binary, "-version"], capture_output=True, text=True,\n'
+             '            encoding="utf-8", errors="replace",\n'
+             '            timeout=PROBE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,\n'
+             '        )\n'),
+        
+            # A launch failure must not land inside robocopy's 0-7 success band;
+            # see LAUNCH_FAILED_RETURNCODE's own comment and
+            # tests/test_launch_failure_is_not_success.py.
+            ("def run_with_progress(",
+             '# The code this reports when the child could not be started at all, or its\n# output could not be captured. It was 1 -- and robocopy\'s convention, which\n# `output.robocopy_success` implements, is that 0-7 all mean SUCCESS. So a\n# robocopy that never launched came back as rc=1 and both call sites in\n# copying.py read it as a clean run: one logged "Extra files copied ... rc=1"\n# having copied nothing, the other skipped its "robocopy failed" raise and\n# died later on the misleading "robocopy did not create the output file".\n#\n# 127 is the shell convention for "command not found" and, more to the point,\n# it is outside robocopy\'s success range. Every consumer here treats any\n# non-zero code as failure (`!= 0` in logsetup and processing), so raising the\n# value costs them nothing.\nLAUNCH_FAILED_RETURNCODE = 127\n\n\ndef run_with_progress('),
+            ("                return subprocess.CompletedProcess(list(args), 1, \"\", str(exc))",
+             "                return subprocess.CompletedProcess(\n"
+             "                    list(args), LAUNCH_FAILED_RETURNCODE, \"\", str(exc))"),
+            ("        return subprocess.CompletedProcess(list(args), 1, \"\", str(exc))",
+             "        return subprocess.CompletedProcess(\n"
+             "            list(args), LAUNCH_FAILED_RETURNCODE, \"\", str(exc))"),
         ],
         "logsetup.py": [
             ("        # This module lives in the muxcls package, so the project root (where the\n"

@@ -380,7 +380,29 @@ def step_output_format(answers: dict[str, Any], allowed: list[str] | None = None
             hint = f" Did you mean '{close[0]}'?" if close else ""
             appio.error(f"'{ext}' is not a supported output format.{hint} Enter a different format.")
             continue
+        # A join cannot be a GIF. `quick_output_mode` treats a `.gif` container
+        # as a request for the two-pass palette pipeline, but `step_start_now`
+        # sends a join to `build_join_encode_command`, which has no such
+        # pipeline: it built an ordinary `-c:v libx264 -c:a aac` encode aimed
+        # at a .gif, and `.gif` is in neither container-compatibility table, so
+        # nothing downgraded the codecs either. Measured on FFmpeg 8:
+        # "gif muxer supports only codec gif for type video", header write
+        # fails, exit non-zero. Refused here rather than at build time, while
+        # the user can still answer differently.
+        if ext == "gif" and answers.get("join_input_items"):
+            appio.error(
+                "A joined output cannot be a GIF: the join is built through "
+                "filter_complex and the GIF palette pass cannot read it. "
+                "Choose a video container, then make a GIF from the result.")
+            continue
         answers["output_ext"] = ext
+        # `_output_ext_before_quick` (wizard_quick) is a snapshot of whatever
+        # THIS question last chose, restored when the quick output is later
+        # declined. Answering the question again retires it: without this, a
+        # Back to here after asking for a GIF, a new container, and then a
+        # declined quick output put the OLD container back and the new answer
+        # was lost in silence.
+        answers.pop("_output_ext_before_quick", None)
         return
 
 
@@ -611,7 +633,14 @@ def step_video_bitrate(answers: dict[str, Any]) -> None:
         _step_video_constant_quality(answers)
         return
 
-    # Bitrate mode: same as before.
+    # Bitrate mode: same as before. Answering it retires any CRF value a
+    # previous pass through this step left behind -- only the numeric branch
+    # below used to drop it, so `n=keep current bitrate` after a Back out of
+    # the CRF question kept both keys. The summary reads `video_crf` first and
+    # reported "constant-quality CRF/CQ mode" while the command carried
+    # `-b:v`, and with no detectable source bitrate the encode really did fall
+    # back to the stale CRF.
+    answers.pop("video_crf", None)
     suggested = source or DEFAULT_OUTPUT_VIDEO_BITRATE_KBPS
     prompt = appio.question_prompt(
         answers,

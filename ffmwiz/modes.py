@@ -374,6 +374,14 @@ def run_folder_settings_wizard(answers: dict[str, Any]) -> None:
         Step("crop_bottom", lambda a: output_has_video(a) and a.get("crop_enabled") and not a.get("crop_values_inline"), step_crop_bottom),
         Step("video_bitrate", video_reencode_options_applicable, wizard.step_video_bitrate),
         Step("nvenc_multipass", nvenc_multipass_prompt_applicable, step_nvenc_multipass),
+        # Same position as the single-file wizard. Folder Encode writes ONE
+        # output per file, which is exactly the condition A.15 documents for
+        # this question, and `execute_encode_plan` -- the executor every folder
+        # job goes through -- already runs `run_cpu_two_pass_ffmpeg`. Only the
+        # question was missing, so the batch route could never turn it on while
+        # its GPU counterpart above could. `cpu_two_pass_applicable` still hides
+        # it for a copy, a GPU encode, cuts, speed and reverse.
+        Step("cpu_two_pass", cpu_two_pass_applicable, step_cpu_two_pass),
         Step("resolution", video_reencode_options_applicable, wizard.step_resolution),
         Step("fps", video_reencode_options_applicable, wizard.step_fps),
         Step("video_speed_reverse", output_has_video, wizard.step_video_speed_reverse_for_encode),

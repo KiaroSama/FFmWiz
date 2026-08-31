@@ -302,8 +302,15 @@ def analyze_copy_cut_chapter_plan(
             "metadata": dict(chapter.get("tags") or {}),
         })
 
-    if overlap_count == 0:
-        return {"mode": "copy", "chapters": [], "overlap_count": 0}
+    # NOT `if overlap_count == 0: return copy`. "No chapter was cut through" is
+    # not "the clock did not move": this point is only reached once
+    # `removed_ranges` is non-empty, so every chapter after a removed span sits
+    # at the wrong time. `-map_chapters 0` cannot express that -- and across the
+    # multi-range concat demuxer it does not even carry the chapters: measured
+    # on a 12 s source with chapters A 0-2 and B 8-10 cut to [(0,4),(8,12)],
+    # neither chapter touches the removed 4-8 s, and the output came back with
+    # ZERO chapters. The remap below already had the right answer (A 0-2,
+    # B 4-6); it was simply thrown away.
     if not remapped_chapters:
         log_info(f"Copy Cut chapter plan: dropping all chapters; overlap_count={overlap_count}")
         return {"mode": "drop", "chapters": [], "overlap_count": overlap_count}

@@ -51,6 +51,11 @@ def _no_resource_warnings(test):
     test.assertEqual(leaked, [], f"ResourceWarning(s) leaked: {[str(w.message) for w in leaked]}")
 
 
+# A child that never finishes on its own: the fixture a read budget has to
+# cut short. Deliberately well under the suite runner's blind-wait ceiling.
+STALLED_CHILD = 'import time; time.sleep(20)'
+
+
 class SubprocessLifecycle(unittest.TestCase):
     def setUp(self):
         FFmWiz.appio.USE_COLOR = False
@@ -172,6 +177,45 @@ class SubprocessLifecycle(unittest.TestCase):
                         return_value=subprocess.CompletedProcess(["ffprobe"], 0, csv_out, "")):
             sizes = FFmWiz.services.probe_packet_sizes("ffprobe", pathlib.Path("clip.mkv"))
         self.assertEqual(sizes, {0: 2000, 1: 64})
+
+    def test_volume_scan_passes_a_positive_timeout(self):
+        """The volumedetect scan decodes the WHOLE audio stream and ran with no
+        read budget at all, while both sibling probes in the same subsystem
+        bounded theirs. Worse than either: `get_audio_volume_stats` submits
+        these into a ThreadPoolExecutor whose `with` block joins on exit, so one
+        wedged child stops the wizard inside `shutdown(wait=True)`."""
+        seen = {}
+
+        def _fake_run(args, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        with mock.patch("subprocess.run", side_effect=_fake_run):
+            FFmWiz.services.probe_audio_volume_stats(
+                "ffmpeg", pathlib.Path("clip.mkv"), 0)
+        self.assertGreater(seen.get("timeout") or 0, 0,
+                           "probe_audio_volume_stats must bound its read")
+
+    def test_volume_scan_returns_instead_of_hanging_on_a_wedged_child(self):
+        # A REAL child that stalls far past the budget, so this proves the child
+        # is killed rather than that a keyword was passed. The stall is the
+        # fixture, not a wait for readiness: 10x the 2 s budget installed below,
+        # and short enough that a leaked child cannot outlive the suite.
+        child = [sys.executable, "-c", STALLED_CHILD]
+        real_run = subprocess.run
+
+        def _fake_run(args, **kwargs):
+            return real_run(child, **kwargs)
+
+        started = time.perf_counter()
+        with mock.patch.object(FFmWiz.services, "_VOLUMEDETECT_TIMEOUT", 2.0), \
+                mock.patch("subprocess.run", side_effect=_fake_run):
+            stats = FFmWiz.services.probe_audio_volume_stats(
+                "ffmpeg", pathlib.Path("clip.mkv"), 0)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(stats, {}, "a scan that never finished cannot report levels")
+        self.assertLess(elapsed, 12.0,
+                        "probe_audio_volume_stats must be bounded, not open-ended")
 
     def test_reap_joins_reader_threads_before_closing(self):
         # The reader must never race a closed handle: reap joins threads first.

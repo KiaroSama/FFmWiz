@@ -26,6 +26,7 @@ import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 import FFmWiz
 
@@ -33,6 +34,7 @@ from artifact_guard import NoLeakedArtifacts
 from ffmwiz import encoding
 from ffmwiz import reverse_pipeline
 from ffmwiz import runtime
+from ffmwiz import services
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -255,6 +257,138 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
         # indistinguishable, the assertion above would prove nothing.
         heard = [self._tone_at(self.source, at) for at in (0.35, 1.35, 2.35, 3.35)]
         self.assertEqual(list(TONES), heard)
+
+
+
+class TheFinalRebuildOwnsTheRemainingEdits(NoLeakedArtifacts, unittest.TestCase):
+    """Regression: a bounded audio reverse refused an ordinary gain change.
+
+    `run_bounded_audio_reverse_encode` declares its four stages' ownership and
+    hands the plan to `validate_stage_plan`, which RAISES when a requested
+    transformation is owned by nobody. Four of them were named by no stage --
+    `look`, `fade`, `volume` and `raw_args` -- so a track long enough to need
+    staging came out of the encode as
+
+        ValueError: transformation(s) ['volume'] are requested but owned by no
+        stage; they would be applied in every stage that reads them
+
+    rather than as a file. Reproduced on each of the four in turn; a job that
+    asked for none of them ran normally, which is why it survived.
+
+    They belong to the FINAL REBUILD: it is the only stage that writes the
+    user's own file, the bounded reverse writes a lossless audio scratch, and
+    the forward join is `intermediate_profile`'d (which is exactly what an
+    opaque `raw_ffmpeg_args` would override).
+    """
+
+    EDITS = {
+        "volume": ("audio_volume", 2.0),
+        "fade": ("fade_in_seconds", 1.5),
+        "look": ("adjust_grayscale", True),
+        "raw_args": ("raw_ffmpeg_args", ["-movflags", "+faststart"]),
+    }
+
+    def setUp(self):
+        super().setUp()
+        self._tmp = Path(tempfile.mkdtemp(prefix="audioowns_case_"))
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self._real_note = FFmWiz.appio.note
+        FFmWiz.appio.note = lambda *a, **k: None
+        self.addCleanup(lambda: setattr(FFmWiz.appio, "note", self._real_note))
+
+    def _synthetic(self, **extra):
+        """A job that needs staging, without touching ffmpeg or a real file."""
+        answers = self.own({
+            "ffmpeg": "ffmpeg", "ffprobe": "ffprobe",
+            "input_path": self._tmp / "in.mkv", "output_location": self._tmp,
+            "output_path": self._tmp / "out.mkv", "output_ext": "mkv",
+            "output_name_stem": "out", "video_encoder": "libx264",
+            "crf": 28, "preset": "ultrafast", "audio_codec": "flac",
+            "audio_tracks": [0], "color_range_choice": "tv",
+            "video_streams": [{"codec_type": "video", "index": 0, "width": 320,
+                               "height": 240, "pix_fmt": "yuv420p",
+                               "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}],
+            "audio_streams": [{"codec_type": "audio", "index": 1,
+                               "channels": 2, "sample_rate": "48000"}],
+            "subtitle_streams": [], "attachment_streams": [], "data_streams": [],
+            "format": {"duration": "600.0"},
+            "reverse_audio": True,
+        })
+        answers.update(extra)
+        FFmWiz.artifact_lease(answers)
+        return answers
+
+    def _rebuild_answers(self, **extra):
+        """The `final` stage dict, captured on its way to the shared executor.
+
+        Every real command is stubbed: what is under test is the STAGE PLAN,
+        and running ffmpeg four times over would test the encoder instead.
+        """
+        answers = self._synthetic(**extra)
+        probe = {"streams": answers["video_streams"] + answers["audio_streams"],
+                 "format": dict(answers["format"])}
+        captured = {}
+
+        def fake_reverse(_src, target, audio_indices=None, label=""):
+            Path(target).write_bytes(b"scratch")
+            return 0, 0.0
+
+        def fake_runner(cmd, *a, **k):
+            Path(cmd[-1]).write_bytes(b"scratch")
+            return 0, 0.0
+
+        def fake_execute(final, cmd, **kwargs):
+            captured["final"] = final
+            return 0, 0.0
+
+        patches = [
+            mock.patch.object(services, "ffprobe_json", lambda *a, **k: probe),
+            mock.patch.object(encoding, "audio_reverse_needs_staging",
+                              lambda *a, **k: True),
+            mock.patch.object(encoding, "bounded_audio_reverse_to_file", fake_reverse),
+            mock.patch.object(runtime, "run_ffmpeg_with_progress", fake_runner),
+            mock.patch.object(encoding, "execute_encode_plan", fake_execute),
+        ]
+        noise = StringIO()
+        with redirect_stdout(noise), redirect_stderr(noise):
+            for patch in patches:
+                patch.start()
+            try:
+                code, _elapsed = encoding.run_bounded_audio_reverse_encode(
+                    answers, ["ffmpeg", "-i", str(answers["input_path"]),
+                              str(answers["output_path"])],
+                    total_duration=600.0, label="owns")
+            finally:
+                for patch in reversed(patches):
+                    patch.stop()
+        self.assertEqual(0, code, noise.getvalue()[-1500:])
+        self.assertIn("final", captured, "the final rebuild was never reached")
+        return captured["final"]
+
+    def test_each_remaining_edit_is_planned_rather_than_refused(self):
+        for name, (key, value) in self.EDITS.items():
+            with self.subTest(transformation=name):
+                # Without the ownership this raised ValueError out of the encode.
+                final = self._rebuild_answers(**{key: value})
+                # And it must be OWNED, not merely tolerated: stage_answers()
+                # strips every key the stage does not own, so the value
+                # surviving into the final rebuild IS the ownership.
+                self.assertEqual(value, final.get(key))
+
+    def test_the_earlier_stages_do_not_also_claim_them(self):
+        # Guard the guard: ownership is exactly one stage, so validate_stage_plan
+        # must still refuse a plan that names any of the four twice.
+        for name in self.EDITS:
+            with self.subTest(transformation=name):
+                with self.assertRaises(ValueError):
+                    FFmWiz.validate_stage_plan(
+                        [("bounded audio reverse", ("audio_reverse", name)),
+                         ("final rebuild", ("cuts", name))])
+
+    def test_a_job_asking_for_none_of_them_is_unchanged(self):
+        final = self._rebuild_answers()
+        for key, _value in self.EDITS.values():
+            self.assertNotIn(key, final)
 
 
 if __name__ == "__main__":

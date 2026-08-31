@@ -187,22 +187,37 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         # one of these filters is off by default, so a config that does
         # not mention them is asking for none -- and a non-interactive
         # run has no one to answer the prompt. The unified editor path is
-        # contractually prompt-free, so it is skipped there too, exactly
-        # like the crop questions above.
+        # contractually prompt-free, so it is skipped there too.
+        #
+        # NOT `_unified_video_editor_declined`, which the crop questions above
+        # do carry. Copying their gate is what made this question, `video_quick`
+        # and `video_composite` unreachable: the editor step always sets ONE of
+        # the two keys, so `not used and not declined` was false on both
+        # branches and none of the three prompts could ever run. Declining the
+        # crop questions is meaningful -- declining the editor zeroes the crop
+        # margins -- but declining a GRAPHICAL editor says nothing about
+        # denoise, a GIF or a watermark, none of which that editor can set.
         wizard_base.Step("video_look",
                     lambda a: (video_reencode_options_applicable(a)
                                and not a.get("_unified_video_editor_used")
-                               and not a.get("_unified_video_editor_declined")
                                and (not config_mode or cfg_has("video_look"))),
                     wizard_look.step_video_look),
         # Straight after the picture filters, on the same gate. A quick output
         # changes what the job PRODUCES -- a GIF, a boomerang, a still frame --
         # so it has to be answered before the questions describing the rate and
         # the size, which it reads for its own defaults.
+        #
+        # Not on a join, for the reason `cpu_two_pass_applicable` excludes one:
+        # `step_start_now` sends a join to `build_join_encode_command`, which
+        # knows nothing about the quick-output plan. A GIF asked for there
+        # forced `output_ext=gif` and then built an ordinary `-c:v libx264
+        # -c:a aac` encode into a .gif, which the muxer refuses outright --
+        # and `.gif` is in neither container-compatibility table, so no
+        # fallback caught it either.
         wizard_base.Step("video_quick",
                     lambda a: (video_reencode_options_applicable(a)
+                               and not a.get("join_input_items")
                                and not a.get("_unified_video_editor_used")
-                               and not a.get("_unified_video_editor_declined")
                                and (not config_mode or cfg_has("video_quick"))),
                     wizard_quick.step_quick_output),
         # Compositing is a filter graph too, so it rides the same re-encode
@@ -212,12 +227,18 @@ def run_wizard(answers: dict[str, Any], config: dict[str, Any] | None = None) ->
         # loop that recovers from every failure (missing file, same as the
         # main input, no usable streams) by re-asking, which a non-interactive
         # run has nobody to answer. There is no config_mode/cfg_has clause
-        # here on purpose, and no `video_composite` config key either.
+        # here on purpose, and no `video_composite` config key either -- which
+        # is why the `_unified_video_editor_declined` clause mattered most
+        # here: prompt-only plus a prompt that could never fire left the whole
+        # feature with no entry point at all for a video output.
+        # Not on a join either, and for the same reason: `step_start_now`
+        # dispatches a join BEFORE it looks at `composite_mode`, so the answer
+        # was collected, summarised and then never reached a builder at all.
         wizard_base.Step("video_composite",
                     lambda a: ((video_reencode_options_applicable(a)
                                 or bool(a.get("audio_streams")))
-                               and not a.get("_unified_video_editor_used")
-                               and not a.get("_unified_video_editor_declined")),
+                               and not a.get("join_input_items")
+                               and not a.get("_unified_video_editor_used")),
                     wizard_composite.step_video_composite),
         # Volume rides the AUDIO gate, not the video one: an audio-only
         # output has no picture but still has a level to set. Both follow
