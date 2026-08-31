@@ -81,16 +81,18 @@ class TheGuiIsStillLaunchable(unittest.TestCase):
     """The GUI runs as a SUBPROCESS SCRIPT, not as an imported module.
 
     Making the editors package-importable must not break that: they are started
-    as `python ffmwiz/gui/ffmwiz_gui.py --request ... --reply ...`, and the
+    as `python ffmwiz/gui/classic/ffmwiz_gui.py --request ... --reply ...`, and
     entry point puts the PACKAGE ROOT on `sys.path` so `ffmwiz.gui.<name>`
     resolves the same way it does for the installed wheel.
     """
 
     def _launch(self, script: str) -> str:
         entry = PACKAGE / "gui" / script
-        if not entry.exists():
-            self.skipTest(f"{script} is not present")
-        reply = ROOT / f"_import_smoke_{script}.json"
+        # NOT skipTest. A missing entry point is the exact regression this
+        # class exists to catch: the GUI split moved this script once, and
+        # the skip turned that into a silent pass for a whole release.
+        self.assertTrue(entry.exists(), f"GUI entry point missing: {entry}")
+        reply = ROOT / f"_import_smoke_{Path(script).name}.json"
         try:
             subprocess.run(
                 [sys.executable, str(entry), "--request", str(ROOT / "_nope.json"),
@@ -103,7 +105,7 @@ class TheGuiIsStillLaunchable(unittest.TestCase):
     def test_the_classic_gui_entry_point_still_starts(self):
         # A missing request file is the cheapest way to prove the process got
         # far enough to parse arguments and answer, without opening a window.
-        self.assertIn("Bad request JSON", self._launch("ffmwiz_gui.py"))
+        self.assertIn("Bad request JSON", self._launch("classic/ffmwiz_gui.py"))
 
 
 if __name__ == "__main__":
