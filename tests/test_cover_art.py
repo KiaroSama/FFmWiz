@@ -140,6 +140,11 @@ class CoverArtRealMux(unittest.TestCase):
         shutil.rmtree(cls._tmp, ignore_errors=True)
 
     def _attached_picture(self, path):
+        # The stream, deliberately, and for opus/ogg it is the ONLY way.
+        # Those two store the cover as a base64 METADATA_BLOCK_PICTURE tag,
+        # and ffprobe reports `format_tags` EMPTY for them while surfacing the
+        # decoded picture as a virtual attached_pic stream (measured, ffmpeg
+        # 8.1.1). A format_tags check here would fail on a correct file.
         out = subprocess.run(
             [FFPROBE, "-v", "error", "-show_streams", "-of", "json", str(path)],
             capture_output=True, text=True, timeout=60).stdout
