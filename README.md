@@ -90,7 +90,7 @@ The installer adds the local `Commands` folder to your User PATH and adds or upd
 
 Mode 1 is the default: press Enter at the menu. Mode 2 runs the same wizard but skips every question already answered in `config.env` and asks the rest.
 
-Each mode is explained in full in [docs/DOCUMENTATION.md §13](docs/DOCUMENTATION.md#13-modes-315-in-detail).
+Each mode is explained in full in [docs/DOCUMENTATION-MODES.md §13](docs/DOCUMENTATION-MODES.md#13-modes-315-in-detail).
 
 ## Graphical editor
 
@@ -98,7 +98,7 @@ When PySide6 is available, video work in Mode 1 can open the **Unified Video Edi
 
 Two engines exist: `classic` (default, PySide6 widgets, full feature set) and `qml` (QtQuick, GPU scene graph, aspect-correct preview for mixed-orientation joins). Select one with `gui_engine=classic|qml` in `config.env` or the environment variable `FFMWIZ_GUI_ENGINE`, which overrides the config. The QML engine handles only the unified editor; if its files are missing, FFmWiz falls back to classic automatically.
 
-Details, shortcuts, and the waveform model: [docs/DOCUMENTATION.md §12](docs/DOCUMENTATION.md#12-the-graphical-editors-classic-and-qml).
+Details, shortcuts, and the waveform model: [docs/DOCUMENTATION-ENCODING.md §12](docs/DOCUMENTATION-ENCODING.md#12-the-graphical-editors-classic-and-qml).
 
 ## Config file
 
@@ -108,7 +108,7 @@ Mode 2 reads its default answers from `config.env`, a simple `key=value` file cr
 Copy-Item config.env.example config.env
 ```
 
-Every key is documented inline in the example file and in full in [docs/DOCUMENTATION.md Appendix B](docs/DOCUMENTATION.md#appendix-b--complete-configenv-key-reference).
+Every key is documented inline in the example file and in full in [docs/DOCUMENTATION-PROMPTS-AND-KEYS.md Appendix B](docs/DOCUMENTATION-PROMPTS-AND-KEYS.md#appendix-b--complete-configenv-key-reference).
 
 ## Logs
 

@@ -26,7 +26,11 @@ pyproject.toml
 run.ps1                # canonical local launcher
 install-command.ps1
 docs/
-  DOCUMENTATION.md     # the authoritative usage/configuration reference
+  DOCUMENTATION.md     # manual: entry point, table of contents, setup, config.env
+  DOCUMENTATION-ENCODING.md         # video/audio, cut-split-join, speed, editors
+  DOCUMENTATION-MODES.md            # modes 3-15, logging, troubleshooting
+  DOCUMENTATION-PROMPTS-AND-KEYS.md # appendices A-B: every prompt, every key
+  DOCUMENTATION-RECIPES.md          # appendices C-L: cookbook, concepts, flags
   architecture.md      # this document
   FFMPEG-REFERENCE.md  # build-specific FFmpeg capability reference
 MediaReports/          # generated media info reports (git-ignored)
