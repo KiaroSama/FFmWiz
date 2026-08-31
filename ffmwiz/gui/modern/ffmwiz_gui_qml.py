@@ -625,7 +625,7 @@ def main() -> int:
     # `setProperty` on a QObject creates DYNAMIC properties that QML cannot see
     # at all -- every `Tok.sp2` came back undefined.
     _TOKENS = {"sp0": 2, "sp1": 4, "sp2": 8, "sp3": 12, "sp4": 16, "sp5": 24,
-               "radSm": 2, "radMd": 3, "fsMicro": 10, "fsBody": 11, "fsLead": 12,
+               "radSm": 6, "radMd": 8, "fsMicro": 10, "fsBody": 11, "fsLead": 12,
                "fsTitle": 14, "rowSm": 22, "rowMd": 26, "rowLg": 32}
 
     _palette_obj = _Palette()
@@ -660,6 +660,28 @@ def main() -> int:
                      "margins": [0, 0, 0, 0], "keep_ranges": [],
                      "separator_points": [], "speed": 1.0,
                      "reverse": False, "include_audio": bool(request.get("has_audio"))})
+        # Optional: render the scene graph to a PNG. This exists so the
+        # editor can be reviewed VISUALLY without a window ever being
+        # created -- under QT_QPA_PLATFORM=offscreen Qt has no native
+        # surface at all, so unlike moving a real window off-screen there
+        # is no interval in which it can appear in front of the user.
+        shot = os.environ.get("FFMWIZ_QML_SHOT")
+        if shot:
+            try:
+                win = engine.rootObjects()[0]
+                size = os.environ.get("FFMWIZ_QML_SHOT_SIZE", "")
+                if "x" in size:
+                    w_px, _, h_px = size.partition("x")
+                    win.setGeometry(0, 0, int(w_px), int(h_px))
+                    # The offscreen screen is a fixed 800x800, so the window
+                    # is born clamped; the resize only reaches the layout
+                    # after the event loop has run once.
+                    for _ in range(6):
+                        app.processEvents()
+                win.grabWindow().save(shot)
+                _log("INFO", f"QML scene grabbed to {shot}")
+            except Exception as exc:  # noqa: BLE001
+                _log("WARNING", f"Could not grab the QML scene: {exc}")
         _log("INFO", "QML self-test passed (root window created).")
         return 0
 

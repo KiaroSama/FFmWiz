@@ -14,7 +14,7 @@ import QtQuick.Layouts
 // video, which is the only thing in this window that should hold colour.
 Rectangle {
     radius: Tok.radMd
-    color: Skin.col("panel", "#161b22")
+    color: Skin.col("panel_modern", "#22272f")
     border.color: Skin.col("border_soft", "#21262d")
     border.width: 1
 }

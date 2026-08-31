@@ -17,7 +17,7 @@ Switch {
         implicitWidth: 30; implicitHeight: 16
         x: sw.leftPadding; y: (sw.height - height) / 2
         radius: height / 2
-        color: sw.checked ? Skin.col("accent", "#3b82f6") : Skin.col("surface", "#21262d")
+        color: sw.checked ? Skin.col("accent", "#3b82f6") : Skin.col("surface_modern", "#2d323a")
         border.color: sw.visualFocus ? Skin.col("accent_hover", "#5b9bff")
                                      : Skin.col("border_strong", "#3a4150")
         border.width: 1

@@ -189,13 +189,13 @@ ApplicationWindow {
         return "rgba(" + parseInt(c.substr(1, 2), 16) + "," + parseInt(c.substr(3, 2), 16)
                + "," + parseInt(c.substr(5, 2), 16) + "," + a + ")"
     }
-    color: col("bg", "#0d1117")
+    color: col("bg_modern", "#191d24")
 
-    palette.window: col("bg", "#0d1117")
+    palette.window: col("bg_modern", "#191d24")
     palette.windowText: col("text", "#e8edfb")
-    palette.base: col("panel_alt", "#1a1f2a")
+    palette.base: col("panel_alt_modern", "#262b37")
     palette.text: col("text", "#e8edfb")
-    palette.button: col("surface", "#21262d")
+    palette.button: col("surface_modern", "#2d323a")
     palette.buttonText: col("text", "#e8edfb")
     palette.highlight: col("accent", "#3b82f6")
     palette.highlightedText: "#ffffff"

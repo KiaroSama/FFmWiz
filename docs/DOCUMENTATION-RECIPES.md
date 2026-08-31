@@ -535,6 +535,8 @@ These environment variables tune behavior. Set them in the shell before launchin
 | `FFMWIZ_DEBUG_PROGRESS` | set / unset | Log every rendered progress line (stripped of ANSI) to the run log. Very verbose; use it only when diagnosing the progress display. |
 | `FFMWIZ_DEBUG_COORDS` | set / unset | Log crop-editor zoom/pan coordinate math (focus point, zoom factor, scroll offset) while dragging. |
 | `FFMWIZ_QML_SELFTEST` | `1` | Run the QML unified editor headlessly and exit — a smoke check for the QtQuick engine. Pair it with `QT_QPA_PLATFORM=offscreen`. |
+| `FFMWIZ_QML_SHOT` | file path | With `FFMWIZ_QML_SELFTEST=1`, save a PNG of the editor's rendered scene to that path and exit. Under `QT_QPA_PLATFORM=offscreen` no window is ever created, so the interface can be reviewed visually without it appearing on screen. |
+| `FFMWIZ_QML_SHOT_SIZE` | e.g. `1600x980` | Resize the editor before `FFMWIZ_QML_SHOT` grabs it. The offscreen platform's virtual screen is a fixed 800x800, which clamps the grab unless the window is resized first. |
 
 Names such as `FFMWIZ_GUI_DIR_NAME`, `FFMWIZ_GUI_FILE_NAME`, and `FFMWIZ_RUNTIME_DIR_NAME`
 appear in the source but are **internal Python constants**, not environment variables — setting
