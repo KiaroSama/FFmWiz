@@ -301,7 +301,12 @@ ApplicationWindow {
         histCurrent = snapshot()   // baseline state for undo/redo
         loadSegment(0, 0, false)
         bridge.startWaveform()
-        if (win.visibility !== Window.Maximized) win.showMaximized()
+        // Same request key the classic engine reads (gui_common chooses
+        // show() vs showMaximized() on it). Maximising unconditionally made
+        // the two engines disagree about a flag the wizard sends: invisible
+        // in the app, which always sends true, but it is why the two preview
+        // launchers opened at different sizes.
+        if (req.start_maximized && win.visibility !== Window.Maximized) win.showMaximized()
     }
 
     // Waveform overview arrives asynchronously from the backend decode; then we
