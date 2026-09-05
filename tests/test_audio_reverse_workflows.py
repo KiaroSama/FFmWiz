@@ -65,6 +65,30 @@ def _run(args, timeout=600):
                           encoding="utf-8", errors="replace", timeout=timeout)
 
 
+def _diagnosis(noise, command=None):
+    """The lines worth reading out of a captured ffmpeg run.
+
+    A progress bar redraws thousands of times, so a tail slice is spinner and
+    nothing else. Keep the lines that carry a diagnosis, plus the command that
+    produced them -- without that, a CI failure says only that something went
+    wrong somewhere.
+    """
+    interesting = []
+    for line in (noise or "").splitlines():
+        text = line.strip()
+        if not text or text.startswith(("100.0%", "  ")) or "•" in text:
+            continue
+        if any(mark in text.lower() for mark in (
+                "error", "invalid", "failed", "cannot", "unable", "no such",
+                "not permitted", "nothing was written", "conversion failed",
+                "unsupported", "deprecated pixel", "@ 0x", "] ")):
+            interesting.append(text)
+    report = chr(10).join(interesting[-25:]) or (noise or "")[-400:]
+    if command:
+        report = "command: " + " ".join(str(part) for part in command) + chr(10) + report
+    return report
+
+
 class AudioReverseKeepsTheWorkflow(NoLeakedArtifacts, unittest.TestCase):
 
     @classmethod
@@ -225,7 +249,7 @@ class AudioReverseKeepsTheWorkflow(NoLeakedArtifacts, unittest.TestCase):
                     answers, answers["cmd"], total_duration=seconds, label="test")
         finally:
             ext04c.audio_reverse_segment_seconds = real
-        self.assertEqual(0, code, noise.getvalue()[-1500:])
+        self.assertEqual(0, code, _diagnosis(noise.getvalue(), answers.get("cmd")))
         return Path(answers["output_path"]), promised
 
     # ---- D01 --------------------------------------------------------------
@@ -296,7 +320,7 @@ class AudioReverseKeepsTheWorkflow(NoLeakedArtifacts, unittest.TestCase):
                     job, job["cmd"], total_duration=SECONDS, label="folder")
         finally:
             ext04c.audio_reverse_segment_seconds = real
-        self.assertEqual(0, code, noise.getvalue()[-1500:])
+        self.assertEqual(0, code, _diagnosis(noise.getvalue()))
         self.assertEqual(["video", "audio"],
                          self._topology(Path(job["output_path"])))
 
@@ -415,7 +439,7 @@ class AudioReverseKeepsTheWorkflow(NoLeakedArtifacts, unittest.TestCase):
         finally:
             runtime.run_ffmpeg_with_progress = real_runner
             ext04c.audio_reverse_segment_seconds = real_segment_seconds
-        self.assertEqual(0, code, noise.getvalue()[-1500:])
+        self.assertEqual(0, code, _diagnosis(noise.getvalue()))
         return Path(answers["output_path"]), commands
 
     def _stages_with(self, commands, needle):
