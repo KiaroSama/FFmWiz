@@ -626,6 +626,24 @@ def bounded_audio_reverse_to_file(
         # docstring of the collector actually promises is that exactly one
         # trailing stub may be dropped, so that is what is checked.
         written = sorted(workspace.glob("areverse_fwd_*"))
+        log_info("Bounded audio reverse forward pass wrote "
+                 f"{len(written)} file(s) for a {segment_count}-segment plan: "
+                 + ", ".join(f"{path.name}={path.stat().st_size}B" for path in written))
+        # The muxer writing FEWER files than planned is its own failure, and it
+        # leaves nothing for the drop check below to notice: no file is
+        # discarded, so the concat simply joins the one piece that exists and
+        # the result is a fraction of the track. Measured on CI: 21776 samples
+        # of an expected 176400, i.e. a single ~0.5 s segment, with exit 0.
+        # `segment_count` is ceil() so one fewer is normal; anything below that
+        # is the split having failed.
+        if len(written) < segment_count - 1:
+            appio.error(
+                f"The bounded reverse split the track into {len(written)} "
+                f"segment(s) where {segment_count} were planned, so the result "
+                "would be short. Refusing to write truncated audio.")
+            log_warn(f"Bounded audio reverse aborted: the segment muxer wrote "
+                     f"{len(written)} of ~{segment_count} expected files")
+            return 1, time.perf_counter() - started_at
         dropped = [path for path in written if path not in chunks]
         if len(dropped) > 1 or (dropped and dropped[0] != written[-1]):
             appio.error(
