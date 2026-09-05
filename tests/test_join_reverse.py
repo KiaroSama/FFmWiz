@@ -202,8 +202,17 @@ class RealJoinReverseKeepsEveryInput(unittest.TestCase):
                                    "is missing")
 
     def test_the_visual_order_is_reversed(self):
+        # 0.6 s, not 0.3: the claim here is about ORDER, and the first ~0.35 s
+        # of the file belongs to the encoder rather than to either input.
+        # Measured on FFmpeg 7.1.1 -- an x264 encode carrying this job's
+        # `-b:v 500k -maxrate 1000k -bufsize 2000k` opens with about nine grey
+        # frames averaging (133,130,134). It is not the join and not the
+        # reverse: the same lead-in appears with `reverse` removed from the
+        # graph, and disappears the moment the bitrate cap is dropped. FFmpeg
+        # 6.1.1 and 9.0.1 do not do it. Sampling inside that window made an
+        # ordering test hostage to rate-control start-up on one build.
         output, _items = self._run_join_reverse()
-        self.assertEqual("blue", self._colour_at(output, 0.3),
+        self.assertEqual("blue", self._colour_at(output, 0.6),
                          "input 2 must come first in a reversed join")
         self.assertEqual("blue", self._colour_at(output, 1.5))
         self.assertEqual("red", self._colour_at(output, 2.5))

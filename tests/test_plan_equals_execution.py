@@ -188,6 +188,43 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
             "audio_pcm": pcm.stdout,
         }
 
+    @staticmethod
+    def _picture_digests(framehash_output):
+        """The md5 column of `-f framehash`, without the timing columns.
+
+        Two encodes that agree on every picture can still disagree on pts, and
+        pts is not what "wrote different pictures" is about.
+        """
+        return [line.rsplit(",", 1)[-1].strip()
+                for line in str(framehash_output).splitlines()
+                if line and not line.startswith("#")]
+
+    def _assert_same_pictures(self, automatic, manual):
+        """Every picture must match, allowing the ONE rounding frame the count
+        assertion above already allows.
+
+        Those two checks used to contradict each other: the count tolerated a
+        one-frame difference while this one demanded byte-identical framehash
+        output, which cannot hold once the counts differ. Measured on FFmpeg
+        7.1.1 -- one run opened with an extra frame and every later picture was
+        identical, just shifted by one pts. So allow a single insertion on
+        either side and keep demanding an exact match for everything else: a
+        plan that really lost content dropped sixteen frames, which no single
+        deletion can reconcile.
+        """
+        want, got = self._picture_digests(automatic), self._picture_digests(manual)
+        if want == got:
+            return
+        longer, shorter = (want, got) if len(want) > len(got) else (got, want)
+        if len(longer) - len(shorter) == 1:
+            for drop in range(len(longer)):
+                if longer[:drop] + longer[drop + 1:] == shorter:
+                    return
+        first = next((i for i, (a, b) in enumerate(zip(want, got)) if a != b),
+                     min(len(want), len(got)))
+        self.fail(f"the exported plan wrote different pictures: {len(want)} vs "
+                  f"{len(got)} frames, first difference at frame {first}")
+
     def _answers(self, out, inputs, **extra):
         items = [self._item(path) for path in inputs]
         answers = self.own({
@@ -417,8 +454,7 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
             f"wrote {automatic['frames']}; more than a rounding frame apart")
         self.assertAlmostEqual(automatic["duration"], manual["duration"], delta=0.05,
                                msg="the exported plan wrote a different duration")
-        self.assertEqual(automatic["frame_hashes"], manual["frame_hashes"],
-                         "the exported plan wrote different pictures")
+        self._assert_same_pictures(automatic["frame_hashes"], manual["frame_hashes"])
 
         want, got = automatic["audio_pcm"], manual["audio_pcm"]
         self.assertAlmostEqual(
