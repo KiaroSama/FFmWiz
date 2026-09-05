@@ -26,9 +26,17 @@ Card {
         // Zoom/pan-aware mapping: the visible window is [viewStart, viewStart+span].
         function t2x(t) { var sp = win.viewSpan(); return pad + ((t - win.viewStart) / Math.max(0.001, sp)) * (width - 2 * pad) }
         function x2t(x) { var sp = win.viewSpan(); return Math.max(0, Math.min(totalDuration, win.viewStart + (x - pad) / Math.max(1, (width - 2 * pad)) * sp)) }
+        // Vertical bands, so nothing has to guess where anything else is:
+        //   0      .. RULER_H   timecode labels + their ticks
+        //   RULER_H.. CHIP_BOT  IN/OUT/SPLIT/CENTER chips and the CTI arrow
+        //   CHIP_BOT..          waveform, cut ranges, everything editable
+        readonly property int rulerH: 20
+        readonly property int chipTop: 21
+        readonly property int chipBot: 41
         onPaint: {
             var ctx = getContext("2d"); ctx.reset()
-            var midY = height * 0.52
+            var RULER_H = rulerH, CHIP_TOP = chipTop, CHIP_BOT = chipBot
+            var midY = Math.max(CHIP_BOT + 14, height * 0.58)
             ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
             ctx.beginPath(); ctx.moveTo(pad, midY); ctx.lineTo(width - pad, midY); ctx.stroke()
             // Time ruler: gridlines + absolute timecode labels for the
@@ -43,25 +51,44 @@ Card {
             var rawStep = span / targetTicks
             var rstep = niceSteps[niceSteps.length - 1]
             for (var ni = 0; ni < niceSteps.length; ++ni) { if (niceSteps[ni] >= rawStep) { rstep = niceSteps[ni]; break } }
-            ctx.font = "9px 'Consolas'"; ctx.textAlign = "left"
+            // The ruler owns the top band ALONE. Its labels used to sit at y=9,
+            // the marker chips at y=1..20 and the CTI clock at y=12..28 -- four
+            // things in the same 28px, so a chip covered whatever label was
+            // behind it and the CENTER chip was sliced in half by the clock.
+            //
+            // Shape copied from the classic ruler: the label CENTRED on its
+            // tick with a short tick line under it, and a label dropped
+            // entirely when it would touch the previous one. A number floating
+            // with nothing under it does not say WHERE it is.
+            ctx.font = "600 10px 'Consolas'"; ctx.textAlign = "center"
             var t0r = Math.ceil(win.viewStart / rstep) * rstep
+            var lastRight = -1e9
             for (var tr = t0r; tr <= win.viewStart + span + 1e-6; tr += rstep) {
                 var trx = t2x(tr)
                 if (trx < pad - 1 || trx > width - pad + 1) continue
+                // gridline, below the ruler band so it never crosses the text
                 ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
-                ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(trx, 12); ctx.lineTo(trx, height - 4); ctx.stroke(); ctx.globalAlpha = 1.0
-                ctx.fillStyle = win.col("tick_lo", "#7d8590"); ctx.fillText(win.fmt(tr), trx + 2, 9)
+                ctx.globalAlpha = 0.45; ctx.beginPath(); ctx.moveTo(trx, RULER_H); ctx.lineTo(trx, height - 4); ctx.stroke(); ctx.globalAlpha = 1.0
+                var lbl = win.fmt(tr)
+                var lw = ctx.measureText(lbl).width
+                var lcx = Math.max(pad + lw / 2, Math.min(width - pad - lw / 2, trx))
+                if (lcx - lw / 2 < lastRight + 10) continue
+                ctx.fillStyle = win.col("tick_hi", "#e6edf3")
+                ctx.fillText(lbl, lcx, 10)
+                ctx.strokeStyle = win.col("tick_hi", "#e6edf3"); ctx.lineWidth = 1
+                ctx.beginPath(); ctx.moveTo(trx + 0.5, 13); ctx.lineTo(trx + 0.5, RULER_H - 1); ctx.stroke()
+                lastRight = lcx + lw / 2
             }
             var xi = t2x(markIn), xo = t2x(markOut)
             ctx.globalAlpha = 0.4; ctx.fillStyle = win.col("accent_dim", "#1b3468")
-            ctx.fillRect(xi, 6, Math.max(0, xo - xi), height - 12); ctx.globalAlpha = 1.0
+            ctx.fillRect(xi, CHIP_BOT, Math.max(0, xo - xi), height - CHIP_BOT - 6); ctx.globalAlpha = 1.0
             // Audio waveform: per-column min/max for the CURRENT
             // viewport (fetched from the backend on viewport change).
             // The pair values are already in -1..1 vs int16 full
             // scale, so quiet stays quiet and loud stays loud.
             var wv = win.wf
             if (wv && wv.length > 1) {
-                var halfMax = Math.min(midY - 4, height - 4 - midY)
+                var halfMax = Math.min(midY - CHIP_BOT, height - 4 - midY)
                 var inner = width - 2 * pad
                 var nb = wv.length
                 ctx.strokeStyle = win.colA("waveform", "#22d3ee", 0.9); ctx.lineWidth = 1
@@ -82,9 +109,9 @@ Card {
             for (var c1 = 0; c1 < cz.length; ++c1) {
                 var cx0 = t2x(cz[c1][0]), cx1 = t2x(cz[c1][1])
                 ctx.fillStyle = win.colA("cut_red", "#f85149", 0.32)
-                ctx.fillRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
+                ctx.fillRect(cx0, CHIP_BOT, Math.max(1, cx1 - cx0), height - CHIP_BOT - 6)
                 ctx.strokeStyle = (c1 === win.selCut) ? "rgba(255,255,255,0.95)" : win.colA("cut_red", "#f85149", 0.9); ctx.lineWidth = (c1 === win.selCut) ? 2 : 1
-                ctx.strokeRect(cx0, 6, Math.max(1, cx1 - cx0), height - 12)
+                ctx.strokeRect(cx0, CHIP_BOT, Math.max(1, cx1 - cx0), height - CHIP_BOT - 6)
                 // Name the range, as the classic does. Without it a red block
                 // says only "something was removed here", not WHICH cut -- and
                 // the delete/select buttons refer to cuts by number.
@@ -92,15 +119,15 @@ Card {
                 if (cw > 44) {
                     ctx.font = "600 10px 'Segoe UI'"; ctx.textAlign = "center"
                     ctx.fillStyle = win.col("text", "#e8edfb")
-                    ctx.fillText("Cut #" + (c1 + 1), cx0 + cw / 2, 20)
+                    ctx.fillText("Cut #" + (c1 + 1), cx0 + cw / 2, CHIP_BOT + 13)
                 }
             }
             ctx.font = "9px 'Segoe UI'"; ctx.textAlign = "center"
             for (var i = 1; i < segs.length; ++i) {
                 var bx = t2x(segs[i].start)
                 ctx.strokeStyle = win.colA("segment_boundary", "#e8b278", 0.78); ctx.lineWidth = 1; ctx.setLineDash([2, 3])
-                ctx.beginPath(); ctx.moveTo(bx, 4); ctx.lineTo(bx, height - 4); ctx.stroke(); ctx.setLineDash([])
-                ctx.fillStyle = win.colA("segment_boundary", "#e8b278", 0.92); ctx.fillText(segs[i].name, bx, 13)
+                ctx.beginPath(); ctx.moveTo(bx, CHIP_BOT); ctx.lineTo(bx, height - 4); ctx.stroke(); ctx.setLineDash([])
+                ctx.fillStyle = win.colA("segment_boundary", "#e8b278", 0.92); ctx.fillText(segs[i].name, bx, CHIP_BOT + 24)
             }
             // Chapters: dashed purple markers with titles (parity with classic).
             for (var ch = 0; ch < chapters.length; ++ch) {
@@ -130,26 +157,50 @@ Card {
                 var tw = ctx.measureText(label).width
                 var w = tw + 14, h = isSel ? 19 : 17, r = h / 2
                 var lx = Math.max(1, Math.min(width - w - 1, x - w / 2))
+                var top = CHIP_TOP + (19 - h) / 2
                 // stem: a soft same-colour glow under a crisp core
                 ctx.strokeStyle = win.colA(key, fb, 0.22); ctx.lineWidth = isSel ? 7 : 5
-                ctx.beginPath(); ctx.moveTo(x, h); ctx.lineTo(x, height - 5); ctx.stroke()
+                ctx.beginPath(); ctx.moveTo(x, top + h); ctx.lineTo(x, height - 5); ctx.stroke()
                 ctx.strokeStyle = c; ctx.lineWidth = isSel ? 2.5 : 2
-                ctx.beginPath(); ctx.moveTo(x, h); ctx.lineTo(x, height - 5); ctx.stroke()
+                ctx.beginPath(); ctx.moveTo(x, top + h); ctx.lineTo(x, height - 5); ctx.stroke()
                 // chip
                 ctx.fillStyle = c
                 ctx.beginPath()
-                ctx.moveTo(lx + r, 1); ctx.lineTo(lx + w - r, 1)
-                ctx.arcTo(lx + w, 1, lx + w, 1 + r, r); ctx.lineTo(lx + w, 1 + h - r)
-                ctx.arcTo(lx + w, 1 + h, lx + w - r, 1 + h, r); ctx.lineTo(lx + r, 1 + h)
-                ctx.arcTo(lx, 1 + h, lx, 1 + h - r, r); ctx.lineTo(lx, 1 + r)
-                ctx.arcTo(lx, 1, lx + r, 1, r); ctx.closePath(); ctx.fill()
+                ctx.moveTo(lx + r, top); ctx.lineTo(lx + w - r, top)
+                ctx.arcTo(lx + w, top, lx + w, top + r, r); ctx.lineTo(lx + w, top + h - r)
+                ctx.arcTo(lx + w, top + h, lx + w - r, top + h, r); ctx.lineTo(lx + r, top + h)
+                ctx.arcTo(lx, top + h, lx, top + h - r, r); ctx.lineTo(lx, top + r)
+                ctx.arcTo(lx, top, lx + r, top, r); ctx.closePath(); ctx.fill()
                 if (isSel) {
                     ctx.strokeStyle = win.col("text", "#e8edfb"); ctx.lineWidth = 1.5; ctx.stroke()
                 }
                 ctx.fillStyle = win.col("timeline_bg", "#0a0d12")
                 ctx.textAlign = "center"; ctx.textBaseline = "middle"
-                ctx.fillText(label, lx + w / 2, 1 + h / 2 + 0.5)
+                ctx.fillText(label, lx + w / 2, top + h / 2 + 0.5)
                 ctx.textBaseline = "alphabetic"
+            }
+            // The guide goes down FIRST: when two markers land close together
+            // the one you can DRAG has to stay readable, and this one you
+            // cannot move.
+            // Centre-of-video guide: a violet CHIP on a dashed stem, so it
+            // belongs to the same family as the IN/OUT/SPLIT markers instead of
+            // being a second arrowhead competing with the playhead. Dashed is
+            // what keeps it readable as a GUIDE rather than a position you set.
+            var cgx = t2x(totalDuration / 2)
+            if (totalDuration > 0 && cgx >= pad - 2 && cgx <= width - pad + 2) {
+                ctx.strokeStyle = win.colA("center_guide", "#c084fc", 0.20); ctx.lineWidth = 5
+                ctx.beginPath(); ctx.moveTo(cgx, CHIP_BOT); ctx.lineTo(cgx, height - 5); ctx.stroke()
+                ctx.strokeStyle = win.col("center_guide", "#c084fc"); ctx.lineWidth = 2; ctx.setLineDash([5, 4])
+                ctx.beginPath(); ctx.moveTo(cgx, CHIP_BOT); ctx.lineTo(cgx, height - 5); ctx.stroke(); ctx.setLineDash([])
+                // Just the word. It used to be a chip PLUS a separate clock pill
+                // whose band overlapped the chip's, which sliced the word in
+                // half. Carrying the time inside the chip fixed that but made
+                // the chip 130px wide, which then buried whatever SPLIT sat
+                // near it. The centre is always duration/2 and hovering reads
+                // the time off the ruler, so the word alone is enough here --
+                // the classic can afford "Center hh:mm:ss" because its ruler is
+                // tall enough to give the pill a row of its own.
+                chip(cgx, "center_guide", "#c084fc", false, "CENTER")
             }
             chip(xi, "marker_in", "#2ddc7f", win.selMarker === "in", "IN")
             chip(xo, "marker_out", "#d29922", win.selMarker === "out", "OUT")
@@ -160,18 +211,6 @@ Card {
                 chip(t2x(Number(separatorPoints[k])),
                      kSel ? "split_marker_sel" : "split_marker",
                      kSel ? "#7dd3fc" : "#38bdf8", kSel, "SPLIT")
-            }
-            // Centre-of-video guide: a violet CHIP on a dashed stem, so it
-            // belongs to the same family as the IN/OUT/SPLIT markers instead of
-            // being a second arrowhead competing with the playhead. Dashed is
-            // what keeps it readable as a GUIDE rather than a position you set.
-            var cgx = t2x(totalDuration / 2)
-            if (totalDuration > 0 && cgx >= pad - 2 && cgx <= width - pad + 2) {
-                ctx.strokeStyle = win.colA("center_guide", "#c084fc", 0.20); ctx.lineWidth = 5
-                ctx.beginPath(); ctx.moveTo(cgx, 18); ctx.lineTo(cgx, height - 5); ctx.stroke()
-                ctx.strokeStyle = win.col("center_guide", "#c084fc"); ctx.lineWidth = 2; ctx.setLineDash([5, 4])
-                ctx.beginPath(); ctx.moveTo(cgx, 18); ctx.lineTo(cgx, height - 5); ctx.stroke(); ctx.setLineDash([])
-                chip(cgx, "center_guide", "#c084fc", false, "CENTER")
             }
             // NOTE: the CTI/playhead is drawn as a separate overlay
             // item (below) so playback moves it WITHOUT repainting
@@ -242,49 +281,38 @@ Card {
             x: Math.max(0, Math.min(tl.width, tl.t2x(win.cti)))
             visible: win.ready && win.cti >= win.viewStart - 1e-6
                      && win.cti <= win.viewStart + win.viewSpan() + 1e-6
-            // A crisp 2px line under a rounded handle. What was here before was
-            // the classic's shape: a 9px BLUE slab behind a 5px red core, capped
-            // with a triangle. At this size the slab reads as a second, wider
-            // playhead in the wrong colour. The glow is the playhead's own colour
-            // now, thin enough to sit under the line rather than beside it.
-            Rectangle {
-                x: -3; y: 20; width: 6; height: cti.height - 20
-                // colA() returns a CSS rgba() string, which is Canvas-only; a QML
-                // color property cannot parse it, so the alpha lives on opacity.
-                color: win.col("playhead", "#ff4d55"); opacity: 0.20
-            }
-            Rectangle {
-                x: -1; y: 20; width: 2; height: cti.height - 20
-                color: win.col("playhead", "#ff4d55")
-            }
-            // The handle: a rounded tag, the shape a modern NLE gives its
-            // playhead, rather than the pennant the classic draws.
-            Rectangle {
-                x: -11; y: 1; width: 22; height: 20; radius: 6
-                color: win.col("playhead", "#ff4d55")
-                Rectangle {   // a grip mark, so the handle reads as draggable
-                    anchors.centerIn: parent
-                    width: 2; height: 8; radius: 1
-                    color: win.col("timeline_bg", "#0a0d12"); opacity: 0.55
+            // A downward ARROW over a thick stem -- the classic's shape, which
+            // is what makes the playhead readable as "the frame you are on"
+            // rather than as one more vertical marker. The rounded handle this
+            // replaces was a tag with a grip mark: it pointed at nothing, and
+            // at chip width it was hard to tell from a SPLIT chip.
+            Canvas {
+                id: ctiHead
+                x: -13; y: 0; width: 26; height: tl.chipTop + 2
+                onPaint: {
+                    var c = getContext("2d"); c.reset()
+                    var w = width, tip = height - 1
+                    c.fillStyle = win.col("playhead", "#ff4d55")
+                    c.strokeStyle = win.col("playhead_halo", "#3b82f6")
+                    c.lineWidth = 2; c.lineJoin = "round"
+                    c.beginPath()
+                    c.moveTo(1, 1); c.lineTo(w - 1, 1); c.lineTo(w / 2, tip)
+                    c.closePath(); c.fill(); c.stroke()
                 }
+                Component.onCompleted: requestPaint()
+                Connections { target: win; function onPaletteRev() { ctiHead.requestPaint() } }
             }
-        }
-        // "Center hh:mm:ss" pill under the centre guide's arrow, like the
-        // classic's. Reuses the hover tooltip's shape so the two read as one set.
-        Rectangle {
-            property real cgx: tl.t2x(totalDuration / 2)
-            visible: win.ready && totalDuration > 0 && cgx >= tl.pad - 2 && cgx <= tl.width - tl.pad + 2
-            color: win.col("bg", "#0d1117"); border.color: win.col("center_guide", "#c084fc")
-            radius: 4; height: 16; width: cgLbl.implicitWidth + 12
-            x: Math.max(0, Math.min(tl.width - width, cgx - width / 2)); y: 12
-            Label {
-                id: cgLbl; anchors.centerIn: parent
-                color: win.col("center_guide_text", "#e9d5ff"); font.pixelSize: 11
-                font.family: "Consolas"
-                // The chip above already says CENTER; repeating the word here
-                // just made two labels for one marker. This one carries the
-                // time, which the chip has no room for.
-                text: fmt(totalDuration / 2)
+            // Stem: a wide same-colour glow under a crisp core, from the arrow
+            // tip down. colA() returns a CSS rgba() string, which is Canvas-only,
+            // so a QML color property cannot parse it -- the alpha lives on
+            // opacity instead.
+            Rectangle {
+                x: -3.5; y: tl.chipTop; width: 7; height: cti.height - tl.chipTop
+                color: win.col("playhead", "#ff4d55"); opacity: 0.22
+            }
+            Rectangle {
+                x: -1.5; y: tl.chipTop; width: 3; height: cti.height - tl.chipTop
+                color: win.col("playhead", "#ff4d55")
             }
         }
         // Hover marker + timestamp tooltip following the cursor.
@@ -300,7 +328,7 @@ Card {
                 visible: hov.hx >= 0
                 color: win.col("surface_modern", "#2d323a"); border.color: win.col("border_strong", "#3a4150")
                 radius: 4; height: 16; width: hovLbl.implicitWidth + 10
-                x: Math.max(0, Math.min(tl.width - width, hov.hx - width / 2)); y: 2
+                x: Math.max(0, Math.min(tl.width - width, hov.hx - width / 2)); y: tl.chipBot + 2
                 Label {
                     id: hovLbl; anchors.centerIn: parent
                     color: win.col("text", "#e8edfb"); font.pixelSize: 10; font.family: "Consolas"

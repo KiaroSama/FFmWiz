@@ -6,6 +6,7 @@ pair output (not single peaks), deep-zoom detail vs the overview, full-scale
 amplitude (vs int16 32768, not the clip's own peak), and join-timeline decoding.
 """
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -216,6 +217,106 @@ class QmlPaletteAndLoggingTests(unittest.TestCase):
             if want and want.lower() != literal.lower():
                 drift.append((key, literal, want))
         self.assertEqual(drift, [])
+
+
+class TimelineBandsDoNotOverlap(unittest.TestCase):
+    """Four things used to be drawn in the same 28px at the top of the timeline.
+
+    The ruler labels sat at y=9, the marker chips at y=1..20, the CTI clock at
+    y=12..28 and the hover tooltip at y=2. A chip covered whatever timecode was
+    behind it, and the CENTER chip was sliced in half by the clock -- the word
+    read as "CFNTFR". The fix is three named bands the whole panel measures
+    from; these tests pin that they stay ordered and stay used.
+    """
+
+    def setUp(self):
+        self.src = (_GUI_DIR / "qml" / "TimelinePanel.qml").read_text(encoding="utf-8")
+
+    def _band(self, name):
+        m = re.search(r"readonly property int %s:\s*(\d+)" % name, self.src)
+        self.assertIsNotNone(m, f"{name} is gone; the timeline bands are unnamed again")
+        return int(m.group(1))
+
+    def test_the_three_bands_are_declared_and_ordered(self):
+        ruler, top, bot = self._band("rulerH"), self._band("chipTop"), self._band("chipBot")
+        self.assertLessEqual(ruler, top, "the chips start before the ruler band ends")
+        self.assertLess(top, bot, "the chip band has no height")
+
+    def test_the_chips_are_drawn_below_the_ruler(self):
+        # The chip geometry must be measured from CHIP_TOP. Hardcoded y=1 is
+        # what put them in the ruler's band.
+        self.assertIn("var top = CHIP_TOP", self.src,
+                      "the chip no longer positions itself from the chip band")
+        self.assertNotIn("ctx.moveTo(lx + r, 1)", self.src,
+                         "the chip is back to a hardcoded y=1, i.e. in the ruler band")
+
+    def test_the_content_starts_below_the_chips(self):
+        # Cut ranges and the mark-in/out wash used to start at y=6, under the
+        # chips. Every one of them now measures from CHIP_BOT.
+        for fragment in ("ctx.fillRect(xi, CHIP_BOT",
+                         "ctx.fillRect(cx0, CHIP_BOT",
+                         "ctx.strokeRect(cx0, CHIP_BOT"):
+            self.assertIn(fragment, self.src, f"{fragment!r} no longer clears the chip band")
+        self.assertIn("Math.min(midY - CHIP_BOT", self.src,
+                      "the waveform can climb back into the chip band")
+
+    def test_the_ruler_label_carries_a_tick_and_dodges_its_neighbour(self):
+        # A number with nothing under it does not say WHERE it is; the classic
+        # draws a short tick below each label and drops a label that would
+        # touch the previous one.
+        # The COMPARISON, not just the variable: `if (false) continue` keeps
+        # the name alive while dropping the suppression entirely.
+        self.assertIn("if (lcx - lw / 2 < lastRight + 10) continue", self.src,
+                      "ruler labels no longer suppress overlap")
+        self.assertIn("ctx.lineTo(trx + 0.5, RULER_H - 1)", self.src,
+                      "the ruler labels lost their tick marks")
+        self.assertIn('ctx.textAlign = "center"', self.src)
+
+    def test_the_centre_guide_is_one_element_drawn_behind_the_markers(self):
+        # It was a chip PLUS a clock pill in an overlapping band. One chip now,
+        # and it goes down before IN/OUT/SPLIT so a marker you can DRAG stays
+        # readable when the two land close together.
+        # `cgLbl` was the separate pill's Label id -- structural, unlike a
+        # phrase that also appears in the comment explaining the history.
+        self.assertNotIn("cgLbl", self.src, "the separate centre pill is back")
+        centre = self.src.index('chip(cgx, "center_guide"')
+        first_marker = self.src.index('chip(xi, "marker_in"')
+        self.assertLess(centre, first_marker,
+                        "the centre guide draws over the editable markers again")
+
+
+class TheZoomToolSurvivesAClick(unittest.TestCase):
+    """`dragged = true` on ANY mouse movement disarmed the zoom tool.
+
+    A real click travels a pixel or two between press and release, so
+    `win.tool === "zoom" && !dragged` was almost never true and clicking with
+    the tool did nothing. The classic canvas measures distance instead
+    (`abs(dx) + abs(dy) < 4` in its mouseReleaseEvent).
+    """
+
+    def setUp(self):
+        self.src = (_GUI_DIR / "qml" / "PreviewPanel.qml").read_text(encoding="utf-8")
+
+    def test_a_movement_threshold_guards_the_click(self):
+        self.assertIn("clickSlop", self.src, "the zoom click has no movement threshold")
+        m = re.search(r"readonly property int clickSlop:\s*(\d+)", self.src)
+        self.assertIsNotNone(m)
+        self.assertGreaterEqual(int(m.group(1)), 2,
+                                "a threshold below 2px cannot absorb ordinary hand jitter")
+
+    def test_dragged_is_set_from_distance_not_from_any_movement(self):
+        self.assertIn("Math.abs(m.x - mPressX) + Math.abs(m.y - mPressY) > clickSlop", self.src)
+        self.assertNotIn("                dragged = true" + chr(10) +
+                         "                if (activeHandle ===", self.src,
+                         "dragged is unconditionally true on the first move again")
+
+    def test_dragging_with_the_zoom_tool_zooms(self):
+        # Before, a drag with this tool did nothing at all: only hand-panning
+        # and handle-resizing had a drag path.
+        self.assertIn("zooming = true", self.src, "the zoom tool has no drag path")
+        self.assertIn("Math.pow(2, (mPressY - m.y) / 110.0)", self.src,
+                      "the drag-zoom no longer matches the classic's response curve")
+        self.assertIn("zooming = false", self.src, "the zoom drag is never released")
 
 
 if __name__ == "__main__":
