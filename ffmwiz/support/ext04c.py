@@ -498,7 +498,20 @@ def audio_reverse_indices(answers: dict[str, Any],
 def audio_reverse_content_seconds(answers: dict[str, Any]) -> tuple[float, float,
                                                                    list[tuple[float, float]]]:
     """(source duration, seconds that survive the cuts, the cut ranges)."""
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    # The audio STREAM first, then the container. This passed an empty stream
+    # dict, so only `format.duration` was ever consulted -- and a container
+    # whose header carries no duration leaves ffprobe estimating. Everything
+    # downstream is sized from this one number: the segment count, the
+    # peak-budget decision, and the length check on the joined result. A short
+    # reading makes all three agree on a track that is not there, so nothing
+    # complains and the reverse comes out short. `stream_duration_seconds`
+    # already prefers the stream over the format; it was simply never shown
+    # one.
+    streams = list(answers.get("audio_streams") or [])
+    indices = audio_reverse_indices(answers)
+    chosen = (streams[indices[0]]
+              if streams and indices and indices[0] < len(streams) else {})
+    duration = services.stream_duration_seconds(chosen, answers.get("format")) or 0.0
     keep_ranges = normalize_cut_ranges(
         list(answers.get("audio_cut_keep_ranges")
              or answers.get("audio_keep_ranges") or []), duration)
