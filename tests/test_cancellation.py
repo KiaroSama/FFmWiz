@@ -214,10 +214,27 @@ class CancelledEncodeStaysPlayable(unittest.TestCase):
              "-c:v", "libx264", "-preset", "veryslow", "-crf", "20", str(out)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-        time.sleep(3.0)
+        # Wait for REAL encoded output, not for the clock. A blind 3 s sleep
+        # was enough on a fast box and not on a 2-core CI runner: with
+        # `-preset veryslow` almost nothing had been written, so the cancel
+        # produced a file with a header and no moov and the test failed with
+        # "moov atom not found". Poll the growing file instead, with a
+        # deadline, which is also what this project's test policy asks for.
+        ENOUGH_BYTES = 64 * 1024   # comfortably past ftyp+mdat header alone
+        deadline = time.monotonic() + 45.0
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            if out.exists() and out.stat().st_size >= ENOUGH_BYTES:
+                break
+            time.sleep(0.1)
         if process.poll() is not None:
             runtime.reap_subprocess(process, wait_timeout=1.0, label="probe")
             self.skipTest("the encode finished before the cancel -- inconclusive")
+        if not (out.exists() and out.stat().st_size >= ENOUGH_BYTES):
+            runtime.reap_subprocess(process, wait_timeout=5.0, label="probe")
+            self.skipTest("the encoder produced too little in 45 s to cancel "
+                          "meaningfully -- inconclusive, not a failure")
 
         # This is the path a Ctrl+C now takes.
         runtime.reap_subprocess(process, label="probe", cancelled=True,

@@ -305,5 +305,40 @@ class WheelContents(unittest.TestCase):
         self.assertIn("FFmWiz.py", self._names)
 
 
+class TheWorkflowOnlyNamesFilesThatExist(unittest.TestCase):
+    """A path in a workflow is a claim nothing verifies until CI runs.
+
+    The classic/modern GUI split left `.github/workflows/python-smoke.yml`
+    pointing at `ffmwiz/gui/ffmwiz_gui.py` and `.../ffmwiz_gui_qml.py`, which
+    no longer exist. The compile job stayed GREEN on them: measured, both
+    `python -m py_compile <missing>` and `python -m compileall -q <missing>`
+    exit 0. Only the gui-import job, which does a real import, ever noticed --
+    and that job had never run, because Actions was billing-blocked.
+
+    So this checks every repo-relative .py/.qml path the workflow mentions.
+    """
+
+    WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "python-smoke.yml"
+
+    def test_every_python_path_in_the_workflow_resolves(self):
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        # Repo-relative paths only: skip anything with a scheme, a drive or a
+        # leading slash, and skip the runner's own temp paths.
+        named = sorted(set(re.findall(r"(?<![\w/.\\:-])((?:[\w.-]+/)*[\w.-]+\.(?:py|qml))", text)))
+        self.assertTrue(named, "no paths found; this guard is watching nothing")
+        missing = [p for p in named
+                   if not (PROJECT_ROOT / p).is_file() and "/" in p]
+        self.assertEqual([], missing,
+                         f"the workflow names {len(missing)} file(s) that do not exist: {missing}")
+
+    def test_the_compile_step_actually_fails_on_a_missing_file(self):
+        # py_compile and compileall both exit 0 for a path that is not there,
+        # so the step has to assert existence itself.
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("missing: ", text,
+                      "the compile step no longer checks that its files exist, "
+                      "so a renamed entry point would compile nothing and pass")
+
+
 if __name__ == "__main__":
     unittest.main()
