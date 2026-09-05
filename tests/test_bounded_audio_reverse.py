@@ -654,13 +654,57 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
                 stack.enter_context(patch)
             self.assertEqual("", ext04b.audio_reverse_one_shot_warning(answers))
 
+    def test_a_container_that_under_reports_does_not_shrink_the_job(self):
+        """The root cause of the CI failure, pinned.
+
+        `audio_reverse_content_seconds` read `format.duration` and nothing else,
+        so a container whose header under-reports sized the WHOLE job from a
+        wrong number: the segment count, the peak-budget decision and the length
+        check on the joined result all agreed on a track that was not there.
+        Nothing complained and the reverse came out short -- CI measured 21776
+        samples of a 176400-sample track with exit code 0.
+
+        Measured on the real function, 4 s source, 0.5 s segments:
+
+            container            before        after
+            healthy              4.000s / 8    4.000s / 8
+            says 0.494s          0.494s / 1    4.000s / 8
+            no duration at all   0.000s / 1    4.000s / 8
+        """
+        source = self._tone_source("mono.flac", "flac")
+        answers = self._answers(source, "flac")
+        truth, _content, _ranges = ext04c.audio_reverse_content_seconds(answers)
+        self.assertAlmostEqual(4.0, truth, delta=0.05, msg="fixture is not 4 s")
+
+        for label, fmt in (
+                ("under-reporting", {**answers["format"], "duration": "0.494000"}),
+                ("no duration", {k: v for k, v in answers["format"].items()
+                                 if k != "duration"})):
+            with self.subTest(container=label):
+                probe = dict(answers)
+                probe["format"] = fmt
+                duration, _c, _r = ext04c.audio_reverse_content_seconds(probe)
+                self.assertAlmostEqual(
+                    truth, duration, delta=0.05,
+                    msg=f"a {label} container still sizes the job; the audio "
+                        "stream's own duration must win")
+
     def test_an_unknown_duration_is_refused_rather_than_run_unbounded(self):
         source = self._tone_source("mono.flac", "flac")
         answers = self._answers(source, "flac")
         with contextlib.redirect_stdout(io.StringIO()):
             answers["cmd"] = [str(part) for part in
                               FFmWiz.build_audio_speed_reverse_command(answers)]
+        # BOTH sources, not just the container. The duration is read from the
+        # audio stream first and the container second, so blanking only the
+        # container no longer describes a job whose length is unknown -- it
+        # describes one the stream can still answer for. The assertion below
+        # is unchanged; only the situation it sets up is honest again.
         answers["format"] = {}
+        answers["audio_streams"] = [
+            {key: value for key, value in stream.items()
+             if key not in ("duration", "tags")}
+            for stream in (answers.get("audio_streams") or [])]
         noise = io.StringIO()
         with contextlib.redirect_stdout(noise):
             code, _elapsed = FFmWiz.run_bounded_audio_reverse(
