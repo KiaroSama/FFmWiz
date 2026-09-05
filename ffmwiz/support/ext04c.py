@@ -677,6 +677,33 @@ def bounded_audio_reverse_to_file(
         code, _elapsed = run_ffmpeg_with_progress(
             concat_cmd, total_duration=content_seconds,
             label=f"{label}: joining the reversed segments")
+        if code != 0:
+            return code, time.perf_counter() - started_at
+
+        # MEASURE THE RESULT. Every step above checks its own exit code and
+        # every one of them can succeed while the track comes out short --
+        # the concat demuxer in particular exits 0 for whatever it managed to
+        # read. Nothing had ever compared the joined length with the length
+        # that went in, so a truncated reverse reached the user as a success.
+        try:
+            joined = services.stream_duration_seconds(
+                {}, (services.ffprobe_json(answers.get("ffprobe") or "ffprobe",
+                                          target) or {}).get("format") or {}) or 0.0
+        except Exception:  # noqa: BLE001 - an unreadable result is a failure too
+            joined = 0.0
+        # A tenth of a second of slack: the last chunk is a remainder and a
+        # lossless round trip lands a frame either side, never a segment.
+        if content_seconds > 0 and joined < content_seconds - 0.1:
+            appio.error(
+                f"The bounded reverse joined {joined:.3f}s of audio from a "
+                f"{content_seconds:.3f}s track across {len(reversed_chunks)} "
+                "segment(s). Refusing to report a truncated result as success.")
+            log_warn(f"Bounded audio reverse aborted: joined {joined:.3f}s of "
+                     f"{content_seconds:.3f}s from {len(reversed_chunks)} chunks; "
+                     "chunk sizes: "
+                     + ", ".join(f"{c.name}={c.stat().st_size}B"
+                                 for c in reversed_chunks if c.exists()))
+            return 1, time.perf_counter() - started_at
         return code, time.perf_counter() - started_at
 
 
