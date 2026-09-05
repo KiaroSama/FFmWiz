@@ -145,7 +145,16 @@ Card {
             property string activeHandle: ""
             property string hoverHandle: ""
             property bool panning: false
+            // Distance from the press point, NOT a boolean set by the first
+            // mouse move. `dragged = true` on any movement meant a real click
+            // -- which almost always travels a pixel or two between press and
+            // release -- disarmed the zoom tool, so clicking with it did
+            // nothing. The classic canvas uses a 4px threshold for exactly
+            // this (`abs(dx) + abs(dy) < 4` in its mouseReleaseEvent).
+            readonly property int clickSlop: 4
             property bool dragged: false
+            property real zoomStart: 1.0
+            property bool zooming: false
             property real lastX: 0
             property real lastY: 0
             property int oL: 0
@@ -204,7 +213,13 @@ Card {
                     hoverHandle = hh
                     return
                 }
-                dragged = true
+                if (Math.abs(m.x - mPressX) + Math.abs(m.y - mPressY) > clickSlop)
+                    dragged = true
+                if (zooming) {
+                    win.pvZoomAt(zoomStart * Math.pow(2, (mPressY - m.y) / 110.0)
+                                 / win.pvZoom, mPressX, mPressY)
+                    return
+                }
                 if (activeHandle === "move") {
                     var dvx = srcX(m.x) - srcX(mPressX)
                     var dvy = srcY(m.y) - srcY(mPressY)
@@ -230,6 +245,11 @@ Card {
                     activeHandle = h
                 } else if ((m.modifiers & Qt.ControlModifier) && insideCrop(m.x, m.y)) {
                     activeHandle = "move"; oL = cropLeft; oR = cropRight; oT = cropTop; oB = cropBottom
+                } else if (win.tool === "zoom") {
+                    // Dragging with the zoom tool zooms continuously, as the
+                    // classic canvas does (2**(dy/110) from the press point).
+                    // Without this a drag with this tool did nothing at all.
+                    zooming = true; zoomStart = win.pvZoom; lastX = m.x; lastY = m.y
                 } else if (win.tool === "hand") {
                     panning = true; lastX = m.x; lastY = m.y
                 }
@@ -237,7 +257,7 @@ Card {
             onReleased: (m) => {
                 if (activeHandle !== "") commit()
                 else if (win.tool === "zoom" && !dragged) win.pvZoomAt((m.modifiers & Qt.AltModifier) ? (1.0 / 1.25) : 1.25, m.x, m.y)
-                activeHandle = ""; panning = false
+                activeHandle = ""; panning = false; zooming = false
                 hoverHandle = hitHandle(m.x, m.y)
             }
             onDoubleClicked: win.resetPreviewView()
