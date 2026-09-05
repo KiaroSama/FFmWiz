@@ -436,6 +436,32 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
                          "four seconds fits the real budget many times over")
         self.assertEqual(4 * RATE, self._samples(output))
 
+    def test_losing_a_segment_refuses_instead_of_writing_short_audio(self):
+        """The net under the fix above: any FUTURE cause of chunk loss is loud.
+
+        The concat joins whatever list it is handed, so nothing downstream can
+        notice a missing piece -- which is how CI got 21776 samples out of
+        176400 with exit code 0. Dropping a MIDDLE chunk here stands in for any
+        such cause: the run must refuse, not truncate.
+        """
+        from ffmwiz.support import ext04c
+        real = ext04c.audio_reverse_chunk_paths
+
+        def lose_one(*a, **k):
+            kept = real(*a, **k)
+            return kept[:1] + kept[2:] if len(kept) > 2 else kept
+
+        source = self._tone_source("mono.flac", "flac")
+        answers = self._answers(source, "flac")
+        code, output, noise = self._execute(
+            answers, FFmWiz.build_audio_speed_reverse_command,
+            list(self._tiny_budget(RATE, 1, "s16"))
+            + [mock.patch.object(ext04c, "audio_reverse_chunk_paths", lose_one)])
+        self.assertNotEqual(0, code, "a lost segment must fail the run")
+        self.assertIn("Refusing to write truncated audio", noise)
+        self.assertFalse(output.exists() and output.stat().st_size > 0,
+                         "no truncated output may be left behind")
+
     def test_many_chunks_reverse_to_a_bit_identical_result(self):
         source = self._tone_source("mono.flac", "flac")
         answers = self._answers(source, "flac")
@@ -773,6 +799,79 @@ class ThePublicDispatchersUseIt(NoLeakedArtifacts, unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(0, result[0])
         self.assertEqual(1, calls["bounded"])
+
+
+class TheChunkFilterDoesNotNeedADuration(unittest.TestCase):
+    """CI found this: real segments discarded, exit code 0, 12% of the audio.
+
+    `audio_reverse_chunk_paths` used to keep a forward chunk only when ffprobe
+    reported `format.duration > 0`. That is not the question it means to ask --
+    it means "is this the unreadable trailing stub the segment muxer leaves" --
+    and a segment muxer does not have to write a duration into a matroska
+    header. On the CI runners (ffmpeg 6.1.1 / 7.1.1 / 9.0.1 essentials, where
+    ffprobe also logged "Could not calculate exact stream sizes with ffprobe
+    packets") the reverse came out at 21776 samples instead of 176400, with a
+    zero exit code, because every step it did check had succeeded.
+
+    Measured on the collector, with a probe that reads the streams but cannot
+    measure the container:
+
+        before: kept 0/5      after: kept 4/5   (4 real + 1 stub written)
+    """
+
+    @staticmethod
+    def _blind(real):
+        """A probe that answers about streams but not about duration."""
+        def probe(ffprobe, path, *a, **k):
+            data = real(ffprobe, path, *a, **k) or {}
+            fmt = dict(data.get("format") or {})
+            fmt.pop("duration", None)
+            out = dict(data)
+            out["format"] = fmt
+            for stream in out.get("streams") or []:
+                stream.pop("duration", None)
+                (stream.get("tags") or {}).pop("DURATION", None)
+            return out
+        return probe
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
+                         "ffmpeg/ffprobe required")
+    def test_a_probe_with_no_duration_still_keeps_every_real_chunk(self):
+        from ffmwiz import services
+        from ffmwiz.support import ext04c
+
+        ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+        with tempfile.TemporaryDirectory() as raw:
+            work = Path(raw)
+            source = work / "tone.flac"
+            subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+                            "-i", "sine=frequency=440:sample_rate=44100:duration=4",
+                            "-c:a", "flac", str(source)], check=True, timeout=120)
+            subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(source),
+                            "-map", "0:a:0", "-c:a", "flac",
+                            "-f", "segment", "-segment_time", "1.000000",
+                            "-segment_format", "matroska", "-reset_timestamps", "1",
+                            str(work / "areverse_fwd_%05d.mkv")], check=True, timeout=120)
+            written = sorted(work.glob("areverse_fwd_*"))
+            self.assertGreaterEqual(len(written), 3, "the fixture did not segment")
+
+            real = services.ffprobe_json
+            blind = self._blind(real)
+            services.ffprobe_json = blind
+            ext04c.services.ffprobe_json = blind
+            try:
+                kept = ext04c.audio_reverse_chunk_paths(ffprobe, work, "areverse_fwd_")
+            finally:
+                services.ffprobe_json = real
+                ext04c.services.ffprobe_json = real
+
+            # Every file the muxer wrote except the trailing stub. The stub is
+            # unreadable (ffprobe raises on its bare EBML header), which is what
+            # separates it from a chunk that merely has no duration.
+            self.assertEqual(len(written) - 1, len(kept),
+                             "a probe that cannot measure the container must not "
+                             "cost us real audio segments")
+            self.assertNotIn(written[-1], kept, "the trailing stub still has to go")
 
 
 if __name__ == "__main__":

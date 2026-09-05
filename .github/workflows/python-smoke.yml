@@ -38,7 +38,8 @@ jobs:
 
       - name: Compile Python files
         run: |
-          python -m py_compile FFmWiz.py ffmwiz/gui/ffmwiz_gui.py ffmwiz/gui/ffmwiz_gui_qml.py
+          python -c "import pathlib, sys; missing=[p for p in sys.argv[1:] if not pathlib.Path(p).is_file()]; sys.exit('missing: ' + ', '.join(missing)) if missing else None" FFmWiz.py ffmwiz/gui/classic/ffmwiz_gui.py ffmwiz/gui/modern/ffmwiz_gui_qml.py
+          python -m py_compile FFmWiz.py ffmwiz/gui/classic/ffmwiz_gui.py ffmwiz/gui/modern/ffmwiz_gui_qml.py
           python -m compileall -q ffmwiz
 
       - name: Validate config.env template
@@ -163,7 +164,7 @@ jobs:
       - name: Import the classic GUI headless
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -c "import importlib.util, PySide6; spec = importlib.util.spec_from_file_location('ffmwiz_gui', 'ffmwiz/gui/ffmwiz_gui.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('GUI import OK', PySide6.__version__)"
+        run: python -c "import importlib.util, PySide6; spec = importlib.util.spec_from_file_location('ffmwiz_gui', 'ffmwiz/gui/classic/ffmwiz_gui.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('GUI import OK', PySide6.__version__)"
 
       - name: Install test dependencies
         # numpy backs the waveform maths the QML tests exercise; without it the

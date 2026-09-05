@@ -367,25 +367,34 @@ def audio_reverse_chunk_paths(ffprobe: str, workspace: Path, prefix: str) -> lis
     """The forward chunks that really hold audio, in order.
 
     The segment muxer writes a trailing stub for the boundary past the end of
-    the stream -- 670 bytes of header on a 4 s fixture -- which ffprobe cannot
-    even read. Anything without a positive duration is dropped; the sample-count
-    regression is what proves nothing real was dropped with it.
+    the stream -- a few hundred bytes of bare header on a 4 s fixture -- and the
+    stub has to go before the concat.
+
+    The test is READABLE AND CARRIES AN AUDIO STREAM, not "ffprobe can compute a
+    duration". Those are different questions and the difference is not academic:
+    this used to drop anything whose `format.duration` was absent, and a segment
+    muxer does not have to write a duration into a matroska header. On the CI
+    runners (ffmpeg 6.1.1 / 7.1.1 / 9.0.1 essentials, where ffprobe also logged
+    "Could not calculate exact stream sizes with ffprobe packets") real chunks
+    were discarded and the reverse came out at 21776 samples instead of 176400 --
+    silently, exit code 0, because every step it did check had succeeded.
+
+    The stub is not merely undurated, it is unreadable: ffprobe reports "EBML
+    header parsing failed" and raises. That is what separates the two cleanly.
     """
     kept: list[Path] = []
     for path in sorted(workspace.glob(prefix + "*")):
         try:
             probe = services.ffprobe_json(ffprobe, path) or {}
         except Exception:
-            # The stub is not merely empty, it is unreadable: ffprobe reports
-            # "EBML header parsing failed" and raises. That is the signature of
-            # the artefact, so it is treated as a zero-length chunk rather than
-            # allowed to fail the run.
-            probe = {}
-        duration = services.stream_duration_seconds({}, probe.get("format") or {}) or 0.0
-        if duration > 0:
+            log_info(f"Bounded audio reverse: dropped unreadable scratch chunk {path.name}")
+            continue
+        has_audio = any(str(stream.get("codec_type") or "").lower() == "audio"
+                        for stream in (probe.get("streams") or []))
+        if has_audio:
             kept.append(path)
         else:
-            log_info(f"Bounded audio reverse: dropped empty scratch chunk {path.name}")
+            log_info(f"Bounded audio reverse: dropped streamless scratch chunk {path.name}")
     return kept
 
 
@@ -606,6 +615,25 @@ def bounded_audio_reverse_to_file(
             answers.get("ffprobe") or "ffprobe", workspace, "areverse_fwd_")
         if not chunks:
             appio.error("The bounded reverse produced no audio segments.")
+            return 1, time.perf_counter() - started_at
+        # Nothing used to compare what came back with what was written.
+        # Losing chunks fails no step -- the concat joins whatever it is
+        # handed -- so short audio reached the user with exit code 0.
+        #
+        # The bound is the muxer's OUTPUT, not `segment_count`: that is
+        # `ceil(content / segment)` and over-counts whenever the content
+        # divides evenly (measured: 9 planned, 8 written). What the
+        # docstring of the collector actually promises is that exactly one
+        # trailing stub may be dropped, so that is what is checked.
+        written = sorted(workspace.glob("areverse_fwd_*"))
+        dropped = [path for path in written if path not in chunks]
+        if len(dropped) > 1 or (dropped and dropped[0] != written[-1]):
+            appio.error(
+                f"The bounded reverse discarded {len(dropped)} of the "
+                f"{len(written)} audio segments it wrote, so the result would "
+                "be short. Refusing to write truncated audio.")
+            log_warn("Bounded audio reverse aborted: dropped "
+                     f"{[path.name for path in dropped]} of {len(written)} chunks")
             return 1, time.perf_counter() - started_at
 
         reversed_chunks: list[Path] = []
