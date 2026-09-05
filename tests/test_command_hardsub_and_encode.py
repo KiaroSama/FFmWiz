@@ -167,6 +167,28 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
                 FFmWiz.trackmanager.print_source_info(answers)
             self.assertIn("chapters: no", out.getvalue())
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _nvidia_present(present):
+        """Pin the DEVICE answer these two tests depend on.
+
+        `join_uses_nvenc_encode` asks `gpu_available_for_answers` last, so
+        without this the result follows whatever card the machine running the
+        suite happens to have: green on a developer box with an NVIDIA GPU, red
+        on a CI runner with none. Patched at the DEFINING module -- patching a
+        re-export leaves the definer's own global untouched.
+        """
+        import ffmwiz.support.ext01c as definer
+        import ffmwiz.modes_join as caller
+        original = definer.gpu_available_for_answers
+        definer.gpu_available_for_answers = lambda *_a, **_k: present
+        caller.gpu_available_for_answers = definer.gpu_available_for_answers
+        try:
+            yield
+        finally:
+            definer.gpu_available_for_answers = original
+            caller.gpu_available_for_answers = original
+
     def test_join_videos_near_quality_uses_nvenc_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -186,13 +208,20 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
                 {"path": first, "streams": [stream], "video_streams": [stream], "audio_streams": [], "format": {}, "duration": 1.0},
                 {"path": second, "streams": [dict(stream, width=1920)], "video_streams": [dict(stream, width=1920)], "audio_streams": [], "format": {}, "duration": 1.0},
             ]
-            cmd = FFmWiz.build_join_near_quality_command(
-                {"ffmpeg": "ffmpeg", "video_encoders": ["h264_nvenc"]},
-                items,
-                base / "joined.mp4",
-            )
+            answers = {"ffmpeg": "ffmpeg", "video_encoders": ["h264_nvenc"]}
+            with self._nvidia_present(True):
+                cmd = FFmWiz.build_join_near_quality_command(
+                    answers, items, base / "joined.mp4")
             self.assertIn("h264_nvenc", cmd)
             self.assertIn("-qp", cmd)
+            # The other direction, which is the whole point of the gate: the
+            # BUILD listing h264_nvenc says nothing about the machine having a
+            # card to run it on.
+            with self._nvidia_present(False):
+                cpu = FFmWiz.build_join_near_quality_command(
+                    answers, items, base / "joined_cpu.mp4")
+            self.assertNotIn("h264_nvenc", cpu)
+            self.assertIn("libx264", cpu)
 
     def test_join_videos_near_quality_applies_nvenc_multipass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,11 +242,10 @@ class CommandHardsubAndEncodeTests(CommandGenBase):
                 {"path": first, "streams": [stream], "video_streams": [stream], "audio_streams": [], "format": {}, "duration": 1.0},
                 {"path": second, "streams": [dict(stream)], "video_streams": [dict(stream)], "audio_streams": [], "format": {}, "duration": 1.0},
             ]
-            cmd = FFmWiz.build_join_near_quality_command(
-                {"ffmpeg": "ffmpeg", "video_encoders": ["h264_nvenc"], "nvenc_multipass": "fullres"},
-                items,
-                base / "joined.mp4",
-            )
+            with self._nvidia_present(True):
+                cmd = FFmWiz.build_join_near_quality_command(
+                    {"ffmpeg": "ffmpeg", "video_encoders": ["h264_nvenc"], "nvenc_multipass": "fullres"},
+                    items, base / "joined.mp4")
             text = " ".join(cmd)
         self.assertIn("-multipass fullres", text)
 
