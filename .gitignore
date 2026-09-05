@@ -108,3 +108,6 @@ _tmp*
 !/.env.dist
 
 /skills-lock.json
+
+# Local CI executor: binaries, credentials and a full working checkout.
+/.actions-runner/
