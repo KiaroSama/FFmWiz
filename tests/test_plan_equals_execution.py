@@ -398,8 +398,23 @@ class PlanMatchesExecution(NoLeakedArtifacts, unittest.TestCase):
 
         manual = self._media_facts(planning / "result.mkv")
         automatic = self._media_facts(running / "result.mkv")
-        self.assertEqual(automatic["frames"], manual["frames"],
-                         "the exported plan wrote a different number of frames")
+        # Within a frame, not to the frame. This same docstring establishes
+        # that the two derive their length differently -- the run reads the
+        # millisecond span Matroska stores, the plan computes it from the
+        # inputs and the frame rate -- and 333 microseconds is enough to land
+        # on either side of a frame boundary depending on how a given ffmpeg
+        # build rounds. Demanding an exact match contradicts the 200 ms the
+        # content comparison already excludes for that very reason (CI saw
+        # 149 against 150 where this machine sees neither).
+        #
+        # It still catches what it was written for: a plan that lost real
+        # content dropped SIXTEEN frames (134 against 150, recorded in
+        # `reverse_pipeline.py`), and the duration assertion below is
+        # unchanged, so a real loss still moves both.
+        self.assertLessEqual(
+            abs(automatic["frames"] - manual["frames"]), 1,
+            f"the exported plan wrote {manual['frames']} frames and the run "
+            f"wrote {automatic['frames']}; more than a rounding frame apart")
         self.assertAlmostEqual(automatic["duration"], manual["duration"], delta=0.05,
                                msg="the exported plan wrote a different duration")
         self.assertEqual(automatic["frame_hashes"], manual["frame_hashes"],

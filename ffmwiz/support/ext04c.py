@@ -680,12 +680,19 @@ def bounded_audio_reverse_to_file(
             if code != 0:
                 return code, time.perf_counter() - started_at
 
+        # The concat DEMUXER cannot join these: they are FLAC, each with its
+        # own STREAMINFO, and it applies the first part's header to all of
+        # them -- the rest fail to decode and vanish without a non-zero exit.
+        # The list is still written, because the exported plan shows it and
+        # the ORDER is the part that matters.
         concat_list = workspace / "areverse_concat.txt"
         # reverse(A||B) is reverse(B)||reverse(A), so joining the reversed
         # chunks in reverse order IS the whole-track reversal -- exactly, not
         # approximately.
         write_concat_list(list(reversed(reversed_chunks)), concat_list)
-        concat_cmd = build_concat_copy_command(answers["ffmpeg"], concat_list, target)
+        concat_cmd = build_audio_concat_filter_command(
+            answers["ffmpeg"], list(reversed(reversed_chunks)), target,
+            tracks=max(1, len(indices)))
         log_info("Bounded audio reverse concat: " + command_to_powershell(concat_cmd))
         code, _elapsed = run_ffmpeg_with_progress(
             concat_cmd, total_duration=content_seconds,

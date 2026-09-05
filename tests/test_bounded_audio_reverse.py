@@ -468,18 +468,21 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
         whatever it managed to read -- so a truncated reverse reached the user as
         a success. Joining only the first chunk stands in for any cause of that.
         """
+        # Patch the JOIN, not the list: the parts now reach ffmpeg as its own
+        # inputs through the concat filter, so shortening the list file no
+        # longer shortens the result.
         from ffmwiz.support import ext04c
-        real = ext04c.write_concat_list
+        real = ext04c.build_audio_concat_filter_command
 
-        def only_the_first(paths, target):
-            return real(list(paths)[:1], target)
+        def only_the_first(ffmpeg, parts, target, *a, **k):
+            return real(ffmpeg, list(parts)[:1], target, *a, **k)
 
         source = self._tone_source("mono.flac", "flac")
         answers = self._answers(source, "flac")
         code, output, noise = self._execute(
             answers, FFmWiz.build_audio_speed_reverse_command,
             list(self._tiny_budget(RATE, 1, "s16"))
-            + [mock.patch.object(ext04c, "write_concat_list", only_the_first)])
+            + [mock.patch.object(ext04c, "build_audio_concat_filter_command", only_the_first)])
         self.assertNotEqual(0, code, "a short join must fail the run")
         self.assertIn("Refusing to report a truncated result", noise)
 

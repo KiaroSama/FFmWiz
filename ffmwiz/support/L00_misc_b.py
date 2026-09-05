@@ -415,6 +415,49 @@ def ps_quote(arg: str) -> str:
     return "'" + arg.replace("'", "''") + "'"
 
 
+def build_audio_concat_filter_command(ffmpeg: str, parts: list[Path],
+                                      output_path: Path,
+                                      codec: str = "flac",
+                                      tracks: int = 1) -> list[str]:
+    """Join audio parts through the concat FILTER, one input each.
+
+    NOT the concat demuxer. The demuxer reads the FIRST part's codec header and
+    applies it to every part, and FLAC carries its blocksize in a per-file
+    STREAMINFO -- so parts recorded with a different blocksize fail to decode
+    ("blocksize 1024 > 272", "decode_frame() failed") and are dropped without a
+    non-zero exit. Measured on ffmpeg 9.0.1: eight half-second parts joined by
+    the demuxer produced 0.4938 s of audio under a header still claiming 4.004 s,
+    whatever `-c copy`, `-avoid_negative_ts` or `+genpts` were set to. The same
+    eight through the filter produce 4.0000 s.
+
+    Each part becomes its own `-i`, so each is opened with its own header. The
+    default codec is FLAC, so the join stays lossless.
+    """
+    cmd = [ffmpeg, "-y", "-hide_banner"]
+    for part in parts:
+        cmd.extend(["-i", str(part)])
+    # One chain per TRACK. A job may reverse several audio tracks and the
+    # chunks carry all of them, so joining only `a:0` would silently drop
+    # the rest -- the same class of loss this whole builder exists to stop.
+    chains, maps = [], []
+    for track in range(max(1, tracks)):
+        label = f"[aout{track}]"
+        chains.append(
+            "".join(f"[{index}:a:{track}]" for index in range(len(parts)))
+            + f"concat=n={len(parts)}:v=0:a=1{label}")
+        maps.extend(["-map", label])
+    cmd.extend(["-filter_complex", ";".join(chains)])
+    cmd.extend(maps)
+    # A filter output has no source stream, so it inherits no tags -- the
+    # language and title the demuxer used to carry through `-c copy` would
+    # simply disappear. Every part has the same track layout, so input 0
+    # answers for all of them.
+    for track in range(max(1, tracks)):
+        cmd.extend([f"-map_metadata:s:a:{track}", f"0:s:a:{track}"])
+    cmd.extend(["-c:a", codec, str(output_path)])
+    return cmd
+
+
 def build_concat_copy_command(ffmpeg: str, concat_list: Path, output_path: Path) -> list[str]:
     cmd = [
         ffmpeg,
@@ -668,6 +711,7 @@ __all__ = [
     'is_single_contiguous_cut',
     'video_bitrate_mode',
     'ps_quote',
+    'build_audio_concat_filter_command',
     'build_concat_copy_command',
     'ffmpeg_input_section_end',
     'ensure_video_input',
