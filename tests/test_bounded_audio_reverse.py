@@ -88,6 +88,16 @@ def _goertzel(values, rate, freq):
                          - coeff * first * second)) / count
 
 
+def _probe_seconds(path):
+    """The container duration, or None when ffprobe cannot say."""
+    out = _run([FFPROBE, "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=nk=1:nw=1", str(path)])
+    try:
+        return float((out.stdout or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class TheMemoryBudget(unittest.TestCase):
     """The arithmetic, without ffmpeg."""
 
@@ -299,6 +309,21 @@ class BoundedAudioReverse(NoLeakedArtifacts, unittest.TestCase):
         result = _run(args)
         if result.returncode != 0:
             self.skipTest("could not build the fixture: " + (result.stderr or "")[-300:])
+        # VERIFY the fixture before any test measures something downstream
+        # of it. It is cached in `_class_tmp` and shared by every case in
+        # the class, so one short build makes a whole suite fail with
+        # sample counts that look like a pipeline defect. On CI, several
+        # unrelated cases -- mono and 6-channel alike -- all reported the
+        # SAME 21776 samples, which is the signature of a shared input,
+        # not of the code under test.
+        seconds = _probe_seconds(path)
+        expected = float(len(tones))
+        if seconds is None or abs(seconds - expected) > 0.05:
+            raise AssertionError(
+                f"the {expected:.0f}s fixture {name} came out at "
+                f"{seconds if seconds is None else round(seconds, 3)}s; every "
+                "measurement taken from it would be meaningless. Built with: "
+                + " ".join(str(part) for part in args[-14:]))
         return path
 
     def _answers(self, source, ext, **extra):
