@@ -29,10 +29,24 @@ from pathlib import Path
 
 import FFmWiz
 
-from ffmwiz.support import ext02
+from ffmwiz.support import ext00c, ext02
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+
+
+def _scale_cuda_has_reset_sar() -> bool:
+    """Ask the same question the builder asks, through the same function.
+
+    The modern GPU chain is only emitted where `scale_cuda` accepts
+    `reset_sar`; running it anywhere else is not a fast path, it is an invalid
+    command line. Sharing `filter_option_available` rather than re-deriving the
+    answer from a version number keeps the test and the builder from drifting
+    apart -- the CI matrix runs a 7.1.1 and a 6.1.1 leg precisely because that
+    split is real.
+    """
+    return bool(FFMPEG) and ext00c.filter_option_available(
+        FFMPEG, "scale_cuda", "reset_sar")
 
 STRETCH = "stretch:1000x500"
 
@@ -252,15 +266,15 @@ class RealNvencStretchGeometry(unittest.TestCase):
                          f"{chain}\n{result.stderr.strip()[-400:]}")
         return _probe_geometry(out)
 
+    @unittest.skipUnless(
+        _scale_cuda_has_reset_sar(),
+        "this build's scale_cuda has no reset_sar (pre-7.2), so the modern "
+        "chain is not what it emits here; the fallback below is")
     def test_the_gpu_fast_path_stretches_to_square_pixels(self):
         self.assertEqual((1000, 500, "1:1", "2:1"), self._encode("modern", True))
 
     def test_the_old_build_fallback_reaches_the_same_geometry(self):
         self.assertEqual((1000, 500, "1:1", "2:1"), self._encode("legacy", False))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TheHardwareGateAgreesWithTheHardware(unittest.TestCase):
@@ -323,3 +337,9 @@ class TheHardwareGateAgreesWithTheHardware(unittest.TestCase):
         self.assertGreaterEqual(min(width, height), 160,
                                 "NVENC refuses frames below ~160 on a side, so a "
                                 "smaller probe fails on working hardware")
+
+
+# At the END, not mid-file: `unittest.main()` collects the classes defined so
+# far, so a guard placed above one silently drops it from a direct run.
+if __name__ == "__main__":
+    unittest.main()
