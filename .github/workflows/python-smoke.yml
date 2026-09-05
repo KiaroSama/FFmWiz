@@ -11,6 +11,18 @@ on:
 permissions:
   contents: read
 
+# Every job reads `vars.CI_RUNNER` and falls back to `windows-latest`, so the
+# default behaviour is unchanged and hosted runners stay the norm. Setting the
+# repository variable to `self-hosted` moves the whole matrix onto a registered
+# runner; UNSETTING it moves everything straight back, with no edit to this
+# file. That escape hatch exists because GitHub-hosted minutes can stop being
+# available for reasons that have nothing to do with the code -- a billing or
+# spending-limit block starts every job and ends it in about two seconds with
+# no steps at all, which reads as a red X and is not one.
+#
+# Jobs must therefore not assume a disposable machine: nothing here installs
+# software system-wide. See the ffmpeg steps.
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -19,7 +31,7 @@ jobs:
   # Installs nothing: py_compile, the template check and the import smoke check
   # all run on the standard library alone.
   compile:
-    runs-on: windows-latest
+    runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -49,7 +61,7 @@ jobs:
         run: python -c "import sys; sys.modules['PySide6'] = None; import FFmWiz; assert hasattr(FFmWiz, 'build_add_files_to_video_command'); assert hasattr(FFmWiz, 'run_media_info_mode'); assert hasattr(FFmWiz, 'run_mux_cleanup_mode'); assert hasattr(FFmWiz, 'run_hardsub_encode_mode'); assert hasattr(FFmWiz, 'build_hardsub_command'); assert hasattr(FFmWiz, 'confirm_numeric_target_not_above_source'); assert hasattr(FFmWiz, 'confirm_resolution_not_above_source'); assert hasattr(FFmWiz, 'analyze_copy_cut_chapter_plan'); assert hasattr(FFmWiz, 'add_files_stream_copy_compatibility_errors'); assert '.webvtt' in FFmWiz.HARDSUB_SUBTITLE_EXTS; assert FFmWiz.display_language('und') == 'unknown'; assert FFmWiz.describe_video_bit_depth({'pix_fmt':'yuv420p10le'}) == '10-bit'; assert FFmWiz.run_mux_cleanup_mode.__module__ == 'ffmwiz.support.ext00b'; assert 'MB' in FFmWiz.media_info_value_with_units('size', '1048576'); assert 'bit/s' in FFmWiz.media_info_value_with_units('bit_rate', '128000'); assert 's)' in FFmWiz.media_info_value_with_units('duration', '12.5'); assert FFmWiz.default_media_reports_dir().name == 'MediaReports'"
 
   tests:
-    runs-on: windows-latest
+    runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
     timeout-minutes: 20
     # The real-ffmpeg tests print progress lines containing non-ASCII separators;
     # on a cp1252 console that is a UnicodeEncodeError, not a test failure.
@@ -100,15 +112,30 @@ jobs:
 
       - name: Install ffmpeg ${{ matrix.ffmpeg }}
         # Without ffmpeg on PATH the real-encode suites self-skip and this job
-        # reports OK having never executed a single ffmpeg assertion. The
-        # chocolatey package embeds the build, so a pinned old version installs
-        # as reliably as the newest one.
+        # reports OK having never executed a single ffmpeg assertion.
+        #
+        # Unpacked, not installed. `choco install --allow-downgrade` mutates the
+        # MACHINE, which is merely wasteful on a throwaway hosted runner and
+        # destructive on a self-hosted one -- it would downgrade the host's own
+        # ffmpeg to whatever this leg pins. These are the same gyan.dev builds
+        # the chocolatey package embeds, dropped in RUNNER_TEMP and put on PATH
+        # for this job only. GITHUB_PATH PREPENDS, so a pinned leg still wins
+        # over an ffmpeg the host already has, and the step below proves it did.
         run: |
-          if ("${{ matrix.ffmpeg }}" -eq "latest") {
-            choco install ffmpeg -y --no-progress
+          $v = "${{ matrix.ffmpeg }}"
+          $url = if ($v -eq "latest") {
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
           } else {
-            choco install ffmpeg -y --no-progress --version=${{ matrix.ffmpeg }} --allow-downgrade
+            "https://github.com/GyanD/codexffmpeg/releases/download/$v/ffmpeg-$v-essentials_build.zip"
           }
+          $dst = Join-Path $env:RUNNER_TEMP "ffmpeg-$v"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-$v.zip"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 900
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          $exe = Get-ChildItem $dst -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found in $url" }
+          $exe.Directory.FullName >> $env:GITHUB_PATH
 
       - name: Confirm this leg is the ffmpeg it claims to be
         shell: bash
@@ -140,7 +167,7 @@ jobs:
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
   # module still fails CI now that the other jobs install nothing.
   gui-import:
-    runs-on: windows-latest
+    runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
     timeout-minutes: 15
 
     steps:
@@ -173,7 +200,17 @@ jobs:
 
       - name: Install ffmpeg
         # The GUI/editor suites decode real media for waveforms and previews.
-        run: choco install ffmpeg -y --no-progress
+        # Unpacked rather than installed, for the reason the tests job explains:
+        # a self-hosted runner's ffmpeg is the developer's own.
+        run: |
+          $dst = Join-Path $env:RUNNER_TEMP "ffmpeg-latest"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-latest.zip"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zip -TimeoutSec 900
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          $exe = Get-ChildItem $dst -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found in the release archive" }
+          $exe.Directory.FullName >> $env:GITHUB_PATH
 
       - name: Run the GUI and QML behaviour suites headless
         shell: bash
