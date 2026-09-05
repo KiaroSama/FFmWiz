@@ -111,7 +111,16 @@ class AudioReverseKeepsTheWorkflow(NoLeakedArtifacts, unittest.TestCase):
         result = _run([
             FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
             "-filter_complex", video + audio, "-map", "[v]", "-map", "[a]",
+            # `-color_range tv` is not decoration. Without it, whether the file
+            # carries a range tag depends on the build: FFmpeg 9.0.1 writes one,
+            # 6.1.1 does not. An untagged source makes the folder-encode case
+            # below demand a BATCH colour-range policy -- correctly, since the
+            # builder refuses to guess a range -- so the test would be asserting
+            # about colour-range policy on old builds and about video
+            # preservation on new ones. Tagging the fixture keeps it about the
+            # one thing its name claims.
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-color_range", "tv",
             "-c:a", "flac", cls.source])
         if result.returncode != 0:
             raise unittest.SkipTest(f"could not build the source: {result.stderr[-400:]}")
