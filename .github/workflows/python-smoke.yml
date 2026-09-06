@@ -143,7 +143,7 @@ jobs:
           $exe.Directory.FullName >> $env:GITHUB_PATH
 
       - name: Confirm this leg is the ffmpeg it claims to be
-        shell: bash
+        shell: bash --noprofile --norc -eo pipefail "{0}"
         # A silent version drift would turn the two legs into duplicates and
         # the reset_sar branch of the other one would stop being covered.
         # No pipes: this shell runs with -o pipefail, and a reader that exits
@@ -160,7 +160,7 @@ jobs:
           [ "$have" = "$want" ]
 
       - name: Run test suite
-        shell: bash
+        shell: bash --noprofile --norc -eo pipefail "{0}"
         # tests/run_suite.py runs one module per worker process (stdlib only -
         # this project keeps zero test dependencies). The suite is dominated by
         # real ffmpeg child processes, so parallelism cut it 48s -> ~16s on a
@@ -220,7 +220,7 @@ jobs:
           $exe.Directory.FullName >> $env:GITHUB_PATH
 
       - name: Run the GUI and QML behaviour suites headless
-        shell: bash
+        shell: bash --noprofile --norc -eo pipefail "{0}"
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: "1"
