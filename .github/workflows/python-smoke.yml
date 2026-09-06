@@ -96,7 +96,12 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+          # Hosted runners are disposable, so the pip cache has to travel with
+          # the job. A self-hosted one keeps its own pip cache on disk between
+          # runs, which makes the upload pure overhead -- measured at 13m04s of
+          # a 15m budget for the PySide6 job, against 4s for the install it was
+          # meant to speed up. Empty disables it.
+          cache: ${{ vars.CI_RUNNER && '' || 'pip' }}
 
       - name: Install test dependencies
         # numpy is needed by the waveform tests only; requirements.txt is the
@@ -178,7 +183,9 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-          cache: pip
+          # See the tests job: on a self-hosted runner the pip cache is already
+          # local, and this is the job whose upload blew the time budget.
+          cache: ${{ vars.CI_RUNNER && '' || 'pip' }}
 
       - name: Install runtime dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
