@@ -5,6 +5,7 @@ it can be unit-tested without Qt. These cover: cache-key invalidation, min/max
 pair output (not single peaks), deep-zoom detail vs the overview, full-scale
 amplitude (vs int16 32768, not the clip's own peak), and join-timeline decoding.
 """
+import json
 import os
 import re
 import sys
@@ -317,6 +318,75 @@ class TheZoomToolSurvivesAClick(unittest.TestCase):
         self.assertIn("Math.pow(2, (mPressY - m.y) / 110.0)", self.src,
                       "the drag-zoom no longer matches the classic's response curve")
         self.assertIn("zooming = false", self.src, "the zoom drag is never released")
+
+
+class ClickingAMarkerFlagGrabsIt(unittest.TestCase):
+    """The IN/OUT flags have to be draggable by clicking the FLAG.
+
+    `chip()` clamps its box back inside the panel, so the default IN at t=0 and
+    OUT at the end draw tens of pixels away from their own stems. `pick()` used
+    to measure only the stem, within 7px -- so aiming at the visible flag
+    selected nothing, and IN/OUT could not be moved at all. These run the
+    editor's own `pick()` in a real JS engine rather than asserting on source
+    text, because the failure was arithmetic, not a missing line.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from PySide6.QtCore import QCoreApplication
+            from PySide6.QtQml import QJSEngine  # noqa: F401
+        except Exception as exc:  # pragma: no cover - the tests job has no PySide6
+            raise unittest.SkipTest(f"PySide6 QtQml required: {exc}")
+        cls._app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+        src = (_GUI_DIR / "qml" / "TimelinePanel.qml").read_text(encoding="utf-8")
+        start = src.index("            function pick(x, y) {")
+        end = src.index("            onPressed:", start)
+        cls._pick_js = src[start:end]
+
+    def _engine(self, boxes, mark_in=0.0, mark_out=100.0):
+        """`pick` against a stub panel: 1s == 1px, so times read as positions."""
+        from PySide6.QtQml import QJSEngine
+        eng = QJSEngine()
+        prelude = (
+            "var tl = { chipBoxes: %s, t2x: function (t) { return t; } };"
+            "var markIn = %r; var markOut = %r;"
+            "var separatorPoints = []; var cuts = [];"
+            % (json.dumps(boxes), float(mark_in), float(mark_out))
+        )
+        res = eng.evaluate(prelude + chr(10) + self._pick_js)
+        self.assertFalse(res.isError(), f"pick() failed to evaluate: {res.toString()}")
+        return eng
+
+    def _pick(self, eng, x, y):
+        res = eng.evaluate("JSON.stringify(pick(%r, %r))" % (float(x), float(y)))
+        self.assertFalse(res.isError(), res.toString())
+        return json.loads(res.toString())
+
+    def test_the_clamped_in_flag_is_hit_where_it_is_drawn(self):
+        # IN sits at t=0 but its flag was pushed to x=1..35 by the clamp.
+        box = {"kind": "in", "idx": -1, "lx": 1, "top": 23, "w": 34, "h": 17}
+        got = self._pick(self._engine([box]), 20, 30)
+        self.assertEqual("in", got["kind"],
+                         "clicking the IN flag selects nothing, so it cannot be dragged")
+
+    def test_the_stem_still_works_for_a_bare_line(self):
+        # A split with no recorded box must still be grabbable by its stem.
+        eng = self._engine([])
+        eng.evaluate("separatorPoints = [50];")
+        self.assertEqual("split", self._pick(eng, 52, 80)["kind"])
+
+    def test_empty_track_area_is_a_seek_not_a_grab(self):
+        box = {"kind": "in", "idx": -1, "lx": 1, "top": 23, "w": 34, "h": 17}
+        got = self._pick(self._engine([box]), 400, 90)
+        self.assertEqual("", got["kind"], "a click on empty track grabbed a marker")
+
+    def test_a_click_below_the_flag_band_does_not_grab_it(self):
+        # The box test must respect y, or the whole column under a flag becomes
+        # a drag handle and dragging the waveform moves the marker instead.
+        box = {"kind": "in", "idx": -1, "lx": 1, "top": 23, "w": 34, "h": 17}
+        got = self._pick(self._engine([box], mark_in=500.0), 20, 120)
+        self.assertEqual("", got["kind"])
 
 
 if __name__ == "__main__":
