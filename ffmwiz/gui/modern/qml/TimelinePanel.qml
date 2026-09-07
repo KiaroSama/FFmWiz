@@ -30,11 +30,20 @@ Card {
         //   0      .. RULER_H   timecode labels + their ticks
         //   RULER_H.. CHIP_BOT  IN/OUT/SPLIT/CENTER chips and the CTI arrow
         //   CHIP_BOT..          waveform, cut ranges, everything editable
-        readonly property int rulerH: 20
-        readonly property int chipTop: 21
-        readonly property int chipBot: 41
+        // Ruler 20 -> 22 so a 12px bold timecode fits with its tick under it.
+        // The two chip bounds move with it; nothing measures them independently.
+        readonly property int rulerH: 22
+        readonly property int chipTop: 23
+        readonly property int chipBot: 43
+        // Where each draggable chip actually LANDED. `chip()` clamps the box
+        // back inside the panel, so a marker at t=0 draws its flag well to the
+        // right of its own stem -- and a hit test that only measured the stem
+        // could not be hit by clicking the thing you can see. Recorded here on
+        // every paint and consulted first by pick().
+        property var chipBoxes: []
         onPaint: {
             var ctx = getContext("2d"); ctx.reset()
+            tl.chipBoxes = []
             var RULER_H = rulerH, CHIP_TOP = chipTop, CHIP_BOT = chipBot
             var midY = Math.max(CHIP_BOT + 14, height * 0.58)
             ctx.strokeStyle = win.col("timeline_track", "#1c2128"); ctx.lineWidth = 1
@@ -60,7 +69,10 @@ Card {
             // tick with a short tick line under it, and a label dropped
             // entirely when it would touch the previous one. A number floating
             // with nothing under it does not say WHERE it is.
-            ctx.font = "600 10px 'Consolas'"; ctx.textAlign = "center"
+            // 12px bold, not 10px semibold: the timecode is the one thing on
+            // this strip you read at a glance, and at 10px it lost to the
+            // classic editor's ruler on the same screen.
+            ctx.font = "700 12px 'Consolas'"; ctx.textAlign = "center"
             var t0r = Math.ceil(win.viewStart / rstep) * rstep
             var lastRight = -1e9
             for (var tr = t0r; tr <= win.viewStart + span + 1e-6; tr += rstep) {
@@ -74,9 +86,9 @@ Card {
                 var lcx = Math.max(pad + lw / 2, Math.min(width - pad - lw / 2, trx))
                 if (lcx - lw / 2 < lastRight + 10) continue
                 ctx.fillStyle = win.col("tick_hi", "#e6edf3")
-                ctx.fillText(lbl, lcx, 10)
+                ctx.fillText(lbl, lcx, 12)
                 ctx.strokeStyle = win.col("tick_hi", "#e6edf3"); ctx.lineWidth = 1
-                ctx.beginPath(); ctx.moveTo(trx + 0.5, 13); ctx.lineTo(trx + 0.5, RULER_H - 1); ctx.stroke()
+                ctx.beginPath(); ctx.moveTo(trx + 0.5, 15); ctx.lineTo(trx + 0.5, RULER_H - 1); ctx.stroke()
                 lastRight = lcx + lw / 2
             }
             var xi = t2x(markIn), xo = t2x(markOut)
@@ -151,13 +163,20 @@ Card {
             // around a green marker. Here the glow is the marker's own colour, the
             // label sits in the chip instead of floating beside it, and selection
             // is shown by weight and a ring rather than by blur.
-            function chip(x, key, fb, isSel, label) {
+            function chip(x, key, fb, isSel, label, kind, idx) {
                 var c = win.col(key, fb)
                 ctx.font = (isSel ? "600 " : "500 ") + (isSel ? 12 : 11) + "px 'Segoe UI'"
                 var tw = ctx.measureText(label).width
                 var w = tw + 14, h = isSel ? 19 : 17, r = h / 2
                 var lx = Math.max(1, Math.min(width - w - 1, x - w / 2))
                 var top = CHIP_TOP + (19 - h) / 2
+                // Only the draggable ones are registered; CENTER is a guide.
+                // `tl.` is required, not style: this is a nested function, which
+                // does not carry the QML object scope, so a bare `chipBoxes`
+                // is a ReferenceError that aborts the whole paint on the first
+                // chip -- which is why every other access in here is qualified.
+                if (kind !== undefined) tl.chipBoxes.push({ kind: kind, idx: idx === undefined ? -1 : idx,
+                                                            lx: lx, top: top, w: w, h: h })
                 // stem: a soft same-colour glow under a crisp core
                 ctx.strokeStyle = win.colA(key, fb, 0.22); ctx.lineWidth = isSel ? 7 : 5
                 ctx.beginPath(); ctx.moveTo(x, top + h); ctx.lineTo(x, height - 5); ctx.stroke()
@@ -202,15 +221,15 @@ Card {
                 // tall enough to give the pill a row of its own.
                 chip(cgx, "center_guide", "#c084fc", false, "CENTER")
             }
-            chip(xi, "marker_in", "#2ddc7f", win.selMarker === "in", "IN")
-            chip(xo, "marker_out", "#d29922", win.selMarker === "out", "OUT")
+            chip(xi, "marker_in", "#2ddc7f", win.selMarker === "in", "IN", "in")
+            chip(xo, "marker_out", "#d29922", win.selMarker === "out", "OUT", "out")
             // Splits get the same flag as IN/OUT (the classic draws all three
             // identically); as a bare line they read as a gridline.
             for (var k = 0; k < separatorPoints.length; ++k) {
                 var kSel = (k === win.selSplit)
                 chip(t2x(Number(separatorPoints[k])),
                      kSel ? "split_marker_sel" : "split_marker",
-                     kSel ? "#7dd3fc" : "#38bdf8", kSel, "SPLIT")
+                     kSel ? "#7dd3fc" : "#38bdf8", kSel, "SPLIT", "split", k)
             }
             // NOTE: the CTI/playhead is drawn as a separate overlay
             // item (below) so playback moves it WITHOUT repainting
@@ -223,8 +242,18 @@ Card {
             onExited: hov.hx = -1
             property string dragKind: ""   // in|out|split|cutS|cutE|""
             property int dragIdx: -1
-            // Pick the nearest draggable handle within ~7px of x.
-            function pick(x) {
+            // Clicking the FLAG has to grab the marker. The stem-only test that
+            // used to live here could not be satisfied by aiming at the chip:
+            // `chip()` clamps its box inside the panel, so the default IN at
+            // t=0 and OUT at the end draw their flags tens of pixels away from
+            // their own stems, and the 7px stem window sat under the panel edge.
+            // Boxes first, then fall back to the stem for a bare split line.
+            function pick(x, y) {
+                for (var b = tl.chipBoxes.length - 1; b >= 0; --b) {
+                    var box = tl.chipBoxes[b]
+                    if (x >= box.lx && x <= box.lx + box.w
+                        && y >= box.top && y <= box.top + box.h) return { kind: box.kind, idx: box.idx, d: 0 }
+                }
                 var best = { kind: "", idx: -1, d: 7 }
                 function consider(k, idx, t) { var d = Math.abs(tl.t2x(t) - x); if (d <= best.d) best = { kind: k, idx: idx, d: d } }
                 consider("in", -1, markIn); consider("out", -1, markOut)
@@ -233,7 +262,7 @@ Card {
                 return best
             }
             onPressed: (m) => {
-                var p = pick(m.x); dragKind = p.kind; dragIdx = p.idx
+                var p = pick(m.x, m.y); dragKind = p.kind; dragIdx = p.idx
                 if (p.kind === "in") { selMarker = "in"; selSplit = -1; selCut = -1 }
                 else if (p.kind === "out") { selMarker = "out"; selSplit = -1; selCut = -1 }
                 else if (p.kind === "split") { selSplit = p.idx; selCut = -1; selMarker = "" }
@@ -272,32 +301,42 @@ Card {
         // CTI / playhead overlay — bound to cti, so playback moves
         // it WITHOUT repainting the waveform canvas (the heavy paint
         // only runs on edits/zoom/pan, never on a playback tick).
-        // Weight and shape copied from the classic: a wide blue halo behind a
-        // thick red stem, topped by a broad triangular head at the ruler. A 2px
-        // hairline was invisible over the waveform.
         Item {
             id: cti
             y: 0; width: 0; height: tl.height
             x: Math.max(0, Math.min(tl.width, tl.t2x(win.cti)))
             visible: win.ready && win.cti >= win.viewStart - 1e-6
                      && win.cti <= win.viewStart + win.viewSpan() + 1e-6
-            // A downward ARROW over a thick stem -- the classic's shape, which
-            // is what makes the playhead readable as "the frame you are on"
-            // rather than as one more vertical marker. The rounded handle this
-            // replaces was a tag with a grip mark: it pointed at nothing, and
-            // at chip width it was hard to tell from a SPLIT chip.
+            // A slim PIN: rounded shoulders tapering to a point. It still has
+            // to point -- that is what says "the frame you are on" rather than
+            // "another vertical marker" -- but the previous version was the
+            // classic's shape lifted whole: 26px wide, a flat triangle, and a
+            // BLUE outline around a red head. That outline broke this panel's
+            // own rule two hundred lines up, where the chips glow in their own
+            // colour precisely so a marker is never ringed in a foreign one.
+            // Half the width, one colour family, and the weight carried by a
+            // soft halo instead of a hard stroke.
             Canvas {
                 id: ctiHead
-                x: -13; y: 0; width: 26; height: tl.chipTop + 2
+                x: -8; y: 0; width: 16; height: tl.chipTop + 2
                 onPaint: {
                     var c = getContext("2d"); c.reset()
-                    var w = width, tip = height - 1
+                    var w = width, r = 4, sh = height * 0.52, tip = height - 1
+                    function pin(inset) {
+                        var l = inset, rt = w - inset, rr = Math.max(1, r - inset)
+                        c.beginPath()
+                        c.moveTo(l + rr, inset); c.lineTo(rt - rr, inset)
+                        c.arcTo(rt, inset, rt, inset + rr, rr)
+                        c.lineTo(rt, sh); c.lineTo(w / 2, tip - inset); c.lineTo(l, sh)
+                        c.lineTo(l, inset + rr); c.arcTo(l, inset, l + rr, inset, rr)
+                        c.closePath()
+                    }
+                    c.fillStyle = win.colA("playhead", "#ff4d55", 0.28)
+                    pin(-2); c.fill()                       // halo, same colour
                     c.fillStyle = win.col("playhead", "#ff4d55")
-                    c.strokeStyle = win.col("playhead_halo", "#3b82f6")
-                    c.lineWidth = 2; c.lineJoin = "round"
-                    c.beginPath()
-                    c.moveTo(1, 1); c.lineTo(w - 1, 1); c.lineTo(w / 2, tip)
-                    c.closePath(); c.fill(); c.stroke()
+                    pin(0); c.fill()                        // solid body
+                    c.strokeStyle = win.colA("text", "#e8edfb", 0.35)
+                    c.lineWidth = 1; pin(1.5); c.stroke()   // top-edge highlight
                 }
                 Component.onCompleted: requestPaint()
                 Connections { target: win; function onPaletteRev() { ctiHead.requestPaint() } }
