@@ -281,7 +281,9 @@ class TimelineBandsDoNotOverlap(unittest.TestCase):
         # phrase that also appears in the comment explaining the history.
         self.assertNotIn("cgLbl", self.src, "the separate centre pill is back")
         centre = self.src.index('chip(cgx, "center_guide"')
-        first_marker = self.src.index('chip(xi, "marker_in"')
+        # IN/OUT are brackets now, not chips: they are the two edges of ONE
+        # region, so they grip their own side of it instead of flying a label.
+        first_marker = self.src.index('bracket(xi, "marker_in"')
         self.assertLess(centre, first_marker,
                         "the centre guide draws over the editable markers again")
 

@@ -30,11 +30,11 @@ Card {
         //   0      .. RULER_H   timecode labels + their ticks
         //   RULER_H.. CHIP_BOT  IN/OUT/SPLIT/CENTER chips and the CTI arrow
         //   CHIP_BOT..          waveform, cut ranges, everything editable
-        // Ruler 20 -> 22 so a 12px bold timecode fits with its tick under it.
+        // Ruler 20 -> 24 so a 13px bold timecode fits with its tick under it.
         // The two chip bounds move with it; nothing measures them independently.
-        readonly property int rulerH: 22
-        readonly property int chipTop: 23
-        readonly property int chipBot: 43
+        readonly property int rulerH: 24
+        readonly property int chipTop: 25
+        readonly property int chipBot: 45
         // Where each draggable chip actually LANDED. `chip()` clamps the box
         // back inside the panel, so a marker at t=0 draws its flag well to the
         // right of its own stem -- and a hit test that only measured the stem
@@ -69,10 +69,13 @@ Card {
             // tick with a short tick line under it, and a label dropped
             // entirely when it would touch the previous one. A number floating
             // with nothing under it does not say WHERE it is.
-            // 12px bold, not 10px semibold: the timecode is the one thing on
-            // this strip you read at a glance, and at 10px it lost to the
-            // classic editor's ruler on the same screen.
-            ctx.font = "700 12px 'Consolas'"; ctx.textAlign = "center"
+            // 13px BOLD, not 10px semibold: the timecode is the one thing on
+            // this strip you read at a glance, and it kept losing to the
+            // classic editor's ruler on the same screen. `bold` rather than a
+            // numeric weight -- Consolas ships Regular and Bold only, so 700
+            // was being synthesised and 800 would round back down to the same
+            // face.
+            ctx.font = "bold 13px 'Consolas'"; ctx.textAlign = "center"
             var t0r = Math.ceil(win.viewStart / rstep) * rstep
             var lastRight = -1e9
             for (var tr = t0r; tr <= win.viewStart + span + 1e-6; tr += rstep) {
@@ -86,9 +89,9 @@ Card {
                 var lcx = Math.max(pad + lw / 2, Math.min(width - pad - lw / 2, trx))
                 if (lcx - lw / 2 < lastRight + 10) continue
                 ctx.fillStyle = win.col("tick_hi", "#e6edf3")
-                ctx.fillText(lbl, lcx, 12)
+                ctx.fillText(lbl, lcx, 13)
                 ctx.strokeStyle = win.col("tick_hi", "#e6edf3"); ctx.lineWidth = 1
-                ctx.beginPath(); ctx.moveTo(trx + 0.5, 15); ctx.lineTo(trx + 0.5, RULER_H - 1); ctx.stroke()
+                ctx.beginPath(); ctx.moveTo(trx + 0.5, 16); ctx.lineTo(trx + 0.5, RULER_H - 1); ctx.stroke()
                 lastRight = lcx + lw / 2
             }
             var xi = t2x(markIn), xo = t2x(markOut)
@@ -198,6 +201,47 @@ Card {
                 ctx.fillText(label, lx + w / 2, top + h / 2 + 0.5)
                 ctx.textBaseline = "alphabetic"
             }
+            // IN/OUT are TRIM HANDLES, not flags. They mark the two edges of one
+            // region, so the modern shape is the one every current NLE uses: a
+            // rounded tab gripping its own side of the selection, rounded on the
+            // OUTER edge and square against the region, with a hairline down the
+            // track. They were pills-on-stems carrying the words "IN"/"OUT",
+            // which is the classic editor's idea (label beside a marker) drawn
+            // with softer corners -- and at the default positions, t=0 and the
+            // very end, the words sat over nothing they belonged to.
+            // `side` is +1 when the region lies to the RIGHT of x (IN), -1 for OUT.
+            function bracket(x, key, fb, isSel, side, kind) {
+                var c = win.col(key, fb)
+                var w = isSel ? 10 : 8, h = CHIP_BOT - CHIP_TOP - 2, r = 3
+                var lx = side > 0 ? x : x - w
+                lx = Math.max(0, Math.min(tl.width - w, lx))
+                var top = CHIP_TOP
+                tl.chipBoxes.push({ kind: kind, idx: -1, lx: lx, top: top, w: w, h: h })
+                ctx.strokeStyle = win.colA(key, fb, 0.22); ctx.lineWidth = isSel ? 5 : 3
+                ctx.beginPath(); ctx.moveTo(x, top + h); ctx.lineTo(x, tl.height - 5); ctx.stroke()
+                ctx.strokeStyle = c; ctx.lineWidth = isSel ? 2 : 1.5
+                ctx.beginPath(); ctx.moveTo(x, top + h); ctx.lineTo(x, tl.height - 5); ctx.stroke()
+                ctx.fillStyle = c
+                ctx.beginPath()
+                if (side > 0) {          // rounded on the left, square against the region
+                    ctx.moveTo(lx + r, top); ctx.lineTo(lx + w, top); ctx.lineTo(lx + w, top + h)
+                    ctx.lineTo(lx + r, top + h); ctx.arcTo(lx, top + h, lx, top + h - r, r)
+                    ctx.lineTo(lx, top + r); ctx.arcTo(lx, top, lx + r, top, r)
+                } else {                 // mirrored
+                    ctx.moveTo(lx, top); ctx.lineTo(lx + w - r, top)
+                    ctx.arcTo(lx + w, top, lx + w, top + r, r); ctx.lineTo(lx + w, top + h - r)
+                    ctx.arcTo(lx + w, top + h, lx + w - r, top + h, r); ctx.lineTo(lx, top + h)
+                }
+                ctx.closePath(); ctx.fill()
+                if (isSel) { ctx.strokeStyle = win.col("text", "#e8edfb"); ctx.lineWidth = 1.5; ctx.stroke() }
+                // Grip notches, the same language as the playhead handle.
+                ctx.strokeStyle = win.colA("timeline_bg", "#0a0d12", 0.55); ctx.lineWidth = 1
+                for (var g = -1; g <= 1; g += 2) {
+                    ctx.beginPath()
+                    ctx.moveTo(lx + w / 2 + g * 1.8, top + h * 0.34)
+                    ctx.lineTo(lx + w / 2 + g * 1.8, top + h * 0.66); ctx.stroke()
+                }
+            }
             // The guide goes down FIRST: when two markers land close together
             // the one you can DRAG has to stay readable, and this one you
             // cannot move.
@@ -221,8 +265,8 @@ Card {
                 // tall enough to give the pill a row of its own.
                 chip(cgx, "center_guide", "#c084fc", false, "CENTER")
             }
-            chip(xi, "marker_in", "#2ddc7f", win.selMarker === "in", "IN", "in")
-            chip(xo, "marker_out", "#d29922", win.selMarker === "out", "OUT", "out")
+            bracket(xi, "marker_in", "#2ddc7f", win.selMarker === "in", 1, "in")
+            bracket(xo, "marker_out", "#d29922", win.selMarker === "out", -1, "out")
             // Splits get the same flag as IN/OUT (the classic draws all three
             // identically); as a bare line they read as a gridline.
             for (var k = 0; k < separatorPoints.length; ++k) {
@@ -307,36 +351,35 @@ Card {
             x: Math.max(0, Math.min(tl.width, tl.t2x(win.cti)))
             visible: win.ready && win.cti >= win.viewStart - 1e-6
                      && win.cti <= win.viewStart + win.viewSpan() + 1e-6
-            // A slim PIN: rounded shoulders tapering to a point. It still has
-            // to point -- that is what says "the frame you are on" rather than
-            // "another vertical marker" -- but the previous version was the
-            // classic's shape lifted whole: 26px wide, a flat triangle, and a
-            // BLUE outline around a red head. That outline broke this panel's
-            // own rule two hundred lines up, where the chips glow in their own
-            // colour precisely so a marker is never ringed in a foreign one.
-            // Half the width, one colour family, and the weight carried by a
-            // soft halo instead of a hard stroke.
+            // A rounded HANDLE on a hairline -- deliberately NOT a point.
+            // Twice now the head was a tapered shape, and twice it read as the
+            // classic editor's playhead, because a downward point IS that
+            // editor's whole visual language: every marker there is a triangle
+            // over a thick line, ringed in a foreign blue. Modern NLE playheads
+            // (Resolve, Premiere, CapCut) do the opposite -- the LINE states the
+            // position and the handle is only somewhere to grab, so it is a
+            // plain rounded rectangle with two grip notches. Nothing tapers.
             Canvas {
                 id: ctiHead
-                x: -8; y: 0; width: 16; height: tl.chipTop + 2
+                x: -6; y: 0; width: 12; height: tl.chipTop
                 onPaint: {
                     var c = getContext("2d"); c.reset()
-                    var w = width, r = 4, sh = height * 0.52, tip = height - 1
-                    function pin(inset) {
-                        var l = inset, rt = w - inset, rr = Math.max(1, r - inset)
-                        c.beginPath()
-                        c.moveTo(l + rr, inset); c.lineTo(rt - rr, inset)
-                        c.arcTo(rt, inset, rt, inset + rr, rr)
-                        c.lineTo(rt, sh); c.lineTo(w / 2, tip - inset); c.lineTo(l, sh)
-                        c.lineTo(l, inset + rr); c.arcTo(l, inset, l + rr, inset, rr)
-                        c.closePath()
-                    }
-                    c.fillStyle = win.colA("playhead", "#ff4d55", 0.28)
-                    pin(-2); c.fill()                       // halo, same colour
+                    var w = width, h = height - 2, r = 3
                     c.fillStyle = win.col("playhead", "#ff4d55")
-                    pin(0); c.fill()                        // solid body
-                    c.strokeStyle = win.colA("text", "#e8edfb", 0.35)
-                    c.lineWidth = 1; pin(1.5); c.stroke()   // top-edge highlight
+                    c.beginPath()
+                    c.moveTo(r, 0); c.lineTo(w - r, 0)
+                    c.arcTo(w, 0, w, r, r); c.lineTo(w, h - r)
+                    c.arcTo(w, h, w - r, h, r); c.lineTo(r, h)
+                    c.arcTo(0, h, 0, h - r, r); c.lineTo(0, r)
+                    c.arcTo(0, 0, r, 0, r); c.closePath(); c.fill()
+                    // Grip notches: what tells you it is a handle, without a point.
+                    c.strokeStyle = win.colA("timeline_bg", "#0a0d12", 0.55)
+                    c.lineWidth = 1
+                    for (var i = -1; i <= 1; i += 2) {
+                        c.beginPath()
+                        c.moveTo(w / 2 + i * 2, h * 0.32); c.lineTo(w / 2 + i * 2, h * 0.68)
+                        c.stroke()
+                    }
                 }
                 Component.onCompleted: requestPaint()
                 Connections { target: win; function onPaletteRev() { ctiHead.requestPaint() } }
