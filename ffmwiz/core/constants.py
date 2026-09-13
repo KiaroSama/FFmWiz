@@ -507,6 +507,11 @@ FFMWIZ_GUI_DIR_NAME = "gui"
 
 FFMWIZ_GUI_FILE_NAME = "ffmwiz_gui.py"
 
+# The QML document the modern driver loads. Named here rather than spelled
+# out at the call site so the dispatcher's preflight and the driver cannot
+# disagree about it (A02).
+QML_MAIN_FILE_NAME = "UnifiedEditor.qml"
+
 REQUIREMENTS_FILE_NAME = "requirements.txt"
 
 PYSIDE6_DISPLAY_NAME = "PySide6"
@@ -729,6 +734,7 @@ __all__ = [
     'FFMWIZ_RUNTIME_DIR_NAME',
     'FFMWIZ_GUI_DIR_NAME',
     'FFMWIZ_GUI_FILE_NAME',
+    'QML_MAIN_FILE_NAME',
     'REQUIREMENTS_FILE_NAME',
     'PYSIDE6_DISPLAY_NAME',
     'PYSIDE6_PIP_SPEC',

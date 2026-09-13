@@ -122,6 +122,19 @@ def _qml_gui_path() -> Path:
             / "ffmwiz_gui_qml.py")
 
 
+def _qml_main_file() -> Path:
+    """The QML the modern driver loads, resolved FROM that driver (A02).
+
+    The dispatcher used to spell this path itself, one directory too high, and
+    a preflight that can disagree with the thing it is gating is not a
+    preflight: it found nothing, took the "files are missing" branch, and
+    launched the CLASSIC editor every time QML was selected. Deriving it from
+    `_qml_gui_path()` means the driver and its resources move together or the
+    check breaks loudly.
+    """
+    return _qml_gui_path().parent / "qml" / QML_MAIN_FILE_NAME
+
+
 def _visible_len(text: str) -> int:
     """Terminal COLUMNS the text occupies, not codepoints.
 
@@ -574,6 +587,7 @@ __all__ = [
     '_requirements_path',
     '_config_setting_for_logging',
     '_qml_gui_path',
+    '_qml_main_file',
     '_visible_len',
     '_progress_seconds_from_state',
     '_progress_target_mux_bitrate_kbps_from_command',
