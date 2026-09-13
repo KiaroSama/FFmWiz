@@ -20,8 +20,12 @@ permissions:
 # spending-limit block starts every job and ends it in about two seconds with
 # no steps at all, which reads as a red X and is not one.
 #
-# Jobs must therefore not assume a disposable machine: nothing here installs
-# software system-wide. See the ffmpeg steps.
+# Jobs must therefore not assume a disposable machine. Nothing here installs
+# software system-wide, every job builds its OWN virtual environment, and every
+# ffmpeg download unpacks into a fresh per-version directory. On a persistent
+# runner the alternative is silent contamination: a package another job left
+# behind turns the "no PySide6" leg into a lie, and a reused extraction
+# directory can serve a build nobody pinned.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,6 +52,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Create a job-scoped virtual environment
+        # A persistent runner keeps whatever the last job installed. This leg
+        # exists to prove the CLI imports with NO third-party package present,
+        # so it must not inherit one. `--without-pip` because it installs
+        # nothing at all, by design.
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: |
+          python -m venv --without-pip "$RUNNER_TEMP/venv-compile"
+          echo "$RUNNER_TEMP/venv-compile/Scripts" >> "$GITHUB_PATH"
+
+      - name: Show the interpreter this job will use
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: |
+          python -c "import sys; print(sys.executable); print(sys.version)"
+          python -c "import sys, pathlib; want = pathlib.Path(r'$RUNNER_TEMP/venv-compile').resolve(); got = pathlib.Path(sys.executable).resolve(); sys.exit(0) if want in got.parents else sys.exit(f'not the job venv: {got}')"
+
       - name: Compile Python files
         run: |
           python -c "import pathlib, sys; missing=[p for p in sys.argv[1:] if not pathlib.Path(p).is_file()]; sys.exit('missing: ' + ', '.join(missing)) if missing else None" FFmWiz.py ffmwiz/gui/classic/ffmwiz_gui.py ffmwiz/gui/modern/ffmwiz_gui_qml.py
@@ -60,9 +80,16 @@ jobs:
       - name: Import smoke check (CLI must import without PySide6)
         run: python -c "import sys; sys.modules['PySide6'] = None; import FFmWiz; assert hasattr(FFmWiz, 'build_add_files_to_video_command'); assert hasattr(FFmWiz, 'run_media_info_mode'); assert hasattr(FFmWiz, 'run_mux_cleanup_mode'); assert hasattr(FFmWiz, 'run_hardsub_encode_mode'); assert hasattr(FFmWiz, 'build_hardsub_command'); assert hasattr(FFmWiz, 'confirm_numeric_target_not_above_source'); assert hasattr(FFmWiz, 'confirm_resolution_not_above_source'); assert hasattr(FFmWiz, 'analyze_copy_cut_chapter_plan'); assert hasattr(FFmWiz, 'add_files_stream_copy_compatibility_errors'); assert '.webvtt' in FFmWiz.HARDSUB_SUBTITLE_EXTS; assert FFmWiz.display_language('und') == 'unknown'; assert FFmWiz.describe_video_bit_depth({'pix_fmt':'yuv420p10le'}) == '10-bit'; assert FFmWiz.run_mux_cleanup_mode.__module__ == 'ffmwiz.support.ext00b'; assert 'MB' in FFmWiz.media_info_value_with_units('size', '1048576'); assert 'bit/s' in FFmWiz.media_info_value_with_units('bit_rate', '128000'); assert 's)' in FFmWiz.media_info_value_with_units('duration', '12.5'); assert FFmWiz.default_media_reports_dir().name == 'MediaReports'"
 
+      - name: Prove no third-party package reached this leg
+        # The check above stubs PySide6 out; this one proves the stub was not
+        # papering over a real installation a previous job left on the runner.
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: |
+          python -c "import importlib.util, sys; leaked=[m for m in ('PySide6','numpy','setuptools') if importlib.util.find_spec(m)]; sys.exit('third-party packages leaked into the no-dependency leg - ' + ', '.join(leaked)) if leaked else print('clean interpreter')"
+
   tests:
     runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     # The real-ffmpeg tests print progress lines containing non-ASCII separators;
     # on a cp1252 console that is a UnicodeEncodeError, not a test failure.
     env:
@@ -100,16 +127,28 @@ jobs:
           # the job. A self-hosted one keeps its own pip cache on disk between
           # runs, which makes the upload pure overhead -- measured at 13m04s of
           # a 15m budget for the PySide6 job, against 4s for the install it was
-          # meant to speed up. Empty disables it.
-          cache: ${{ vars.CI_RUNNER && '' || 'pip' }}
+          # meant to speed up.
+          #
+          # The first branch must be the TRUTHY one. `X && '' || 'pip'` reads as
+          # a ternary and is not one: GitHub's `&&` yields the empty string,
+          # which is FALSE, so `||` fell through to 'pip' whether the variable
+          # was set or not and the cache was never actually disabled (F11).
+          cache: ${{ !vars.CI_RUNNER && 'pip' || '' }}
+
+      - name: Create a job-scoped virtual environment
+        # Test dependencies go HERE, never into the runner's own interpreter and
+        # never into requirements.txt, which is the runtime manifest.
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-tests"
+          echo "$RUNNER_TEMP/venv-tests/Scripts" >> "$GITHUB_PATH"
 
       - name: Install test dependencies
-        # numpy is needed by the waveform tests only; requirements.txt is the
-        # runtime manifest and stays untouched. PySide6 is not installed here -
-        # no test imports it (see the gui-import job).
+        # numpy is needed by the waveform tests only. PySide6 is not installed
+        # here - the Qt suites belong to the gui-import job.
         #
-        # setuptools/wheel are NOT optional here: tests/test_packaging.py builds
-        # a real wheel to prove the artifact still contains the ffmwiz package,
+        # setuptools/wheel are NOT optional: tests/test_packaging.py builds a
+        # real wheel to prove the artifact still contains the ffmwiz package,
         # and it self-skips when the build backend is missing. Since Python 3.12
         # `ensurepip` ships neither, so this leg silently skipped the only proof
         # the wheel works at all.
@@ -126,8 +165,26 @@ jobs:
         # the chocolatey package embeds, dropped in RUNNER_TEMP and put on PATH
         # for this job only. GITHUB_PATH PREPENDS, so a pinned leg still wins
         # over an ffmpeg the host already has, and the step below proves it did.
+        #
+        # The extraction directory is REMOVED first. On a persistent runner a
+        # reused directory can still hold the previous archive's tree, so the
+        # pin would be honoured by the download and quietly ignored on disk.
+        #
+        # SHA256: pinned in this file for the two fixed versions, so a later
+        # change to a published asset fails the job instead of silently changing
+        # what the matrix tests. To be explicit about what that does NOT prove:
+        # the upstream project publishes no checksum for these archives, so the
+        # values were computed once from the release assets and committed here
+        # under review. They detect drift; they do not authenticate the
+        # publisher. `latest` moves by design and is recorded, not pinned.
+        shell: pwsh
+        timeout-minutes: 12
         run: |
           $v = "${{ matrix.ffmpeg }}"
+          $pins = @{
+            "7.1.1" = "04861d3339c5ebe38b56c19a15cf2c0cc97f5de4fa8910e4d47e5e6404e4a2d4"
+            "6.1.1" = "742e32fc9f92681f9f254b925e1b613fdd8074ba40749d4879aefdb009b94cc5"
+          }
           $url = if ($v -eq "latest") {
             "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
           } else {
@@ -135,45 +192,108 @@ jobs:
           }
           $dst = Join-Path $env:RUNNER_TEMP "ffmpeg-$v"
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-$v.zip"
+          Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+          Remove-Item -Force $zip -ErrorAction SilentlyContinue
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 900
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($pins.ContainsKey($v)) {
+            if ($actual -ne $pins[$v]) {
+              throw "ffmpeg $v archive hash $actual does not match the pin $($pins[$v])"
+            }
+            Write-Host "ffmpeg $v archive matches its pinned SHA256"
+          } else {
+            Write-Host "ffmpeg $v archive SHA256 (unpinned, recorded): $actual"
+          }
           Expand-Archive -Path $zip -DestinationPath $dst -Force
           $exe = Get-ChildItem $dst -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           if (-not $exe) { throw "ffmpeg.exe not found in $url" }
+          if (-not (Test-Path (Join-Path $exe.Directory.FullName "ffprobe.exe"))) {
+            throw "ffprobe.exe is missing from $url"
+          }
           $exe.Directory.FullName >> $env:GITHUB_PATH
 
       - name: Confirm this leg is the ffmpeg it claims to be
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        # A silent version drift would turn the two legs into duplicates and
-        # the reset_sar branch of the other one would stop being covered.
+        # A silent version drift would turn the two legs into duplicates and the
+        # reset_sar branch of the other one would stop being covered. A
+        # capability probe alone cannot tell 6.1.1 from 7.1.1 -- neither has
+        # reset_sar -- so the VERSION STRING and the resolved PATH are both
+        # asserted, for ffmpeg and ffprobe, and the capability check stays on
+        # top of that rather than instead of it.
+        #
         # No pipes: this shell runs with -o pipefail, and a reader that exits
         # early (head, grep -q) can leave ffmpeg killed by SIGPIPE and fail the
         # step for a reason that has nothing to do with the build.
         run: |
-          ffmpeg -version
+          want="${{ matrix.ffmpeg }}"
+          expected_dir="$RUNNER_TEMP/ffmpeg-$want"
+          for tool in ffmpeg ffprobe; do
+            resolved="$(command -v $tool)"
+            echo "$tool -> $resolved"
+            case "$resolved" in
+              "$expected_dir"*) ;;
+              *) echo "$tool resolves outside this job's extraction directory"; exit 1 ;;
+            esac
+            banner="$($tool -hide_banner -version)"
+            echo "$banner" > "$RUNNER_TEMP/$tool-version.txt"
+            first="$(head -n 1 "$RUNNER_TEMP/$tool-version.txt")"
+            echo "$first"
+            if [ "$want" != latest ]; then
+              case "$first" in
+                "$tool version $want"*) ;;
+                *) echo "expected $tool version $want"; exit 1 ;;
+              esac
+            fi
+          done
           case "$(ffmpeg -hide_banner -h filter=scale)" in
             *reset_sar*) have=yes ;;
             *)           have=no ;;
           esac
-          want=$([ "${{ matrix.ffmpeg }}" = latest ] && echo yes || echo no)
-          echo "scale reset_sar: have=$have want=$want"
-          [ "$have" = "$want" ]
+          expect=$([ "$want" = latest ] && echo yes || echo no)
+          echo "scale reset_sar: have=$have expect=$expect"
+          [ "$have" = "$expect" ]
 
       - name: Run test suite
         shell: bash --noprofile --norc -eo pipefail "{0}"
+        timeout-minutes: 20
         # tests/run_suite.py runs one module per worker process (stdlib only -
         # this project keeps zero test dependencies). The suite is dominated by
         # real ffmpeg child processes, so parallelism cut it 48s -> ~16s on a
         # 16-core machine; a 2-core runner still gains. --require names what THIS
         # job installs, so a skip for ffmpeg or numpy fails the job while a real
-        # NVENC-hardware skip stays legitimate.
-        run: python tests/run_suite.py --require ffmpeg --require numpy --require wheel
+        # NVENC-hardware skip stays legitimate. --json leaves a readable record
+        # of what ran, what skipped and why, uploaded below even on failure.
+        run: python tests/run_suite.py --require ffmpeg --require numpy --require wheel --json "$RUNNER_TEMP/results.json"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-py${{ matrix.python-version }}-ffmpeg${{ matrix.ffmpeg }}
+          path: |
+            ${{ runner.temp }}/results.json
+            ${{ runner.temp }}/ffmpeg-version.txt
+            ${{ runner.temp }}/ffprobe-version.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove this job's scratch files
+        if: always()
+        # A persistent runner keeps RUNNER_TEMP between runs on some setups, and
+        # an ffmpeg tree is ~250 MB per leg.
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "venv-tests") -ErrorAction SilentlyContinue
+          Get-ChildItem $env:TEMP -Directory -Filter "ffmwiz_*" -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
   # module still fails CI now that the other jobs install nothing.
   gui-import:
     runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository
@@ -185,7 +305,13 @@ jobs:
           python-version: "3.13"
           # See the tests job: on a self-hosted runner the pip cache is already
           # local, and this is the job whose upload blew the time budget.
-          cache: ${{ vars.CI_RUNNER && '' || 'pip' }}
+          cache: ${{ !vars.CI_RUNNER && 'pip' || '' }}
+
+      - name: Create a job-scoped virtual environment
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-gui"
+          echo "$RUNNER_TEMP/venv-gui/Scripts" >> "$GITHUB_PATH"
 
       - name: Install runtime dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
@@ -202,25 +328,48 @@ jobs:
 
       - name: Install test dependencies
         # numpy backs the waveform maths the QML tests exercise; without it the
-        # waveform cases self-skip and --strict-skips would fail the job.
+        # waveform cases self-skip and --require numpy would fail the job.
         run: python -m pip install --disable-pip-version-check numpy
 
       - name: Install ffmpeg
         # The GUI/editor suites decode real media for waveforms and previews.
         # Unpacked rather than installed, for the reason the tests job explains:
         # a self-hosted runner's ffmpeg is the developer's own.
+        shell: pwsh
+        timeout-minutes: 12
         run: |
           $dst = Join-Path $env:RUNNER_TEMP "ffmpeg-latest"
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-latest.zip"
+          Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
+          Remove-Item -Force $zip -ErrorAction SilentlyContinue
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zip -TimeoutSec 900
+          Write-Host "ffmpeg latest archive SHA256 (unpinned, recorded): $((Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower())"
           Expand-Archive -Path $zip -DestinationPath $dst -Force
           $exe = Get-ChildItem $dst -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           if (-not $exe) { throw "ffmpeg.exe not found in the release archive" }
+          if (-not (Test-Path (Join-Path $exe.Directory.FullName "ffprobe.exe"))) {
+            throw "ffprobe.exe is missing from the release archive"
+          }
           $exe.Directory.FullName >> $env:GITHUB_PATH
+
+      - name: Confirm the GUI job uses its own ffmpeg
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: |
+          for tool in ffmpeg ffprobe; do
+            resolved="$(command -v $tool)"
+            echo "$tool -> $resolved"
+            case "$resolved" in
+              "$RUNNER_TEMP/ffmpeg-latest"*) ;;
+              *) echo "$tool resolves outside this job's extraction directory"; exit 1 ;;
+            esac
+            $tool -hide_banner -version > "$RUNNER_TEMP/$tool-version.txt"
+            head -n 1 "$RUNNER_TEMP/$tool-version.txt"
+          done
 
       - name: Run the GUI and QML behaviour suites headless
         shell: bash --noprofile --norc -eo pipefail "{0}"
+        timeout-minutes: 20
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: "1"
@@ -232,4 +381,30 @@ jobs:
         # --require names what THIS job installs. The older --strict-skips
         # classified skips with a pattern that never mentioned PySide6/QtQml/
         # QtQuick, so it returned OK with exactly those classes skipped (B17).
-        run: python tests/run_suite.py --require pyside6 --require numpy --require ffmpeg -j 2 -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2
+        #
+        # The -k list is hand-maintained and therefore drifts: a new Qt suite
+        # lands, nothing selects it, and it never runs anywhere. The guard in
+        # tests/test_ci_coverage_guard.py reads THIS line and fails when a
+        # tests/ module that needs PySide6 is missing from it.
+        run: python tests/run_suite.py --require pyside6 --require numpy --require ffmpeg -j 2 --json "$RUNNER_TEMP/results.json" -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2 -k gui_child_ownership
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-import-results
+          path: |
+            ${{ runner.temp }}/results.json
+            ${{ runner.temp }}/ffmpeg-version.txt
+            ${{ runner.temp }}/ffprobe-version.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove this job's scratch files
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "venv-gui") -ErrorAction SilentlyContinue
+          Get-ChildItem $env:TEMP -Directory -Filter "ffmwiz_*" -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
