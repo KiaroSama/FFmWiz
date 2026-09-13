@@ -13,7 +13,7 @@ From the repo root:
 
 `run_suite.py` is what CI runs. It gives each test module its own worker process
 and pulls the next module off the queue as a worker frees up: measured on a
-16-core machine, ~2380 tests take ~306 s at `-j 8` — the suite is
+16-core machine, ~2450 tests take ~306 s at `-j 8` — the suite is
 dominated by real ffmpeg child processes, not CPU. It adds no dependency; the project keeps a
 zero-test-dependency policy, so it is `unittest` plus `concurrent.futures`.
 Module-per-process is also what keeps it safe: several suites monkeypatch module
@@ -43,8 +43,16 @@ errors, unexpected successes, and every skip with the capability it was
 attributed to, plus the environment (Python, platform, the resolved ffmpeg and
 ffprobe paths and version lines, numpy/PySide6/setuptools/wheel versions). It is
 written on EVERY exit path, including the refusals that run no tests, so a red
-CI job is readable from its artifact without digging through the log. Both CI
-jobs upload it with `if: always()`.
+CI job is readable without digging through the log.
+
+Both CI jobs upload it with `if: always()`, and that upload is allowed to fail:
+the account's artifact storage quota is currently full, so `continue-on-error`
+keeps an external condition from turning a green suite red. Because a
+best-effort step must never be the only copy of the evidence,
+`tools/ci_result_summary.py` then restates the same facts — commit SHA, tool
+versions, counts, failures by name, skips grouped by capability, and whether an
+artifact was actually retained — in the job log and `GITHUB_STEP_SUMMARY`. It
+always exits 0: it reports, it never decides.
 
 The stdlib `discover` form still works and is the fallback. Always `discover`,
 always from the repo root. Two reasons:

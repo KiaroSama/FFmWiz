@@ -2,8 +2,9 @@
 
 FFmWiz is a Windows application, and its CI matrix runs on Windows. WSL is a
 second, much faster place to run the **portable** part of the suite while you
-work: measured here at **224 seconds for 2433 tests across 6 workers**, against
-roughly five minutes on Windows.
+work: measured on 2026-09-13 at **224 seconds for 2433 tests across 6 workers**,
+against roughly five minutes on Windows. (The suite has grown since that
+measurement; the ratio is the point, not the exact count.)
 
 It does not replace the Windows run, and it is not meant to. See
 [What WSL cannot cover](#what-wsl-cannot-cover).
