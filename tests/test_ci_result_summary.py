@@ -46,6 +46,16 @@ def _record(**overrides) -> dict:
         "workers": 8,
         "selection": [],
         "required": ["ffmpeg", "numpy"],
+        "environment": {
+            "python": "3.13.13",
+            "implementation": "CPython",
+            "platform": "Windows-11-10.0.26200-SP0",
+            "ffmpeg": r"C:\tools\ffmpeg.exe",
+            "ffmpeg_version": "ffmpeg version 6.1.1-essentials_build",
+            "ffprobe_version": "ffprobe version 6.1.1-essentials_build",
+            "numpy": "2.3.4",
+            "PySide6": "",
+        },
         "modules": [
             {"module": "test_alpha", "seconds": 12.5, "tests": 40,
              "failures": ["test_alpha.Case.test_one"], "errors": [],
@@ -97,6 +107,57 @@ class TheEvidenceSurvivesTheQuota(unittest.TestCase):
     def test_a_passing_run_says_so(self):
         text = _module().render(_record(verdict="ok", exit_code=0), "")
         self.assertIn("PASS", text.splitlines()[0])
+
+
+class TheSummaryNamesWhichTreeItDescribes(unittest.TestCase):
+    """A summary without SHA and tool versions describes SOME run, not this one.
+
+    That is the exact reason the lost artifact mattered, so the replacement has
+    to carry what the artifact carried.
+    """
+
+    def render(self, upload: str = "", **environment) -> str:
+        module = _module()
+        previous = dict(os.environ)
+        os.environ.update(environment)
+        try:
+            return module.render(_record(), "py3.13 / ffmpeg 6.1.1", upload)
+        finally:
+            os.environ.clear()
+            os.environ.update(previous)
+
+    def test_the_commit_sha_and_run_are_named(self):
+        text = self.render(GITHUB_SHA="a92d1d1d9b48ccf619b0a5c07916b20208d8d054",
+                           GITHUB_RUN_ID="34765106471", GITHUB_REF_NAME="main")
+        self.assertIn("a92d1d1d9b48ccf619b0a5c07916b20208d8d054", text)
+        self.assertIn("34765106471", text)
+        self.assertIn("main", text)
+
+    def test_the_tool_versions_are_named(self):
+        text = self.render()
+        self.assertIn("3.13.13", text)
+        self.assertIn("6.1.1-essentials_build", text)
+        self.assertIn("2.3.4", text)
+
+    def test_an_absent_tool_is_not_listed_as_empty(self):
+        # PySide6 is "" on the legs that deliberately do not install it.
+        text = self.render()
+        self.assertNotIn("PySide6: ``", text)
+
+    def test_a_refused_upload_is_stated_not_implied(self):
+        text = self.render(upload="failure")
+        self.assertIn("NOT retained", text)
+        self.assertIn("this summary is the record", text)
+
+    def test_a_successful_upload_is_stated_too(self):
+        self.assertIn("uploaded", self.render(upload="success"))
+
+    def test_nothing_is_claimed_when_the_outcome_is_unknown(self):
+        # Locally, and any time the step id is not wired: say nothing rather
+        # than guess. Claiming an artifact that does not exist is the failure
+        # mode this line exists to prevent.
+        text = self.render()
+        self.assertNotIn("result artifact", text)
 
 
 class TheReporterNeverDecides(unittest.TestCase):
@@ -176,6 +237,17 @@ class TheWorkflowActuallyRunsIt(unittest.TestCase):
         for block in self.workflow.split("- name: ")[1:]:
             if "tools/ci_result_summary.py" in block:
                 self.assertIn("if: always()", block)
+
+    def test_every_summary_is_told_the_upload_outcome(self):
+        # Without it the summary cannot say whether an artifact exists, and the
+        # requirement is precisely never to imply one that the quota refused.
+        calls = [block for block in self.workflow.split("- name: ")[1:]
+                 if "tools/ci_result_summary.py" in block]
+        self.assertTrue(calls)
+        for block in calls:
+            self.assertIn("steps.upload.outcome", block)
+        self.assertEqual(self.workflow.count("id: upload"), len(calls),
+                         "a summary reads steps.upload.outcome from a step with no id")
 
 
 if __name__ == "__main__":

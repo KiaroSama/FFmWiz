@@ -12,7 +12,10 @@ So the essentials are written twice: to the job log, and to the run's step
 summary page, neither of which the quota can take away. A truncated summary of a
 real run beats a complete artifact that was never stored.
 
-    python tools/ci_result_summary.py <results.json> [label]
+    python tools/ci_result_summary.py <results.json> [label] [upload outcome]
+
+`upload outcome` is the artifact step's own `outcome`, so the summary can state
+whether an artifact exists instead of leaving the reader to assume one does.
 
 Exit status is always 0. This step reports; it never decides. The suite's own
 exit code is the verdict, and a summary that failed to render must not be able
@@ -33,8 +36,36 @@ MAX_SKIP_REASONS = 12
 MAX_SLOW = 5
 
 
-def render(payload: dict, label: str) -> str:
-    """A compact Markdown summary of one run. Pure: no I/O, no environment."""
+# Which of environment_report()'s keys are worth a line here, in this order.
+# Versions only: the resolved tool PATHS are already asserted by their own CI
+# step, and repeating them here buys nothing a reader needs.
+ENVIRONMENT_KEYS = ("python", "implementation", "platform",
+                    "ffmpeg_version", "ffprobe_version",
+                    "numpy", "PySide6", "setuptools", "wheel")
+
+
+def identity(environment: dict) -> list[str]:
+    """SHA, run and tool versions -- the facts that say WHICH tree this is.
+
+    A summary without them describes some run, not this one, which is the whole
+    reason the lost artifact mattered. `GITHUB_*` are absent locally and the
+    lines simply do not appear.
+    """
+    lines = []
+    for name, key in (("commit", "GITHUB_SHA"), ("ref", "GITHUB_REF_NAME"),
+                      ("run", "GITHUB_RUN_ID"), ("attempt", "GITHUB_RUN_ATTEMPT")):
+        value = os.environ.get(key)
+        if value:
+            lines.append(f"- {name}: `{value}`")
+    for key in ENVIRONMENT_KEYS:
+        value = environment.get(key)
+        if value:
+            lines.append(f"- {key}: `{value}`")
+    return lines
+
+
+def render(payload: dict, label: str, upload: str = "") -> str:
+    """A compact Markdown summary of one run. Pure: no I/O apart from os.environ."""
     modules = payload.get("modules") or []
     tests = sum(int(item.get("tests") or 0) for item in modules)
     failures = [name for item in modules for name in (item.get("failures") or [])]
@@ -58,6 +89,17 @@ def render(payload: dict, label: str) -> str:
     selection = payload.get("selection") or []
     if selection:
         lines.append(f"- selection: {', '.join(map(str, selection))}")
+
+    # Say plainly whether the artifact exists. Claiming one that the storage
+    # quota refused would be worse than having none.
+    if upload:
+        kept = upload == "success"
+        lines.append(f"- result artifact: **{'uploaded' if kept else 'NOT retained'}**"
+                     + ("" if kept else f" (upload {upload}); this summary is the record"))
+
+    identity_lines = identity(payload.get("environment") or {})
+    if identity_lines:
+        lines += ["", "#### Identity and tool versions", ""] + identity_lines
 
     for title, names in (("Failures", failures), ("Errors", errors),
                          ("Unexpected successes", unexpected)):
@@ -93,6 +135,7 @@ def render(payload: dict, label: str) -> str:
 def main(argv: list[str]) -> int:
     path = Path(argv[1]) if len(argv) > 1 else None
     label = argv[2] if len(argv) > 2 else ""
+    upload = argv[3] if len(argv) > 3 else ""
     if path is None:
         text = "### No results file was named; nothing to summarise.\n"
     else:
@@ -105,7 +148,7 @@ def main(argv: list[str]) -> int:
                     f"- reason: `{exc}`\n"
                     "- the job's own exit code is the verdict; this step only reports.\n")
         else:
-            text = render(payload, label)
+            text = render(payload, label, upload)
 
     print(text)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
