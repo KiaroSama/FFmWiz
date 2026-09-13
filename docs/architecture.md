@@ -35,6 +35,7 @@ docs/
   DOCUMENTATION-RECIPES.md          # appendices C-L: cookbook, concepts, flags
   architecture.md      # this document
   FFMPEG-REFERENCE.md  # build-specific FFmpeg capability reference
+  TESTING-IN-WSL.md    # the fast portable test pass, and what it cannot cover
 MediaReports/          # generated media info reports (git-ignored)
 Logs/                  # per-run UTC logs (git-ignored)
 .github/
@@ -77,6 +78,10 @@ ffmwiz/                # the application package (all implementation lives here)
     icons/             # includes ffmwiz_app.ico / ffmwiz_app.png (window/taskbar icon)
     cursors/
 tests/                 # unittest suite at the project root
+tools/                 # developer/CI scripts; no runtime code imports them
+  run-tests-wsl.sh     # the fast portable pass in WSL (docs/TESTING-IN-WSL.md)
+  ci_result_summary.py # restates a CI job's result in the log and step summary,
+                       #   because the artifact upload is best-effort
 ```
 
 Keep the `assets` folder inside the `ffmwiz` package (`ffmwiz/assets/`). The GUI
