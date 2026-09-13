@@ -296,7 +296,7 @@ jobs:
         # and a job whose suite passed reports failure, which is exactly the
         # false red this step must never produce.
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tests-py${{ matrix.python-version }}-ffmpeg${{ matrix.ffmpeg }}
           path: |
@@ -472,7 +472,7 @@ jobs:
         # and a job whose suite passed reports failure, which is exactly the
         # false red this step must never produce.
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gui-import-results
           path: |
