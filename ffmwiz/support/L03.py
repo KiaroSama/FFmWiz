@@ -343,13 +343,21 @@ def apply_output_location_value(answers: dict[str, Any], value: str) -> None:
     input_path: Path = answers["input_path"]
     answers.pop("output_name_stem", None)
     answers["output_used_default"] = False
+    answers["output_location_is_dir"] = False
     if not value:
         # The default output folder is the input folder. The previous default
         # was a fixed E:\output path which broke most workflows.
         answers["output_location"] = input_path.parent
+        answers["output_location_is_dir"] = True
         answers["output_used_default"] = True
         return
 
+    # A trailing separator is the user saying "this is a folder", and Path()
+    # drops it -- so the intent is recorded here, before it is gone, and read
+    # back by output_location_names_a_file. Without it a not-yet-created
+    # `D:\Exports.v1\` became the file `D:\Exports.mkv`.
+    normalized = normalize_terminal_path_text(value)
+    answers["output_location_is_dir"] = normalized.rstrip().endswith(("/", "\\", os.sep))
     output_value = terminal_path(value)
     if not output_value.drive and not output_value.root and output_value.parent == Path(".") and not output_value.suffix:
         answers["output_location"] = input_path.parent
