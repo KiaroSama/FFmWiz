@@ -189,19 +189,44 @@ class TheRunnerReportsWhatActuallyHappened(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     # --- (c) skip attribution ----------------------------------------------
+    def assert_refused_for(self, result: subprocess.CompletedProcess, capability: str) -> None:
+        """The run failed, and it named the capability as the reason.
+
+        There are two correct refusals and which one fires depends on the
+        machine, not on the code: when the capability really is absent the
+        PREFLIGHT stops the run before a test executes, and when it is present
+        the skip classification catches the `No usable ...` message. Pinning
+        one message made this test pass here and fail in the CI job that
+        deliberately installs no PySide6 -- the very configuration it exists to
+        protect. What must hold in both is: nonzero exit, capability named.
+        """
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1,
+                         f"the runner reported success\n{output}")
+        self.assertTrue(
+            "suite shrank" in output or "is not installed" in output,
+            f"the refusal did not name a missing capability\n{output}")
+        self.assertIn(capability, output.lower())
+
     def test_a_missing_ffmpeg_skip_is_not_environmental(self):
         name = self.probe(SKIPS_FOR_FFMPEG)
-        self.assert_fails(self.run_runner("-j", "1", "-k", name, "--require", "ffmpeg"),
-                          "suite shrank")
+        self.assert_refused_for(
+            self.run_runner("-j", "1", "-k", name, "--require", "ffmpeg"), "ffmpeg")
 
     def test_a_missing_qt_skip_is_not_environmental(self):
         name = self.probe(SKIPS_FOR_QT)
-        self.assert_fails(self.run_runner("-j", "1", "-k", name, "--require", "pyside6"),
-                          "suite shrank")
+        self.assert_refused_for(
+            self.run_runner("-j", "1", "-k", name, "--require", "pyside6"), "pyside6")
 
     def test_a_genuine_hardware_skip_is_still_environmental(self):
         name = self.probe(SKIPS_FOR_HARDWARE)
         result = self.run_runner("-j", "1", "-k", name, "--require", "ffmpeg")
+        if run_suite.probe_capability("ffmpeg"):
+            # No ffmpeg here at all, so the preflight refuses first and this
+            # machine cannot say anything about skip classification.
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("is not installed", result.stdout)
+            return
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_the_classifier_no_longer_exempts_the_phrase_no_usable(self):
