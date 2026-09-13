@@ -314,6 +314,7 @@ def run_ffmpeg_with_progress(
     split_progress_part_durations: list[float] | None = None,
     initial_detail: str | None = None,
     progress_output_paths: list[Path] | None = None,
+    source_dependencies: list[Path] | None = None,
 ) -> tuple[int, float]:
     """Run an FFmpeg command and render an in-place progress line.
 
@@ -333,7 +334,11 @@ def run_ffmpeg_with_progress(
     # the primary file and never its external tracks). FFmpeg would open that
     # file for writing, destroy it, and exit 0. Refusing here costs one stat per
     # input and cannot be bypassed by adding another builder (R02).
-    conflict = command_source_output_conflict(cmd)
+    # `source_dependencies` is the planner's own read list, for anything argv
+    # cannot show. The guard already reads inputs, concat members, `file:` URLs
+    # and file-valued options out of the command itself (A01); this is where a
+    # caller declares the rest instead of hoping a heuristic finds it.
+    conflict = command_source_output_conflict(cmd, extra_sources=source_dependencies)
     if conflict is not None:
         source, destination = conflict
         message = (f"Refusing to run {label}: the output {destination} is the same file as "

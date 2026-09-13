@@ -22,7 +22,14 @@ from ffmwiz import appio
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
 from ffmwiz.support.L01_filters import requested_volume_gain
+from ffmwiz.core.constants_ffmpeg_options import (FFMPEG_VALUED_OPTIONS,
+                                                  FFMPEG_VALUELESS_OPTIONS)
 from ffmwiz.support.L01_misc import _config_setting_for_logging
+
+# The tables moved down a layer so the execution-boundary guard reads the same
+# contract (A01). The wizard's own names stay, because they are public.
+VALUELESS_RAW_OPTIONS = FFMPEG_VALUELESS_OPTIONS
+VALUED_RAW_OPTIONS = FFMPEG_VALUED_OPTIONS
 
 # ffmpeg's own limits on the `volume` filter are far wider, but a factor
 # outside this range is much more likely to be a typo than an intention: 0.01
@@ -54,15 +61,6 @@ RAW_OPTION_ALIASES = {
 # after one of them reads as its argument, which is how a bare output pathname
 # (`-shortest out.mp4`) slipped in and made ffmpeg write a second, untracked
 # file alongside the planned one -- exit code 0, two outputs, one a surprise.
-VALUELESS_RAW_OPTIONS = {
-    "-an", "-vn", "-sn", "-dn", "-nostats", "-stats", "-copyts", "-re",
-    "-start_at_zero", "-shortest", "-ignore_unknown", "-copy_unknown",
-    "-benchmark", "-benchmark_all", "-dump", "-hex", "-xerror", "-bitexact",
-    "-fix_sub_duration", "-copyinkf", "-autorotate", "-noautorotate",
-    "-autoscale", "-noautoscale", "-accurate_seek", "-noaccurate_seek",
-    "-debug_ts", "-psnr", "-vstats", "-stdin", "-auto_conversion_filters",
-    "-noauto_conversion_filters", "-nostdin",
-}
 
 
 # Options that take exactly ONE value. Arity is DECLARED here, never guessed
@@ -70,40 +68,6 @@ VALUELESS_RAW_OPTIONS = {
 # `-report extra.wav` and `-nobitexact extra.wav` through, and FFmpeg then wrote
 # BOTH `extra.wav` and the planned output with exit 0 (R03). Stream qualifiers
 # are stripped before lookup, so `-b:v` and `-metadata:s:a:0` resolve here too.
-VALUED_RAW_OPTIONS = {
-    # rate control and quality
-    "-b", "-crf", "-cq", "-qp", "-maxrate", "-minrate", "-bufsize", "-qmin",
-    "-qmax", "-qdiff", "-qcomp", "-aq", "-aq-strength", "-compression_level",
-    "-global_quality", "-rc", "-cbr", "-multipass", "-rc-lookahead",
-    # encoder tuning
-    "-preset", "-tune", "-profile", "-level", "-coder", "-trellis", "-subq",
-    "-refs", "-bf", "-g", "-keyint_min", "-sc_threshold", "-me_method",
-    "-x264-params", "-x264opts", "-x265-params", "-svtav1-params", "-tier",
-    "-spatial_aq", "-temporal_aq", "-aq-mode", "-b_ref_mode", "-gpu",
-    # picture and audio shape
-    "-pix_fmt", "-s", "-r", "-aspect", "-sample_fmt", "-ar", "-ac",
-    "-channel_layout", "-color_primaries", "-color_trc", "-colorspace",
-    "-color_range", "-field_order", "-sws_flags", "-swr_flags",
-    # container and muxing
-    "-movflags", "-fflags", "-flags", "-max_muxing_queue_size", "-muxdelay",
-    "-muxpreload", "-avoid_negative_ts", "-vsync", "-fps_mode", "-async",
-    "-itsoffset", "-itsscale", "-timestamp", "-metadata", "-disposition",
-    "-attach", "-map_channel", "-shortest_buf_duration", "-segment_time",
-    # process control
-    "-threads", "-filter_threads", "-filter_complex_threads", "-thread_queue_size",
-    "-hwaccel", "-hwaccel_device", "-hwaccel_output_format", "-init_hw_device",
-    "-filter_hw_device", "-loglevel", "-v", "-max_alloc", "-abort_on",
-    "-dts_delta_threshold", "-dts_error_threshold", "-seek_timestamp",
-    "-reinit_filter", "-vstats_file", "-frames", "-vframes", "-aframes",
-    "-q", "-qscale", "-bt", "-bitrate", "-maxrate:v", "-pass", "-passlogfile",
-    # Expert options the first table missed. Each was verified against a real
-    # FFmpeg run before being added: refusing `-brand iso6` and `-strict -2`
-    # rejected commands FFmpeg accepts, and the refusal then recommended an
-    # `-opt=value` spelling FFmpeg exits 8 on (A05).
-    "-brand", "-strict", "-tag", "-bsf", "-top", "-force_key_frames",
-    "-video_track_timescale", "-max_interleave_delta", "-time_base",
-    "-enc_time_base", "-ch_layout", "-write_tmcd",
-}
 
 # The user's own extension of the table above, for an expert option this build
 # supports and FFmWiz has not listed. Declaring arity is the ONLY safe way to
