@@ -24,7 +24,8 @@ import unittest
 from pathlib import Path
 
 import FFmWiz
-from ffmwiz.wizard_raw import (VOLUME_MAX, VOLUME_MIN, canonical_raw_option,
+from ffmwiz.wizard_raw import (RAW_VALUED_OPTIONS_SETTING, VOLUME_MAX, VOLUME_MIN,
+                               canonical_raw_option,
                                parse_raw_arguments, parse_volume, raw_option_arity)
 
 FFMPEG = shutil.which("ffmpeg")
@@ -366,3 +367,76 @@ class ExtremeVolumeIsAValidationError(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@requires_ffmpeg
+class TheParserAcceptsWhatFFmpegAccepts(unittest.TestCase):
+    """A05: the arity contract went too far the other way.
+
+    `-brand iso6` and `-strict -2` are ordinary expert options that real FFmpeg
+    runs. The parser refused both as unknown arity and told the user to write
+    `-brand=iso6` instead -- which the parser then accepted and FFmpeg exited 8
+    on, because that spelling does not exist. A validator must never recommend
+    a syntax the tool rejects.
+
+    Every refusal R03 established stays refused; see the classes above.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="ffmwiz_a05_"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.source = self.root / "in.mp4"
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(self.source)],
+                       check=True, timeout=180)
+
+    def ffmpeg_accepts(self, extra: list[str]) -> bool:
+        out = self.root / f"out{len(extra)}{abs(hash(tuple(extra))) % 1000}.mp4"
+        result = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                                 "-i", str(self.source), "-c", "copy", *extra, str(out)],
+                                capture_output=True, timeout=180)
+        return result.returncode == 0
+
+    def test_the_expert_options_really_work_in_this_ffmpeg(self):
+        # The premise. If a future build drops one, this says so plainly
+        # instead of the acceptance test below failing for a hidden reason.
+        for extra in (["-brand", "iso6"], ["-strict", "-2"]):
+            with self.subTest(extra=extra):
+                self.assertTrue(self.ffmpeg_accepts(extra),
+                                f"this ffmpeg build no longer accepts {' '.join(extra)}")
+
+    def test_the_parser_accepts_them_in_ffmpeg_s_own_form(self):
+        for text in ("-brand iso6", "-strict -2"):
+            with self.subTest(text=text):
+                self.assertEqual(text.split(), parse_raw_arguments(text))
+
+    def test_a_negative_value_is_a_value_not_an_option(self):
+        self.assertEqual(["-strict", "-2"], parse_raw_arguments("-strict -2"))
+
+    def test_no_refusal_ever_recommends_the_ffmpeg_equals_spelling(self):
+        # `-opt=value` is the form FFmpeg exits 8 on. Recommending it turned a
+        # refusal into a broken command the user then had to debug. The config
+        # key the message DOES name contains an `=` of its own, which is why
+        # this asserts on the option spelling rather than on the character.
+        for option, value in (("-madeupopt", "somevalue"), ("-anotherfakeopt", "12")):
+            with self.subTest(option=option):
+                with self.assertRaises(ValueError) as caught:
+                    parse_raw_arguments(f"{option} {value}")
+                message = str(caught.exception)
+                self.assertNotIn(f"{option}={value}", message,
+                                 f"the refusal still recommends a spelling FFmpeg "
+                                 f"rejects: {message}")
+                self.assertIn(RAW_VALUED_OPTIONS_SETTING, message,
+                              "the refusal does not say how to declare a real option")
+
+    def test_a_genuinely_unknown_option_is_still_refused(self):
+        # The R03 guarantee: no guessing that an unknown option eats the next
+        # token, because that is how a bare filename became a second output.
+        with self.assertRaises(ValueError):
+            parse_raw_arguments("-madeupopt extra.wav")
+
+    def test_the_extension_point_is_the_declared_table(self):
+        self.assertEqual(1, raw_option_arity("-brand"))
+        self.assertEqual(1, raw_option_arity("-strict"))
+        self.assertIsNone(raw_option_arity("-madeupopt"))
