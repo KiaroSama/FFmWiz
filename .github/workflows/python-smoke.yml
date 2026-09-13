@@ -463,9 +463,9 @@ jobs:
       - name: Confirm the GUI job uses its own ffmpeg
         shell: bash --noprofile --norc -eo pipefail "{0}"
         run: |
-          # cygpath for the same reason the tests job explains: RUNNER_TEMP is a
-          # Windows path and `command -v` answers in MSYS form.
-          expected_dir="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")/ffmpeg-latest"
+          # cygpath for the same reason the tests job explains: FFMWIZ_SCRATCH is
+          # a Windows path and `command -v` answers in MSYS form.
+          expected_dir="$(cygpath -u "$FFMWIZ_SCRATCH" 2>/dev/null || echo "$FFMWIZ_SCRATCH")/ffmpeg-latest"
           echo "expecting $expected_dir"
           for tool in ffmpeg ffprobe; do
             resolved="$(command -v $tool)"

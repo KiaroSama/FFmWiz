@@ -268,3 +268,29 @@ class TheCleanupProvesOwnershipByPathComponent(TheCleanupDeletesOnlyOwnedPaths):
                         gone = Path(line[len("cleaned: "):].strip())
                         self.assertFalse(gone.exists(),
                                          f"reported clean but {gone} is still there")
+
+
+class EveryJobChecksTheDirectoryItActuallyUses(unittest.TestCase):
+    """The extraction path and the assertion about it must name one directory.
+
+    The ffmpeg archives moved into each job's own scratch, and one job's
+    verification step kept expecting the old shared RUNNER_TEMP -- so a correct
+    install failed its own path check. Two places spelling the same fact is a
+    drift waiting to happen; this is the mechanical check that it has not.
+    """
+
+    def test_the_expectation_matches_the_extraction_root(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        extract_roots = set(re.findall(r'\$dst = Join-Path \$env:(\w+) "ffmpeg-', text))
+        expect_roots = set(re.findall(r'expected_dir="\$\(cygpath -u "\$(\w+)"', text))
+        self.assertTrue(extract_roots, "no ffmpeg extraction step found")
+        self.assertTrue(expect_roots, "no tool-path verification step found")
+        self.assertEqual(
+            extract_roots, expect_roots,
+            f"ffmpeg is extracted under {sorted(extract_roots)} but the path check "
+            f"expects {sorted(expect_roots)}")
+
+    def test_the_archives_are_job_owned(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn('$zip = Join-Path $env:RUNNER_TEMP "ffmpeg-', text,
+                         "an ffmpeg archive is written to the shared RUNNER_TEMP again")
