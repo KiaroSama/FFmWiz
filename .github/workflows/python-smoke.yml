@@ -80,6 +80,19 @@ jobs:
       - name: Import smoke check (CLI must import without PySide6)
         run: python -c "import sys; sys.modules['PySide6'] = None; import FFmWiz; assert hasattr(FFmWiz, 'build_add_files_to_video_command'); assert hasattr(FFmWiz, 'run_media_info_mode'); assert hasattr(FFmWiz, 'run_mux_cleanup_mode'); assert hasattr(FFmWiz, 'run_hardsub_encode_mode'); assert hasattr(FFmWiz, 'build_hardsub_command'); assert hasattr(FFmWiz, 'confirm_numeric_target_not_above_source'); assert hasattr(FFmWiz, 'confirm_resolution_not_above_source'); assert hasattr(FFmWiz, 'analyze_copy_cut_chapter_plan'); assert hasattr(FFmWiz, 'add_files_stream_copy_compatibility_errors'); assert '.webvtt' in FFmWiz.HARDSUB_SUBTITLE_EXTS; assert FFmWiz.display_language('und') == 'unknown'; assert FFmWiz.describe_video_bit_depth({'pix_fmt':'yuv420p10le'}) == '10-bit'; assert FFmWiz.run_mux_cleanup_mode.__module__ == 'ffmwiz.support.ext00b'; assert 'MB' in FFmWiz.media_info_value_with_units('size', '1048576'); assert 'bit/s' in FFmWiz.media_info_value_with_units('bit_rate', '128000'); assert 's)' in FFmWiz.media_info_value_with_units('duration', '12.5'); assert FFmWiz.default_media_reports_dir().name == 'MediaReports'"
 
+      - name: Waveform maths with NO numpy installed
+        # numpy is an ACCELERATOR in the waveform model, not a requirement, and
+        # the stdlib `array('h')` path is what a user without it actually runs.
+        # Every other job installs numpy, so that path was only ever exercised
+        # by a test that imports numpy to build its own fixture -- which is not
+        # the same interpreter (A01/CI). This leg has nothing installed at all,
+        # so the fallback is proved where it is genuinely alone.
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        timeout-minutes: 10
+        run: |
+          python -c "import importlib.util, sys; sys.exit('numpy leaked into the no-dependency leg') if importlib.util.find_spec('numpy') else print('numpy is absent, as this leg requires')"
+          python tests/run_suite.py -j 2 -k join_waveform_clock -k qml_waveform -k theme_tokens
+
       - name: Prove no third-party package reached this leg
         # The check above stubs PySide6 out; this one proves the stub was not
         # papering over a real installation a previous job left on the runner.
@@ -209,8 +222,12 @@ jobs:
           } else {
             "https://github.com/GyanD/codexffmpeg/releases/download/$v/ffmpeg-$v-essentials_build.zip"
           }
-          $dst = Join-Path $env:RUNNER_TEMP "ffmpeg-$v"
-          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-$v.zip"
+          # Inside the job's OWN scratch: a shared RUNNER_TEMP/ffmpeg-$v was
+          # swept by name afterwards, which deletes the build a concurrent job
+          # on the same self-hosted runner is using. Owned paths mean the
+          # cleanup can name exactly what it created (A01/CI).
+          $dst = Join-Path $env:FFMWIZ_SCRATCH "ffmpeg-$v"
+          $zip = Join-Path $env:FFMWIZ_SCRATCH "ffmpeg-$v.zip"
           Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
           Remove-Item -Force $zip -ErrorAction SilentlyContinue
           $ProgressPreference = 'SilentlyContinue'
@@ -246,10 +263,10 @@ jobs:
         # step for a reason that has nothing to do with the build.
         run: |
           want="${{ matrix.ffmpeg }}"
-          # RUNNER_TEMP is a WINDOWS path (G:\...) while `command -v` answers in
-          # MSYS form (/g/...), so the two never share a prefix. cygpath is what
-          # makes the comparison meaningful rather than always false.
-          expected_dir="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")/ffmpeg-$want"
+          # FFMWIZ_SCRATCH is a WINDOWS path (G:\...) while `command -v` answers
+          # in MSYS form (/g/...), so the two never share a prefix. cygpath is
+          # what makes the comparison meaningful rather than always false.
+          expected_dir="$(cygpath -u "$FFMWIZ_SCRATCH" 2>/dev/null || echo "$FFMWIZ_SCRATCH")/ffmpeg-$want"
           echo "expecting $expected_dir"
           for tool in ffmpeg ffprobe; do
             resolved="$(command -v $tool)"
@@ -325,12 +342,20 @@ jobs:
         # name match is not ownership (R01).
         shell: pwsh
         run: |
-          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([char]92)
+          # Component-wise, not a string prefix: "G:\runner temp2" StartsWith
+          # "G:\runner temp", so a bare prefix test calls a SIBLING contained.
+          # Comparing against the root plus a separator is what makes it mean
+          # "inside", and the root itself is never a target.
+          $prefix = $root + [char]92
           foreach ($target in @($env:FFMWIZ_SCRATCH, (Join-Path $env:RUNNER_TEMP "venv-tests"))) {
             if ([string]::IsNullOrWhiteSpace($target)) { continue }
             if (-not (Test-Path -LiteralPath $target)) { continue }
-            $full = [System.IO.Path]::GetFullPath($target)
-            if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $full = [System.IO.Path]::GetFullPath($target).TrimEnd([char]92)
+            if ($full -eq $root) {
+              Write-Host "refusing to clean RUNNER_TEMP itself: $full"; continue
+            }
+            if (-not ($full + [char]92).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
               Write-Host "refusing to clean outside RUNNER_TEMP: $full"; continue
             }
             $item = Get-Item -LiteralPath $full -Force
@@ -338,11 +363,18 @@ jobs:
               Write-Host "refusing to follow a reparse point: $full"; continue
             }
             Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "cleaned: $full"
+            # Verified, not assumed: a locked handle leaves the tree in place,
+            # and printing "cleaned" for it hides exactly the leak this step
+            # exists to prevent.
+            if (Test-Path -LiteralPath $full) {
+              Write-Host "NOT cleaned (still present): $full"
+            } else {
+              Write-Host "cleaned: $full"
+            }
           }
-          Get-ChildItem (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -Directory -ErrorAction SilentlyContinue |
-            Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # No `ffmpeg-*` sweep any more: the archives and their extraction live
+          # inside FFMWIZ_SCRATCH above, so they are already gone, and sweeping
+          # RUNNER_TEMP by name deleted whatever a concurrent job was using.
 
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
   # module still fails CI now that the other jobs install nothing.
@@ -412,8 +444,9 @@ jobs:
         shell: pwsh
         timeout-minutes: 12
         run: |
-          $dst = Join-Path $env:RUNNER_TEMP "ffmpeg-latest"
-          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg-latest.zip"
+          # Job-owned, same reason as the tests job (A01/CI).
+          $dst = Join-Path $env:FFMWIZ_SCRATCH "ffmpeg-latest"
+          $zip = Join-Path $env:FFMWIZ_SCRATCH "ffmpeg-latest.zip"
           Remove-Item -Recurse -Force $dst -ErrorAction SilentlyContinue
           Remove-Item -Force $zip -ErrorAction SilentlyContinue
           $ProgressPreference = 'SilentlyContinue'
@@ -500,12 +533,20 @@ jobs:
         # name match is not ownership (R01).
         shell: pwsh
         run: |
-          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([char]92)
+          # Component-wise, not a string prefix: "G:\runner temp2" StartsWith
+          # "G:\runner temp", so a bare prefix test calls a SIBLING contained.
+          # Comparing against the root plus a separator is what makes it mean
+          # "inside", and the root itself is never a target.
+          $prefix = $root + [char]92
           foreach ($target in @($env:FFMWIZ_SCRATCH, (Join-Path $env:RUNNER_TEMP "venv-gui"))) {
             if ([string]::IsNullOrWhiteSpace($target)) { continue }
             if (-not (Test-Path -LiteralPath $target)) { continue }
-            $full = [System.IO.Path]::GetFullPath($target)
-            if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $full = [System.IO.Path]::GetFullPath($target).TrimEnd([char]92)
+            if ($full -eq $root) {
+              Write-Host "refusing to clean RUNNER_TEMP itself: $full"; continue
+            }
+            if (-not ($full + [char]92).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
               Write-Host "refusing to clean outside RUNNER_TEMP: $full"; continue
             }
             $item = Get-Item -LiteralPath $full -Force
@@ -513,8 +554,15 @@ jobs:
               Write-Host "refusing to follow a reparse point: $full"; continue
             }
             Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "cleaned: $full"
+            # Verified, not assumed: a locked handle leaves the tree in place,
+            # and printing "cleaned" for it hides exactly the leak this step
+            # exists to prevent.
+            if (Test-Path -LiteralPath $full) {
+              Write-Host "NOT cleaned (still present): $full"
+            } else {
+              Write-Host "cleaned: $full"
+            }
           }
-          Get-ChildItem (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -Directory -ErrorAction SilentlyContinue |
-            Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # No `ffmpeg-*` sweep any more: the archives and their extraction live
+          # inside FFMWIZ_SCRATCH above, so they are already gone, and sweeping
+          # RUNNER_TEMP by name deleted whatever a concurrent job was using.
