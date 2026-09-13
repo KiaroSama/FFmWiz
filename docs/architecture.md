@@ -42,6 +42,9 @@ Logs/                  # per-run UTC logs (git-ignored)
   workflows/
 ffmwiz/                # the application package (all implementation lives here)
   core/                # constants, colors, exceptions, timeline (dependency layer 0)
+                       #   constants_ffmpeg_options.py holds the ffmpeg
+                       #   option/arity contract, read by the wizard's raw
+                       #   parser AND by the execution-boundary guard
   support/             # pure/low-level helpers (L00_*/L01_*/L02..L07 + ext tiers)
   appio.py             # interactive I/O + logging foundation
   runtime*.py          # progress rendering, console/VT, PySide detection
