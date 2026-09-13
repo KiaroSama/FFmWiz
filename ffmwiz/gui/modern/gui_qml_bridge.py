@@ -58,7 +58,14 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             # or shutdown saw nothing, deleted the temp dir and let an unowned
             # ffmpeg run on. The owner spawns and registers under one lock, so
             # that window does not exist (NEW-GUI2/NEW-GUI3).
-            self._children = ChildProcessOwner()
+            # TWO lanes, deliberately. One owner meant one generation counter
+            # and one cancel: starting a reverse render advanced the counter the
+            # WAVEFORM decode was registered under and killed its child, and a
+            # public cancelReverse() could not stop reverse work without also
+            # stopping the decode. They are separate jobs with separate
+            # lifetimes, so they get separate owners (R04).
+            self._reverse_children = ChildProcessOwner()
+            self._wave_children = ChildProcessOwner()
             self._rev_lock = threading.Lock()
             self._rev_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_qmlrev_")
             self._rev_files: list[str] = []
@@ -124,14 +131,14 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             if self._wave_key == key and self._pcm is not None:
                 self.waveformReady.emit(key, json.dumps(self._overview()))
                 return
-            if self._children.closed:
+            if self._wave_children.closed:
                 return
             if self._wave_thread is not None and self._wave_thread.is_alive():
                 # Never return silently: the caller has no timeout and QML would
                 # sit on "decoding waveform…" forever (NEW-GUI6).
                 self._wave_pending = key
                 return
-            self._children.worker_started()
+            self._wave_children.worker_started()
             self._wave_thread = threading.Thread(target=self._decode_waveform, args=(key,), daemon=True)
             self._wave_thread.start()
 
@@ -143,7 +150,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 except Exception as exc:  # noqa: BLE001
                     _log("DEBUG", f"Waveform decode failed: {exc}")
                     payload = "[]"
-                if self._children.closed:
+                if self._wave_children.closed:
                     # The window is going away. Publishing here would touch a
                     # half-torn-down QML scene for a result nobody will draw.
                     return
@@ -156,7 +163,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             finally:
                 # In `finally`, so a failed decode or a cancelled one still
                 # releases the worker that cleanup_reverse waits on.
-                self._children.worker_finished()
+                self._wave_children.worker_finished()
 
         def _load_pcm(self, key: str) -> None:
             ffmpeg = str(self._req.get("ffmpeg") or "ffmpeg")
@@ -167,7 +174,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 # Popen through the owner, not subprocess.run: run() holds the
                 # child in a local nobody else can reach, so closing the window
                 # mid-decode left an ffmpeg running and a PCM file behind.
-                proc = self._children.start([ffmpeg, *args],
+                proc = self._wave_children.start([ffmpeg, *args],
                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if proc is None:
@@ -175,13 +182,19 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 try:
                     _, stderr = proc.communicate()
                 finally:
-                    self._children.finish(proc)
+                    self._wave_children.finish(proc)
                 if proc.returncode != 0:
-                    # Silent failure here left the canvas stuck forever (D07).
+                    # A nonzero decoder exit means the PCM on disk is whatever
+                    # FFmpeg managed before it died. Reading it anyway promoted
+                    # a truncated 4000-sample fragment into the successful cache
+                    # and the editor drew it as the whole clip (R04). Fail
+                    # loudly instead, leaving the cache untouched so a retry is
+                    # still possible.
                     detail = (stderr or b"").decode("utf-8", "replace").strip()[-400:]
                     _log("WARNING", f"Waveform decode failed (rc={proc.returncode}): {detail}")
-                if self._children.closed:
-                    return
+                    raise RuntimeError(f"waveform decode failed (rc={proc.returncode})")
+                if self._wave_children.closed:
+                    raise RuntimeError("waveform decode cancelled by shutdown")
                 data = Path(pcm_path).read_bytes()
             finally:
                 # `finally`, and after the child is reaped: on Windows the file
@@ -235,28 +248,42 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             except Exception as exc:
                 _log("DEBUG", f"renderReverse bad spec: {exc}")
                 return
-            if self._children.closed:
+            if self._reverse_children.closed:
                 return
             # The previous chunk's result is already superseded and each render
             # holds an ffmpeg process plus a full window of frames, so stop it
             # before starting another (NEW-GUI2). Claiming the generation here,
             # on the GUI thread, is what makes a render started earlier but not
             # yet spawned refuse to spawn at all.
-            self._children.bump_generation(int(spec.get("gen", 0)))
-            self.cancelReverse()
-            self._children.worker_started()
+            #
+            # SUPERSEDE, which is not the same as CANCEL: this stops the older
+            # generations and spares the one being started. `cancelReverse()` is
+            # the public "stop reverse work" slot and must stop the current one
+            # too -- it used to call cancel(keep_generation=current), so a
+            # direct QML cancel spared the very process it was asked to stop
+            # (R04).
+            generation = int(spec.get("gen", 0))
+            self._reverse_children.bump_generation(generation)
+            self._reverse_children.cancel(keep_generation=generation)
+            self._reverse_children.worker_started()
             threading.Thread(target=self._do_reverse, args=(spec,), daemon=True).start()
 
         @Slot()
         def cancelReverse(self) -> None:  # noqa: N802 (QML camelCase)
-            """Stop every reverse proxy still rendering, bounded and reaped."""
-            self._children.cancel(keep_generation=self._children.current_generation())
+            """Stop EVERY reverse proxy, including the current generation.
+
+            Called from QML when the user leaves reverse mode or seeks away, so
+            "stop" has to mean stop. Waveform decoding is a different lane and
+            is deliberately untouched.
+            """
+            self._reverse_children.bump_generation()
+            self._reverse_children.cancel()
 
         def _do_reverse(self, spec: dict) -> None:
             try:
                 self._render_reverse(spec)
             finally:
-                self._children.worker_finished()
+                self._reverse_children.worker_finished()
 
         def _render_reverse(self, spec: dict) -> None:
             gen = int(spec.get("gen", 0))
@@ -281,21 +308,21 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 # Spawn and register together. Doing it in two steps left a gap
                 # in which cancelReverse/cleanup saw no child, returned "clean",
                 # and the process it never saw outlived the window.
-                proc = self._children.start(args, generation=gen,
+                proc = self._reverse_children.start(args, generation=gen,
                                             stdout=subprocess.DEVNULL,
                                             stderr=subprocess.PIPE,
                                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if proc is None:
                     # Superseded or shut down before it could start.
                     self._discard_proxy(out)
-                    if not self._children.closed:
+                    if not self._reverse_children.closed:
                         self.reverseReady.emit(gen, "")
                     return
                 try:
                     _, err = proc.communicate()
                 finally:
-                    self._children.finish(proc)
-                if self._children.closed or not self._children.is_current(gen):
+                    self._reverse_children.finish(proc)
+                if self._reverse_children.closed or not self._reverse_children.is_current(gen):
                     # A stale or post-shutdown result must never be published.
                     self._discard_proxy(out)
                     return
@@ -332,27 +359,40 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             except OSError:
                 pass
 
-        def cleanup_reverse(self) -> None:
+        def cleanup_reverse(self) -> bool:
             """Shut every owned child and worker down, then delete what they
-            wrote. Idempotent, bounded, and it reports what it could not
-            remove instead of swallowing the failure."""
-            self._children.close()
+            wrote. Returns False when shutdown or removal did not complete.
+
+            Idempotent and bounded, and it reports what it could not remove
+            instead of swallowing the failure."""
+            reverse_done = self._reverse_children.close()
+            wave_done = self._wave_children.close()
             with self._rev_lock:
                 self._rev_files = []
+            if not (reverse_done and wave_done):
+                # A worker is still running and still owns what it is writing.
+                # Deleting its directory now is the race this guard exists for;
+                # the temp directory is reported instead of silently removed.
+                _log("WARNING",
+                     f"Shutdown incomplete (reverse={reverse_done}, waveform={wave_done}); "
+                     f"leaving {self._rev_temp.name} in place rather than deleting files "
+                     f"a worker still owns")
+                return False
             # The children are reaped by now, so the handles Windows kept on
             # the proxies are gone; a short bounded retry still covers an
             # antivirus scan holding one for a moment.
             for attempt in range(5):
                 try:
                     self._rev_temp.cleanup()
-                    return
+                    return True
                 except FileNotFoundError:
-                    return
+                    return True
                 except OSError as exc:     # Windows can still hold a lock
                     if attempt == 4:
                         _log("WARNING", f"Could not remove {self._rev_temp.name}: {exc}")
-                        return
+                        return False
                     time.sleep(0.2)
+            return False
     return Bridge
 
 

@@ -372,12 +372,20 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
         # The child is spawned THROUGH the owner, never with a bare Popen: a
         # bare Popen registers only after it returns, and a cancel landing in
         # that gap reported "clean" while the process ran on (F08).
-        self.assertIn("self._children.start(args, generation=gen", self.SRC)
+        self.assertIn("self._reverse_children.start(args, generation=gen", self.SRC)
         self.assertNotIn("subprocess.Popen(args", self.SRC)
-        # renderReverse claims the generation and cancels before spawning.
+        # renderReverse SUPERSEDES older generations and spares the new one.
+        # It must NOT call the public cancelReverse(): that slot stops every
+        # reverse render including the current one, which is right for a user
+        # leaving reverse mode and wrong for starting the next chunk (R04).
         head = self.SRC[self.SRC.index("def renderReverse"):self.SRC.index("def cancelReverse")]
-        self.assertIn("self._children.bump_generation(", head)
-        self.assertIn("self.cancelReverse()", head)
+        self.assertIn("self._reverse_children.bump_generation(", head)
+        self.assertIn("cancel(keep_generation=generation)", head)
+        self.assertNotIn("self.cancelReverse()", head)
+        # And the public slot spares nothing.
+        slot = self.SRC[self.SRC.index("def cancelReverse"):self.SRC.index("def _do_reverse")]
+        self.assertIn("self._reverse_children.cancel()", slot)
+        self.assertNotIn("keep_generation", slot)
 
     def test_proxies_live_in_one_owned_temp_dir(self):
         self.assertIn('tempfile.TemporaryDirectory(prefix="ffmwiz_qmlrev_")', self.SRC)

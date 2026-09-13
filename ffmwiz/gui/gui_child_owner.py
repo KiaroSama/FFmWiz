@@ -121,19 +121,25 @@ class ChildProcessOwner:
             self._terminate(proc)
         return len(doomed)
 
-    def close(self, worker_timeout: float = 8.0) -> None:
-        """Shut down: refuse new children, stop the running ones, wait for the
-        workers that own them, then sweep once more. Idempotent.
+    def close(self, worker_timeout: float = 8.0) -> bool:
+        """Shut down, and say honestly whether the shutdown completed.
+
+        Returns True only when every worker returned inside `worker_timeout`.
+        A False result means somebody still owns resources -- the caller must
+        NOT then delete the files those workers are writing into, which is
+        exactly what happened while this returned None and the caller had
+        nothing to check (R04).
 
         The order matters: killing first is what unblocks a worker sitting in
         `communicate()`, and waiting for the workers is what makes it safe for
-        the caller to delete the temp files they were writing into.
+        the caller to clean up. Idempotent.
         """
         with self._lock:
             self._closed = True
         self.cancel()
-        self.wait_idle(worker_timeout)
+        idle = self.wait_idle(worker_timeout)
         self.cancel()      # a worker may have raced one last child in
+        return bool(idle) and self.active_workers() == 0
 
     def _terminate(self, proc) -> None:
         """Bounded terminate -> kill -> reap, so no zombie and no hang."""
