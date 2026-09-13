@@ -14,6 +14,7 @@ runs anything, which is exactly the confirmation this needs.
 """
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Any
 
@@ -21,6 +22,7 @@ from ffmwiz import appio
 from ffmwiz.appio import paint
 from ffmwiz.core.colors import Color
 from ffmwiz.support.L01_filters import requested_volume_gain
+from ffmwiz.support.L01_misc import _config_setting_for_logging
 
 # ffmpeg's own limits on the `volume` filter are far wider, but a factor
 # outside this range is much more likely to be a typo than an intention: 0.01
@@ -94,7 +96,35 @@ VALUED_RAW_OPTIONS = {
     "-dts_delta_threshold", "-dts_error_threshold", "-seek_timestamp",
     "-reinit_filter", "-vstats_file", "-frames", "-vframes", "-aframes",
     "-q", "-qscale", "-bt", "-bitrate", "-maxrate:v", "-pass", "-passlogfile",
+    # Expert options the first table missed. Each was verified against a real
+    # FFmpeg run before being added: refusing `-brand iso6` and `-strict -2`
+    # rejected commands FFmpeg accepts, and the refusal then recommended an
+    # `-opt=value` spelling FFmpeg exits 8 on (A05).
+    "-brand", "-strict", "-tag", "-bsf", "-top", "-force_key_frames",
+    "-video_track_timescale", "-max_interleave_delta", "-time_base",
+    "-enc_time_base", "-ch_layout", "-write_tmcd",
 }
+
+# The user's own extension of the table above, for an expert option this build
+# supports and FFmWiz has not listed. Declaring arity is the ONLY safe way to
+# widen the grammar: guessing that an unknown option eats the next token is
+# what let a bare filename become a second output (R03), so it stays refused.
+RAW_VALUED_OPTIONS_SETTING = "raw_ffmpeg_valued_args"
+
+
+def user_declared_valued_options() -> set[str]:
+    """Extra one-value options declared in config.env, normalized to `-name`."""
+    raw = _config_setting_for_logging(RAW_VALUED_OPTIONS_SETTING, "")
+    text = str(raw or "").strip()
+    if not text or text.lower() in {"n", "no", "none"}:
+        return set()
+    declared = set()
+    for piece in re.split(r"[,\s]+", text):
+        name = piece.strip().lower()
+        if not name:
+            continue
+        declared.add(name if name.startswith("-") else f"-{name}")
+    return declared
 
 # The file-loaded spelling of any option: `-/filter:a filters.txt` reads the
 # VALUE of `-filter:a` out of a file. It reached the wizard's own audio filter
@@ -161,6 +191,9 @@ def raw_option_arity(token: str) -> int | None:
     if base.startswith("-no") and len(base) > 3:
         return 0
     if canonical in VALUED_RAW_OPTIONS or base in VALUED_RAW_OPTIONS:
+        return 1
+    declared = user_declared_valued_options()
+    if canonical in declared or base in declared:
         return 1
     return None
 
@@ -267,8 +300,9 @@ def parse_raw_arguments(text: str) -> list[str]:
             raise ValueError(
                 f"FFmWiz does not know whether {part} takes a value, so it "
                 f"cannot tell if {following} is that value or a file name "
-                f"FFmpeg would write. Put the value in the same token "
-                f"({part}={following}) if it is a value, or remove it")
+                f"FFmpeg would write. If {part} takes a value, declare it in "
+                f"config.env as {RAW_VALUED_OPTIONS_SETTING}={part.lstrip('-')} "
+                f"and run again; otherwise remove {following}")
     return parts
 
 
