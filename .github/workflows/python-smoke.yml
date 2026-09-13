@@ -290,6 +290,7 @@ jobs:
         run: python tests/run_suite.py --require ffmpeg --require numpy --require wheel --json "$RUNNER_TEMP/results.json"
 
       - name: Upload results
+        id: upload
         if: always()
         # Retention is evidence, not a verdict. The account's artifact storage
         # quota is an external condition -- when it is full the upload errors
@@ -313,7 +314,7 @@ jobs:
         # step summary -- neither of which the artifact quota can take away.
         # It reports and never decides: it exits 0 whatever the suite did.
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "py${{ matrix.python-version }} / ffmpeg ${{ matrix.ffmpeg }}"
+        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "py${{ matrix.python-version }} / ffmpeg ${{ matrix.ffmpeg }}" "${{ steps.upload.outcome }}"
 
       - name: Remove this job's scratch files
         if: always()
@@ -466,6 +467,7 @@ jobs:
         run: python tests/run_suite.py --require pyside6 --require numpy --require ffmpeg -j 2 --json "$RUNNER_TEMP/results.json" -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2 -k gui_child_ownership
 
       - name: Upload results
+        id: upload
         if: always()
         # Retention is evidence, not a verdict. The account's artifact storage
         # quota is an external condition -- when it is full the upload errors
@@ -487,7 +489,7 @@ jobs:
         # Same reason as the tests job: the artifact is best-effort, the log and
         # the step summary are not.
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "gui-import"
+        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "gui-import" "${{ steps.upload.outcome }}"
 
       - name: Remove this job's scratch files
         if: always()
