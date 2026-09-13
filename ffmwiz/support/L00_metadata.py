@@ -238,10 +238,21 @@ def copy_cut_remap_chapter(
 
 
 def ffmetadata_escape(value: Any) -> str:
-    text = str(value)
+    r"""Escape one FFmetadata key or value.
+
+    FFmetadata escapes a special character by prefixing it with a backslash
+    -- and a physical newline is one of them, so a two-line chapter title is
+    backslash + LF, NOT the C escape "\n". Emitting the C form made a real
+    FFmpeg round trip read First<LF>Second back as the literal text
+    "FirstnSecond", and CRLF as "FirstrnSecond": the newline vanished and
+    its letter stayed. CR is normalized to LF first, because a bare CR
+    cannot be carried through this format without the reader ending the
+    line early; that keeps the Windows CRLF case lossless in the only way
+    the format allows.
+    """
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\\", "\\\\")
-    text = text.replace("\r", "\\r").replace("\n", "\\n")
-    for char in ("=", ";", "#"):
+    for char in ("=", ";", "#", "\n"):
         text = text.replace(char, "\\" + char)
     return text
 
