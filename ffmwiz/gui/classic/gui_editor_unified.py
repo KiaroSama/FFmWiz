@@ -45,7 +45,7 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_spec: str = "a:0",
-                         label: str | None = None) -> str:
+                         label: str | None = None, origin: float = 0.0) -> str:
     """One join segment's audio, bounded to the SEGMENT's own declared length.
 
     Shared shape with the QML engine's waveform so both editors lay audio on
@@ -54,11 +54,15 @@ def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_s
     and `apad=whole_dur` pads a short one with silence.
     """
     span = max(0.001, float(duration))
+    start = max(0.0, float(origin or 0.0))
     out = label if label is not None else f"a{index}"
+    # `origin` is where the PICTURE starts on the demuxer's clock; audio before
+    # it belongs to no part of this timeline. Same contract and same order as
+    # the QML engine, so both editors place a sample identically (A04).
     return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
             f"aresample={rate}:first_pts=0,"
-            f"atrim=end={span:.6f},apad=whole_dur={span:.6f},"
-            f"asetpts=PTS-STARTPTS[{out}]")
+            f"atrim=start={start:.6f}:end={start + span:.6f},"
+            f"asetpts=PTS-STARTPTS,apad=whole_dur={span:.6f}[{out}]")
 
 
 def build_classic_waveform_args(
@@ -89,7 +93,10 @@ def build_classic_waveform_args(
         # as the audio instead, so every marker after a segment whose audio was
         # shorter or longer than its picture sat at the wrong time.
         filters = [
-            segment_audio_filter(idx, float(segment.get("duration") or 0.0), 4000)
+            segment_audio_filter(
+                idx, float(segment.get("duration") or 0.0), 4000,
+                origin=0.0 if not segment.get("has_audio", True)
+                else float(segment.get("picture_clock_offset") or 0.0))
             for idx, segment in enumerate(segments)
         ]
         filters.append(f"{''.join(labels)}concat=n={len(segments)}:v=0:a=1[mix]")
@@ -98,7 +105,9 @@ def build_classic_waveform_args(
         # The same picture-clock contract as the joined branch above (R05).
         duration = float(req.get("duration") or 0.0)
         if duration > 0:
-            chain = segment_audio_filter(0, duration, 4000, label="mix")
+            chain = segment_audio_filter(
+                0, duration, 4000, label="mix",
+                origin=float(req.get("picture_clock_offset") or 0.0))
         else:
             chain = "[0:a:0]aformat=channel_layouts=mono,aresample=4000:first_pts=0[mix]"
         args.extend([

@@ -286,8 +286,13 @@ class JoinWaveformGraphTests(unittest.TestCase):
         self.assertNotIn("b.mkv", args)
         # Each segment is bounded to its own declared length, so the joined
         # waveform spans exactly 5 + 4 seconds whatever the inputs contain.
-        self.assertIn("atrim=end=5.000000,apad=whole_dur=5.000000", joined)
-        self.assertIn("atrim=end=4.000000,apad=whole_dur=4.000000", joined)
+        # Asserted as the BOUND, not as one spelling of the filter chain: the
+        # chain gained an origin trim (A04) and pinning its exact bytes made a
+        # behaviour-preserving change look like a regression.
+        for span in ("5.000000", "4.000000"):
+            with self.subTest(span=span):
+                self.assertIn(f"end={span}", joined)
+                self.assertIn(f"apad=whole_dur={span}", joined)
 
     def test_all_audio_segments_are_unchanged(self):
         req = {"join_segments": [

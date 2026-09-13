@@ -58,6 +58,9 @@ from ffmwiz.support.L01_paths import *  # noqa: F401,F403
 from ffmwiz.support.L01_split import *  # noqa: F401,F403
 from ffmwiz.support.L01_streams import *  # noqa: F401,F403
 from ffmwiz.support.L01_text import *  # noqa: F401,F403
+# Named rather than star-imported: the editors need exactly one thing from the
+# subtitle tier -- where the picture starts on the demuxer's clock (A04).
+from ffmwiz.support.L01_subtitles import picture_clock_offset  # noqa: F401
 from ffmwiz.support.L02 import *  # noqa: F401,F403
 from ffmwiz.support.L03 import *  # noqa: F401,F403
 from ffmwiz.support.L04 import *  # noqa: F401,F403
@@ -210,7 +213,15 @@ def choose_crop_graphically(answers: dict[str, Any]) -> tuple[int, int, int, int
             source_w, source_h = 1920, 1080
     else:
         source_w, source_h = 1920, 1080
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    # The editor's timeline is the PICTURE's, not the container's. A 2 s clip
+    # whose audio runs 4 s has a 4 s container, and announcing that made the
+    # whole editor -- preview, waveform, markers, export ranges -- 4 s long
+    # over 2 s of frames (A04). `video_stream_span_seconds` is the contract
+    # that already encodes the precision order: the stream's own duration,
+    # Matroska's per-stream DURATION tag, frames over frame rate, container.
+    video_streams = list(answers.get("video_streams") or [])
+    duration = video_stream_span_seconds(
+        video_streams[0] if video_streams else {}, answers.get("format")) or 0.0
     request = {
         "mode": "crop",
         "input_path": str(answers["input_path"]),
@@ -293,7 +304,10 @@ def open_cut_gui(
 
 
 def open_video_speed_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    # The editor's timeline is the PICTURE's, not the container's (A04).
+    video_streams = list(answers.get("video_streams") or [])
+    duration = video_stream_span_seconds(
+        video_streams[0] if video_streams else {}, answers.get("format")) or 0.0
     request = {
         "mode": "video_speed",
         "input_path": str(answers["input_path"]),
@@ -325,13 +339,19 @@ def open_video_speed_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
-    duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
+    # The editor's timeline is the PICTURE's, not the container's (A04).
+    video_streams = list(answers.get("video_streams") or [])
+    duration = video_stream_span_seconds(
+        video_streams[0] if video_streams else {}, answers.get("format")) or 0.0
     join_segments: list[dict[str, Any]] = []
     if answers.get("join_input_items"):
         first_segment = {
             "path": str(answers["input_path"]),
             "name": Path(answers["input_path"]).name,
             "duration": float(duration),
+            # Per-segment picture origin, so the waveform trims each input's
+            # pre-picture audio on its OWN clock rather than input 0's (A04).
+            "picture_clock_offset": float(picture_clock_offset(answers)),
             "chapters": (answers.get("probe") or {}).get("chapters") or [],
             # Per-segment, because the request-level has_audio is input 0 only:
             # the editors need to know which inputs actually carry audio before
@@ -344,7 +364,16 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
                 {
                     "path": str(item.get("path")),
                     "name": Path(item.get("path")).name,
-                    "duration": float(item.get("duration") or 0.0),
+                    # Each segment's own PICTURE span. `concat` splices
+                    # decoded frames, so a container that outlives its picture
+                    # adds no frames but did inflate every later offset (A04).
+                    "duration": join_item_picture_span(item),
+                    "picture_clock_offset": float(picture_clock_offset({
+                        "video_streams": item.get("video_streams")
+                        or [stream for stream in ((item.get("probe") or {}).get("streams") or [])
+                            if str(stream.get("codec_type") or "").lower() == "video"],
+                        "format": (item.get("probe") or {}).get("format") or {},
+                    })),
                     "chapters": (item.get("probe") or {}).get("chapters") or [],
                     "has_audio": bool(item.get("audio_streams")),
                 }
@@ -389,6 +418,12 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
         "has_audio": any_join_audio(answers),
         "audio_count": len(answers.get("audio_streams") or []),
         "chapters": chapters,
+        # Where the picture starts on the demuxer's clock. Without it a
+        # consumer cannot put an audio sample on the picture clock at all: an
+        # impulse at container 1.5 s in a file whose picture starts at 1 s
+        # belongs at picture 0.5 s, and every consumer was placing it at 1.5
+        # (A04). 0.0 for an ordinary file, which is most of them.
+        "picture_clock_offset": float(picture_clock_offset(answers)),
         "join_segments": join_segments,
         "ffmpeg": answers.get("ffmpeg") or shutil.which("ffmpeg") or "ffmpeg",
         "log_path": str(log_path()) if log_path() is not None else "",
@@ -458,6 +493,9 @@ def open_unified_video_gui(answers: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def open_audio_transform_gui(answers: dict[str, Any], audio_index: int) -> dict[str, Any] | None:
+    # Deliberately the CONTAINER's length: this editor edits an AUDIO stream,
+    # which can legitimately outlive the picture. The video editors use the
+    # picture span (A04); using it here would crop the audio timeline.
     duration = services.stream_duration_seconds({}, answers.get("format")) or 0.0
     request = {
         "mode": "audio_transform",
