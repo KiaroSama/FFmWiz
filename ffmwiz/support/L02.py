@@ -657,10 +657,18 @@ def choose_add_files_output_path(input_path: Path, extra_items: list[dict[str, A
     return resolve_output_collision(unique_numbered_path(output_path), input_path, ADD_FILES_OUTPUT_SUFFIX)
 
 
-def track_manager_output_path(input_path: Path) -> Path:
+def track_manager_output_path(input_path: Path, extra_items: list[dict[str, Any]] | None = None) -> Path:
+    """The `_TrackEdit` destination, safe against EVERY source this job reads.
+
+    Track Manager consumes the primary file AND each external audio/subtitle
+    track being added. Guarding only the primary left the added ones exposed:
+    a hardlink from an external WAV to the default destination was kept, FFmpeg
+    read and overwrote that WAV in the same run, and returned 0 (R02).
+    """
     suffix = input_path.suffix or ".mkv"
     candidate = input_path.with_name(f"{sanitize_output_stem(input_path.stem)}_TrackEdit{suffix}")
-    return resolve_output_collision(candidate, input_path, "_TrackEdit")
+    sources = [input_path] + [Path(item["path"]) for item in (extra_items or []) if item.get("path")]
+    return resolve_output_collision_for_sources(candidate, sources, "_TrackEdit")
 
 
 def _track_manager_loudnorm_summary(answers: dict[str, Any]) -> str:

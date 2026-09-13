@@ -82,6 +82,25 @@ def resolve_output_collision(output_path: Path, input_path: Path, collision_suff
     return unique_numbered_path(candidate)
 
 
+def resolve_output_collision_for_sources(output_path: Path, sources: list[Path],
+                                         collision_suffix: str) -> Path:
+    """Avoid writing the output over ANY source the job reads.
+
+    `resolve_output_collision` guards one input. A job usually has several --
+    joined media, external tracks, subtitles, covers -- and guarding only the
+    primary is how Track Manager came to overwrite an added WAV (R02). This is
+    the shared form; `ext00b.resolve_output_collision_against_inputs` keeps its
+    name and logging and delegates here, so there is one rule, not two.
+    """
+    resolved = output_path
+    for source in sources:
+        if source and paths_same(resolved, source):
+            safe_stem = sanitize_output_stem(resolved.stem)
+            resolved = unique_numbered_path(
+                resolved.with_name(f"{safe_stem}{collision_suffix}{resolved.suffix}"))
+    return resolved
+
+
 def build_separator_base_output_path(answers: dict[str, Any]) -> Path:
     input_path: Path = answers["input_path"]
     output_location: Path = answers["output_location"]
@@ -107,6 +126,7 @@ __all__ = [
     'folder_default_output_path',
     'asset_path',
     'resolve_output_collision',
+    'resolve_output_collision_for_sources',
     'build_separator_base_output_path',
     'default_extract_stream_output_path',
 ]

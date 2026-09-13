@@ -326,6 +326,25 @@ def run_ffmpeg_with_progress(
 
     Returns (returncode, elapsed_seconds).
     """
+    # LAST LINE OF DEFENCE, and the only one every caller shares. A destination
+    # resolved safely at planning time can still be an alias of a source by the
+    # time it runs -- a hardlink created after confirmation -- and a builder can
+    # simply have failed to consider one of its sources (Track Manager checked
+    # the primary file and never its external tracks). FFmpeg would open that
+    # file for writing, destroy it, and exit 0. Refusing here costs one stat per
+    # input and cannot be bypassed by adding another builder (R02).
+    conflict = command_source_output_conflict(cmd)
+    if conflict is not None:
+        source, destination = conflict
+        message = (f"Refusing to run {label}: the output {destination} is the same file as "
+                   f"the input {source}. FFmpeg would overwrite that source while reading it.")
+        log_error(message)
+        try:
+            appio.error(message)
+        except Exception:      # noqa: BLE001 - a console failure must not hide the refusal
+            print(message, file=sys.stderr)
+        return 1, 0.0
+
     progress_cmd = _inject_progress_args(cmd)
     # Record the difference, not the whole command again: the progress variant
     # is the same argv plus a couple of reporting flags.
