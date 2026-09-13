@@ -119,6 +119,25 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Create a job-owned scratch directory
+        # EVERY temporary file this job makes must land somewhere this job owns.
+        # The previous cleanup swept `$env:TEMP` for `ffmwiz_*` and deleted every
+        # match: on a self-hosted runner running as the desktop user that is the
+        # SAME %TEMP% the user's own editor sessions and retained manual-command
+        # inputs live in, so a prefix match was being treated as proof of
+        # ownership. It is not. Pointing TEMP/TMP/TMPDIR at a per-job directory
+        # under RUNNER_TEMP makes ownership structural: the sweep can then be a
+        # single scoped delete instead of a pattern hunt through shared state.
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP "ffmwiz-scratch-$env:GITHUB_RUN_ID-$env:GITHUB_JOB-${{ matrix.python-version }}-${{ matrix.ffmpeg }}"
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          "TEMP=$scratch"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$scratch"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMPDIR=$scratch"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FFMWIZ_SCRATCH=$scratch" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "job scratch: $scratch"
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -289,13 +308,30 @@ jobs:
 
       - name: Remove this job's scratch files
         if: always()
-        # A persistent runner keeps RUNNER_TEMP between runs on some setups, and
-        # an ffmpeg tree is ~250 MB per leg.
+        # Deletes ONLY what this job owns, and proves that before deleting:
+        # the target must resolve INSIDE RUNNER_TEMP and must not be a reparse
+        # point, so a junction planted in the scratch path cannot redirect the
+        # delete outside the owned area. No prefix sweep of shared %TEMP%: a
+        # name match is not ownership (R01).
         shell: pwsh
         run: |
-          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "venv-tests") -ErrorAction SilentlyContinue
-          Get-ChildItem $env:TEMP -Directory -Filter "ffmwiz_*" -ErrorAction SilentlyContinue |
+          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          foreach ($target in @($env:FFMWIZ_SCRATCH, (Join-Path $env:RUNNER_TEMP "venv-tests"))) {
+            if ([string]::IsNullOrWhiteSpace($target)) { continue }
+            if (-not (Test-Path -LiteralPath $target)) { continue }
+            $full = [System.IO.Path]::GetFullPath($target)
+            if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+              Write-Host "refusing to clean outside RUNNER_TEMP: $full"; continue
+            }
+            $item = Get-Item -LiteralPath $full -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+              Write-Host "refusing to follow a reparse point: $full"; continue
+            }
+            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "cleaned: $full"
+          }
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -Directory -ErrorAction SilentlyContinue |
+            Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
   # The only job that installs PySide6 (665 MB), so a broken pin or a broken GUI
@@ -307,6 +343,25 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Create a job-owned scratch directory
+        # EVERY temporary file this job makes must land somewhere this job owns.
+        # The previous cleanup swept `$env:TEMP` for `ffmwiz_*` and deleted every
+        # match: on a self-hosted runner running as the desktop user that is the
+        # SAME %TEMP% the user's own editor sessions and retained manual-command
+        # inputs live in, so a prefix match was being treated as proof of
+        # ownership. It is not. Pointing TEMP/TMP/TMPDIR at a per-job directory
+        # under RUNNER_TEMP makes ownership structural: the sweep can then be a
+        # single scoped delete instead of a pattern hunt through shared state.
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP "ffmwiz-scratch-$env:GITHUB_RUN_ID-$env:GITHUB_JOB-gui"
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          "TEMP=$scratch"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$scratch"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMPDIR=$scratch"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FFMWIZ_SCRATCH=$scratch" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "job scratch: $scratch"
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -420,9 +475,28 @@ jobs:
 
       - name: Remove this job's scratch files
         if: always()
+        # Deletes ONLY what this job owns, and proves that before deleting:
+        # the target must resolve INSIDE RUNNER_TEMP and must not be a reparse
+        # point, so a junction planted in the scratch path cannot redirect the
+        # delete outside the owned area. No prefix sweep of shared %TEMP%: a
+        # name match is not ownership (R01).
         shell: pwsh
         run: |
-          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "venv-gui") -ErrorAction SilentlyContinue
-          Get-ChildItem $env:TEMP -Directory -Filter "ffmwiz_*" -ErrorAction SilentlyContinue |
+          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          foreach ($target in @($env:FFMWIZ_SCRATCH, (Join-Path $env:RUNNER_TEMP "venv-gui"))) {
+            if ([string]::IsNullOrWhiteSpace($target)) { continue }
+            if (-not (Test-Path -LiteralPath $target)) { continue }
+            $full = [System.IO.Path]::GetFullPath($target)
+            if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+              Write-Host "refusing to clean outside RUNNER_TEMP: $full"; continue
+            }
+            $item = Get-Item -LiteralPath $full -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+              Write-Host "refusing to follow a reparse point: $full"; continue
+            }
+            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "cleaned: $full"
+          }
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP "ffmpeg-*") -Directory -ErrorAction SilentlyContinue |
+            Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
