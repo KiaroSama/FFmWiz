@@ -63,6 +63,53 @@ VALUELESS_RAW_OPTIONS = {
 }
 
 
+# Options that take exactly ONE value. Arity is DECLARED here, never guessed
+# from whether the next token happens to look like a file: guessing is what let
+# `-report extra.wav` and `-nobitexact extra.wav` through, and FFmpeg then wrote
+# BOTH `extra.wav` and the planned output with exit 0 (R03). Stream qualifiers
+# are stripped before lookup, so `-b:v` and `-metadata:s:a:0` resolve here too.
+VALUED_RAW_OPTIONS = {
+    # rate control and quality
+    "-b", "-crf", "-cq", "-qp", "-maxrate", "-minrate", "-bufsize", "-qmin",
+    "-qmax", "-qdiff", "-qcomp", "-aq", "-aq-strength", "-compression_level",
+    "-global_quality", "-rc", "-cbr", "-multipass", "-rc-lookahead",
+    # encoder tuning
+    "-preset", "-tune", "-profile", "-level", "-coder", "-trellis", "-subq",
+    "-refs", "-bf", "-g", "-keyint_min", "-sc_threshold", "-me_method",
+    "-x264-params", "-x264opts", "-x265-params", "-svtav1-params", "-tier",
+    "-spatial_aq", "-temporal_aq", "-aq-mode", "-b_ref_mode", "-gpu",
+    # picture and audio shape
+    "-pix_fmt", "-s", "-r", "-aspect", "-sample_fmt", "-ar", "-ac",
+    "-channel_layout", "-color_primaries", "-color_trc", "-colorspace",
+    "-color_range", "-field_order", "-sws_flags", "-swr_flags",
+    # container and muxing
+    "-movflags", "-fflags", "-flags", "-max_muxing_queue_size", "-muxdelay",
+    "-muxpreload", "-avoid_negative_ts", "-vsync", "-fps_mode", "-async",
+    "-itsoffset", "-itsscale", "-timestamp", "-metadata", "-disposition",
+    "-attach", "-map_channel", "-shortest_buf_duration", "-segment_time",
+    # process control
+    "-threads", "-filter_threads", "-filter_complex_threads", "-thread_queue_size",
+    "-hwaccel", "-hwaccel_device", "-hwaccel_output_format", "-init_hw_device",
+    "-filter_hw_device", "-loglevel", "-v", "-max_alloc", "-abort_on",
+    "-dts_delta_threshold", "-dts_error_threshold", "-seek_timestamp",
+    "-reinit_filter", "-vstats_file", "-frames", "-vframes", "-aframes",
+    "-q", "-qscale", "-bt", "-bitrate", "-maxrate:v", "-pass", "-passlogfile",
+}
+
+# The file-loaded spelling of any option: `-/filter:a filters.txt` reads the
+# VALUE of `-filter:a` out of a file. It reached the wizard's own audio filter
+# and replaced it -- measured PCM peak 2048 -> 8190 -- because the leading `/`
+# hid the option family from the ownership check (R03).
+FILE_LOADED_PREFIX = "-/"
+
+# `-filter_script:a` is the same thing under another name: it hands FFmpeg a
+# file whose contents become that stream's filtergraph.
+FILTER_SCRIPT_ALIASES = {
+    "-filter_script": "-filter", "-filter_script:v": "-filter:v",
+    "-filter_script:a": "-filter:a", "-filter_script:s": "-filter:s",
+}
+
+
 def _is_option_token(token: str) -> bool:
     """Whether a token is an ffmpeg OPTION rather than a value.
 
@@ -81,14 +128,41 @@ def _is_option_token(token: str) -> bool:
 def canonical_raw_option(token: str) -> str:
     """An option spelled in the family FFmWiz reasons about.
 
-    A stream qualifier is kept (`-c:v:0` stays qualified) so the caller can
-    still compare the BASE, while a legacy alias is rewritten to the modern
-    name it is an alias FOR.
+    Canonicalization happens BEFORE any ownership decision, because every
+    spelling that escaped the check was a spelling this function did not
+    normalize: the legacy `-vcodec` alias, the file-loaded `-/filter:a` form and
+    the `-filter_script:a` twin all reach options the wizard owns. A stream
+    qualifier is kept (`-c:v:0` stays qualified) so the caller can still compare
+    the BASE.
     """
     lowered = token.lower()
+    if lowered.startswith(FILE_LOADED_PREFIX) and len(lowered) > len(FILE_LOADED_PREFIX):
+        lowered = "-" + lowered[len(FILE_LOADED_PREFIX):]
+    lowered = FILTER_SCRIPT_ALIASES.get(lowered, lowered)
     head, separator, qualifier = lowered.partition(":")
+    head = FILTER_SCRIPT_ALIASES.get(head, head)
     canonical = RAW_OPTION_ALIASES.get(head, head)
     return canonical + (separator + qualifier if separator else "")
+
+
+def raw_option_arity(token: str) -> int | None:
+    """How many values an option takes: 0, 1, or None when it is not known.
+
+    None is the honest answer for an option outside the schema, and the caller
+    must treat it as ambiguous rather than assuming it swallows the next token.
+    That assumption is the whole of R03: it turned a bare filename into "the
+    value of -report" and let FFmpeg write an output nobody planned.
+    """
+    canonical = canonical_raw_option(token)
+    base = canonical.partition(":")[0]
+    if canonical in VALUELESS_RAW_OPTIONS or base in VALUELESS_RAW_OPTIONS:
+        return 0
+    # `-noX` is FFmpeg's boolean-off spelling and never takes a value.
+    if base.startswith("-no") and len(base) > 3:
+        return 0
+    if canonical in VALUED_RAW_OPTIONS or base in VALUED_RAW_OPTIONS:
+        return 1
+    return None
 
 
 def parse_volume(text: str) -> float:
@@ -177,12 +251,24 @@ def parse_raw_arguments(text: str) -> list[str]:
             raise ValueError(
                 f"{part} is set by the wizard itself; changing it here would "
                 f"make the printed command and the job disagree")
+        arity = raw_option_arity(part)
         index += 1
-        if (canonical not in VALUELESS_RAW_OPTIONS
-                and base not in VALUELESS_RAW_OPTIONS
-                and index < len(parts)
-                and not _is_option_token(parts[index])):
-            index += 1      # this token is that option's value, not an operand
+        following = parts[index] if index < len(parts) else None
+        if arity == 1:
+            if following is None or _is_option_token(following):
+                raise ValueError(
+                    f"{part} needs a value and none was given")
+            index += 1
+        elif arity is None and following is not None and not _is_option_token(following):
+            # FFmWiz does not know this option's arity, so it cannot tell a
+            # value from an operand -- and an operand here becomes a file
+            # FFmpeg writes. Refused with the two readings named, rather than
+            # guessed in the direction that creates a hidden output.
+            raise ValueError(
+                f"FFmWiz does not know whether {part} takes a value, so it "
+                f"cannot tell if {following} is that value or a file name "
+                f"FFmpeg would write. Put the value in the same token "
+                f"({part}={following}) if it is a value, or remove it")
     return parts
 
 

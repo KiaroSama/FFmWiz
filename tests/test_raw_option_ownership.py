@@ -25,7 +25,7 @@ from pathlib import Path
 
 import FFmWiz
 from ffmwiz.wizard_raw import (VOLUME_MAX, VOLUME_MIN, canonical_raw_option,
-                               parse_raw_arguments, parse_volume)
+                               parse_raw_arguments, parse_volume, raw_option_arity)
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -161,6 +161,116 @@ class RefusedOptionsWouldHaveBrokenTheJob(unittest.TestCase):
                                  "stream=codec_name", "-of", "csv=p=0", str(out)],
                                 capture_output=True, text=True, timeout=180)
         self.assertIn("aac", codecs.stdout, "the planned audio encoder must survive")
+
+
+class ArityIsDeclaredNotGuessed(unittest.TestCase):
+    """R03 -- the parser must not invent an option's arity."""
+
+    HIDDEN_OUTPUT = ["-report extra.wav", "-nobitexact extra.wav",
+                     "-benchmark extra.wav", "-xerror out.mkv"]
+    OWNED_BY_ANOTHER_SPELLING = ["-/filter:a filters.txt", "-/af filters.txt",
+                                 "-filter_script:a f.txt", "-filter_script:v f.txt",
+                                 "-/vf f.txt", "-/c:v copy"]
+    MISSING_VALUE = ["-metadata", "-preset", "-crf", "-b:v", "-tune"]
+
+    def test_a_bare_file_after_a_valueless_flag_is_refused(self):
+        for text in self.HIDDEN_OUTPUT:
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    parse_raw_arguments(text)
+
+    def test_file_loaded_and_script_spellings_reach_the_ownership_check(self):
+        for text in self.OWNED_BY_ANOTHER_SPELLING:
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    parse_raw_arguments(text)
+
+    def test_a_missing_required_value_is_refused(self):
+        for text in self.MISSING_VALUE:
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError) as caught:
+                    parse_raw_arguments(text)
+                self.assertIn("needs a value", str(caught.exception))
+
+    def test_an_unknown_option_followed_by_a_bare_token_is_ambiguous(self):
+        with self.assertRaises(ValueError) as caught:
+            parse_raw_arguments("-totally_unknown_option something.wav")
+        message = str(caught.exception)
+        self.assertIn("does not know whether", message)
+        self.assertIn("something.wav", message)
+
+    def test_an_unknown_option_alone_is_still_allowed(self):
+        self.assertEqual(parse_raw_arguments("-totally_unknown_option"),
+                         ["-totally_unknown_option"])
+        self.assertEqual(parse_raw_arguments("-unknown_a -unknown_b"),
+                         ["-unknown_a", "-unknown_b"])
+
+    def test_arity_is_reported_honestly(self):
+        self.assertEqual(raw_option_arity("-preset"), 1)
+        self.assertEqual(raw_option_arity("-b:v"), 1)
+        self.assertEqual(raw_option_arity("-metadata:s:a:0"), 1)
+        self.assertEqual(raw_option_arity("-an"), 0)
+        self.assertEqual(raw_option_arity("-nobitexact"), 0)
+        self.assertIsNone(raw_option_arity("-something_nobody_declared"))
+
+    def test_canonicalization_unwraps_every_spelling(self):
+        self.assertEqual(canonical_raw_option("-/filter:a"), "-filter:a")
+        self.assertEqual(canonical_raw_option("-filter_script:a"), "-filter:a")
+        self.assertEqual(canonical_raw_option("-/vcodec"), "-c:v")
+
+    def test_legitimate_expert_options_still_pass(self):
+        for text in ("-attach cover.png", "-metadata:s:a:0 language=eng",
+                     "-b:v 2M", "-x264-params keyint=30", "-aq -1",
+                     "-pix_fmt yuv420p10le", "-movflags +faststart"):
+            with self.subTest(text=text):
+                self.assertTrue(parse_raw_arguments(text))
+
+
+@requires_ffmpeg
+class TheRefusedGrammarWouldHaveCostRealOutput(unittest.TestCase):
+    """R03 proved with FFmpeg: each refusal prevents a real, observable harm."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="ffmwiz_r03_"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.source = self.root / "in.mkv"
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=1",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le",
+                        "-shortest", str(self.source)], check=True, timeout=180)
+
+    def planned(self, extra: list[str], out: Path) -> list[str]:
+        return [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(self.source), "-filter:a", "volume=0.5",
+                "-c:v", "copy", "-c:a", "pcm_s16le", *extra, str(out)]
+
+    def test_a_valueless_flag_plus_a_filename_really_writes_two_files(self):
+        surprise = self.root / "extra.wav"
+        out = self.root / "planned.mkv"
+        result = subprocess.run(self.planned(["-nobitexact", str(surprise)], out),
+                                capture_output=True, timeout=180)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(surprise.exists(),
+                        "the hidden-output case is not reproducible any more")
+        # And the parser refuses exactly that shape.
+        with self.assertRaises(ValueError):
+            parse_raw_arguments(f"-nobitexact {surprise}")
+
+    def test_a_file_loaded_filter_really_overrides_the_planned_one(self):
+        script = self.root / "filters.txt"
+        script.write_text("volume=4", encoding="utf-8")
+        loud = self.root / "loud.wav"
+        quiet = self.root / "quiet.wav"
+        base = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(self.source), "-filter:a", "volume=0.5", "-vn"]
+        subprocess.run(base + [str(quiet)], check=True, timeout=180)
+        subprocess.run(base + ["-/filter:a", str(script), str(loud)],
+                       check=True, timeout=180)
+        self.assertNotEqual(quiet.read_bytes(), loud.read_bytes(),
+                            "the file-loaded filter no longer overrides; recheck the premise")
+        with self.assertRaises(ValueError):
+            parse_raw_arguments(f"-/filter:a {script}")
 
 
 class ExtremeVolumeIsAValidationError(unittest.TestCase):
