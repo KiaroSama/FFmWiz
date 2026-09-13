@@ -6,13 +6,14 @@ From the repo root:
     python tests/run_suite.py -k practical        # only matching modules
     python tests/run_suite.py -k join -k reverse  # -k repeats, and unions
     python tests/run_suite.py -j 1                # serial, same reporting
+    python tests/run_suite.py --json results.json # machine-readable result file
 
     python -m unittest discover -s tests          # whole suite, stdlib runner
     python -m unittest discover -s tests -p test_practical_ffmpeg.py   # one module
 
 `run_suite.py` is what CI runs. It gives each test module its own worker process
 and pulls the next module off the queue as a worker frees up: measured on a
-16-core machine, ~2170 tests take ~177 s serial and ~99 s at `-j 6` — the suite is
+16-core machine, ~2380 tests take ~306 s at `-j 8` — the suite is
 dominated by real ffmpeg child processes, not CPU. It adds no dependency; the project keeps a
 zero-test-dependency policy, so it is `unittest` plus `concurrent.futures`.
 Module-per-process is also what keeps it safe: several suites monkeypatch module
@@ -26,10 +27,24 @@ A skip is classified by the CAPABILITY it names — `ffmpeg`, `numpy`, `powershe
     python tests/run_suite.py --strict-skips                     # every capability
 
 `--require` fails the run when a suite skipped for a capability THIS job installs,
-so the suite cannot silently shrink. `--strict-skips` is the same check with every
+so the suite cannot silently shrink. It also PREFLIGHTS: the capability is proved
+present before anything runs, rather than inferred from the absence of a matching
+skip, so a missing dependency fails on itself instead of on the wording of
+whatever skip happened to mention it. `--strict-skips` is the same check with every
 known capability required, which is only correct in a job that really installs them
 all — locally it fails on whatever is genuinely absent. Hardware and privilege
-skips (NVENC, symlink) are never capabilities and stay allowed either way.
+skips (NVENC, symlink) are never capabilities and stay allowed either way. The
+phrase "no usable X" is NOT a hardware exemption: "No usable FFmpeg binary" is a
+missing ffmpeg, and it used to slip past `--require` because a broad pattern
+matched it first.
+
+`--json PATH` writes the run as data — every module with its counts, failures,
+errors, unexpected successes, and every skip with the capability it was
+attributed to, plus the environment (Python, platform, the resolved ffmpeg and
+ffprobe paths and version lines, numpy/PySide6/setuptools/wheel versions). It is
+written on EVERY exit path, including the refusals that run no tests, so a red
+CI job is readable from its artifact without digging through the log. Both CI
+jobs upload it with `if: always()`.
 
 The stdlib `discover` form still works and is the fallback. Always `discover`,
 always from the repo root. Two reasons:
