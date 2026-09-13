@@ -99,6 +99,21 @@ class Probe(unittest.TestCase):
         raise unittest.SkipTest("no usable NVIDIA CUDA hardware on this runner")
 '''
 
+THREAD_RAISES = '''import threading, unittest
+
+
+def boom():
+    raise RuntimeError("the thread failed and unittest never heard about it")
+
+
+class Probe(unittest.TestCase):
+    def test_a_joined_thread_raises(self):
+        worker = threading.Thread(target=boom)
+        worker.start()
+        worker.join()
+        self.assertTrue(True)
+'''
+
 PASSING = '''import unittest
 
 
@@ -274,6 +289,109 @@ class TheRunnerReportsWhatActuallyHappened(unittest.TestCase):
         for capability in run_suite.CAPABILITY_PATTERNS:
             with self.subTest(capability=capability):
                 self.assertIsInstance(run_suite.probe_capability(capability), str)
+
+
+class AThreadFailureIsAFailure(unittest.TestCase):
+    """R08 -- `threading.excepthook` prints and changes nothing else.
+
+    A test that starts a thread, joins it and asserts nothing about it still
+    passed while that thread died of an uncaught RuntimeError, and the runner
+    reported exit 0 / OK.
+    """
+
+    def setUp(self) -> None:
+        self.written: list[Path] = []
+        self.addCleanup(self.remove_probes)
+
+    remove_probes = TheRunnerReportsWhatActuallyHappened.remove_probes
+    probe = TheRunnerReportsWhatActuallyHappened.probe
+    run_runner = TheRunnerReportsWhatActuallyHappened.run_runner
+
+    def test_an_uncaught_thread_exception_fails_the_run(self):
+        name = self.probe(THREAD_RAISES)
+        result = self.run_runner("-j", "1", "-k", name)
+        self.assertEqual(result.returncode, 1,
+                         f"a dead thread was reported as success\n{result.stdout}")
+        self.assertIn("thread", result.stdout)
+
+    def test_it_fails_in_parallel_too(self):
+        name = self.probe(THREAD_RAISES)
+        other = self.probe(PASSING)
+        result = self.run_runner("-j", "2", "-k", name, "-k", other)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("thread", result.stdout)
+
+    def test_the_hooks_are_restored_after_a_module_runs(self):
+        import threading as threading_module
+        before_unraisable = sys.unraisablehook
+        before_thread = threading_module.excepthook
+        run_suite.run_module("test_run_suite_skip_policy")
+        self.assertIs(sys.unraisablehook, before_unraisable)
+        self.assertIs(threading_module.excepthook, before_thread)
+
+
+class ThePreflightProvesTheCapability(unittest.TestCase):
+    """R08 -- `find_spec` and `which` only prove a NAME is in the right place."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="ffmwiz_r08_"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_a_module_that_raises_at_import_is_not_usable(self):
+        (self.root / "ffmwiz_boom_probe.py").write_text(
+            "raise RuntimeError('broken at import')\n", encoding="utf-8")
+        previous = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = str(self.root) + (os.pathsep + previous if previous else "")
+        self.addCleanup(lambda: os.environ.__setitem__("PYTHONPATH", previous)
+                        if previous is not None else os.environ.pop("PYTHONPATH", None))
+        why = run_suite._probe_import("ffmwiz_boom_probe")
+        self.assertTrue(why, "an import-time failure was reported as usable")
+        self.assertIn("fails at import", why)
+
+    def test_a_healthy_module_probes_clean(self):
+        self.assertEqual(run_suite._probe_import("json"), "")
+
+    def test_a_binary_that_exits_nonzero_is_not_usable(self):
+        if os.name != "nt":
+            self.skipTest("the .cmd shim used here is Windows-only")
+        shim = self.root / "fake_tool.cmd"
+        shim.write_text("@echo off\r\nexit /b 2\r\n", encoding="utf-8")
+        why = run_suite._probe_executable(str(shim))
+        self.assertTrue(why, "a binary that exits 2 was reported as usable")
+        self.assertIn("exited 2", why)
+
+    def test_a_missing_binary_is_not_usable(self):
+        self.assertTrue(run_suite._probe_executable(str(self.root / "nope.exe")))
+
+    def test_a_real_tool_probes_clean(self):
+        found = shutil.which("ffmpeg")
+        if not found:
+            self.skipTest("ffmpeg is not installed to probe")
+        self.assertEqual(run_suite._probe_executable(found), "")
+
+
+class EnvironmentWordsNoLongerExcuseACapability(unittest.TestCase):
+    """R08 -- `headless` and `display` were a wording-shaped hole."""
+
+    def test_a_headless_qt_skip_is_attributed_to_pyside6(self):
+        for reason in ("Qt cannot start headless",
+                       "no display available for QtQuick",
+                       "PySide6 headless run refused"):
+            with self.subTest(reason=reason):
+                self.assertEqual(run_suite.classify_skip(reason), "pyside6")
+
+    def test_genuine_hardware_and_privilege_skips_stay_environmental(self):
+        for reason in ("no NVIDIA GPU present", "hevc_nvenc unavailable",
+                       "CUDA device missing", "symlink privilege not held",
+                       "no usable NVIDIA CUDA hardware"):
+            with self.subTest(reason=reason):
+                self.assertEqual(run_suite.classify_skip(reason), "")
+
+    def test_the_broad_words_are_gone_from_the_pattern(self):
+        pattern = run_suite.ENVIRONMENT_SKIP_RE.pattern
+        self.assertNotIn("headless", pattern)
+        self.assertNotIn("display", pattern)
+        self.assertNotIn("no usable", pattern)
 
 
 if __name__ == "__main__":

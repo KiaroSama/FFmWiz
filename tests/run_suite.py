@@ -26,6 +26,7 @@ import re
 import sys
 import gc
 import json
+import threading
 import platform
 import shutil
 import time
@@ -55,7 +56,10 @@ CAPABILITY_PATTERNS: dict[str, re.Pattern[str]] = {
     "ffmpeg": re.compile(r"ffmpeg|ffprobe", re.I),
     "numpy": re.compile(r"numpy", re.I),
     "powershell": re.compile(r"powershell|pwsh", re.I),
-    "pyside6": re.compile(r"pyside6|qtqml|qtquick|qt quick|qml", re.I),
+    # A word-boundary `qt` too: with the broad `headless` exemption gone (R08), a skip that
+    # says "Qt cannot start headless" has to land on a capability rather than
+    # fall through unattributed. For this project Qt IS PySide6.
+    "pyside6": re.compile(r"pyside6|qtqml|qtquick|qt quick|qml|\bqt\b", re.I),
     "wheel": re.compile(r"setuptools|wheel", re.I),
 }
 
@@ -68,8 +72,15 @@ CAPABILITY_PATTERNS: dict[str, re.Pattern[str]] = {
 # installation" were both filed as environmental and sailed past `--require
 # ffmpeg` / `--require pyside6`. A required dependency does not become optional
 # because of the wording of the skip that announced its absence.
+#
+# `headless` and `display` are gone for the same reason (R08). They were added
+# for "no display" skips, but the GUI job runs under QT_QPA_PLATFORM=offscreen,
+# where a missing display is not a legitimate excuse -- so the only thing those
+# two words could do was let a Qt capability failure through by wording.
+# Everything left here names hardware or an OS privilege that installing
+# cannot provide.
 ENVIRONMENT_SKIP_RE = re.compile(
-    r"nvenc|nvidia|cuda|symlink|privilege|hardware|display|headless", re.I)
+    r"nvenc|nvidia|cuda|symlink|privilege|hardware", re.I)
 
 
 def classify_skip(reason: str) -> str:
@@ -95,17 +106,66 @@ def probe_capability(name: str) -> str:
 
     if name == "ffmpeg":
         for tool in ("ffmpeg", "ffprobe"):
-            if not shutil.which(tool):
+            found = shutil.which(tool)
+            if not found:
                 return f"{tool} is not on PATH"
+            why = _probe_executable(found)
+            if why:
+                return f"{tool} at {found} {why}"
         return ""
     if name == "powershell":
-        if not (shutil.which("powershell") or shutil.which("pwsh")):
+        found = shutil.which("powershell") or shutil.which("pwsh")
+        if not found:
             return "neither powershell nor pwsh is on PATH"
         return ""
-    modules = {"numpy": ("numpy",), "pyside6": ("PySide6",), "wheel": ("wheel", "setuptools")}
+    modules = {"numpy": ("numpy",), "pyside6": ("PySide6", "PySide6.QtQml", "PySide6.QtQuick"),
+               "wheel": ("wheel", "setuptools")}
     for module in modules.get(name, ()):  # pragma: no branch - table-driven
         if importlib.util.find_spec(module) is None:
             return f"{module} is not importable"
+        why = _probe_import(module)
+        if why:
+            return why
+    return ""
+
+
+def _probe_executable(path: str) -> str:
+    """"" when the binary actually RUNS, else why it does not.
+
+    `shutil.which` only proves a file with that name is on PATH. A wrapper that
+    exits 2, or a binary missing a shared library, satisfied `--require` and the
+    suite then skipped every test that needed it (R08).
+    """
+    import subprocess
+    try:
+        result = subprocess.run([path, "-version"], capture_output=True, timeout=60)
+    except OSError as exc:
+        return f"could not be executed: {exc}"
+    except subprocess.SubprocessError as exc:
+        return f"did not answer -version: {exc}"
+    if result.returncode != 0:
+        return f"exited {result.returncode} for -version"
+    return ""
+
+
+def _probe_import(module: str) -> str:
+    """"" when the module actually IMPORTS, else why it does not.
+
+    `find_spec` only proves a file is in the right place. A package that raises
+    at import time -- a broken Qt install is the usual one -- has a spec and no
+    working module, and that satisfied `--require pyside6` (R08). The import
+    runs in a FRESH interpreter so a half-initialised module cannot poison this
+    process, and it is bounded.
+    """
+    import subprocess
+    try:
+        result = subprocess.run([sys.executable, "-c", f"import {module}"],
+                                capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{module} could not be probed: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        return f"{module} fails at import: {detail[-1] if detail else 'unknown error'}"
     return ""
 
 
@@ -139,6 +199,7 @@ def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
 
 def run_module(name: str) -> dict:
     """Run one test module in this process and return a picklable summary."""
+    module_name = name
     # Unclosed subprocess pipes are a real, previously shipped bug class.
     warnings.simplefilter("error", ResourceWarning)
     sys.path.insert(0, str(TESTS_DIR))
@@ -151,6 +212,7 @@ def run_module(name: str) -> dict:
     # instead, as module errors.
     unraisable: list[tuple[str, str]] = []
     previous_hook = sys.unraisablehook
+    previous_thread_hook = threading.excepthook
 
     def collect_unraisable(entry) -> None:
         # Never raise out of this hook, and never keep a reference to the
@@ -163,7 +225,21 @@ def run_module(name: str) -> dict:
         except Exception:       # noqa: BLE001 - a broken hook hides everything
             unraisable.append((f"{name} (unraisable)", "unraisable exception (details unavailable)"))
 
+    def collect_thread_exception(entry) -> None:
+        # An exception that escapes a thread's run() is printed by the default
+        # hook and changes nothing else: a test that joins that thread still
+        # passed, and the runner still reported OK (R08). Same contract as the
+        # unraisable hook -- never raise, keep only text.
+        try:
+            name = getattr(entry.thread, "name", "thread")
+            text = "".join(traceback.format_exception(
+                entry.exc_type, entry.exc_value, entry.exc_traceback))
+            unraisable.append((f"{module_name} (thread {name})", text))
+        except Exception:       # noqa: BLE001 - a broken hook hides everything
+            unraisable.append((f"{module_name} (thread)", "thread exception (details unavailable)"))
+
     sys.unraisablehook = collect_unraisable
+    threading.excepthook = collect_thread_exception
     started = time.monotonic()
     try:
         suite = unittest.defaultTestLoader.loadTestsFromName(name)
@@ -174,7 +250,10 @@ def run_module(name: str) -> dict:
         # the module that caused it.
         gc.collect()
     finally:
+        # Restored in `finally` and in this order, so a failure inside the run
+        # cannot leave the interpreter with this module's hooks installed.
         sys.unraisablehook = previous_hook
+        threading.excepthook = previous_thread_hook
 
     return {
         "module": name,
