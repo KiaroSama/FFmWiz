@@ -121,7 +121,7 @@ class RefusedOptionsWouldHaveBrokenTheJob(unittest.TestCase):
                         "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=1",
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                        "-shortest", str(self.source)], check=True)
+                        "-shortest", str(self.source)], check=True, timeout=180)
 
     def planned_command(self, extra: list[str], out: Path) -> list[str]:
         """The shape FFmWiz builds: raw options just before the output path."""
@@ -132,7 +132,7 @@ class RefusedOptionsWouldHaveBrokenTheJob(unittest.TestCase):
     def test_accepted_audio_copy_would_have_failed_the_planned_job(self):
         out = self.root / "broken.mkv"
         result = subprocess.run(self.planned_command(["-acodec", "copy"], out),
-                                capture_output=True)
+                                capture_output=True, timeout=180)
         self.assertNotEqual(result.returncode, 0,
                             "-acodec copy is refused because it breaks the planned job")
 
@@ -140,7 +140,7 @@ class RefusedOptionsWouldHaveBrokenTheJob(unittest.TestCase):
         surprise = self.root / "surprise.mkv"
         out = self.root / "planned.mkv"
         result = subprocess.run(self.planned_command([str(surprise)], out),
-                                capture_output=True)
+                                capture_output=True, timeout=180)
         self.assertEqual(result.returncode, 0)
         self.assertTrue(surprise.exists(),
                         "a positional operand really does create an untracked output")
@@ -149,17 +149,17 @@ class RefusedOptionsWouldHaveBrokenTheJob(unittest.TestCase):
     def test_the_surviving_options_produce_exactly_the_planned_output(self):
         out = self.root / "planned.mkv"
         extra = parse_raw_arguments("-metadata title=Episode#1 -tune film")
-        result = subprocess.run(self.planned_command(extra, out), capture_output=True)
+        result = subprocess.run(self.planned_command(extra, out), capture_output=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         self.assertEqual(sorted(p.name for p in self.root.iterdir()),
                          ["in.mkv", "planned.mkv"])
         probe = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
                                 "format_tags=title", "-of", "default=nw=1:nk=1", str(out)],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, timeout=180)
         self.assertEqual(probe.stdout.strip(), "Episode#1")
         codecs = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
                                  "stream=codec_name", "-of", "csv=p=0", str(out)],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, timeout=180)
         self.assertIn("aac", codecs.stdout, "the planned audio encoder must survive")
 
 

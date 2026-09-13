@@ -200,7 +200,7 @@ class RealFFmpegRunsFromASpacedPath(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         probe = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
                                 "format_tags=title", "-of", "default=nw=1:nk=1", str(out)],
-                               capture_output=True, text=True, encoding="utf-8")
+                               capture_output=True, text=True, encoding="utf-8", timeout=180)
         self.assertEqual(probe.stdout.strip(), title)
 
 

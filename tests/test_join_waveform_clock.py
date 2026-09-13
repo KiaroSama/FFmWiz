@@ -60,7 +60,7 @@ class TheJoinedWaveformFollowsTheSegmentClock(unittest.TestCase):
         cls._encode(cls.late, "adelay=1000|1000", source="sine=frequency=990:duration=1")
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                         "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=2",
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(cls.silent)], check=True)
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(cls.silent)], check=True, timeout=180)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -78,13 +78,13 @@ class TheJoinedWaveformFollowsTheSegmentClock(unittest.TestCase):
                         "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=2",
                         *args, "-map", "0:v", "-map", "1:a", *filters,
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                        str(path)], check=True)
+                        str(path)], check=True, timeout=180)
 
     def decode(self, segments, builder=build_wave_decode_args):
         out = self.root / "wave.pcm"
         args = builder({"join_segments": segments}, str(out)) if builder is build_wave_decode_args \
             else builder({}, segments, str(out))
-        result = subprocess.run([FFMPEG, *args], capture_output=True)
+        result = subprocess.run([FFMPEG, *args], capture_output=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         pcm = decode_pcm_samples(out.read_bytes())
         out.unlink(missing_ok=True)
@@ -150,7 +150,7 @@ class TheJoinedWaveformFollowsTheSegmentClock(unittest.TestCase):
                     {"path": self.equal, "duration": self.SEGMENT, "has_audio": True}]
         out = self.root / "classic.pcm"
         args = build_classic_waveform_args({}, segments, out)
-        result = subprocess.run([FFMPEG, *args], capture_output=True)
+        result = subprocess.run([FFMPEG, *args], capture_output=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         pcm = decode_pcm_samples(out.read_bytes())
         out.unlink(missing_ok=True)
