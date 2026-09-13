@@ -113,12 +113,17 @@ def _launch_qt_gui(request: dict[str, Any]) -> dict[str, Any] | None:
     # QML files are missing.
     if request.get("mode") == "video_unified" and _gui_engine_selected() == "qml":
         qml_script = _qml_gui_path()
-        qml_file = script_dir() / "ffmwiz" / FFMWIZ_GUI_DIR_NAME / "qml" / "UnifiedEditor.qml"
+        # Resolved FROM the driver, never spelled out again here: the previous
+        # literal pointed one directory above the real `modern/qml/`, so this
+        # gate never passed and QML silently launched CLASSIC (A02).
+        qml_file = _qml_main_file()
         if qml_script.exists() and qml_file.exists():
             gui_path = qml_script
             log_info("Using modern QML GUI engine for the unified video editor.")
         else:
-            log_warn("QML GUI engine selected but its files are missing; using the classic editor.")
+            missing = [str(path) for path in (qml_script, qml_file) if not path.exists()]
+            log_warn("QML GUI engine selected but its files are missing; using the "
+                     f"classic editor. Not found: {', '.join(missing)}")
 
     request_payload = dict(request)
     # Serialize Path objects to plain strings for JSON.
