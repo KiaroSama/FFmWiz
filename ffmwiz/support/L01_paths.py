@@ -62,6 +62,18 @@ def normalize_terminal_path_text(value: str) -> str:
     return value
 
 
+def output_location_is_explicit_directory(value: str) -> bool:
+    """True when the user's own text ends in a separator: "this is a folder".
+
+    `Path()` discards a trailing separator, so the intent has to be read from
+    the text -- and from the NORMALIZED text. A quoted `"D:\\Exports\\"` ends in
+    the quote, not the separator, so testing the raw string answered False and
+    a not-yet-created folder became a filename (A07). Both pickers ask here
+    rather than each spelling out the test.
+    """
+    return normalize_terminal_path_text(value).rstrip().endswith(("/", "\\", os.sep))
+
+
 def folder_default_output_path(input_folder: Path) -> Path:
     return input_folder.parent / f"{sanitize_output_stem(input_folder.name)}_Encode"
 
@@ -123,6 +135,7 @@ def default_extract_stream_output_path(input_path: Path, stream: dict[str, Any],
 
 __all__ = [
     'normalize_terminal_path_text',
+    'output_location_is_explicit_directory',
     'folder_default_output_path',
     'asset_path',
     'resolve_output_collision',
