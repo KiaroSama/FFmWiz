@@ -39,9 +39,10 @@ sudo chmod -R a+rX /opt/uv-python
 echo 'export UV_PYTHON_INSTALL_DIR=/opt/uv-python' | sudo tee /etc/profile.d/uv-shared-python.sh
 ```
 
-Ubuntu 26.04 ships **Python 3.14 only**, which is outside this project's
-supported `>=3.10,<3.14` range — that is why the interpreters come from `uv`
-rather than `apt`.
+Ubuntu 26.04 ships **Python 3.14 only**. `pyproject.toml` declares
+`requires-python = ">=3.10"` with no upper bound, but CI proves 3.10 and 3.13
+and nothing has been verified on 3.14 — so the interpreters come from `uv`,
+pinned to the versions CI actually tests, rather than from `apt`.
 
 ## Running
 
