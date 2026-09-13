@@ -459,10 +459,9 @@ def export_bounded_reverse_plan(answers: dict[str, Any],
         if cmd and cmd[0].startswith("<"):
             lines.append(f"#   {cmd[0]} -- FFmWiz writes this list at run time")
         else:
-            # `&` is required: command_to_powershell quotes the executable for
-            # DISPLAY, and PowerShell parses a bare quoted string followed by
-            # arguments as an expression, not a command.
-            lines.append("& " + command_to_powershell(cmd))
+            # command_to_powershell emits the call operator itself when the
+            # executable had to be quoted, so the line is directly runnable.
+            lines.append(command_to_powershell(cmd))
             lines.append("if ($LASTEXITCODE -ne 0) { throw '"
                          + label.replace("'", "''") + " failed' }")
         lines.append("")
