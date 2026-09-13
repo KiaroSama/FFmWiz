@@ -287,7 +287,18 @@ class TheRefusedGrammarWouldHaveCostRealOutput(unittest.TestCase):
         self.fail("no file-loaded filter spelling works in this ffmpeg build; "
                   "recheck the premise of the refusal, do not weaken it")
 
-    def test_a_file_loaded_filter_really_overrides_the_planned_one(self):
+    def test_a_file_loaded_filter_costs_the_user_the_output_they_planned(self):
+        """The harm is real on every supported build -- in two different shapes.
+
+        Where the spelling is the SAME option (`-/filter:a`, ffmpeg 7+), the last
+        one wins and the user silently gets a different encode. Where it is a
+        SEPARATE option (`-filter_script:a`, through 6.x), ffmpeg refuses the
+        combination outright with EINVAL and the planned encode never happens.
+
+        So the oracle is not "it overrode" -- it is "the planned output is not
+        what the user gets". A raw option that were genuinely harmless would
+        succeed AND produce the identical bytes, and that is what fails here.
+        """
         option = self.file_loaded_filter_option()
         script = self.root / "filters.txt"
         script.write_text("volume=4", encoding="utf-8")
@@ -296,10 +307,17 @@ class TheRefusedGrammarWouldHaveCostRealOutput(unittest.TestCase):
         base = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                 "-i", str(self.source), "-filter:a", "volume=0.5", "-vn"]
         subprocess.run(base + [str(quiet)], check=True, timeout=180)
-        subprocess.run(base + [option, str(script), str(loud)],
-                       check=True, timeout=180)
-        self.assertNotEqual(quiet.read_bytes(), loud.read_bytes(),
-                            "the file-loaded filter no longer overrides; recheck the premise")
+        # Not check=True: a refusal IS one of the two harms. The spelling itself
+        # is known good on this build -- file_loaded_filter_option() proved it
+        # runs alone -- so a nonzero here is about the COMBINATION, nothing else.
+        result = subprocess.run(base + [option, str(script), str(loud)],
+                                capture_output=True, timeout=180)
+        produced = loud.read_bytes() if loud.exists() else b""
+        self.assertNotEqual(
+            quiet.read_bytes(), produced,
+            f"{option} changed nothing: it neither overrode the planned filter "
+            f"nor broke the run (exit {result.returncode}), so there is no harm "
+            "behind the refusal any more -- recheck the premise")
         with self.assertRaises(ValueError):
             parse_raw_arguments(f"{option} {script}")
 
