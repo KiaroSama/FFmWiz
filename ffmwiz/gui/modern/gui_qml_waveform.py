@@ -63,7 +63,7 @@ def segment_audio_stream_spec(req: dict, seg: dict | None = None) -> str:
 
 
 def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: str = "a:0",
-                         label: str | None = None) -> str:
+                         label: str | None = None, origin: float = 0.0) -> str:
     """One join segment's audio, bounded to the SEGMENT's own length.
 
     The timeline is built from the declared segment durations (the picture
@@ -79,11 +79,18 @@ def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: st
     with silence, so the result is exactly `duration` either way.
     """
     span = max(0.001, float(duration))
+    start = max(0.0, float(origin or 0.0))
     out = label if label is not None else f"a{index}"
+    # `origin` is where the PICTURE starts on the demuxer's clock. Audio before
+    # it is not part of this segment's timeline, and leaving it in put every
+    # sample `origin` seconds late: an impulse at container 1.5 s in a file
+    # whose picture starts at 1.0 s was drawn at sample 6000 instead of 2000
+    # (A04). `asetpts` now runs BEFORE `apad`, so `whole_dur` measures the
+    # trimmed span rather than the original timeline.
     return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
             f"aresample={rate}:first_pts=0,"
-            f"atrim=end={span:.6f},apad=whole_dur={span:.6f},"
-            f"asetpts=PTS-STARTPTS[{out}]")
+            f"atrim=start={start:.6f}:end={start + span:.6f},"
+            f"asetpts=PTS-STARTPTS,apad=whole_dur={span:.6f}[{out}]")
 
 
 def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
@@ -107,7 +114,11 @@ def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
         filt = [
             segment_audio_filter(
                 i, float(seg.get("duration") or 0.0), WAVE_RATE,
-                "a:0" if not seg.get("has_audio", True) else segment_audio_stream_spec(req, seg))
+                "a:0" if not seg.get("has_audio", True) else segment_audio_stream_spec(req, seg),
+                # Each segment carries its own picture origin; a generated
+                # silence input has none (A04).
+                origin=0.0 if not seg.get("has_audio", True)
+                else float(seg.get("picture_clock_offset") or 0.0))
             for i, seg in enumerate(segs)
         ]
         filt.append("".join(f"[a{i}]" for i in range(len(segs))) + f"concat=n={len(segs)}:v=0:a=1[mix]")
@@ -122,7 +133,9 @@ def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
         # the PICTURE's, not the audio's.
         duration = float(req.get("duration") or 0.0)
         if duration > 0:
-            chain = segment_audio_filter(0, duration, WAVE_RATE, spec, label="mix")
+            chain = segment_audio_filter(
+                0, duration, WAVE_RATE, spec, label="mix",
+                origin=float(req.get("picture_clock_offset") or 0.0))
         else:
             # No declared duration means there is no picture clock to honour;
             # bounding to a guess would be worse than decoding what is there.
