@@ -64,12 +64,26 @@ def identity(environment: dict) -> list[str]:
     return lines
 
 
+def _entry_name(entry) -> str:
+    """The test name of a failure/error record, old shape or new.
+
+    The runner used to write bare names here and now writes
+    `{"test": ..., "detail": ...}` so a record carries its traceback. Reading
+    both means an artifact from an older run still renders.
+    """
+    if isinstance(entry, dict):
+        return str(entry.get("test") or "unnamed")
+    return str(entry)
+
+
 def render(payload: dict, label: str, upload: str = "") -> str:
     """A compact Markdown summary of one run. Pure: no I/O apart from os.environ."""
     modules = payload.get("modules") or []
     tests = sum(int(item.get("tests") or 0) for item in modules)
-    failures = [name for item in modules for name in (item.get("failures") or [])]
-    errors = [name for item in modules for name in (item.get("errors") or [])]
+    failures = [_entry_name(entry) for item in modules
+                for entry in (item.get("failures") or [])]
+    errors = [_entry_name(entry) for item in modules
+              for entry in (item.get("errors") or [])]
     unexpected = [name for item in modules for name in (item.get("unexpected") or [])]
     skips = [entry for item in modules for entry in (item.get("skipped") or [])]
 
