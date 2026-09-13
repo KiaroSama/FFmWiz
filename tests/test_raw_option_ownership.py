@@ -257,28 +257,38 @@ class TheRefusedGrammarWouldHaveCostRealOutput(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_raw_arguments(f"-nobitexact {surprise}")
 
-    def supports_file_loaded_options(self) -> bool:
-        """Whether THIS ffmpeg understands the `-/opt file` spelling.
+    # Two spellings load a filter from a file, and both land in the SAME owned
+    # option family: canonical_raw_option maps each to `-filter:a`. Which one a
+    # build accepts differs -- `-/opt file` is the general form and the 6.1.1 leg
+    # rejects it, while `-filter_script:a` is the older filter-only form. The
+    # harm is identical either way, so the test asks the build which spelling it
+    # speaks rather than skipping on the one it does not.
+    FILE_LOADED_SPELLINGS = ("-/filter:a", "-filter_script:a")
 
-        It is not in every supported build -- the 6.1.1 leg rejects it -- and an
-        unavailable syntax is not the same thing as a safety test passing. The
-        parser-level refusal is asserted unconditionally in the class above; only
-        the demonstration that the syntax would really override needs the
-        capability.
+    def file_loaded_filter_option(self) -> str:
+        """The `<option> <file>` filter spelling THIS ffmpeg accepts.
+
+        Deliberately not a skip. ffmpeg is a capability this job installs, so a
+        skip naming it shrinks the suite for a reason the job could fix -- which
+        is exactly the false-success shape R08 exists to reject. A build that
+        speaks neither spelling is real news about the premise, so it fails.
         """
         probe = self.root / "probe.txt"
         probe.write_text("volume=1", encoding="utf-8")
-        out = self.root / "probe.wav"
-        result = subprocess.run(
-            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-             "-i", str(self.source), "-vn", "-/filter:a", str(probe), str(out)],
-            capture_output=True, timeout=180)
-        out.unlink(missing_ok=True)
-        return result.returncode == 0
+        for option in self.FILE_LOADED_SPELLINGS:
+            out = self.root / "probe.wav"
+            result = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                 "-i", str(self.source), "-vn", option, str(probe), str(out)],
+                capture_output=True, timeout=180)
+            out.unlink(missing_ok=True)
+            if result.returncode == 0:
+                return option
+        self.fail("no file-loaded filter spelling works in this ffmpeg build; "
+                  "recheck the premise of the refusal, do not weaken it")
 
     def test_a_file_loaded_filter_really_overrides_the_planned_one(self):
-        if not self.supports_file_loaded_options():
-            self.skipTest("this ffmpeg build does not accept the -/opt file spelling")
+        option = self.file_loaded_filter_option()
         script = self.root / "filters.txt"
         script.write_text("volume=4", encoding="utf-8")
         loud = self.root / "loud.wav"
@@ -286,12 +296,12 @@ class TheRefusedGrammarWouldHaveCostRealOutput(unittest.TestCase):
         base = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                 "-i", str(self.source), "-filter:a", "volume=0.5", "-vn"]
         subprocess.run(base + [str(quiet)], check=True, timeout=180)
-        subprocess.run(base + ["-/filter:a", str(script), str(loud)],
+        subprocess.run(base + [option, str(script), str(loud)],
                        check=True, timeout=180)
         self.assertNotEqual(quiet.read_bytes(), loud.read_bytes(),
                             "the file-loaded filter no longer overrides; recheck the premise")
         with self.assertRaises(ValueError):
-            parse_raw_arguments(f"-/filter:a {script}")
+            parse_raw_arguments(f"{option} {script}")
 
 
 class ExtremeVolumeIsAValidationError(unittest.TestCase):
