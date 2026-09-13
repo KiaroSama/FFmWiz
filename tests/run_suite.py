@@ -24,7 +24,12 @@ import argparse
 import os
 import re
 import sys
+import gc
+import json
+import platform
+import shutil
 import time
+import traceback
 import unittest
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -57,8 +62,14 @@ CAPABILITY_PATTERNS: dict[str, re.Pattern[str]] = {
 # Genuinely environmental: no amount of installing fixes them on a given runner.
 # Matched FIRST, so "no usable NVIDIA CUDA/hevc_nvenc hardware" is never blamed
 # on the ffmpeg the job did install.
+#
+# `no usable` is NOT in this list, and must not be put back. It used to be, and
+# it matched first -- so "No usable FFmpeg binary" and "No usable PySide6
+# installation" were both filed as environmental and sailed past `--require
+# ffmpeg` / `--require pyside6`. A required dependency does not become optional
+# because of the wording of the skip that announced its absence.
 ENVIRONMENT_SKIP_RE = re.compile(
-    r"nvenc|nvidia|cuda|symlink|privilege|hardware|no usable", re.I)
+    r"nvenc|nvidia|cuda|symlink|privilege|hardware|display|headless", re.I)
 
 
 def classify_skip(reason: str) -> str:
@@ -68,6 +79,33 @@ def classify_skip(reason: str) -> str:
     for name, pattern in CAPABILITY_PATTERNS.items():
         if pattern.search(reason):
             return name
+    return ""
+
+
+def probe_capability(name: str) -> str:
+    """"" when the capability is really present, else why it is not.
+
+    A preflight, so `--require X` fails on the missing dependency itself rather
+    than on the wording of whatever skip happened to mention it -- and fails
+    even when the affected suites skipped for some other reason, or were not
+    selected at all.
+    """
+    import importlib.util
+    import shutil
+
+    if name == "ffmpeg":
+        for tool in ("ffmpeg", "ffprobe"):
+            if not shutil.which(tool):
+                return f"{tool} is not on PATH"
+        return ""
+    if name == "powershell":
+        if not (shutil.which("powershell") or shutil.which("pwsh")):
+            return "neither powershell nor pwsh is on PATH"
+        return ""
+    modules = {"numpy": ("numpy",), "pyside6": ("PySide6",), "wheel": ("wheel", "setuptools")}
+    for module in modules.get(name, ()):  # pragma: no branch - table-driven
+        if importlib.util.find_spec(module) is None:
+            return f"{module} is not importable"
     return ""
 
 
@@ -106,18 +144,47 @@ def run_module(name: str) -> dict:
     sys.path.insert(0, str(TESTS_DIR))
     sys.path.insert(0, str(PROJECT_ROOT))
 
+    # An exception raised inside __del__ -- which is where an unclosed file or
+    # pipe turns the ResourceWarning above into one -- cannot propagate. Python
+    # hands it to sys.unraisablehook, which PRINTS it and moves on, so a real
+    # leak produced "1 test, 0 errors" and a green suite. Collect them here
+    # instead, as module errors.
+    unraisable: list[tuple[str, str]] = []
+    previous_hook = sys.unraisablehook
+
+    def collect_unraisable(entry) -> None:
+        # Never raise out of this hook, and never keep a reference to the
+        # object being finalized: only formatted text crosses back.
+        try:
+            where = getattr(entry, "err_msg", None) or "Exception ignored in"
+            text = "".join(traceback.format_exception(
+                entry.exc_type, entry.exc_value, entry.exc_traceback))
+            unraisable.append((f"{name} (unraisable)", f"{where}\n{text}"))
+        except Exception:       # noqa: BLE001 - a broken hook hides everything
+            unraisable.append((f"{name} (unraisable)", "unraisable exception (details unavailable)"))
+
+    sys.unraisablehook = collect_unraisable
     started = time.monotonic()
-    suite = unittest.defaultTestLoader.loadTestsFromName(name)
-    stream = __import__("io").StringIO()
-    result = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
+    try:
+        suite = unittest.defaultTestLoader.loadTestsFromName(name)
+        stream = __import__("io").StringIO()
+        result = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
+        # Force pending finalizers to run while the hook is still installed,
+        # so a leak that CPython had not collected yet is still attributed to
+        # the module that caused it.
+        gc.collect()
+    finally:
+        sys.unraisablehook = previous_hook
+
     return {
         "module": name,
         "seconds": time.monotonic() - started,
         "run": result.testsRun,
+        "unraisable": list(unraisable),
         # Tracebacks are already formatted strings; the TestCase objects are not
         # reliably picklable, so only the text crosses the process boundary.
         "failures": [(str(test), text) for test, text in result.failures],
-        "errors": [(str(test), text) for test, text in result.errors],
+        "errors": [(str(test), text) for test, text in result.errors] + list(unraisable),
         "skipped": [(str(test), why) for test, why in result.skipped],
         # An @unittest.expectedFailure test that PASSES lands here and in
         # nothing else -- not in `failures`, not in `errors`. The markers in
@@ -132,6 +199,27 @@ def run_module(name: str) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the suite, then always write the machine-readable results.
+
+    A red CI job is exactly the run whose log is hardest to read, so the result
+    file is written on every exit path -- including the ones that refuse to run
+    anything at all.
+    """
+    started = time.monotonic()
+    collected: list[dict] = []
+    parsed: dict = {}
+    verdict = 1
+    try:
+        verdict = _run(argv, collected, parsed)
+    finally:
+        arguments = parsed.get("args")
+        if arguments is not None and getattr(arguments, "json", None):
+            write_results(arguments.json, collected, verdict,
+                          time.monotonic() - started, arguments)
+    return verdict
+
+
+def _run(argv, collected: list[dict], parsed: dict) -> int:
     # Failure text can contain any character the app emits (the editors use
     # glyphs like the transport arrows). A cp1252 console would raise
     # UnicodeEncodeError while PRINTING the failure and hide it entirely.
@@ -149,6 +237,9 @@ def main(argv: list[str] | None = None) -> int:
                              "repeat to select several")
     parser.add_argument("--strict-skips", action="store_true",
                         help="fail when a suite skipped for any installable capability")
+    parser.add_argument("--json", metavar="PATH", default=None,
+                        help="write a machine-readable result file (modules, "
+                             "counts, failures, skip reasons, environment)")
     parser.add_argument("--require", action="append", default=None,
                         metavar="CAPABILITY",
                         help="fail when a suite skipped for THIS capability "
@@ -156,6 +247,25 @@ def main(argv: list[str] | None = None) -> int:
                              "ffmpeg, numpy, powershell, pyside6, wheel). "
                              "Use it in a job that installs the dependency.")
     args = parser.parse_args(argv)
+    parsed["args"] = args
+
+    required = {name.strip().lower()
+                for value in (args.require or [])
+                for name in value.split(",") if name.strip()}
+    unknown = required - set(CAPABILITY_PATTERNS)
+    if unknown:
+        print("unknown --require capability: " + ", ".join(sorted(unknown)))
+        print("known: " + ", ".join(sorted(CAPABILITY_PATTERNS)))
+        return 1
+
+    # Preflight: prove the required capability is actually here BEFORE running,
+    # instead of inferring its presence from the absence of a matching skip.
+    absent = [f"{name}: {why}" for name in sorted(required) if (why := probe_capability(name))]
+    if absent:
+        print("a capability this job requires is not installed:")
+        for item in absent:
+            print("  " + item)
+        return 1
 
     modules = discover_modules(args.filter)
     if not modules:
@@ -172,8 +282,14 @@ def main(argv: list[str] | None = None) -> int:
             # the moment it is free instead of owning a fixed share up front.
             results = list(pool.map(run_module, modules, chunksize=1))
     elapsed = time.monotonic() - started
+    collected.extend(results)
 
     total = sum(item["run"] for item in results)
+    # A module that matched the selection but ran nothing is a silent hole: a
+    # renamed class, a bad -k, an import guard that swallowed everything. It
+    # used to be accepted by the parent verdict as zero tests, zero failures.
+    empty = [item["module"] for item in results
+             if item["run"] == 0 and not item["skipped"]]
     failures = [entry for item in results for entry in item["failures"]]
     errors = [entry for item in results for entry in item["errors"]]
     skipped = [entry for item in results for entry in item["skipped"]]
@@ -197,18 +313,18 @@ def main(argv: list[str] | None = None) -> int:
         print("documents is fixed: delete the marker and the comment above it,")
         print("so the test guards the fix from here on.")
 
+    if empty:
+        print("selected modules ran no tests at all: " + ", ".join(sorted(empty)))
+        print("a matched module with zero tests is a hole in the suite, not a pass.")
+        return 1
+
+    if total == 0:
+        print("the selection ran 0 tests")
+        return 1
+
     if failures or errors or unexpected:
         print(f"FAILED (failures={len(failures)}, errors={len(errors)}, "
               f"unexpected successes={len(unexpected)})")
-        return 1
-
-    required = {name.strip().lower()
-                for value in (args.require or [])
-                for name in value.split(",") if name.strip()}
-    unknown = required - set(CAPABILITY_PATTERNS)
-    if unknown:
-        print("unknown --require capability: " + ", ".join(sorted(unknown)))
-        print("known: " + ", ".join(sorted(CAPABILITY_PATTERNS)))
         return 1
 
     if args.strict_skips or required:
@@ -227,6 +343,67 @@ def main(argv: list[str] | None = None) -> int:
 
     print("OK" + (f" (skipped={len(skipped)})" if skipped else ""))
     return 0
+
+
+def environment_report() -> dict:
+    """Versions and tool paths a failed CI run needs and a log line loses."""
+    report = {
+        "python": sys.version.split()[0],
+        "implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "cpu_count": os.cpu_count(),
+    }
+    for tool in ("ffmpeg", "ffprobe", "powershell", "pwsh"):
+        found = shutil.which(tool)
+        report[tool] = found or ""
+        if found and tool in ("ffmpeg", "ffprobe"):
+            try:
+                import subprocess
+                first = subprocess.run([found, "-version"], capture_output=True,
+                                       text=True, timeout=60).stdout.splitlines()
+                report[tool + "_version"] = first[0] if first else ""
+            except Exception as exc:      # noqa: BLE001 - reporting must not fail the run
+                report[tool + "_version"] = f"unavailable: {exc}"
+    for module in ("numpy", "PySide6", "setuptools", "wheel"):
+        try:
+            report[module] = __import__(module).__version__
+        except Exception:                 # noqa: BLE001
+            report[module] = ""
+    return report
+
+
+def write_results(path: str, results: list[dict], verdict: int, elapsed: float,
+                  arguments) -> None:
+    """One JSON file per run, so a red CI job is readable without the log."""
+    payload = {
+        "verdict": "ok" if verdict == 0 else "failed",
+        "exit_code": verdict,
+        "seconds": round(elapsed, 3),
+        "workers": arguments.jobs,
+        "selection": arguments.filter or [],
+        "required": arguments.require or [],
+        "environment": environment_report(),
+        "modules": [
+            {
+                "module": item["module"],
+                "seconds": round(item["seconds"], 3),
+                "tests": item["run"],
+                "failures": [name for name, _text in item["failures"]],
+                "errors": [name for name, _text in item["errors"]],
+                "unexpected": item["unexpected"],
+                "skipped": [{"test": name, "reason": why,
+                             "capability": classify_skip(why)}
+                            for name, why in item["skipped"]],
+            }
+            for item in results
+        ],
+    }
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                              encoding="utf-8")
+    except OSError as exc:
+        print(f"could not write {path}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

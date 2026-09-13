@@ -88,7 +88,7 @@ def build_separator_base_output_path(answers: dict[str, Any]) -> Path:
     output_ext = answers["output_ext"]
     if answers.get("output_name_stem"):
         return output_location / f"{sanitize_output_stem(answers['output_name_stem'])}.{output_ext}"
-    if output_location.suffix:
+    if output_location_names_a_file(output_location, bool(answers.get("output_location_is_dir"))):
         output_path = output_location.with_suffix("." + output_ext)
         return output_path.with_name(f"{sanitize_output_stem(output_path.stem)}{output_path.suffix}")
     return output_location / f"{sanitize_output_stem(input_path.stem)}.{output_ext}"

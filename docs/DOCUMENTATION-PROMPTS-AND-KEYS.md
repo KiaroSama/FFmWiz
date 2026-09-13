@@ -329,8 +329,19 @@ a readable media file; otherwise Mode 2 stops with a clear error.
 
 **`output_path`** — Where to write the result. Accepts a folder (output is named from the
 input), a full file path, or a bare base name (placed in the input folder using
-`output_format`). Empty means the input's folder. FFmWiz never overwrites the input; a numeric
-suffix is added on collision.
+`output_format`). Empty means the input's folder.
+
+A path that already exists as a folder IS a folder, whatever it is called: a
+dotted name such as `Exports.v1` or `Season.01` receives the output, it does not
+become the sibling file `Exports.mkv`. A path that already exists as a file is a
+file name. Only a path that does not exist yet is classified by its extension —
+and there, ending the value with `\` or `/` says "folder" explicitly, so a
+not-yet-created `D:\Exports.v2\` is still created as a directory.
+
+FFmWiz never overwrites the input; a numeric suffix is added on collision. That
+protection is by file IDENTITY, not by spelling, so a hardlink, a symlink, a
+Windows junction or a symlinked parent folder that leads back to an input is
+redirected too — including every extra input of a join.
 
 **`output_format`** — The output container extension without a dot (`mp4`, `mkv`, `mov`,
 `webm`, `mp3`, `m4a`, `opus`, `flac`, `wav`, ...). `n` inherits the input's extension. The
@@ -401,15 +412,29 @@ decibels (`+6dB`), or `n`. Accepted range is 0.01 to 10.0, about -40 dB to
 It is applied AFTER LoudNorm, because LoudNorm normalises to a target and would
 undo a gain applied before it.
 
-**`raw_ffmpeg_args`** — Your own ffmpeg options, or `n`. They are split the way
+**`raw_ffmpeg_args`** — Your own ffmpeg OPTIONS, or `n`. They are split the way
 a shell would quote them, so `-metadata title="My film"` keeps its spaces, and
 they are placed LAST, immediately before the output path: ffmpeg reads output
-options in order, so options here can override what the wizard chose. Options
-the wizard owns -- `-i`, `-vf`, `-c:v`, `-map`, `-ss`, `-y`, `-filter_complex`
-and the rest -- are refused, because the settings summary, the output path and
-the exported plan all read those back from the answers, and letting an argument
-change one would make the printed command disagree with the job. The full
-command is always shown for review before anything runs.
+options in order, so options here can override what the wizard chose. A `#` is
+an ordinary character here, not a comment, so `-metadata title=Episode#1` and a
+path containing `#` both survive intact. The full command is always shown for
+review before anything runs.
+
+Three things are refused, because the settings summary, the output path, the
+source-collision check and the exported plan all read the job back from the
+answers, and any of them would make the printed command disagree with what runs:
+
+- Options the wizard owns — `-i`, `-vf`, `-c:v`, `-map`, `-ss`, `-y`,
+  `-filter_complex` and the rest.
+- Their legacy spellings and per-stream forms, which mean the same thing:
+  `-vcodec`, `-acodec`, `-scodec`, `-dcodec`, `-c:v:0`, `-codec:a` and so on.
+- A bare file name. ffmpeg reads an operand as a file — the last one becomes an
+  extra OUTPUT — so a stray path would quietly write a second file the wizard
+  knows nothing about. Attach it to the option it belongs to instead
+  (`-attach cover.png`).
+
+Negative numeric values (`-aq -1`), flag options (`-an`), `+`-prefixed values
+(`-movflags +faststart`) and file-valued options all still work.
 
 Omit the key entirely and Mode 2 never asks about it. In the interactive
 wizard the same question is offered once, after the crop questions, and is

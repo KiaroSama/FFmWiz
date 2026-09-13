@@ -91,7 +91,8 @@ def _loudnorm_output_sample_rate(answers: dict[str, Any] | None = None) -> int:
 
 def resolve_audio_tool_output_ext(answers: dict[str, Any]) -> str:
     output_location = answers.get("output_location")
-    if isinstance(output_location, Path) and output_location.suffix:
+    if isinstance(output_location, Path) and output_location_names_a_file(
+            output_location, bool(answers.get("output_location_is_dir"))):
         requested = output_location.suffix.lstrip(".").lower()
         if requested in {"mp3", "m4a", "aac", "opus", "ogg", "wav", "flac"}:
             return requested

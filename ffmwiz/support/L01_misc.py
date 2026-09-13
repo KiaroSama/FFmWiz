@@ -488,7 +488,22 @@ def _cuda_fast_path_needs_ar_padding(answers: dict[str, Any]) -> bool:
 
 
 def command_to_powershell(args: list[str]) -> str:
-    return " ".join(ps_quote(arg) for arg in args)
+    r"""Render an argv list as a PowerShell command that actually RUNS.
+
+    PowerShell parses a quoted string in command position as an expression, so
+    `'C:\Program Files\FFmpeg\ffmpeg.exe' -version` prints the path instead of
+    running it. The call operator `&` is what turns a quoted executable back
+    into an invocation; a bare executable name needs no operator and reads
+    better without one. Arguments stay individually quoted -- the whole command
+    is never collapsed into one `&` string, which would need Invoke-Expression
+    to run and would reintroduce shell parsing FFmWiz deliberately avoids.
+    """
+    if not args:
+        return ""
+    executable, *rest = args
+    quoted_executable = ps_quote(executable)
+    head = quoted_executable if quoted_executable == executable else "& " + quoted_executable
+    return " ".join([head, *(ps_quote(arg) for arg in rest)])
 
 
 def build_signalstats_command(

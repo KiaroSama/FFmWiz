@@ -1,0 +1,162 @@
+"""One owner for every child process a GUI background worker starts.
+
+Both editors render preview proxies and decode waveforms on background
+threads, and each of those holds an FFmpeg child. Registering that child
+*after* `Popen` returns leaves a window with no owner: a cancel or a window
+close that lands inside it sees no child, reports everything clean, deletes
+the temp directory -- and the child it never saw keeps running, then registers
+itself into an owner that has already shut down. A paused-spawn probe
+reproduced exactly that: cleanup returned, the proxy directory was gone, the
+real child was still alive.
+
+The window is closed by starting the child UNDER the lock that records it. A
+canceller therefore either arrives before the spawn, and the spawn is refused,
+or after the registration, and finds the child. There is no third case.
+
+Qt-free and importable without PySide6, so the lifecycle can be tested with
+real child processes and no display.
+"""
+from __future__ import annotations
+
+import subprocess
+import threading
+
+
+class ChildProcessOwner:
+    """Tracks child processes and background workers for one editor window.
+
+    `generation` supports superseded work: a reverse-preview render started for
+    an older seek must not spawn at all once a newer one exists, and must not
+    publish its result if it was already running.
+    """
+
+    def __init__(self, kill_timeout: float = 5.0) -> None:
+        self._lock = threading.RLock()
+        # id(proc) -> (proc, generation). Keyed by identity because Popen is
+        # not hashable-by-value and two runs can share an exit code.
+        self._children: dict[int, tuple[subprocess.Popen, int]] = {}
+        self._closed = False
+        self._generation = 0
+        self._workers = 0
+        self._idle = threading.Event()
+        self._idle.set()
+        self._kill_timeout = max(0.1, float(kill_timeout))
+
+    # --- state -------------------------------------------------------------
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def active_children(self) -> int:
+        with self._lock:
+            return len(self._children)
+
+    def active_workers(self) -> int:
+        with self._lock:
+            return self._workers
+
+    def current_generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def bump_generation(self, generation: int | None = None) -> int:
+        """Make `generation` (or the next number) the live one."""
+        with self._lock:
+            self._generation = int(generation) if generation is not None else self._generation + 1
+            return self._generation
+
+    def is_current(self, generation: int) -> bool:
+        with self._lock:
+            return not self._closed and int(generation) >= self._generation
+
+    # --- workers -----------------------------------------------------------
+    def worker_started(self) -> None:
+        with self._lock:
+            self._workers += 1
+            self._idle.clear()
+
+    def worker_finished(self) -> None:
+        with self._lock:
+            self._workers = max(0, self._workers - 1)
+            if not self._workers:
+                self._idle.set()
+
+    def wait_idle(self, timeout: float) -> bool:
+        """True when every registered worker has returned."""
+        return self._idle.wait(max(0.0, float(timeout)))
+
+    # --- children ----------------------------------------------------------
+    def start(self, args, generation: int | None = None, popen=subprocess.Popen, **kwargs):
+        """Spawn and register a child atomically; None when it was refused.
+
+        Refused after `close()`, and refused for a generation another render
+        has already superseded -- a superseded child is never created at all,
+        which is cheaper and far safer than creating one and racing to kill it.
+        """
+        with self._lock:
+            if self._closed:
+                return None
+            if generation is not None and int(generation) < self._generation:
+                return None
+            proc = popen(args, **kwargs)
+            self._children[id(proc)] = (proc, self._generation if generation is None else int(generation))
+            return proc
+
+    def finish(self, proc) -> None:
+        """Deregister a child that has already exited (after communicate())."""
+        if proc is None:
+            return
+        with self._lock:
+            self._children.pop(id(proc), None)
+
+    def cancel(self, keep_generation: int | None = None) -> int:
+        """Stop owned children; optionally spare the given generation."""
+        with self._lock:
+            doomed = [entry for entry in self._children.values()
+                      if keep_generation is None or entry[1] != int(keep_generation)]
+            for proc, _generation in doomed:
+                self._children.pop(id(proc), None)
+        for proc, _generation in doomed:
+            self._terminate(proc)
+        return len(doomed)
+
+    def close(self, worker_timeout: float = 8.0) -> None:
+        """Shut down: refuse new children, stop the running ones, wait for the
+        workers that own them, then sweep once more. Idempotent.
+
+        The order matters: killing first is what unblocks a worker sitting in
+        `communicate()`, and waiting for the workers is what makes it safe for
+        the caller to delete the temp files they were writing into.
+        """
+        with self._lock:
+            self._closed = True
+        self.cancel()
+        self.wait_idle(worker_timeout)
+        self.cancel()      # a worker may have raced one last child in
+
+    def _terminate(self, proc) -> None:
+        """Bounded terminate -> kill -> reap, so no zombie and no hang."""
+        try:
+            if proc.poll() is not None:
+                proc.wait(timeout=self._kill_timeout)
+                return
+            proc.terminate()
+        except Exception:      # noqa: BLE001 - already gone, or not ours any more
+            pass
+        try:
+            proc.wait(timeout=self._kill_timeout)
+            return
+        except Exception:      # noqa: BLE001 - still alive after terminate
+            pass
+        try:
+            proc.kill()
+        except Exception:      # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=self._kill_timeout)
+        except Exception:      # noqa: BLE001
+            pass
+
+
+__all__ = ["ChildProcessOwner"]

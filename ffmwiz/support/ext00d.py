@@ -338,7 +338,7 @@ def build_lossless_split_command(answers: dict[str, Any], points: list[float]) -
     chosen_ext = str(answers.get("lossless_split_ext") or lossless_audio_copy_ext(codec, input_path.suffix))
     ext = "." + chosen_ext.lower().lstrip(".")
     location = Path(answers.get("output_location") or input_path.parent)
-    if location.suffix:
+    if output_location_names_a_file(location, bool(answers.get("output_location_is_dir"))):
         out_dir = location.parent
         stem = sanitize_output_stem(location.stem)
     else:

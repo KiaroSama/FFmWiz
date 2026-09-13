@@ -123,7 +123,8 @@ class SinglePaletteTests(unittest.TestCase):
         from ffmwiz.gui import gui_style   # shared: it did not move
         self.assertIs(ffmwiz_gui_qml._PALETTE, gui_style.PALETTE)
         # The old hand-copied 26-key dict is gone.
-        src = (_GUI_DIR / "modern" / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
+        src = "\n".join(path.read_text(encoding="utf-8")
+                        for path in sorted((_GUI_DIR / "modern").glob("*.py")))
         self.assertNotIn('"panel_alt": "#1a1f2a"', src)
 
 

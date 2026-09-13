@@ -672,10 +672,11 @@ def _track_manager_loudnorm_summary(answers: dict[str, Any]) -> str:
     return f"{label}, target I={target} LUFS"
 
 
-def choose_hardsub_output_path(input_path: Path, output_ext: str, output_location: Path, output_name_stem: str | None = None) -> Path:
+def choose_hardsub_output_path(input_path: Path, output_ext: str, output_location: Path, output_name_stem: str | None = None,
+                               output_location_is_dir: bool = False) -> Path:
     if output_name_stem:
         candidate = output_location / f"{sanitize_output_stem(output_name_stem)}.{output_ext}"
-    elif output_location.suffix:
+    elif output_location_names_a_file(output_location, output_location_is_dir):
         candidate = output_location.with_suffix("." + output_ext)
     else:
         candidate = output_location / f"{sanitize_output_stem(input_path.stem)}{HARDSUB_OUTPUT_SUFFIX}.{output_ext}"
@@ -733,7 +734,7 @@ def join_default_output_path(answers: dict[str, Any], first_input: Path) -> Path
     suffix = first_input.suffix or ".mkv"
     if answers.get("output_name_stem"):
         candidate = output_location / f"{sanitize_output_stem(answers['output_name_stem'])}{suffix}"
-    elif output_location.suffix:
+    elif output_location_names_a_file(output_location, bool(answers.get("output_location_is_dir"))):
         candidate = output_location.with_suffix(suffix)
     else:
         candidate = output_location / f"{sanitize_output_stem(first_input.stem)}_Joined{suffix}"

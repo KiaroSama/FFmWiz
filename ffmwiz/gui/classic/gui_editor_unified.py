@@ -44,6 +44,21 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
     return segments
 
 
+def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_spec: str = "a:0") -> str:
+    """One join segment's audio, bounded to the SEGMENT's own declared length.
+
+    Shared shape with the QML engine's waveform so both editors lay audio on
+    the same clock: `aresample=...:first_pts=0` keeps a late-starting audio
+    stream at its true offset, `atrim` cuts a long input to the segment span
+    and `apad=whole_dur` pads a short one with silence.
+    """
+    span = max(0.001, float(duration))
+    return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
+            f"aresample={rate}:first_pts=0,"
+            f"atrim=end={span:.6f},apad=whole_dur={span:.6f},"
+            f"asetpts=PTS-STARTPTS[a{index}]")
+
+
 def build_classic_waveform_args(
     req: dict[str, Any], segments: list[dict[str, Any]], out_path: Any
 ) -> list[str]:
@@ -64,12 +79,17 @@ def build_classic_waveform_args(
                 # filtergraph, so one silent segment killed the waveform
                 # for the entire join. Feed matching silence instead (D07).
                 seg_duration = max(0.001, float(segment.get("duration") or 0.0))
-                args.extend(["-f", "lavfi", "-t", f"{seg_duration:.3f}",
+                args.extend(["-f", "lavfi", "-t", f"{seg_duration:.6f}",
                              "-i", "anullsrc=channel_layout=mono:sample_rate=4000"])
             labels.append(f"[a{idx}]")
-        filters = []
-        for idx, _segment in enumerate(segments):
-            filters.append(f"[{idx}:a:0]aformat=channel_layouts=mono,aresample=4000,asetpts=PTS-STARTPTS[a{idx}]")
+        # Each segment is bounded to its DECLARED length, the same clock the
+        # timeline is laid out on. Unbounded concat made the waveform as long
+        # as the audio instead, so every marker after a segment whose audio was
+        # shorter or longer than its picture sat at the wrong time.
+        filters = [
+            segment_audio_filter(idx, float(segment.get("duration") or 0.0), 4000)
+            for idx, segment in enumerate(segments)
+        ]
         filters.append(f"{''.join(labels)}concat=n={len(segments)}:v=0:a=1[mix]")
         args.extend(["-filter_complex", ";".join(filters), "-map", "[mix]"])
     else:
