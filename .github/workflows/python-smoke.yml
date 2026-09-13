@@ -91,7 +91,12 @@ jobs:
         timeout-minutes: 10
         run: |
           python -c "import importlib.util, sys; sys.exit('numpy leaked into the no-dependency leg') if importlib.util.find_spec('numpy') else print('numpy is absent, as this leg requires')"
-          python tests/run_suite.py -j 2 -k join_waveform_clock -k qml_waveform -k theme_tokens
+          # `qml_waveform` carries this leg: its WaveformWindowTests run the
+          # model against a stdlib array('h') and, where numpy exists, against
+          # both. `join_waveform_clock` is deliberately NOT selected here -- it
+          # needs real ffmpeg, which this job does not install, so it would add
+          # only skips.
+          python tests/run_suite.py -j 2 -k qml_waveform -k theme_tokens
 
       - name: Prove no third-party package reached this leg
         # The check above stubs PySide6 out; this one proves the stub was not

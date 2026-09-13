@@ -9,6 +9,8 @@ import json
 import os
 import re
 import sys
+import array
+import math
 import unittest
 from pathlib import Path
 
@@ -75,62 +77,100 @@ class WaveDecodeArgsTests(unittest.TestCase):
         self.assertEqual(args.count("-i"), 3)  # one -i per joined input
 
 
-@requires_numpy
 class WaveformWindowTests(unittest.TestCase):
+    """The waveform maths, in BOTH representations it really runs in.
+
+    numpy is an accelerator here, not a requirement: without it the model works
+    on a stdlib `array('h')`, and that is what a user who never installed numpy
+    sees. These tests used numpy only to BUILD their fixtures and were gated on
+    it, so the stdlib branch was never exercised -- and a CI leg with no numpy
+    installed simply skipped them, proving nothing (A01/CI).
+
+    Each case now runs against every representation available: the stdlib array
+    always, the numpy array when numpy is installed. `build_wave_envelope` and
+    `waveform_window` branch on the type, so this is what covers both branches.
+    """
+
     RATE = 4000
 
-    def _pcm(self, samples):
-        return np.asarray(samples, dtype=np.int16)
+    def representations(self, samples):
+        """(label, pcm) for every array type this model accepts."""
+        clipped = [max(-32768, min(32767, int(value))) for value in samples]
+        yield "array", array.array("h", clipped)
+        if _HAS_NUMPY:
+            yield "numpy", np.asarray(clipped, dtype=np.int16)
 
     def test_returns_minmax_pairs(self):
         # A signal that swings negative and positive must yield min<max pairs.
         n = self.RATE * 4
-        t = np.arange(n)
-        pcm = (20000 * np.sin(t / 50.0)).astype(np.int16)
-        emn, emx = Q.build_wave_envelope(pcm)
-        pairs = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, 4.0, 200)
-        self.assertGreater(len(pairs), 1)
-        for mn, mx in pairs:
-            self.assertLessEqual(mn, mx)               # min/max, not a single peak
-            self.assertGreaterEqual(mn, -1.0 - 1e-6)
-            self.assertLessEqual(mx, 1.0 + 1e-6)
-        # At least one column must actually carry a negative min (true min/max,
-        # not absolute-peak-only).
-        self.assertTrue(any(mn < -0.1 for mn, _ in pairs))
+        samples = [int(20000 * math.sin(i / 50.0)) for i in range(n)]
+        for label, pcm in self.representations(samples):
+            with self.subTest(pcm=label):
+                emn, emx = Q.build_wave_envelope(pcm)
+                pairs = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, 4.0, 200)
+                self.assertGreater(len(pairs), 1)
+                for mn, mx in pairs:
+                    self.assertLessEqual(mn, mx)       # min/max, not a single peak
+                    self.assertGreaterEqual(mn, -1.0 - 1e-6)
+                    self.assertLessEqual(mx, 1.0 + 1e-6)
+                # At least one column must actually carry a negative min (true
+                # min/max, not absolute-peak-only).
+                self.assertTrue(any(mn < -0.1 for mn, _ in pairs))
 
     def test_full_scale_not_normalized_to_clip_peak(self):
         # A constant half-scale signal must read ~0.5, NOT 1.0 (i.e. it is scaled
         # against int16 full scale, not the clip's own maximum).
-        pcm = self._pcm([16384] * (self.RATE * 2))
-        emn, emx = Q.build_wave_envelope(pcm)
-        pairs = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, 2.0, 100)
-        self.assertTrue(pairs)
-        peak = max(mx for _, mx in pairs)
-        self.assertAlmostEqual(peak, 0.5, delta=0.02)
+        for label, pcm in self.representations([16384] * (self.RATE * 2)):
+            with self.subTest(pcm=label):
+                emn, emx = Q.build_wave_envelope(pcm)
+                pairs = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, 2.0, 100)
+                self.assertTrue(pairs)
+                peak = max(mx for _, mx in pairs)
+                self.assertAlmostEqual(peak, 0.5, delta=0.02)
 
     def test_deep_zoom_reveals_detail_overview_compresses(self):
         # First 1% of the clip is loud, the rest silent. The full-timeline
         # overview compresses the loud region into ~1 column; a deep zoom on that
         # region fills (almost) every column with loud data.
         n = self.RATE * 100  # 100s
-        pcm = np.zeros(n, dtype=np.int16)
         loud_len = n // 100  # first 1%
-        pcm[:loud_len] = 30000
-        emn, emx = Q.build_wave_envelope(pcm)
+        samples = [30000] * loud_len + [0] * (n - loud_len)
         dur = n / self.RATE
-        overview = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, dur, 100)
-        zoomed = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, dur * 0.01, 100)
-        loud_over = sum(1 for _, mx in overview if mx > 0.5)
-        loud_zoom = sum(1 for _, mx in zoomed if mx > 0.5)
-        self.assertLessEqual(loud_over, 3)        # overview crushes it to ~1 column
-        self.assertGreater(loud_zoom, 50)         # deep zoom resolves the loud region
+        for label, pcm in self.representations(samples):
+            with self.subTest(pcm=label):
+                emn, emx = Q.build_wave_envelope(pcm)
+                overview = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, dur, 100)
+                zoomed = Q.waveform_window(pcm, emn, emx, self.RATE, 0.0, dur * 0.01, 100)
+                loud_over = sum(1 for _, mx in overview if mx > 0.5)
+                loud_zoom = sum(1 for _, mx in zoomed if mx > 0.5)
+                self.assertLessEqual(loud_over, 3)   # overview crushes it to ~1 column
+                self.assertGreater(loud_zoom, 50)    # deep zoom resolves it
 
     def test_window_clamps_and_handles_empty(self):
-        pcm = self._pcm([100] * (self.RATE * 2))
-        emn, emx = Q.build_wave_envelope(pcm)
-        # Out-of-range / inverted window must not throw and returns a list.
-        self.assertIsInstance(Q.waveform_window(pcm, emn, emx, self.RATE, -5.0, 1.0, 50), list)
-        self.assertEqual(Q.waveform_window(None, None, None, self.RATE, 0.0, 1.0, 50), [])
+        for label, pcm in self.representations([100] * (self.RATE * 2)):
+            with self.subTest(pcm=label):
+                emn, emx = Q.build_wave_envelope(pcm)
+                # Out-of-range / inverted window must not throw, returns a list.
+                self.assertIsInstance(
+                    Q.waveform_window(pcm, emn, emx, self.RATE, -5.0, 1.0, 50), list)
+                self.assertEqual(
+                    Q.waveform_window(None, None, None, self.RATE, 0.0, 1.0, 50), [])
+
+    def test_both_representations_agree_column_for_column(self):
+        """The accelerator must not change the answer, only the speed."""
+        if not _HAS_NUMPY:
+            self.skipTest("numpy is absent, so there is no second representation "
+                          "to compare against; the stdlib path is covered above")
+        samples = [int(18000 * math.sin(i / 37.0)) for i in range(self.RATE * 3)]
+        results = []
+        for _label, pcm in self.representations(samples):
+            emn, emx = Q.build_wave_envelope(pcm)
+            results.append(Q.waveform_window(pcm, emn, emx, self.RATE, 0.2, 2.6, 120))
+        self.assertEqual(len(results), 2)
+        for index, (left, right) in enumerate(zip(*results)):
+            with self.subTest(column=index):
+                self.assertAlmostEqual(left[0], right[0], places=6)
+                self.assertAlmostEqual(left[1], right[1], places=6)
 
 
 class QmlPaletteAndLoggingTests(unittest.TestCase):
