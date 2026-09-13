@@ -66,6 +66,7 @@ instead (`composite_unsupported_answer_notes`), on the same rule as
 These assert on the built argv, not on a helper, because every one of these
 defects lived in the gate or the omission in FRONT of a correct helper.
 """
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +90,9 @@ class _Quiet(unittest.TestCase):
         FFmWiz.appio.USE_COLOR = False
         FFmWiz.appio.note = lambda *a, **k: None
         self.tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_reach_"))
+        # Removed in cleanup, not left for %TEMP% to collect: one suite run
+        # dropped 51 of these directories, one per test.
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
     def tearDown(self):
         FFmWiz.appio.note = self._note
