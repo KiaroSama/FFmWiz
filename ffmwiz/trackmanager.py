@@ -633,7 +633,7 @@ def _run_track_manager_single(answers: dict[str, Any]) -> tuple[int, float] | No
                 appio.note("No track was removed or added; nothing to do.")
                 return None
             input_path = Path(answers["input_path"])
-            output_path = track_manager_output_path(input_path)
+            output_path = track_manager_output_path(input_path, extra_items)
             # The output keeps the source container, so a subtitle it cannot
             # carry at all has to be refused here instead of failing at
             # header-write time and leaving a 0-byte file next to the source.
@@ -736,7 +736,7 @@ def _run_track_manager_folder(answers: dict[str, Any]) -> tuple[int, float] | No
     succeeded = 0
     failures = 0
     for media in media_files:
-        output_path = track_manager_output_path(media)
+        output_path = track_manager_output_path(media, extra_items)
         # A folder can mix containers, so both the compatibility check and the
         # output-relative stream indexes have to be resolved per file.
         problems = track_manager_subtitle_container_problems(output_path.suffix, extra_items)

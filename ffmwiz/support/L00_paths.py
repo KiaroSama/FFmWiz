@@ -130,6 +130,63 @@ def output_location_names_a_file(output_location: Path, explicit_directory: bool
     return bool(output_location.suffix)
 
 
+def command_input_paths(cmd: list[str]) -> list[Path]:
+    """Every path an FFmpeg argv reads as an INPUT (`-i <path>`)."""
+    inputs: list[Path] = []
+    for index, token in enumerate(cmd[:-1] if cmd else []):
+        if str(token) != "-i":
+            continue
+        value = str(cmd[index + 1] or "").strip()
+        if not value or value.startswith("-"):
+            continue
+        lowered = value.lower()
+        if lowered.startswith("pipe:") or lowered in {"-", "nul", "null", os.devnull.lower()}:
+            continue
+        try:
+            inputs.append(Path(value))
+        except (TypeError, ValueError):
+            continue
+    return inputs
+
+
+def command_output_path(cmd: list[str]) -> Path | None:
+    """The destination an FFmpeg argv writes, or None for a non-file sink."""
+    if not cmd:
+        return None
+    candidate = str(cmd[-1] or "").strip()
+    if not candidate or candidate.startswith("-"):
+        return None
+    lowered = candidate.lower()
+    if lowered.startswith("pipe:") or lowered in {"-", "nul", "null", os.devnull.lower()}:
+        return None
+    if len(cmd) >= 2 and str(cmd[-2]) == "-i":
+        return None        # the last token is an INPUT, so this command has no file output
+    try:
+        return Path(candidate)
+    except (TypeError, ValueError):
+        return None
+
+
+def command_source_output_conflict(cmd: list[str]) -> tuple[Path, Path] | None:
+    """(input, output) when running `cmd` would overwrite one of its own inputs.
+
+    Planning resolves a safe destination, but that is not the last word. The
+    destination can BECOME an alias of a source afterwards -- a hardlink created
+    between confirmation and execution -- and a caller can simply have failed to
+    consider one of its sources at all: Track Manager checked the primary file
+    and never the external tracks it also reads. This is the final point at
+    which the command is still data rather than a running process, so the
+    identity check is repeated here for every caller at once.
+    """
+    output = command_output_path(cmd)
+    if output is None:
+        return None
+    for source in command_input_paths(cmd):
+        if paths_same(output, source):
+            return source, output
+    return None
+
+
 def unique_numbered_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -147,5 +204,8 @@ __all__ = [
     'sanitize_output_stem',
     'paths_same',
     'output_location_names_a_file',
+    'command_input_paths',
+    'command_output_path',
+    'command_source_output_conflict',
     'unique_numbered_path',
 ]

@@ -495,13 +495,9 @@ def confirm_target_above_source(
 
 def resolve_output_collision_against_inputs(output_path: Path, input_paths: list[Path], collision_suffix: str) -> Path:
     """Avoid writing the output over any source input, including joined inputs."""
-    resolved = output_path
-    for input_path in input_paths:
-        if paths_same(resolved, input_path):
-            safe_stem = sanitize_output_stem(resolved.stem)
-            resolved = unique_numbered_path(resolved.with_name(f"{safe_stem}{collision_suffix}{resolved.suffix}"))
-            log_info(f"Output path matched an input path; using safe output path instead: {resolved}")
-            break
+    resolved = resolve_output_collision_for_sources(output_path, list(input_paths), collision_suffix)
+    if resolved != output_path:
+        log_info(f"Output path matched an input path; using safe output path instead: {resolved}")
     return resolved
 
 
