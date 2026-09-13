@@ -257,7 +257,28 @@ class TheRefusedGrammarWouldHaveCostRealOutput(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_raw_arguments(f"-nobitexact {surprise}")
 
+    def supports_file_loaded_options(self) -> bool:
+        """Whether THIS ffmpeg understands the `-/opt file` spelling.
+
+        It is not in every supported build -- the 6.1.1 leg rejects it -- and an
+        unavailable syntax is not the same thing as a safety test passing. The
+        parser-level refusal is asserted unconditionally in the class above; only
+        the demonstration that the syntax would really override needs the
+        capability.
+        """
+        probe = self.root / "probe.txt"
+        probe.write_text("volume=1", encoding="utf-8")
+        out = self.root / "probe.wav"
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(self.source), "-vn", "-/filter:a", str(probe), str(out)],
+            capture_output=True, timeout=180)
+        out.unlink(missing_ok=True)
+        return result.returncode == 0
+
     def test_a_file_loaded_filter_really_overrides_the_planned_one(self):
+        if not self.supports_file_loaded_options():
+            self.skipTest("this ffmpeg build does not accept the -/opt file spelling")
         script = self.root / "filters.txt"
         script.write_text("volume=4", encoding="utf-8")
         loud = self.root / "loud.wav"
