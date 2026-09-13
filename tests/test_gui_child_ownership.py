@@ -328,8 +328,8 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: self.wave_started),
                         "the waveform decode never started"),
         bridge.cancelReverse()
-        self.assertIsNone(self.wave_started[0].poll(),
-                          "cancelling reverse killed the waveform decode")
+        self.assertIn(self.wave_started[0].poll(), (None, 0),
+                      "cancelling reverse terminated the waveform decode")
 
     def test_starting_a_reverse_render_does_not_kill_a_running_decode(self):
         """Superseding reverse generations must not touch the other lane."""
@@ -338,8 +338,12 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: self.wave_started))
         bridge.renderReverse('{"gen": 7, "ss": 0, "dur": 8, "width": 320}')
         self.assertTrue(self.wait_for(lambda: self.reverse_started))
-        self.assertIsNone(self.wave_started[0].poll(),
-                          "starting a reverse render killed the waveform child")
+        # Still running, or finished cleanly -- both mean "not killed". On a
+        # fast runner the decode of a short clip completes before this line, so
+        # demanding `poll() is None` made the test fail for the machine's speed
+        # rather than for the behaviour it names.
+        self.assertIn(self.wave_started[0].poll(), (None, 0),
+                      "starting a reverse render terminated the waveform child")
 
     def test_window_shutdown_stops_both_lanes(self):
         bridge = self.make_bridge()
