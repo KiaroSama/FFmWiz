@@ -429,7 +429,11 @@ def choose_extract_stream_output_path(input_path: Path, stream: dict[str, Any], 
                 candidate = candidate.with_suffix(output_value.suffix)
             else:
                 candidate = input_path.parent / f"{sanitize_output_stem(output_value.name)}{default_suffix}"
-        elif output_value.suffix:
+        elif output_location_names_a_file(output_value, value.rstrip().endswith(("/", "\\", os.sep))):
+            # The shared classifier, not `.suffix` again. An existing directory
+            # called `music.wav` is a DIRECTORY: this picker was still branching
+            # on the suffix and wrote the sibling file `music (2).wav` instead
+            # of extracting into the folder the user selected (R07).
             candidate = output_value.with_name(f"{sanitize_output_stem(output_value.stem)}{output_value.suffix}")
         else:
             candidate = output_value / default_path.name

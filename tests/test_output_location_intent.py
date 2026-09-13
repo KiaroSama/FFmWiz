@@ -159,5 +159,54 @@ class EveryOutputFlowAgreesOnTheSameIntent(unittest.TestCase):
         self.assertEqual(resolve_audio_tool_output_ext(explicit), "flac")
 
 
+class ExtractionRoutesThroughTheSameClassifier(unittest.TestCase):
+    """R07 -- the extraction picker was the last `.suffix` branch left.
+
+    Selecting an existing directory named `music.wav` returned the sibling FILE
+    `music (2).wav`, and a real extraction wrote there successfully -- to a
+    place the user had not chosen.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="ffmwiz_r07_"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.source = self.root / "clip.mkv"
+        self.source.write_bytes(b"x")
+        self.stream = {"index": 1, "codec_type": "audio", "codec_name": "aac"}
+
+    def choose(self, value):
+        from ffmwiz.support.ext01b import choose_extract_stream_output_path
+        return choose_extract_stream_output_path(self.source, self.stream, str(value))
+
+    def test_an_existing_dotted_directory_receives_the_stream(self):
+        for name in ("music.wav", "Exports.v1", "Season.01", "خروجی.نسخه۱", "my exports.v2"):
+            directory = self.root / name
+            directory.mkdir()
+            with self.subTest(directory=name):
+                self.assertEqual(self.choose(directory).parent, directory)
+
+    def test_an_explicit_file_is_still_a_file(self):
+        chosen = self.choose(self.root / "explicit.wav")
+        self.assertEqual(chosen.parent, self.root)
+        self.assertEqual(chosen.name, "explicit.wav")
+
+    def test_a_new_path_marked_as_a_directory_is_a_directory(self):
+        chosen = self.choose(str(self.root / "New.v9") + os.sep)
+        self.assertEqual(chosen.parent, self.root / "New.v9")
+
+    def test_a_bare_name_still_names_the_file(self):
+        chosen = self.choose("just_a_name")
+        self.assertEqual(chosen.parent, self.source.parent)
+        self.assertTrue(chosen.name.startswith("just_a_name"))
+
+    def test_the_default_is_unchanged(self):
+        chosen = self.choose("")
+        self.assertEqual(chosen.parent, self.source.parent)
+
+    def test_the_source_is_still_protected(self):
+        chosen = self.choose(self.source)
+        self.assertNotEqual(chosen, self.source)
+
+
 if __name__ == "__main__":
     unittest.main()
