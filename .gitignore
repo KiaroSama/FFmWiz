@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 
 .venv/
+.venv-wsl/
 venv/
 env/
 .env
