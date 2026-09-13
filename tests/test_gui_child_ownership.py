@@ -157,6 +157,39 @@ class TheOwnerClosesTheRegistrationGap(unittest.TestCase):
                         "close() returned while a worker was still writing")
         self.assert_all_dead()
 
+    def test_close_admits_when_a_worker_did_not_finish(self):
+        """`close()` must not report success while somebody still owns files.
+
+        It returned None and the caller had nothing to check, so bridge cleanup
+        went on to delete a directory a live worker was still writing into (R04).
+        """
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck_worker():
+            self.owner.worker_started()
+            try:
+                release.wait(30)
+            finally:
+                self.owner.worker_finished()
+
+        threading.Thread(target=stuck_worker, daemon=True).start()
+        self.assertTrue(self.wait_until(lambda: self.owner.active_workers() == 1))
+        self.assertFalse(self.owner.close(worker_timeout=0.5),
+                         "close() claimed a clean shutdown with a worker still running")
+        release.set()
+        self.assertTrue(self.wait_until(lambda: self.owner.active_workers() == 0))
+        self.assertTrue(self.owner.close(worker_timeout=5),
+                        "close() still reports failure after the worker returned")
+
+    def wait_until(self, predicate, timeout=10.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
     def test_close_is_idempotent(self):
         self.owner.start(SLEEPER, popen=self.recording_popen())
         self.owner.close(worker_timeout=2)
@@ -220,25 +253,36 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
                    "duration": 12.0, "has_audio": True}
         request.update(overrides)
         bridge = Bridge(self.app, request)
+        # Reverse and waveform are separate lanes now, and several tests below
+        # turn on telling their children apart.
         self.started: list[subprocess.Popen] = []
-        real_start = bridge._children.start
+        self.reverse_started: list[subprocess.Popen] = []
+        self.wave_started: list[subprocess.Popen] = []
+        for owner, bucket in ((bridge._reverse_children, self.reverse_started),
+                              (bridge._wave_children, self.wave_started)):
+            self._record(owner, bucket)
+        self.addCleanup(self.assert_nothing_survived, bridge)
+        return bridge
+
+    def _record(self, owner, bucket) -> None:
+        real_start = owner.start
 
         def recording_start(*args, **kwargs):
             proc = real_start(*args, **kwargs)
             if proc is not None:
+                bucket.append(proc)
                 self.started.append(proc)
             return proc
 
-        bridge._children.start = recording_start
-        self.addCleanup(self.assert_nothing_survived, bridge)
-        return bridge
+        owner.start = recording_start
 
     def assert_nothing_survived(self, bridge) -> None:
         bridge.cleanup_reverse()
         for proc in self.started:
             self.assertIsNotNone(proc.poll(), f"pid {proc.pid} outlived the editor")
-        self.assertEqual(bridge._children.active_children(), 0)
-        self.assertEqual(bridge._children.active_workers(), 0)
+        for owner in (bridge._reverse_children, bridge._wave_children):
+            self.assertEqual(owner.active_children(), 0)
+            self.assertEqual(owner.active_workers(), 0)
         self.assertFalse(os.path.isdir(bridge._rev_temp.name),
                          "the owned proxy directory survived cleanup")
 
@@ -251,14 +295,113 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
             time.sleep(0.05)
         return False
 
-    def test_cancelling_a_reverse_render_kills_its_child(self):
+    def test_the_public_cancel_slot_stops_the_current_render(self):
+        """Exactly what QML calls -- no private generation mutation.
+
+        The previous version of this test bumped `_children` by hand before
+        cancelling, which changed the precondition and hid the defect: the slot
+        called `cancel(keep_generation=current)` and therefore SPARED the very
+        process QML had just asked it to stop (R04).
+
+        The render is deliberately one this machine cannot finish quickly, and
+        the stop is required to be FAST. An earlier version asked for an 8 s
+        chunk and then waited 20 s: the child finished on its own and the test
+        passed whether or not cancelling did anything.
+        """
         bridge = self.make_bridge()
-        bridge.renderReverse('{"gen": 1, "ss": 0, "dur": 8, "width": 320}')
-        self.assertTrue(self.wait_for(lambda: self.started),
+        bridge.renderReverse('{"gen": 1, "ss": 0, "dur": 11, "width": 1920}')
+        self.assertTrue(self.wait_for(lambda: self.reverse_started),
                         "the render never started a child")
-        bridge._children.bump_generation(2)
+        proc = self.reverse_started[0]
+        self.assertIsNone(proc.poll(), "the render finished before it could be cancelled")
+        started = time.monotonic()
+        bridge.cancelReverse()        # the public slot, as QML calls it
+        elapsed = time.monotonic() - started
+        self.assertIsNotNone(proc.poll(), "the cancelled render is still running")
+        self.assertLess(elapsed, 15.0,
+                        "cancelReverse() returned only once the render ended by itself")
+
+    def test_cancelling_reverse_does_not_stop_the_waveform(self):
+        """Two lanes: a reverse cancel is not a waveform cancel."""
+        bridge = self.make_bridge()
+        bridge.startWaveform()
+        self.assertTrue(self.wait_for(lambda: self.wave_started),
+                        "the waveform decode never started"),
         bridge.cancelReverse()
-        self.assertIsNotNone(self.started[0].poll(), "the cancelled render is still running")
+        self.assertIsNone(self.wave_started[0].poll(),
+                          "cancelling reverse killed the waveform decode")
+
+    def test_starting_a_reverse_render_does_not_kill_a_running_decode(self):
+        """Superseding reverse generations must not touch the other lane."""
+        bridge = self.make_bridge()
+        bridge.startWaveform()
+        self.assertTrue(self.wait_for(lambda: self.wave_started))
+        bridge.renderReverse('{"gen": 7, "ss": 0, "dur": 8, "width": 320}')
+        self.assertTrue(self.wait_for(lambda: self.reverse_started))
+        self.assertIsNone(self.wave_started[0].poll(),
+                          "starting a reverse render killed the waveform child")
+
+    def test_window_shutdown_stops_both_lanes(self):
+        bridge = self.make_bridge()
+        bridge.startWaveform()
+        bridge.renderReverse('{"gen": 1, "ss": 0, "dur": 10, "width": 640}')
+        self.assertTrue(self.wait_for(lambda: self.wave_started and self.reverse_started))
+        bridge.cleanup_reverse()
+        for proc in self.started:
+            self.assertIsNotNone(proc.poll(), f"pid {proc.pid} survived shutdown")
+
+    def partial_then_fail_shim(self) -> Path:
+        """A stand-in decoder that writes real PCM and THEN exits nonzero.
+
+        This is the audit's fault injection. Pointing the bridge at a missing
+        binary is a different failure -- it dies at spawn and never reaches the
+        nonzero-exit path -- so it cannot show whether a truncated decode gets
+        promoted into the cache.
+        """
+        if os.name != "nt":
+            self.skipTest("the .cmd shim used for fault injection is Windows-only")
+        shim = self.media_root / "partial_then_fail.cmd"
+        shim.write_text(
+            "@echo off\r\n"
+            f'"{sys.executable}" -c "import sys,array;'
+            'open(sys.argv[-1],\'wb\').write(array.array(\'h\',[1000]*4000).tobytes())" %*\r\n'
+            "exit /b 1\r\n",
+            encoding="utf-8")
+        return shim
+
+    def test_a_partial_decode_that_exits_nonzero_never_becomes_the_cache(self):
+        """A nonzero decoder exit must not publish the PCM it managed to write."""
+        shim = self.partial_then_fail_shim()
+        bridge = self.make_bridge(ffmpeg=str(shim))
+        before_key, before_pcm = bridge._wave_key, bridge._pcm
+        bridge.startWaveform()
+        self.assertTrue(self.wait_for(
+            lambda: bridge._wave_thread is not None and not bridge._wave_thread.is_alive(),
+            timeout=60), "the decode worker never finished")
+        # The shim really did write samples, so this is the promotion case.
+        self.assertTrue(self.wave_started, "no decode child was started")
+        self.assertEqual(self.wave_started[0].returncode, 1)
+        self.assertEqual(bridge._wave_key, before_key,
+                         "a failed decode was promoted into the cache key")
+        self.assertIs(bridge._pcm, before_pcm,
+                      "a failed decode published its partial PCM")
+
+    def test_a_decoder_that_cannot_even_start_is_reported_not_cached(self):
+        bridge = self.make_bridge(ffmpeg=str(self.media_root / "no-such-ffmpeg.exe"))
+        before_key, before_pcm = bridge._wave_key, bridge._pcm
+        bridge.startWaveform()
+        self.assertTrue(self.wait_for(
+            lambda: bridge._wave_thread is not None and not bridge._wave_thread.is_alive(),
+            timeout=30))
+        self.assertEqual(bridge._wave_key, before_key)
+        self.assertIs(bridge._pcm, before_pcm)
+
+    def test_repeated_cleanup_is_idempotent(self):
+        bridge = self.make_bridge()
+        bridge.renderReverse('{"gen": 1, "ss": 0, "dur": 4, "width": 320}')
+        self.wait_for(lambda: self.reverse_started, timeout=15)
+        self.assertTrue(bridge.cleanup_reverse())
+        self.assertTrue(bridge.cleanup_reverse())
 
     def test_closing_during_a_render_leaves_nothing_behind(self):
         bridge = self.make_bridge()
@@ -298,7 +441,7 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: published, timeout=20),
                         "a failed launch never reported back")
         self.assertEqual(published[0][1], "", "a failed launch published an output path")
-        self.assertEqual(bridge._children.active_children(), 0)
+        self.assertEqual(bridge._reverse_children.active_children(), 0)
 
     def test_a_result_is_not_published_after_shutdown(self):
         bridge = self.make_bridge()
