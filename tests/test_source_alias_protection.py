@@ -37,7 +37,7 @@ def sha256(path: Path) -> str:
 def make_wav(path: Path, seconds: float = 0.3, frequency: int = 440) -> None:
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                     "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={seconds}",
-                    str(path)], check=True)
+                    str(path)], check=True, timeout=180)
 
 
 def try_symlink(link: Path, target: Path) -> bool:
@@ -53,7 +53,7 @@ def try_junction(link: Path, target: Path) -> bool:
     if os.name != "nt":
         return False
     result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, timeout=180)
     return result.returncode == 0 and link.exists()
 
 
@@ -85,7 +85,7 @@ class AnAliasOfTheInputIsNeverTheOutput(unittest.TestCase):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                         "-i", str(self.source), "-filter:a", "volume=0.5",
-                        str(output_path)], check=True)
+                        str(output_path)], check=True, timeout=180)
 
     def assert_source_survived(self, output_path: Path) -> None:
         self.assertFalse(paths_same(output_path, self.source),

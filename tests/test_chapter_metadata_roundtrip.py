@@ -79,7 +79,7 @@ class ChaptersSurviveARealRoundTrip(unittest.TestCase):
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                         "-f", "lavfi", "-i", "testsrc=size=64x48:rate=10:duration=4",
                         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(self.source)],
-                       check=True)
+                       check=True, timeout=180)
 
     def round_trip(self, writer, title: str) -> list[dict]:
         plan = {"chapters": [
@@ -92,11 +92,11 @@ class ChaptersSurviveARealRoundTrip(unittest.TestCase):
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
              "-i", str(self.source), "-i", str(metadata_path),
              "-map_metadata", "1", "-map_chapters", "1", "-c", "copy", str(out)],
-            capture_output=True)
+            capture_output=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
         probe = subprocess.run([FFPROBE, "-v", "error", "-show_chapters",
                                 "-of", "json", str(out)], capture_output=True, text=True,
-                               encoding="utf-8")
+                               encoding="utf-8", timeout=180)
         return json.loads(probe.stdout)["chapters"]
 
     def test_every_title_shape_comes_back_intact(self):

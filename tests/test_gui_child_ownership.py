@@ -40,6 +40,9 @@ except Exception:                                                 # noqa: BLE001
     _HAVE_QT = False
 requires_qt = unittest.skipUnless(_HAVE_QT, "No usable PySide6 installation for the Qt lifecycle tests")
 
+# The child under test, not a wait: every test below KILLS this process and
+# asserts it is gone, so the 30 s is only how long it would survive if the
+# owner failed to reap it. Nothing here ever waits for it to finish.
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(30)"]
 
 
@@ -185,7 +188,7 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
                         "-f", "lavfi", "-i", "sine=frequency=440:duration=12",
                         "-c:v", "libx264", "-preset", "ultrafast",
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
-                        str(cls.source)], check=True)
+                        str(cls.source)], check=True, timeout=180)
 
     @classmethod
     def tearDownClass(cls) -> None:
