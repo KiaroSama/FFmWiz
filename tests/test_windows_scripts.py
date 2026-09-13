@@ -30,7 +30,10 @@ LAUNCHER_STEP = "New-Item -ItemType Directory -Path $commandDir -Force | Out-Nul
 MARKER = "REACHED-LAUNCHER-STEP"
 
 
+# The Windows installer, driven through `.cmd` shims. PowerShell 7 exists on
+# Linux too, so the platform -- not the shell -- is what decides here.
 @unittest.skipIf(not PWSH, "PowerShell not available")
+@unittest.skipIf(os.name != "nt", "drives the Windows installer; not meaningful on this platform")
 class InstallerDependencyFailureTests(unittest.TestCase):
     def setUp(self):
         self._tmp = Path(tempfile.mkdtemp(prefix="ffmwiz_installer_"))
