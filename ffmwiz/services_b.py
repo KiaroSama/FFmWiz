@@ -178,7 +178,7 @@ def build_output_path(answers: dict[str, Any]) -> Path:
 
     if answers.get("output_name_stem"):
         output_path = output_location / f"{sanitize_output_stem(answers['output_name_stem'])}.{output_ext}"
-    elif output_location.suffix:
+    elif output_location_names_a_file(output_location, bool(answers.get("output_location_is_dir"))):
         output_path = output_location.with_suffix("." + output_ext)
         output_path = output_path.with_name(f"{sanitize_output_stem(output_path.stem)}{output_path.suffix}")
     else:
