@@ -188,3 +188,27 @@ class ArchitectureCodeRefTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShellScriptsStayOnUnixLineEndings(unittest.TestCase):
+    """A `.sh` checked out with CRLF is a broken script, not a styled one.
+
+    `bash` reads the carriage return as part of the token: `set -euo pipefail`
+    becomes `pipefail\r`, which is an invalid option name, and the run dies on
+    line 2. WSL reads this Windows working tree directly, so a checkout with
+    `core.autocrlf=true` is exactly how a developer meets it.
+    """
+
+    def test_gitattributes_pins_sh_to_lf(self):
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("*.sh text eol=lf", attributes,
+                      "a shell script may be checked out with CRLF and die in bash")
+
+    def test_every_tracked_shell_script_has_unix_endings(self):
+        for path in sorted(ROOT.rglob("*.sh")):
+            if any(part in {".git", ".actions-runner", ".venv-wsl", "node_modules"}
+                   for part in path.parts):
+                continue
+            with self.subTest(script=path.name):
+                self.assertNotIn(b"\r\n", path.read_bytes(),
+                                 f"{path} has CRLF line endings")
