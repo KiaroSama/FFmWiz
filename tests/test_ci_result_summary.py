@@ -108,6 +108,17 @@ class TheEvidenceSurvivesTheQuota(unittest.TestCase):
         text = _module().render(_record(verdict="ok", exit_code=0), "")
         self.assertIn("PASS", text.splitlines()[0])
 
+    def test_a_record_that_carries_its_traceback_still_names_the_test(self):
+        # run_suite.py now writes {"test": ..., "detail": ...} so a failure
+        # record carries the exception text (A06). The bare-string form above
+        # is what an older artifact holds, and both must render.
+        modern = _record()
+        modern["modules"][0]["failures"] = [
+            {"test": "test_alpha.Case.test_one", "detail": "RuntimeError: boom"}]
+        text = _module().render(modern, "")
+        self.assertIn("test_alpha.Case.test_one", text)
+        self.assertNotIn("{'test'", text, "the raw dict leaked into the summary")
+
 
 class TheSummaryNamesWhichTreeItDescribes(unittest.TestCase):
     """A summary without SHA and tool versions describes SOME run, not this one.

@@ -33,7 +33,8 @@ import time
 import traceback
 import unittest
 import warnings
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -114,10 +115,22 @@ def probe_capability(name: str) -> str:
                 return f"{tool} at {found} {why}"
         return ""
     if name == "powershell":
-        found = shutil.which("powershell") or shutil.which("pwsh")
-        if not found:
-            return "neither powershell nor pwsh is on PATH"
-        return ""
+        # Probed by RUNNING it, exactly like ffmpeg above. `which` only proves a
+        # file of that name exists: a wrapper that exits 2 satisfied --require
+        # powershell, and every PowerShell test that then skipped was excused by
+        # a capability the job never actually had (A06).
+        reasons = []
+        for tool in ("powershell", "pwsh"):
+            found = shutil.which(tool)
+            if not found:
+                continue
+            why = _probe_executable(found, ["-NoLogo", "-NoProfile", "-Command", "exit 0"])
+            if not why:
+                return ""
+            reasons.append(f"{tool} at {found} {why}")
+        if reasons:
+            return "; ".join(reasons)
+        return "neither powershell nor pwsh is on PATH"
     modules = {"numpy": ("numpy",), "pyside6": ("PySide6", "PySide6.QtQml", "PySide6.QtQuick"),
                "wheel": ("wheel", "setuptools")}
     for module in modules.get(name, ()):  # pragma: no branch - table-driven
@@ -129,22 +142,26 @@ def probe_capability(name: str) -> str:
     return ""
 
 
-def _probe_executable(path: str) -> str:
+def _probe_executable(path: str, arguments: list[str] | None = None) -> str:
     """"" when the binary actually RUNS, else why it does not.
 
     `shutil.which` only proves a file with that name is on PATH. A wrapper that
     exits 2, or a binary missing a shared library, satisfied `--require` and the
-    suite then skipped every test that needed it (R08).
+    suite then skipped every test that needed it (R08, and again for PowerShell
+    in A06). `arguments` is the bounded sentinel command for this tool; FFmpeg
+    answers `-version`, a shell needs its own.
     """
     import subprocess
+    sentinel = list(arguments) if arguments else ["-version"]
+    label = " ".join(sentinel)
     try:
-        result = subprocess.run([path, "-version"], capture_output=True, timeout=60)
+        result = subprocess.run([path, *sentinel], capture_output=True, timeout=60)
     except OSError as exc:
         return f"could not be executed: {exc}"
     except subprocess.SubprocessError as exc:
-        return f"did not answer -version: {exc}"
+        return f"did not answer `{label}`: {exc}"
     if result.returncode != 0:
-        return f"exited {result.returncode} for -version"
+        return f"exited {result.returncode} for `{label}`"
     return ""
 
 
@@ -197,6 +214,79 @@ def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
     return sorted(names, key=lambda name: (rank.get(name, len(slow_first)), name))
 
 
+# A traceback is the useful part of a failure record; a 200 KB one is not, and
+# the file has to stay readable. Keep the head and the tail, which is where the
+# cause and the assertion live.
+MAX_DETAIL_CHARS = 4000
+
+
+def _trimmed(text: str) -> str:
+    text = str(text or "")
+    if len(text) <= MAX_DETAIL_CHARS:
+        return text
+    half = MAX_DETAIL_CHARS // 2
+    return f"{text[:half]}\n... [{len(text) - MAX_DETAIL_CHARS} characters omitted] ...\n{text[-half:]}"
+
+
+def _worker_crash_record(name: str, reason) -> dict:
+    """A module whose worker died: a real failure with a real traceback.
+
+    Shaped exactly like a normal module record so every consumer -- the verdict,
+    the printed failures, the JSON -- handles it without a special case. An
+    abrupt exit carries no traceback of its own, so the cause is named instead
+    of left as an empty error.
+    """
+    text = "".join(traceback.format_exception(reason)) if isinstance(reason, BaseException) \
+        else str(reason)
+    return {
+        "module": name,
+        "seconds": 0.0,
+        "run": 0,
+        "unraisable": [],
+        "failures": [],
+        "errors": [(f"{name} (worker crash)",
+                    f"the worker process running {name} did not return a result.\n{text}")],
+        "skipped": [],
+        "unexpected": [],
+    }
+
+
+# How long a module's own threads get to finish after its last test returned.
+# A ceiling, not an expected duration: a test that needs longer should join its
+# thread itself, which is what makes the wait deterministic.
+MODULE_THREAD_SETTLE_S = 10.0
+
+
+def _settle_module_threads(before: set, module_name: str) -> list[tuple[str, str]]:
+    """Wait for the threads THIS module started; report the ones that outlive it.
+
+    Returns the same (label, text) shape the unraisable/thread hooks produce, so
+    a leaked worker lands in the module's errors like any other defect instead
+    of disappearing into the next module's run.
+    """
+    new_threads = [thread for thread in threading.enumerate()
+                   if thread not in before and thread is not threading.current_thread()]
+    if not new_threads:
+        return []
+    deadline = time.monotonic() + MODULE_THREAD_SETTLE_S
+    for thread in new_threads:
+        if thread.daemon:
+            continue          # a daemon thread is declared not-owned-to-completion
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            thread.join(remaining)
+        except RuntimeError:  # pragma: no cover - joining self or a dead thread
+            continue
+    leaked = [thread for thread in new_threads if thread.is_alive()]
+    return [(f"{module_name} (leaked thread {thread.name})",
+             f"still running {MODULE_THREAD_SETTLE_S:.0f}s after the module's last test "
+             f"returned; daemon={thread.daemon}. A test owns what it starts: join it, "
+             f"or give it a bounded stop.")
+            for thread in leaked]
+
+
 def run_module(name: str) -> dict:
     """Run one test module in this process and return a picklable summary."""
     module_name = name
@@ -241,10 +331,18 @@ def run_module(name: str) -> dict:
     sys.unraisablehook = collect_unraisable
     threading.excepthook = collect_thread_exception
     started = time.monotonic()
+    before = set(threading.enumerate())
     try:
         suite = unittest.defaultTestLoader.loadTestsFromName(name)
         stream = __import__("io").StringIO()
         result = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
+        # A module is not finished while the threads its tests started are
+        # still running. The hooks used to be restored the moment `run()`
+        # returned, so a thread that raised a fraction of a second later met
+        # the DEFAULT hook, which prints and returns -- module green, run green
+        # (A06). Only threads that appeared during this module are waited for;
+        # joining anything else would mean waiting on the pool's own workers.
+        unraisable.extend(_settle_module_threads(before, module_name))
         # Force pending finalizers to run while the hook is still installed,
         # so a leak that CPython had not collected yet is still attributed to
         # the module that caused it.
@@ -352,16 +450,41 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
         return 1
 
     started = time.monotonic()
-    results: list[dict] = []
+    # `collected` IS the results list, not a copy taken at the end: `main`
+    # writes it from a `finally`, so anything appended here survives an
+    # exception. `list(pool.map(...))` used to collect only after every module
+    # had returned, so one worker dying abruptly threw away the records of the
+    # modules that had already finished and left `modules: []` behind (A06).
+    results: list[dict] = collected
     if args.jobs <= 1:
-        results = [run_module(name) for name in modules]
+        for name in modules:
+            results.append(run_module(name))
     else:
         with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-            # chunksize=1 -> dynamic balancing; a worker takes the next module
-            # the moment it is free instead of owning a fixed share up front.
-            results = list(pool.map(run_module, modules, chunksize=1))
+            # Submitted individually rather than mapped, so each result is kept
+            # the moment it arrives and a broken worker is attributable.
+            pending = {pool.submit(run_module, name): name for name in modules}
+            recorded: set[str] = set()
+            try:
+                for future in as_completed(pending):
+                    name = pending[future]
+                    recorded.add(name)
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:   # noqa: BLE001 - any worker fault
+                        # BrokenProcessPool included: an abrupt exit gives every
+                        # outstanding future this same exception.
+                        results.append(_worker_crash_record(name, exc))
+            finally:
+                # Completeness is the point: every module that was submitted
+                # gets a record, so "modules" can never be shorter than the
+                # selection and quietly read as "these are all that ran" (A06).
+                for name in modules:
+                    if name not in recorded:
+                        results.append(_worker_crash_record(
+                            name, "not run: the worker pool broke before this module "
+                                  "produced a result"))
     elapsed = time.monotonic() - started
-    collected.extend(results)
 
     total = sum(item["run"] for item in results)
     # A module that matched the selection but ran nothing is a silent hole: a
@@ -467,8 +590,13 @@ def write_results(path: str, results: list[dict], verdict: int, elapsed: float,
                 "module": item["module"],
                 "seconds": round(item["seconds"], 3),
                 "tests": item["run"],
-                "failures": [name for name, _text in item["failures"]],
-                "errors": [name for name, _text in item["errors"]],
+                # Name AND text. A name alone says a thread failed but not what
+                # it raised, so the record a red CI job is read from could not
+                # be acted on without the log it was meant to replace (A06).
+                "failures": [{"test": name, "detail": _trimmed(text)}
+                             for name, text in item["failures"]],
+                "errors": [{"test": name, "detail": _trimmed(text)}
+                           for name, text in item["errors"]],
                 "unexpected": item["unexpected"],
                 "skipped": [{"test": name, "reason": why,
                              "capability": classify_skip(why)}
