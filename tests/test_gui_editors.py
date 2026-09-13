@@ -282,8 +282,12 @@ class JoinWaveformGraphTests(unittest.TestCase):
         # concat arity holds and [1:a:0] still binds.
         self.assertIn("anullsrc=channel_layout=mono:sample_rate=4000", joined)
         self.assertIn("lavfi", args)
-        self.assertIn("4.000", args)
+        self.assertIn("4.000000", args)
         self.assertNotIn("b.mkv", args)
+        # Each segment is bounded to its own declared length, so the joined
+        # waveform spans exactly 5 + 4 seconds whatever the inputs contain.
+        self.assertIn("atrim=end=5.000000,apad=whole_dur=5.000000", joined)
+        self.assertIn("atrim=end=4.000000,apad=whole_dur=4.000000", joined)
 
     def test_all_audio_segments_are_unchanged(self):
         req = {"join_segments": [
@@ -352,7 +356,12 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.SRC = (_GUI_DIR / "modern" / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
+        # The modern engine is three modules now (driver, Bridge, waveform),
+        # so read them all: a check pinned to one file passes for the wrong
+        # reason the moment the code it guards moves to a sibling.
+        cls.SRC = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((_GUI_DIR / "modern").glob("*.py")))
 
     def test_exit_code_and_size_are_checked_before_emitting(self):
         self.assertIn("os.path.getsize(out) > 0", self.SRC)
@@ -360,9 +369,14 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
 
     def test_superseded_render_is_killed(self):
         self.assertIn("def cancelReverse", self.SRC)
-        self.assertIn("subprocess.Popen(args", self.SRC)
-        # renderReverse cancels before spawning the replacement.
-        head = self.SRC[self.SRC.index("def renderReverse"):self.SRC.index("def _do_reverse")]
+        # The child is spawned THROUGH the owner, never with a bare Popen: a
+        # bare Popen registers only after it returns, and a cancel landing in
+        # that gap reported "clean" while the process ran on (F08).
+        self.assertIn("self._children.start(args, generation=gen", self.SRC)
+        self.assertNotIn("subprocess.Popen(args", self.SRC)
+        # renderReverse claims the generation and cancels before spawning.
+        head = self.SRC[self.SRC.index("def renderReverse"):self.SRC.index("def cancelReverse")]
+        self.assertIn("self._children.bump_generation(", head)
         self.assertIn("self.cancelReverse()", head)
 
     def test_proxies_live_in_one_owned_temp_dir(self):
