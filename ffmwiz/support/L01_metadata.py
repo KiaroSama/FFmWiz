@@ -61,7 +61,10 @@ def write_encode_chapter_metadata(plan: dict[str, Any], temp_dir: Path, suffix: 
                 continue
             lines.append(f"{ffmetadata_escape(key)}={ffmetadata_escape(value)}")
         lines.append("")
-    metadata_path.write_text("\n".join(lines), encoding="utf-8")
+    # newline="\n" is load-bearing: default text mode on Windows rewrites
+    # every LF as CRLF, which would turn an escaped newline inside a chapter
+    # title into an escaped CR plus a REAL line break and split the record.
+    metadata_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     return metadata_path
 
 
@@ -119,7 +122,10 @@ def write_copy_cut_chapter_metadata(plan: dict[str, Any], temp_dir: Path) -> Pat
                 continue
             lines.append(f"{ffmetadata_escape(key)}={ffmetadata_escape(value)}")
         lines.append("")
-    metadata_path.write_text("\n".join(lines), encoding="utf-8")
+    # newline="\n" is load-bearing: default text mode on Windows rewrites
+    # every LF as CRLF, which would turn an escaped newline inside a chapter
+    # title into an escaped CR plus a REAL line break and split the record.
+    metadata_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     return metadata_path
 
 

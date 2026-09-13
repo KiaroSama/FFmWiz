@@ -426,7 +426,8 @@ class QmlReverseProxyAudio(unittest.TestCase):
     def test_the_proxy_call_site_asks_the_helper(self):
         # _do_reverse lives inside main() behind a Qt import, so the helper can
         # only guard the proxy if the proxy actually calls it.
-        source = (_GUI_DIR / "modern" / "ffmwiz_gui_qml.py").read_text(encoding="utf-8")
+        source = "\n".join(path.read_text(encoding="utf-8")
+                           for path in sorted((_GUI_DIR / "modern").glob("*.py")))
         self.assertIn("if reverse_proxy_wants_audio(self._req, spec):", source)
         self.assertNotIn('if self._req.get("has_audio"):', source)
 

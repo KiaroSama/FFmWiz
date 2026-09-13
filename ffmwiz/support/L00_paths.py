@@ -75,7 +75,59 @@ def sanitize_output_stem(stem: str) -> str:
 
 
 def paths_same(a: Path, b: Path) -> bool:
-    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+    """True when both paths denote the same FILE, not merely the same text.
+
+    Comparing normalized strings misses every alias a filesystem offers: a
+    hardlink, a symlink, a Windows junction and a symlinked parent directory
+    all spell the source file differently while pointing at it. An output that
+    survives this check as "different" is handed straight to FFmpeg, which
+    happily rewrites the user's input in place and still exits 0.
+
+    Two existing paths are therefore compared by file identity
+    (`os.path.samefile`, i.e. st_dev/st_ino), and a not-yet-existing output is
+    compared canonically so an alias in its PARENT chain is still caught. An
+    identity check that fails for any reason other than a missing path is
+    inconclusive -- never proof that the two paths differ -- so it errs toward
+    "same", whose only cost is a renamed output.
+    """
+    text_a, text_b = str(a or ""), str(b or "")
+    if not text_a or not text_b:
+        return False
+    if os.path.normcase(os.path.abspath(text_a)) == os.path.normcase(os.path.abspath(text_b)):
+        return True
+    if os.path.lexists(text_a) and os.path.lexists(text_b):
+        try:
+            return os.path.samefile(text_a, text_b)
+        except (OSError, ValueError):
+            return True
+    try:
+        return os.path.normcase(os.path.realpath(text_a)) == os.path.normcase(os.path.realpath(text_b))
+    except (OSError, ValueError):
+        return False
+
+
+def output_location_names_a_file(output_location: Path, explicit_directory: bool = False) -> bool:
+    """True when an output location is a target FILENAME rather than a folder.
+
+    A dotted directory name is ordinary (`Exports.v1`, `Season.01`), and the
+    default output location is the input's own parent, so classifying by
+    `.suffix` alone sent a whole job to a sibling file named after the folder
+    (`Exports.mkv`) instead of into the folder. Existence decides first: a path
+    that IS a directory is a folder whatever it is called, and a path that IS a
+    file is a filename. `explicit_directory` carries the intent of a trailing
+    separator, which terminal-path normalization strips before this is reached,
+    so a not-yet-created folder can still be requested explicitly.
+    """
+    if explicit_directory:
+        return False
+    try:
+        if output_location.is_dir():
+            return False
+        if output_location.is_file():
+            return True
+    except OSError:
+        pass
+    return bool(output_location.suffix)
 
 
 def unique_numbered_path(path: Path) -> Path:
@@ -94,5 +146,6 @@ __all__ = [
     'script_dir',
     'sanitize_output_stem',
     'paths_same',
+    'output_location_names_a_file',
     'unique_numbered_path',
 ]

@@ -39,6 +39,57 @@ RESERVED_RAW_OPTIONS = {
     "-c:t", "-ss", "-t", "-to", "-stream_loop", "-fpre", "-vpre", "-apre",
 }
 
+# ffmpeg still accepts the pre-`-c:v` spellings, and a denylist written in the
+# canonical form waves every one of them through: `-acodec copy` was accepted,
+# replaced the audio encoder the wizard had planned, and made a volume-filter
+# job fail outright while the printed summary still promised the encode.
+RAW_OPTION_ALIASES = {
+    "-vcodec": "-c:v", "-acodec": "-c:a", "-scodec": "-c:s", "-dcodec": "-c:d",
+    "-vfilter": "-vf", "-afilter": "-af",
+}
+
+# ffmpeg options that take NO value of their own. Without this set the token
+# after one of them reads as its argument, which is how a bare output pathname
+# (`-shortest out.mp4`) slipped in and made ffmpeg write a second, untracked
+# file alongside the planned one -- exit code 0, two outputs, one a surprise.
+VALUELESS_RAW_OPTIONS = {
+    "-an", "-vn", "-sn", "-dn", "-nostats", "-stats", "-copyts", "-re",
+    "-start_at_zero", "-shortest", "-ignore_unknown", "-copy_unknown",
+    "-benchmark", "-benchmark_all", "-dump", "-hex", "-xerror", "-bitexact",
+    "-fix_sub_duration", "-copyinkf", "-autorotate", "-noautorotate",
+    "-autoscale", "-noautoscale", "-accurate_seek", "-noaccurate_seek",
+    "-debug_ts", "-psnr", "-vstats", "-stdin", "-auto_conversion_filters",
+    "-noauto_conversion_filters", "-nostdin",
+}
+
+
+def _is_option_token(token: str) -> bool:
+    """Whether a token is an ffmpeg OPTION rather than a value.
+
+    A leading dash is not enough: `-1`, `-0.5` and `-1e3` are ordinary negative
+    values (`-aq -1`), and rejecting every dashed token would break them.
+    """
+    if not token.startswith("-") or len(token) == 1:
+        return False
+    try:
+        float(token)
+    except ValueError:
+        return True
+    return False
+
+
+def canonical_raw_option(token: str) -> str:
+    """An option spelled in the family FFmWiz reasons about.
+
+    A stream qualifier is kept (`-c:v:0` stays qualified) so the caller can
+    still compare the BASE, while a legacy alias is rewritten to the modern
+    name it is an alias FOR.
+    """
+    lowered = token.lower()
+    head, separator, qualifier = lowered.partition(":")
+    canonical = RAW_OPTION_ALIASES.get(head, head)
+    return canonical + (separator + qualifier if separator else "")
+
 
 def parse_volume(text: str) -> float:
     """`1.5`, `150%` or `+6dB` -> a linear factor. Raises ValueError.
@@ -62,6 +113,13 @@ def parse_volume(text: str) -> float:
             factor = float(value)
     except ValueError:
         raise ValueError(f"{text!r} is not a volume; try 1.5, 150% or +6dB")
+    except OverflowError:
+        # `+10000dB` is 10**500. The prompt's retry contract and every config
+        # consumer are built on ValueError, so an OverflowError escaped
+        # validation entirely instead of asking the user again.
+        raise ValueError(
+            f"{text!r} is outside {VOLUME_MIN}-{VOLUME_MAX}; "
+            f"{VOLUME_MIN} is about -40 dB and {VOLUME_MAX} about +20 dB")
     if not VOLUME_MIN <= factor <= VOLUME_MAX:
         raise ValueError(
             f"{factor:g} is outside {VOLUME_MIN}-{VOLUME_MAX}; "
@@ -83,23 +141,48 @@ def parse_raw_arguments(text: str) -> list[str]:
     lex = shlex.shlex(text.strip(), posix=True)
     lex.whitespace_split = True
     lex.escape = ""      # a Windows path is not an escape sequence
+    # shlex treats `#` as a comment by default, so `-metadata title=Episode#1`
+    # arrived as `-metadata title=Episode` and a path with a `#` lost its tail.
+    # An ffmpeg option line has no comments; this is not a shell script.
+    lex.commenters = ""
     try:
         parts = list(lex)
     except ValueError as error:      # an unbalanced quote
         raise ValueError(f"could not read that: {error}")
-    for part in parts:
-        lowered = part.lower()
+
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if not _is_option_token(part):
+            # Nothing reaches here except a token in OPERAND position, and
+            # ffmpeg reads an operand as a file: the last one becomes an extra
+            # OUTPUT, earlier ones extra inputs. FFmWiz owns both ends of the
+            # command -- the summary, the output path, the source-collision
+            # check and the progress reader all read them back from `answers`
+            # -- so an untracked destination is refused, not silently written.
+            raise ValueError(
+                f"{part} is a file name, not an option; FFmWiz owns the input "
+                f"and output paths, so ffmpeg would write a file the wizard "
+                f"does not know about. Remove it, or attach it to the option "
+                f"it belongs to")
+        canonical = canonical_raw_option(part)
         # Compare the BASE, not just the exact string. ffmpeg lets almost any
         # option take a per-stream qualifier (`-c:v:0`, `-map_metadata:s:0`),
         # and an exact-match denylist waves every one of those spellings
         # through: `-c:v:0` used to slip past `-c`/`-c:v` and get appended
         # after the wizard's own codec choice, so ffmpeg would honour it
         # silently.
-        base = lowered.partition(":")[0] if lowered.startswith("-") else lowered
-        if lowered in RESERVED_RAW_OPTIONS or base in RESERVED_RAW_OPTIONS:
+        base = canonical.partition(":")[0]
+        if canonical in RESERVED_RAW_OPTIONS or base in RESERVED_RAW_OPTIONS:
             raise ValueError(
                 f"{part} is set by the wizard itself; changing it here would "
                 f"make the printed command and the job disagree")
+        index += 1
+        if (canonical not in VALUELESS_RAW_OPTIONS
+                and base not in VALUELESS_RAW_OPTIONS
+                and index < len(parts)
+                and not _is_option_token(parts[index])):
+            index += 1      # this token is that option's value, not an operand
     return parts
 
 
@@ -146,7 +229,7 @@ def step_audio_volume(answers: dict[str, Any]) -> None:
 
 
 def step_raw_ffmpeg_args(answers: dict[str, Any]) -> None:
-    hint = ("n, or your own ffmpeg options, e.g. "
+    hint = ("n, or your own ffmpeg OPTIONS (no file names), e.g. "
             + paint('-metadata title="My film" -tune film', Color.LIME))
 
     def forget(answers):
@@ -161,7 +244,9 @@ def step_raw_ffmpeg_args(answers: dict[str, Any]) -> None:
         # line: the warning must come BEFORE "Extra options: ..." so the user
         # sees why the command deserves a second look before what was added.
         print(paint("These go in unchanged, just before the output path. "
-                    "Check the command below before starting.", Color.YELLOW))
+                    "Options the wizard owns (codecs, filters, maps, -i, -ss) "
+                    "and bare file names are refused. Check the command below "
+                    "before starting.", Color.YELLOW))
         return parsed
 
     def describe(answers):
@@ -172,5 +257,6 @@ def step_raw_ffmpeg_args(answers: dict[str, Any]) -> None:
 
 
 __all__ = ["VOLUME_MIN", "VOLUME_MAX", "RESERVED_RAW_OPTIONS",
+           "RAW_OPTION_ALIASES", "VALUELESS_RAW_OPTIONS", "canonical_raw_option",
            "parse_volume", "parse_raw_arguments", "build_volume_filter",
            "describe_raw", "step_audio_volume", "step_raw_ffmpeg_args"]

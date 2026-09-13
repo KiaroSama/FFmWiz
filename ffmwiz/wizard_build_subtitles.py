@@ -158,6 +158,7 @@ def build_hardsub_command(answers: dict[str, Any]) -> list[str]:
         output_ext,
         answers["output_location"],
         answers.get("output_name_stem"),
+        bool(answers.get("output_location_is_dir")),
     )
     answers["output_path"] = output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
