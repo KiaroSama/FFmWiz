@@ -81,8 +81,21 @@ class TheWorkflowNeverSweepsSharedTemp(unittest.TestCase):
     def test_the_cleanup_validates_containment_and_reparse_points(self):
         for script in cleanup_scripts():
             with self.subTest(script=script[:40]):
-                self.assertIn("StartsWith($root", script)
+                # Containment is tested against the root PLUS a separator, so a
+                # sibling that merely shares the prefix is outside; the root
+                # itself is rejected outright. The behaviour is proved below --
+                # this states the shape so the weaker `StartsWith($root` form
+                # cannot come back unnoticed.
+                self.assertIn("StartsWith($prefix", script)
+                self.assertNotIn("StartsWith($root", script)
+                self.assertIn("-eq $root", script)
                 self.assertIn("ReparsePoint", script)
+
+    def test_no_step_sweeps_runner_temp_by_name(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn('Join-Path $env:RUNNER_TEMP "ffmpeg-*"', text,
+                         "a name sweep of RUNNER_TEMP is back; it deletes the "
+                         "ffmpeg build a concurrent job is using")
 
 
 @requires_powershell
@@ -112,8 +125,12 @@ class TheCleanupDeletesOnlyOwnedPaths(unittest.TestCase):
         self.scratch = self.runner_temp / "ffmwiz-scratch-42-tests-3.13-latest"
         (self.scratch / "ffmwiz_owned_run").mkdir(parents=True)
         (self.scratch / "ffmwiz_owned_run" / "artifact.bin").write_bytes(b"owned")
-        self.ffmpeg_tree = self.runner_temp / "ffmpeg-7.1.1"
-        self.ffmpeg_tree.mkdir()
+        # The job's own ffmpeg build lives INSIDE its scratch now. It used to sit
+        # beside it in RUNNER_TEMP and be swept by the name `ffmpeg-*`, which
+        # deleted the build a concurrent job on the same runner was using -- the
+        # R01 mistake one directory down. Owned means owned by path, not by name.
+        self.ffmpeg_tree = self.scratch / "ffmpeg-7.1.1"
+        self.ffmpeg_tree.mkdir(parents=True)
         (self.ffmpeg_tree / "ffmpeg.exe").write_bytes(b"binary")
 
     def run_cleanup(self, script: str, scratch: Path | None = None,
@@ -195,3 +212,59 @@ class TheCleanupDeletesOnlyOwnedPaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@requires_powershell
+class TheCleanupProvesOwnershipByPathComponent(TheCleanupDeletesOnlyOwnedPaths):
+    """A01/CI hardening: `StartsWith` is not containment, and a prefix is not
+    ownership even inside RUNNER_TEMP.
+
+    `C:\runner temp2` starts with `C:\runner temp`, so a string prefix test
+    calls a SIBLING directory contained. And `ffmpeg-*` swept by name deletes
+    the build another concurrent job on the same runner is using -- the same
+    mistake R01 fixed for the shared %TEMP%, one directory down.
+    """
+
+    def test_a_sibling_sharing_the_prefix_is_not_inside(self):
+        sibling = self.root / "runner temp2"
+        (sibling / "another job").mkdir(parents=True)
+        (sibling / "another job" / "keep.bin").write_bytes(b"not ours")
+        before = tree_hash(sibling)
+        for script in cleanup_scripts():
+            with self.subTest(script=script[:40]):
+                result = self.run_cleanup(script, scratch=sibling / "another job")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(before, tree_hash(sibling),
+                                 "a prefix match was treated as containment")
+                self.assertIn("refusing", (result.stdout + result.stderr).lower())
+
+    def test_runner_temp_itself_is_never_the_target(self):
+        before = tree_hash(self.runner_temp)
+        for script in cleanup_scripts():
+            with self.subTest(script=script[:40]):
+                result = self.run_cleanup(script, scratch=self.runner_temp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(self.runner_temp.exists(),
+                                "the cleanup deleted RUNNER_TEMP itself")
+                self.assertEqual(before, tree_hash(self.runner_temp))
+
+    def test_another_jobs_ffmpeg_build_survives(self):
+        foreign = self.runner_temp / "ffmpeg-6.1.1"
+        foreign.mkdir()
+        (foreign / "ffmpeg.exe").write_bytes(b"another job is using this")
+        before = tree_hash(foreign)
+        for script in cleanup_scripts():
+            with self.subTest(script=script[:40]):
+                self.run_cleanup(script)
+                self.assertEqual(before, tree_hash(foreign),
+                                 "a concurrent job's ffmpeg build was swept by name")
+
+    def test_cleaned_is_printed_only_for_a_path_that_is_gone(self):
+        for script in cleanup_scripts():
+            with self.subTest(script=script[:40]):
+                result = self.run_cleanup(script)
+                for line in result.stdout.splitlines():
+                    if line.startswith("cleaned: "):
+                        gone = Path(line[len("cleaned: "):].strip())
+                        self.assertFalse(gone.exists(),
+                                         f"reported clean but {gone} is still there")
