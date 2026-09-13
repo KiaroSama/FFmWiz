@@ -356,8 +356,7 @@ def apply_output_location_value(answers: dict[str, Any], value: str) -> None:
     # drops it -- so the intent is recorded here, before it is gone, and read
     # back by output_location_names_a_file. Without it a not-yet-created
     # `D:\Exports.v1\` became the file `D:\Exports.mkv`.
-    normalized = normalize_terminal_path_text(value)
-    answers["output_location_is_dir"] = normalized.rstrip().endswith(("/", "\\", os.sep))
+    answers["output_location_is_dir"] = output_location_is_explicit_directory(value)
     output_value = terminal_path(value)
     if not output_value.drive and not output_value.root and output_value.parent == Path(".") and not output_value.suffix:
         answers["output_location"] = input_path.parent

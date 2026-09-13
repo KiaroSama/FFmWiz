@@ -120,14 +120,28 @@ def output_location_names_a_file(output_location: Path, explicit_directory: bool
     """
     if explicit_directory:
         return False
+    if path_is_existing_directory(output_location):
+        return False
     try:
-        if output_location.is_dir():
-            return False
         if output_location.is_file():
             return True
     except OSError:
         pass
     return bool(output_location.suffix)
+
+
+def path_is_existing_directory(path: Path) -> bool:
+    """True only when the path exists AND is a directory. Never raises.
+
+    Separate from the classifier above because callers need this answer on its
+    own: "is this already a folder" decides a branch BEFORE the file/stem
+    question is even asked, and `not names_a_file(...)` is not a substitute --
+    that is also true of a bare stem that does not exist yet (A07).
+    """
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
 
 
 def command_input_paths(cmd: list[str]) -> list[Path]:
@@ -204,6 +218,7 @@ __all__ = [
     'sanitize_output_stem',
     'paths_same',
     'output_location_names_a_file',
+    'path_is_existing_directory',
     'command_input_paths',
     'command_output_path',
     'command_source_output_conflict',
