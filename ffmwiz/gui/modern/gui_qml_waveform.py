@@ -62,7 +62,8 @@ def segment_audio_stream_spec(req: dict, seg: dict | None = None) -> str:
     return text or "a:0"
 
 
-def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: str = "a:0") -> str:
+def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: str = "a:0",
+                         label: str | None = None) -> str:
     """One join segment's audio, bounded to the SEGMENT's own length.
 
     The timeline is built from the declared segment durations (the picture
@@ -78,10 +79,11 @@ def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: st
     with silence, so the result is exactly `duration` either way.
     """
     span = max(0.001, float(duration))
+    out = label if label is not None else f"a{index}"
     return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
             f"aresample={rate}:first_pts=0,"
             f"atrim=end={span:.6f},apad=whole_dur={span:.6f},"
-            f"asetpts=PTS-STARTPTS[a{index}]")
+            f"asetpts=PTS-STARTPTS[{out}]")
 
 
 def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
@@ -112,9 +114,23 @@ def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
         args += ["-filter_complex", ";".join(filt), "-map", "[mix]"]
     else:
         spec = segment_audio_stream_spec(req)
+        # ONE picture-clock contract for single and joined media alike. The
+        # single-input branch used to decode the audio stream as-is: a 4-second
+        # video carrying 1 second of audio produced 1 second of PCM, which the
+        # editor then drew across the 4-second timeline, and audio delayed by a
+        # second started at sample 1 instead of sample 4001 (R05). The span is
+        # the PICTURE's, not the audio's.
+        duration = float(req.get("duration") or 0.0)
+        if duration > 0:
+            chain = segment_audio_filter(0, duration, WAVE_RATE, spec, label="mix")
+        else:
+            # No declared duration means there is no picture clock to honour;
+            # bounding to a guess would be worse than decoding what is there.
+            chain = (f"[0:{spec}]aformat=channel_layouts=mono,"
+                     f"aresample={WAVE_RATE}:first_pts=0[mix]")
         args += [
             "-i", str(req.get("input_path") or ""),
-            "-filter_complex", f"[0:{spec}]aformat=channel_layouts=mono,aresample={WAVE_RATE}[mix]",
+            "-filter_complex", chain,
             "-map", "[mix]",
         ]
     args += ["-f", "s16le", "-acodec", "pcm_s16le", out_path]
@@ -174,67 +190,112 @@ def build_wave_envelope(pcm, step: int = WAVE_ENV_STEP):
     return env_min, env_max
 
 
+def _extremes(values):
+    """(min, max) of a slice, for a numpy array or a stdlib array alike."""
+    if len(values) == 0:
+        return None
+    try:
+        import numpy as np
+        if isinstance(values, np.ndarray):
+            return int(values.min()), int(values.max())
+    except Exception:      # noqa: BLE001 - the stdlib path below is the floor
+        pass
+    return min(values), max(values)
+
+
+def _column_extremes(pcm, env_min, env_max, lo: int, hi: int, env_step: int, use_env: bool):
+    """(min, max) over the raw sample interval [lo, hi), or None when empty.
+
+    With the envelope in play this combines the complete buckets that lie
+    INSIDE the interval with raw fragments at BOTH edges. Whole buckets were
+    previously counted out across columns instead of being placed by their
+    sample positions, which slid transients into the neighbouring column.
+    """
+    if hi <= lo:
+        return None
+    if not use_env:
+        return _extremes(pcm[lo:hi])
+
+    first_full = -(-lo // env_step)                 # ceil
+    last_full = hi // env_step                      # floor
+    results = []
+    if last_full > first_full:
+        available = min(last_full, len(env_min))
+        if available > first_full:
+            low = _extremes(env_min[first_full:available])
+            high = _extremes(env_max[first_full:available])
+            if low is not None and high is not None:
+                results.append((low[0], high[1]))
+    # The partial bucket at each edge is read from the raw samples, so a column
+    # boundary that falls inside a bucket is still exact.
+    head_end = min(hi, first_full * env_step)
+    if head_end > lo:
+        found = _extremes(pcm[lo:head_end])
+        if found is not None:
+            results.append(found)
+    tail_start = max(lo, last_full * env_step)
+    if hi > tail_start:
+        found = _extremes(pcm[tail_start:hi])
+        if found is not None:
+            results.append(found)
+    if not results:
+        return _extremes(pcm[lo:hi])
+    return min(r[0] for r in results), max(r[1] for r in results)
+
+
 def waveform_window(pcm, env_min, env_max, rate, start, end, width,
                     env_step: int = WAVE_ENV_STEP):
-    """Return up to `width` [min, max] amplitude pairs (each in -1..1) covering
-    the time window [start, end]. Zoomed-in windows read raw PCM for full detail;
-    zoomed-out windows read the decimated envelope. Pure function (no Qt) so it
-    is unit-testable with a synthetic PCM array. Works with or without numpy."""
+    """Up to `width` [min, max] pairs (each in -1..1) for the window [start, end].
+
+    Every column's bounds are computed in the ORIGINAL SAMPLE CLOCK and then
+    read from the data that actually falls inside them. Two defects came from
+    not doing that (R06):
+
+    * bucket COUNTS were spread across the columns rather than sample
+      POSITIONS, so a peak at sample 550 viewed over [0.025, 1.0] s at width 8
+      landed in column 1 instead of column 0;
+    * a viewport longer than the available PCM was clamped to the data, which
+      stretched what existed across the full width -- a half-second peak inside
+      one second of PCM, viewed over four seconds, appeared at column 4 instead
+      of column 1.
+
+    A column with no samples is silence, which is what "no data here" looks
+    like; it is never filled by borrowing from a column that does have data.
+    Pure function (no Qt), identical results with and without numpy.
+    """
     if pcm is None or rate <= 0 or width <= 0:
         return []
     total = int(len(pcm))
     if total <= 0:
         return []
-    s0 = max(0, min(total, int(float(start) * rate)))
-    s1 = max(s0 + 1, min(total, int(float(end) * rate)))
-    nwin = s1 - s0
-    if nwin <= 0:
+    first = float(start) * rate
+    last = float(end) * rate
+    if last <= first:
         return []
-    width = int(min(width, WAVE_MAX_BUCKETS))
+    width = int(min(int(width), WAVE_MAX_BUCKETS))
+    span = last - first
     fs = 32768.0
-    use_env = (env_min is not None and env_max is not None and (nwin / max(1, width)) > env_step)
-    if use_env:
-        # The envelope bucket that CONTAINS s1 has to be included or the last
-        # fraction of the viewport disappears; a floor-aligned end dropped it.
-        # Both edge buckets straddle the viewport, so they are recomputed from
-        # the raw samples actually inside it -- including the whole bucket
-        # instead would paint a peak that is not in view.
-        e0 = max(0, s0 // env_step)
-        e1 = max(e0 + 1, min(len(env_min), -(-s1 // env_step)))
-        src_min = list(env_min[e0:e1])
-        src_max = list(env_max[e0:e1])
-        for slot in ({0, len(src_min) - 1} if src_min else set()):
-            lo = max(s0, (e0 + slot) * env_step)
-            hi = min(s1, (e0 + slot + 1) * env_step)
-            if hi <= lo or (lo == (e0 + slot) * env_step and hi == (e0 + slot + 1) * env_step):
-                continue        # the bucket is fully inside the viewport
-            edge = pcm[lo:hi]
-            if len(edge):
-                src_min[slot] = min(edge)
-                src_max[slot] = max(edge)
-    else:
-        seg = pcm[s0:s1]
-        src_min = seg
-        src_max = seg
-    m = len(src_min)
-    if m <= 0:
-        return []
-    buckets = int(min(width, m))
-    try:
-        import numpy as np
-        if isinstance(src_min, np.ndarray):
-            starts = ((np.arange(buckets, dtype=np.int64) * m) // buckets)
-            mins = np.minimum.reduceat(src_min, starts)
-            maxs = np.maximum.reduceat(src_max, starts)
-            return [[float(mins[i]) / fs, float(maxs[i]) / fs] for i in range(int(mins.size))]
-    except Exception:
-        pass
+    # The envelope is a speed-up, worth reading only when one column covers
+    # more than a whole bucket; below that the raw samples are both cheaper
+    # and exact.
+    use_env = (env_min is not None and env_max is not None
+               and len(env_min) > 0 and (span / width) > env_step)
+
     out = []
-    for i in range(buckets):
-        a = (i * m) // buckets
-        b = max(a + 1, ((i + 1) * m) // buckets)
-        out.append([min(src_min[a:b]) / fs, max(src_max[a:b]) / fs])
+    for column in range(width):
+        lo = first + span * column / width
+        hi = first + span * (column + 1) / width
+        low_index = max(0, int(lo) if lo >= 0 else 0)
+        high_index = min(total, int(hi) + (1 if hi > int(hi) else 0))
+        found = _column_extremes(pcm, env_min, env_max, low_index, high_index,
+                                 env_step, use_env)
+        if found is None:
+            out.append([0.0, 0.0])          # outside the PCM: silence, not a stretch
+        else:
+            out.append([float(found[0]) / fs, float(found[1]) / fs])
     return out
+
+
 
 __all__ = [
     "WAVE_RATE",
