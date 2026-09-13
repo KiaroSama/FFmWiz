@@ -227,7 +227,11 @@ jobs:
         # step for a reason that has nothing to do with the build.
         run: |
           want="${{ matrix.ffmpeg }}"
-          expected_dir="$RUNNER_TEMP/ffmpeg-$want"
+          # RUNNER_TEMP is a WINDOWS path (G:\...) while `command -v` answers in
+          # MSYS form (/g/...), so the two never share a prefix. cygpath is what
+          # makes the comparison meaningful rather than always false.
+          expected_dir="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")/ffmpeg-$want"
+          echo "expecting $expected_dir"
           for tool in ffmpeg ffprobe; do
             resolved="$(command -v $tool)"
             echo "$tool -> $resolved"
@@ -356,11 +360,15 @@ jobs:
       - name: Confirm the GUI job uses its own ffmpeg
         shell: bash --noprofile --norc -eo pipefail "{0}"
         run: |
+          # cygpath for the same reason the tests job explains: RUNNER_TEMP is a
+          # Windows path and `command -v` answers in MSYS form.
+          expected_dir="$(cygpath -u "$RUNNER_TEMP" 2>/dev/null || echo "$RUNNER_TEMP")/ffmpeg-latest"
+          echo "expecting $expected_dir"
           for tool in ffmpeg ffprobe; do
             resolved="$(command -v $tool)"
             echo "$tool -> $resolved"
             case "$resolved" in
-              "$RUNNER_TEMP/ffmpeg-latest"*) ;;
+              "$expected_dir"*) ;;
               *) echo "$tool resolves outside this job's extraction directory"; exit 1 ;;
             esac
             $tool -hide_banner -version > "$RUNNER_TEMP/$tool-version.txt"
