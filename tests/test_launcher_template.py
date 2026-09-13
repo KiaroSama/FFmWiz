@@ -48,7 +48,12 @@ class LauncherTemplate(unittest.TestCase):
         self.assertIn("version_info", text)
         self.assertIn("3.10", text)
 
+    # PowerShell 7 runs on Linux, so "is pwsh installed" is not the right gate:
+    # this drives the WINDOWS launcher through `.cmd` shims, which only Windows
+    # can execute. Under WSL the old gate let it run and fail for the platform
+    # rather than for the behaviour.
     @unittest.skipIf(not PWSH, "PowerShell not available")
+    @unittest.skipIf(os.name != "nt", "drives Windows .cmd shims; not meaningful on this platform")
     def test_launcher_skips_an_interpreter_older_than_310(self):
         # Drive the real launcher with shims: `py` reports 3.9, `python` reports
         # a supported version. The launcher must reject the first, say so, and
