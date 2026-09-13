@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -103,7 +104,7 @@ class TheReporterNeverDecides(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="ffmwiz_summary_"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.root, ignore_errors=True))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.summary_file = self.root / "step-summary.md"
 
     def run_script(self, *arguments: str) -> subprocess.CompletedProcess:
