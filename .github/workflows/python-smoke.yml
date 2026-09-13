@@ -306,6 +306,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Restate the result where a quota cannot evict it
+        if: always()
+        # The upload above is allowed to fail, so it cannot be the only copy of
+        # the evidence. This writes the same facts to the job log and the run's
+        # step summary -- neither of which the artifact quota can take away.
+        # It reports and never decides: it exits 0 whatever the suite did.
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "py${{ matrix.python-version }} / ffmpeg ${{ matrix.ffmpeg }}"
+
       - name: Remove this job's scratch files
         if: always()
         # Deletes ONLY what this job owns, and proves that before deleting:
@@ -472,6 +481,13 @@ jobs:
             ${{ runner.temp }}/ffprobe-version.txt
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Restate the result where a quota cannot evict it
+        if: always()
+        # Same reason as the tests job: the artifact is best-effort, the log and
+        # the step summary are not.
+        shell: bash --noprofile --norc -eo pipefail "{0}"
+        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "gui-import"
 
       - name: Remove this job's scratch files
         if: always()
