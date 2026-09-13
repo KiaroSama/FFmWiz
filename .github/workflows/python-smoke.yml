@@ -272,6 +272,11 @@ jobs:
 
       - name: Upload results
         if: always()
+        # Retention is evidence, not a verdict. The account's artifact storage
+        # quota is an external condition -- when it is full the upload errors
+        # and a job whose suite passed reports failure, which is exactly the
+        # false red this step must never produce.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: tests-py${{ matrix.python-version }}-ffmpeg${{ matrix.ffmpeg }}
@@ -398,6 +403,11 @@ jobs:
 
       - name: Upload results
         if: always()
+        # Retention is evidence, not a verdict. The account's artifact storage
+        # quota is an external condition -- when it is full the upload errors
+        # and a job whose suite passed reports failure, which is exactly the
+        # false red this step must never produce.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: gui-import-results
