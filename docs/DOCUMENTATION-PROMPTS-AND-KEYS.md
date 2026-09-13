@@ -434,7 +434,16 @@ answers, and any of them would make the printed command disagree with what runs:
   (`-attach cover.png`).
 
 Negative numeric values (`-aq -1`), flag options (`-an`), `+`-prefixed values
-(`-movflags +faststart`) and file-valued options all still work.
+(`-movflags +faststart`) and file-valued options all still work, and so do
+expert options such as `-brand iso6` and `-strict -2`.
+
+**`raw_ffmpeg_valued_args`** — option NAMES that take one value, comma or space
+separated, with or without the leading dash (`brand, strict`), or `n`. FFmWiz
+knows the arity of the options it lists; for anything else it cannot tell a
+VALUE from a file name, and a file name there becomes an extra output. Rather
+than guess, it refuses and asks you to declare the option here. Write the
+option in ffmpeg's own form (`-brand iso6`, two tokens) — an `-opt=value`
+spelling is not something ffmpeg accepts, and FFmWiz will never suggest one.
 
 Omit the key entirely and Mode 2 never asks about it. In the interactive
 wizard the same question is offered once, after the crop questions, and is

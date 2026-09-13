@@ -295,6 +295,7 @@ Every key is also documented inline in `config.env.example`.
 | `video_quick` | `gif` / `boomerang` / `thumb` / `loop=N` / `n` | `n` | Quick outputs; see below. |
 | `audio_volume` | factor, `150%`, `+6dB` or `n` | `n` | Audio gain, 0.01-10.0. |
 | `raw_ffmpeg_args` | ffmpeg options or `n` | `n` | Your own options, added last. |
+| `raw_ffmpeg_valued_args` | option names or `n` | `n` | Extra options that take a value. |
 | `audio_tracks` | 0 / 0,1,2 / all / d / e / de | `de` | Which audio streams to keep. |
 | `audio_codec` | aac, libopus, opus, libmp3lame, flac, pcm_s16le, copy, ... | `aac` | Audio encoder. |
 | `audio_bitrate_kbps` | integer or `n` | `n` | Audio bitrate per stream (kbps). |
