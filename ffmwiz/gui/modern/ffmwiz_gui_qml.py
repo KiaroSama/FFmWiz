@@ -288,7 +288,13 @@ def main() -> int:
         _log("INFO", "QML self-test passed (root window created).")
         # The self-test returns before the event loop, so it used to skip the
         # cleanup below entirely and leave its owned proxy directory in %TEMP%.
-        bridge.cleanup_reverse()
+        # The return value is the verdict, not decoration: an incomplete
+        # cleanup means a child is still running and its files are still
+        # there, and reporting 0 for that is how the caller came to believe a
+        # window had shut down cleanly when it had not (A03).
+        if not bridge.cleanup_reverse():
+            _log("WARNING", "QML self-test finished but cleanup did not complete")
+            return 3
         return 0
 
     try:
@@ -298,7 +304,11 @@ def main() -> int:
         # entirely and leave the proxies, the PCM file and their ffmpeg
         # children behind.
         bridge.finalize_if_unsubmitted()
-        bridge.cleanup_reverse()
+        cleaned = bridge.cleanup_reverse()
+    if not cleaned:
+        _log("WARNING", "the editor exited before cleanup completed; "
+                        "owned children or temporary files remain")
+        return 3
     return int(rc or 0)
 
 

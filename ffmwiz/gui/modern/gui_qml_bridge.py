@@ -181,7 +181,14 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                     return          # closed before this decode could start
                 try:
                     _, stderr = proc.communicate()
-                finally:
+                except BaseException:
+                    # Communication failed, so nothing is known about the child.
+                    # Stop and reap it BEFORE releasing anything: an
+                    # unconditional finish() here handed cleanup a green light
+                    # to delete the PCM a live decoder was still writing (A03).
+                    self._wave_children.stop(proc)
+                    raise
+                else:
                     self._wave_children.finish(proc)
                 if proc.returncode != 0:
                     # A nonzero decoder exit means the PCM on disk is whatever
@@ -320,7 +327,10 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                     return
                 try:
                     _, err = proc.communicate()
-                finally:
+                except BaseException:
+                    self._reverse_children.stop(proc)      # same contract (A03)
+                    raise
+                else:
                     self._reverse_children.finish(proc)
                 if self._reverse_children.closed or not self._reverse_children.is_current(gen):
                     # A stale or post-shutdown result must never be published.

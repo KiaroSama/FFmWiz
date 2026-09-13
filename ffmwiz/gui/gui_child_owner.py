@@ -35,6 +35,10 @@ class ChildProcessOwner:
         # id(proc) -> (proc, generation). Keyed by identity because Popen is
         # not hashable-by-value and two runs can share an exit code.
         self._children: dict[int, tuple[subprocess.Popen, int]] = {}
+        # id(proc) -> why it could not be reaped. Ownership is kept for these,
+        # so a later attempt can finish the job and a caller can say what is
+        # still holding the files (A03).
+        self._unreaped: dict[int, str] = {}
         self._closed = False
         self._generation = 0
         self._workers = 0
@@ -103,23 +107,79 @@ class ChildProcessOwner:
             self._children[id(proc)] = (proc, self._generation if generation is None else int(generation))
             return proc
 
-    def finish(self, proc) -> None:
-        """Deregister a child that has already exited (after communicate())."""
+    def unreaped(self) -> list[str]:
+        """Why each still-owned child could not be stopped. Empty when clean."""
+        with self._lock:
+            return list(self._unreaped.values())
+
+    def finish(self, proc) -> bool:
+        """Release a child that has EXITED. False when it is still running.
+
+        The caller used to run this from an unconditional `finally`, so a
+        `communicate()` that raised released a child that was still alive --
+        and cleanup then deleted the directory it was writing into (A03).
+        Releasing ownership is a statement that the process is gone, so it is
+        made only when `poll()` says so.
+        """
         if proc is None:
-            return
+            return True
+        try:
+            exited = proc.poll() is not None
+        except Exception:      # noqa: BLE001 - a handle we can no longer query
+            exited = False
+        if not exited:
+            return False
         with self._lock:
             self._children.pop(id(proc), None)
+            self._unreaped.pop(id(proc), None)
+        return True
+
+    def stop(self, proc) -> bool:
+        """Terminate and reap ONE owned child. False when it survived.
+
+        The single-child form of `cancel`, for a worker whose communication
+        failed: the child must be stopped before anyone may touch what it was
+        writing.
+        """
+        if proc is None:
+            return True
+        with self._lock:
+            entry = self._children.pop(id(proc), None)
+        why = self._terminate(proc)
+        if why:
+            with self._lock:
+                if entry is not None:
+                    self._children[id(proc)] = entry
+                self._unreaped[id(proc)] = why
+            return False
+        with self._lock:
+            self._unreaped.pop(id(proc), None)
+        return True
 
     def cancel(self, keep_generation: int | None = None) -> int:
-        """Stop owned children; optionally spare the given generation."""
+        """Stop owned children; optionally spare the given generation.
+
+        Returns how many were actually STOPPED, not how many were attempted.
+        A child whose terminate and kill were both refused stays owned and
+        stays counted: releasing it on a failed attempt is what let
+        `active_children()` read 0 while the process was still running (A03).
+        """
         with self._lock:
             doomed = [entry for entry in self._children.values()
                       if keep_generation is None or entry[1] != int(keep_generation)]
             for proc, _generation in doomed:
                 self._children.pop(id(proc), None)
-        for proc, _generation in doomed:
-            self._terminate(proc)
-        return len(doomed)
+        stopped = 0
+        for proc, generation in doomed:
+            why = self._terminate(proc)
+            with self._lock:
+                if why:
+                    self._children[id(proc)] = (proc, generation)
+                    self._unreaped[id(proc)] = why
+                else:
+                    stopped += 1
+                    self._unreaped.pop(id(proc), None)
+        return stopped
 
     def close(self, worker_timeout: float = 8.0) -> bool:
         """Shut down, and say honestly whether the shutdown completed.
@@ -139,30 +199,45 @@ class ChildProcessOwner:
         self.cancel()
         idle = self.wait_idle(worker_timeout)
         self.cancel()      # a worker may have raced one last child in
-        return bool(idle) and self.active_workers() == 0
+        with self._lock:
+            # A surviving child counts too. Workers idle while a process they
+            # started is still writing is exactly the state in which deleting
+            # its directory is a race (A03).
+            return bool(idle) and self._workers == 0 and not self._children
 
-    def _terminate(self, proc) -> None:
-        """Bounded terminate -> kill -> reap, so no zombie and no hang."""
+    def _terminate(self, proc) -> str:
+        """Bounded terminate -> kill -> reap. "" on confirmed exit, else why not.
+
+        An outcome, not a best effort. Swallowing every failure here is how a
+        live child came to be reported as cleaned up: the caller had nothing to
+        check and no reason to keep looking (A03).
+        """
+        reasons: list[str] = []
         try:
             if proc.poll() is not None:
-                proc.wait(timeout=self._kill_timeout)
-                return
+                return ""
             proc.terminate()
-        except Exception:      # noqa: BLE001 - already gone, or not ours any more
-            pass
+        except Exception as exc:   # noqa: BLE001 - already gone, or refused
+            reasons.append(f"terminate refused: {exc}")
         try:
             proc.wait(timeout=self._kill_timeout)
-            return
-        except Exception:      # noqa: BLE001 - still alive after terminate
+            return ""
+        except Exception:          # noqa: BLE001 - still alive after terminate
             pass
         try:
             proc.kill()
-        except Exception:      # noqa: BLE001
-            pass
+        except Exception as exc:   # noqa: BLE001
+            reasons.append(f"kill refused: {exc}")
         try:
             proc.wait(timeout=self._kill_timeout)
-        except Exception:      # noqa: BLE001
-            pass
+        except Exception as exc:   # noqa: BLE001
+            reasons.append(f"still running after kill: {exc}")
+        try:
+            if proc.poll() is not None:
+                return ""
+        except Exception as exc:   # noqa: BLE001
+            reasons.append(f"exit status unavailable: {exc}")
+        return "; ".join(reasons) or "did not exit within the kill timeout"
 
 
 __all__ = ["ChildProcessOwner"]

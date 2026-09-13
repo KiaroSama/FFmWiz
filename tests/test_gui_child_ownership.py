@@ -400,6 +400,45 @@ class TheEditorLeavesNothingRunning(unittest.TestCase):
         self.assertEqual(bridge._wave_key, before_key)
         self.assertIs(bridge._pcm, before_pcm)
 
+    def test_a_failed_communicate_does_not_release_a_live_child(self):
+        """A03: the `finally: finish(proc)` released a child that never exited.
+
+        `communicate()` raising means nothing is known about the process. The
+        worker used to deregister it anyway, so cleanup reported success and
+        deleted the directory a live FFmpeg was still writing into.
+        """
+        bridge = self.make_bridge()
+        owner = bridge._reverse_children
+        real_start = owner.start
+
+        def start_with_broken_communicate(*args, **kwargs):
+            proc = real_start(*args, **kwargs)
+            if proc is not None:
+                # Only the communication fails; the child is real and alive.
+                # The pipes are closed first, because the real communicate()
+                # is what would have closed them -- leaving them open would be
+                # a leak this test introduced, not one it is testing.
+                def fail(*_args, **_kwargs):
+                    for pipe in (proc.stdout, proc.stderr, proc.stdin):
+                        if pipe is not None and not pipe.closed:
+                            pipe.close()
+                    raise OSError("the pipe went away")
+
+                proc.communicate = fail
+            return proc
+
+        owner.start = start_with_broken_communicate
+        self.addCleanup(setattr, owner, "start", real_start)
+
+        bridge.renderReverse('{"gen": 1, "ss": 0, "dur": 11, "width": 1920}')
+        self.assertTrue(self.wait_for(lambda: self.reverse_started, timeout=20))
+        proc = self.reverse_started[0]
+        # The worker has raised by now; what matters is that the child was
+        # stopped and reaped rather than silently disowned.
+        self.assertTrue(self.wait_for(lambda: proc.poll() is not None, timeout=20),
+                        "the child was left running after its communicate failed")
+        self.assertTrue(bridge.cleanup_reverse())
+
     def test_repeated_cleanup_is_idempotent(self):
         bridge = self.make_bridge()
         bridge.renderReverse('{"gen": 1, "ss": 0, "dur": 4, "width": 320}')
