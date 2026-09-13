@@ -44,7 +44,8 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
     return segments
 
 
-def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_spec: str = "a:0") -> str:
+def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_spec: str = "a:0",
+                         label: str | None = None) -> str:
     """One join segment's audio, bounded to the SEGMENT's own declared length.
 
     Shared shape with the QML engine's waveform so both editors lay audio on
@@ -53,10 +54,11 @@ def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_s
     and `apad=whole_dur` pads a short one with silence.
     """
     span = max(0.001, float(duration))
+    out = label if label is not None else f"a{index}"
     return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
             f"aresample={rate}:first_pts=0,"
             f"atrim=end={span:.6f},apad=whole_dur={span:.6f},"
-            f"asetpts=PTS-STARTPTS[a{index}]")
+            f"asetpts=PTS-STARTPTS[{out}]")
 
 
 def build_classic_waveform_args(
@@ -93,9 +95,15 @@ def build_classic_waveform_args(
         filters.append(f"{''.join(labels)}concat=n={len(segments)}:v=0:a=1[mix]")
         args.extend(["-filter_complex", ";".join(filters), "-map", "[mix]"])
     else:
+        # The same picture-clock contract as the joined branch above (R05).
+        duration = float(req.get("duration") or 0.0)
+        if duration > 0:
+            chain = segment_audio_filter(0, duration, 4000, label="mix")
+        else:
+            chain = "[0:a:0]aformat=channel_layouts=mono,aresample=4000:first_pts=0[mix]"
         args.extend([
             "-i", str(req.get("input_path") or ""),
-            "-filter_complex", "[0:a:0]aformat=channel_layouts=mono,aresample=4000[mix]",
+            "-filter_complex", chain,
             "-map", "[mix]",
         ])
     args.extend(["-f", "s16le", "-acodec", "pcm_s16le", str(out_path)])
