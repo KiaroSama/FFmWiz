@@ -74,9 +74,9 @@ def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: st
     first segment sat at the wrong place.
 
     `aresample=...:first_pts=0` pads a stream whose audio starts late, keeping
-    the original A/V offset instead of sliding the audio to zero; `atrim` cuts
-    a long input to the segment span and `apad=whole_dur` fills a short one
-    with silence, so the result is exactly `duration` either way.
+    the original A/V offset instead of sliding the audio to zero; `apad` then
+    extends the stream to the far edge of the wanted interval and `atrim` cuts
+    that interval out, so the result is exactly `duration` either way.
     """
     span = max(0.001, float(duration))
     start = max(0.0, float(origin or 0.0))
@@ -85,12 +85,16 @@ def segment_audio_filter(index: int, duration: float, rate: int, stream_spec: st
     # it is not part of this segment's timeline, and leaving it in put every
     # sample `origin` seconds late: an impulse at container 1.5 s in a file
     # whose picture starts at 1.0 s was drawn at sample 6000 instead of 2000
-    # (A04). `asetpts` now runs BEFORE `apad`, so `whole_dur` measures the
-    # trimmed span rather than the original timeline.
+    # (A04).
+    # PAD BEFORE TRIM, and pad to the FAR edge of the interval. A segment whose
+    # audio lies entirely before its picture has nothing left once the trim
+    # runs, and the other order handed `concat` an empty stream: FFmpeg failed
+    # the whole joined decode and the later segments were lost with it (A04).
     return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
             f"aresample={rate}:first_pts=0,"
+            f"apad=whole_dur={start + span:.6f},"
             f"atrim=start={start:.6f}:end={start + span:.6f},"
-            f"asetpts=PTS-STARTPTS,apad=whole_dur={span:.6f}[{out}]")
+            f"asetpts=PTS-STARTPTS[{out}]")
 
 
 def build_wave_decode_args(req: dict, out_path: str) -> list[str]:
