@@ -12,21 +12,35 @@ called.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from collections.abc import Sequence
 
 from .colors import dim, info, ok, warn
 from .models import MediaFile, OutputStreamEdits, SelectionRules, StreamInfo, StreamMetadataEdit
 from .muxlogic import selected_audio_streams, selected_subtitle_streams
-from .prompts import MenuBack, ask_csv_int_required, ask_language_code, ask_language_codes_required, ask_numbered_menu, ask_text, ask_yes_no
+from .prompts import (
+    MenuBack,
+    ask_csv_int_required,
+    ask_language_code,
+    ask_language_codes_required,
+    ask_numbered_menu,
+    ask_text,
+    ask_yes_no,
+)
 from .reporting import format_metadata_edit, format_metadata_edits
-from .textutil import format_index_list, format_prompt_label, format_text_list, is_unknown_language, normalize_language_code
+from .textutil import (
+    format_index_list,
+    format_prompt_label,
+    format_text_list,
+    is_unknown_language,
+    normalize_language_code,
+)
 
 
 def kept_streams_for_metadata(
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     codec_type: str,
-    current_rules: Optional[SelectionRules],
-) -> List[StreamInfo]:
+    current_rules: SelectionRules | None,
+) -> list[StreamInfo]:
     if current_rules is None:
         return [
             stream
@@ -35,7 +49,7 @@ def kept_streams_for_metadata(
             if stream.codec_type == codec_type
         ]
 
-    kept: List[StreamInfo] = []
+    kept: list[StreamInfo] = []
     for media in media_files:
         if codec_type == "audio":
             kept.extend(selected_audio_streams(media, current_rules))
@@ -45,10 +59,10 @@ def kept_streams_for_metadata(
 
 
 def kept_languages_for_metadata(
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     codec_type: str,
-    current_rules: Optional[SelectionRules],
-) -> List[str]:
+    current_rules: SelectionRules | None,
+) -> list[str]:
     return sorted({
         normalize_language_code(stream.language)
         for stream in kept_streams_for_metadata(media_files, codec_type, current_rules)
@@ -56,10 +70,10 @@ def kept_languages_for_metadata(
 
 
 def kept_indexes_for_metadata(
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     codec_type: str,
-    current_rules: Optional[SelectionRules],
-) -> List[int]:
+    current_rules: SelectionRules | None,
+) -> list[int]:
     return sorted({
         stream.index
         for stream in kept_streams_for_metadata(media_files, codec_type, current_rules)
@@ -71,9 +85,9 @@ def format_stream_order(codec_type: str, order: Sequence[int]) -> str:
 
 
 def ask_metadata_edits(
-    media_files: List[MediaFile],
-    initial_edits: Optional[Sequence[StreamMetadataEdit]] = None,
-    current_rules: Optional[SelectionRules] = None,
+    media_files: list[MediaFile],
+    initial_edits: Sequence[StreamMetadataEdit] | None = None,
+    current_rules: SelectionRules | None = None,
 ) -> OutputStreamEdits:
     current_edits = list(initial_edits or [])
     audio_order = list(current_rules.audio_order) if current_rules else []
@@ -84,7 +98,7 @@ def ask_metadata_edits(
     unknown_subtitle_found = any(is_unknown_language(value) for value in subtitle_languages_available)
     default_action = "1" if unknown_audio_found else "2" if unknown_subtitle_found else "10"
 
-    def current_summary() -> List[str]:
+    def current_summary() -> list[str]:
         lines = []
         if current_edits:
             lines.append(f"Current metadata edits: {format_metadata_edits(current_edits)}")

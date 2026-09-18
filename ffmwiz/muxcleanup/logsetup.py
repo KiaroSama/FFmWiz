@@ -8,17 +8,17 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence
 
-from .constants import APP_VERSION, OPERATION_TIMEOUT_ENV_VAR
 from .colors import warn
+from .constants import APP_VERSION, OPERATION_TIMEOUT_ENV_VAR
 
 LOGGER = logging.getLogger("MuxCls")
 
 
-LOG_FILE: Optional[Path] = None
+LOG_FILE: Path | None = None
 
 
 # Set MUXCLS_DEBUG=1 to record command lines and captured output for every
@@ -60,7 +60,7 @@ def log_command_output(label: str, returncode: int, stdout: str, stderr: str) ->
         LOGGER.log(level, "%s stderr: %s", label, truncate_output(stderr))
 
 
-def setup_logging() -> Optional[Path]:
+def setup_logging() -> Path | None:
     global LOG_FILE
 
     try:

@@ -4,12 +4,25 @@ from __future__ import annotations
 import shutil
 import sys
 import time
-from typing import Iterable, List, Optional, Sequence
+from collections.abc import Iterable, Sequence
 
+from .colors import (
+    EXAMPLE_TEXT_COLOR,
+    FOUND_DETAIL_VALUE_COLOR,
+    FOUND_LABEL_COLOR,
+    FOUND_VALUE_COLOR,
+    HEADER_SEPARATOR_COLOR,
+    LANGUAGE_COLORS,
+    PROMPT_DEFAULT_COLOR,
+    UNKNOWN_LANGUAGE_COLOR,
+    C,
+    color,
+    warn,
+)
 from .constants import UNKNOWN_LANGUAGE_DISPLAY, UNKNOWN_LANGUAGE_INPUTS
-from .colors import C, EXAMPLE_TEXT_COLOR, FOUND_DETAIL_VALUE_COLOR, FOUND_LABEL_COLOR, FOUND_VALUE_COLOR, HEADER_SEPARATOR_COLOR, LANGUAGE_COLORS, PROMPT_DEFAULT_COLOR, UNKNOWN_LANGUAGE_COLOR, color, warn
 from .logsetup import LOGGER
 from .models import StreamInfo
+
 
 def terminal_width() -> int:
     return max(20, shutil.get_terminal_size((80, 20)).columns)
@@ -118,12 +131,12 @@ def format_prompt_label(prompt: str) -> str:
     )
 
 
-def parse_csv_text(raw: str) -> List[str]:
+def parse_csv_text(raw: str) -> list[str]:
     return [x.strip().lower() for x in raw.split(",") if x.strip()]
 
 
-def parse_csv_int(raw: str) -> List[int]:
-    result: List[int] = []
+def parse_csv_int(raw: str) -> list[int]:
+    result: list[int] = []
     for part in raw.split(","):
         part = part.strip()
         if not part:
@@ -138,7 +151,7 @@ def parse_csv_int(raw: str) -> List[int]:
 def format_elapsed_time(seconds: float) -> str:
     if seconds < 0:
         LOGGER.warning("Negative elapsed time received: %s", seconds)
-    total_seconds = max(0, int(round(seconds)))
+    total_seconds = max(0, round(seconds))
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02}:{minutes:02}:{seconds:02}"
@@ -166,7 +179,7 @@ class ProgressPrinter:
     running, next to how long the whole run has been going. Each file gets its
     own printer, so its timer starts at zero and stops when the file is done."""
 
-    def __init__(self, total_started_at: Optional[float] = None) -> None:
+    def __init__(self, total_started_at: float | None = None) -> None:
         self.started_at = time.perf_counter()
         self.total_started_at = total_started_at
         self._last_second = -1
@@ -204,7 +217,7 @@ class ProgressPrinter:
         self._line_open = False
 
 
-def format_stream_size(size_bytes: Optional[int]) -> str:
+def format_stream_size(size_bytes: int | None) -> str:
     if size_bytes is None:
         return "-"
     if size_bytes < 0:
@@ -270,13 +283,13 @@ def language_color(language: str) -> str:
     return LANGUAGE_COLORS[sum(ord(ch) for ch in normalized) % len(LANGUAGE_COLORS)]
 
 
-def format_index_list(indexes: List[int]) -> str:
+def format_index_list(indexes: list[int]) -> str:
     if not indexes:
         return "none"
     return ", ".join(str(index) for index in indexes)
 
 
-def format_text_list(values: List[str]) -> str:
+def format_text_list(values: list[str]) -> str:
     if not values:
         return "none"
     return ", ".join(display_language(value) for value in values)

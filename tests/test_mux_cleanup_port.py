@@ -47,7 +47,7 @@ FFPROBE_AVAILABLE = shutil.which("ffprobe") is not None
 # suite verifies the VENDORED copy against upstream when upstream is here.
 _UPSTREAM = os.environ.get("FFMWIZ_MUXCLS_REPO", "")
 UPSTREAM_REPO = Path(_UPSTREAM) if _UPSTREAM else Path("muxcls-upstream-not-configured")
-UPSTREAM_COMMIT = "8a9b948"
+UPSTREAM_COMMIT = "ff2886c"
 VENDOR_HEADER = "# Part of the FFmWiz Stream Cleanup Remux subsystem.\n"
 
 
@@ -457,19 +457,17 @@ class VendoringContractTests(unittest.TestCase):
         # main_menu is the embedding seam: standalone MuxCls cannot go "back"
         # and has no caller to report an outcome to, so neither exists upstream.
         "app.py": [
-            ("from .processing import print_ready_for_next_task, process_files, verify_output\n"
-             "\n"
-             "def main_menu() -> None:\n",
-             "from .processing import ProcessSummary, print_ready_for_next_task, process_files, verify_output\n"
-             "\n"
-             "def main_menu(allow_back: bool = False) -> Optional[ProcessSummary]:\n"
+            ("from .processing import print_ready_for_next_task, process_files, verify_output\n",
+             "from .processing import ProcessSummary, print_ready_for_next_task, process_files, verify_output\n"),
+            ("def main_menu() -> None:\n",
+             "def main_menu(allow_back: bool = False) -> ProcessSummary | None:\n"
              "    # allow_back is the embedding switch: standalone MuxCls has nowhere to go\n"
              "    # back to, but inside FFmWiz the input prompt is a way out to the wizard\n"
              "    # menu. The last run's summary travels back with it so the caller can\n"
              "    # report the outcome instead of guessing at it.\n"),
             ("    input_from_args = input_path_from_args(sys.argv[1:])\n",
              "    input_from_args = input_path_from_args(sys.argv[1:])\n"
-             "    last_summary: Optional[ProcessSummary] = None\n"),
+             "    last_summary: ProcessSummary | None = None\n"),
             ('        if input_root is None:\n'
              '            input_root = ask_path(\n'
              '                "Input file or folder path (drag/drop here, then press Enter)",\n'
@@ -573,7 +571,7 @@ class VendoringContractTests(unittest.TestCase):
              '    """\n'
              '    try:\n'
              '        proc = subprocess.run(\n'
-             '            [binary, "-version"], capture_output=True, text=True,\n'
+             '            [binary, "-version"], check=False, capture_output=True, text=True,\n'
              '            timeout=PROBE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,\n'
              '        )\n',
              '    output raises, and it is not something the user can reconstruct later.\n'
@@ -587,7 +585,7 @@ class VendoringContractTests(unittest.TestCase):
              '    """\n'
              '    try:\n'
              '        proc = subprocess.run(\n'
-             '            [binary, "-version"], capture_output=True, text=True,\n'
+             '            [binary, "-version"], check=False, capture_output=True, text=True,\n'
              '            encoding="utf-8", errors="replace",\n'
              '            timeout=PROBE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,\n'
              '        )\n'),
@@ -604,7 +602,15 @@ class VendoringContractTests(unittest.TestCase):
              "        return subprocess.CompletedProcess(\n"
              "            list(args), LAUNCH_FAILED_RETURNCODE, \"\", str(exc))"),
         ],
+        # `datetime.UTC` is a 3.11 alias. MuxCls floors at 3.11 (its CI runs
+        # 3.11-3.13); FFmWiz floors at 3.10 and its CI runs 3.10, where the
+        # import raises ImportError before anything else can run. `timezone.utc`
+        # is the same object and works on every supported version, so the
+        # divergence is here rather than in the floor.
         "logsetup.py": [
+            ("from datetime import UTC, datetime\n",
+             "from datetime import datetime, timezone\n"),
+            ("datetime.now(UTC)", "datetime.now(timezone.utc)"),
             ("        # This module lives in the muxcls package, so the project root (where the\n"
              "        # Logs folder belongs) is the parent of the package directory.\n"
              "        log_root = Path(__file__).resolve().parent.parent / \"Logs\"",

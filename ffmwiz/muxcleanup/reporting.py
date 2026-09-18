@@ -1,16 +1,54 @@
 # Part of the FFmWiz Stream Cleanup Remux subsystem.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
 
-from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE
-from .colors import C, plain, FILE_LINE_COLOR, SCAN_SEPARATOR_COLOR, HEADER_COLOR, SETTING_AUDIO_COLOR, SETTING_FALSE_COLOR, SETTING_INPUT_PATH_COLOR, SETTING_LABEL_COLOR, SETTING_MODE_COLOR, SETTING_OUTPUT_BASE_COLOR, SETTING_OUTPUT_ROOT_COLOR, SETTING_SUBTITLE_COLOR, SETTING_TRUE_COLOR, SETTING_VALUE_COLOR, color, dim, info, warn
+from .colors import (
+    FILE_LINE_COLOR,
+    HEADER_COLOR,
+    SCAN_SEPARATOR_COLOR,
+    SETTING_AUDIO_COLOR,
+    SETTING_FALSE_COLOR,
+    SETTING_INPUT_PATH_COLOR,
+    SETTING_LABEL_COLOR,
+    SETTING_MODE_COLOR,
+    SETTING_OUTPUT_BASE_COLOR,
+    SETTING_OUTPUT_ROOT_COLOR,
+    SETTING_SUBTITLE_COLOR,
+    SETTING_TRUE_COLOR,
+    SETTING_VALUE_COLOR,
+    C,
+    color,
+    dim,
+    info,
+    plain,
+    warn,
+)
+from .constants import (
+    AUDIO_ALL,
+    AUDIO_BY_INDEX,
+    AUDIO_BY_LANGUAGE,
+    AUDIO_BY_TITLE,
+    SUBTITLE_ALL,
+    SUBTITLE_BY_INDEX,
+    SUBTITLE_BY_LANGUAGE,
+    SUBTITLE_BY_TITLE,
+)
 from .logsetup import LOGGER
 from .models import MediaFile, StreamInfo, StreamMetadataEdit
-from .textutil import center_for_terminal, display_language, format_language_list, format_stream, language_color, normalize_language_code, separator_line
 from .muxlogic import text_matches_any
 from .output import display_path
+from .textutil import (
+    center_for_terminal,
+    display_language,
+    format_language_list,
+    format_stream,
+    language_color,
+    normalize_language_code,
+    separator_line,
+)
+
 
 def echo(text: str = "") -> None:
     """Write one line to the console and the same line, uncoloured, to the log.
@@ -86,7 +124,7 @@ def print_setting(label: str, value: object) -> None:
     echo(f"{color(label + ':', SETTING_LABEL_COLOR)} {color(value, value_color)}")
 
 
-def print_scan_report(media_files: List[MediaFile], root: Path) -> None:
+def print_scan_report(media_files: list[MediaFile], root: Path) -> None:
     print_header("Scan Report: Audio And Subtitle Streams")
 
     for i, media in enumerate(media_files, start=1):
@@ -116,7 +154,7 @@ def print_scan_report(media_files: List[MediaFile], root: Path) -> None:
 
 
 def add_stream_summary(
-    summary: Dict[Tuple[str, str, str], Tuple[int, str, str, str]],
+    summary: dict[tuple[str, str, str], tuple[int, str, str, str]],
     stream: StreamInfo,
 ) -> None:
     lang = normalize_language_code(stream.language)
@@ -143,7 +181,7 @@ def format_stream_summary_row(count: int, lang: str, title: str, codec: str) -> 
 
 
 def add_stream_index_summary(
-    summary: Dict[Tuple[int, str, str, str], Tuple[int, int, str, str, str]],
+    summary: dict[tuple[int, str, str, str], tuple[int, int, str, str, str]],
     stream: StreamInfo,
 ) -> None:
     index = stream.index
@@ -171,7 +209,7 @@ def format_stream_index_summary_row(count: int, index: int, lang: str, title: st
     ))
 
 
-def streams_for_type(media_files: List[MediaFile], codec_type: str) -> List[StreamInfo]:
+def streams_for_type(media_files: list[MediaFile], codec_type: str) -> list[StreamInfo]:
     return [
         stream
         for media in media_files
@@ -180,7 +218,7 @@ def streams_for_type(media_files: List[MediaFile], codec_type: str) -> List[Stre
     ]
 
 
-def print_stream_choices(label: str, streams: List[StreamInfo], include_index: bool) -> None:
+def print_stream_choices(label: str, streams: list[StreamInfo], include_index: bool) -> None:
     heading = f"{label} {'indexes' if include_index else 'titles'} found:"
     echo(color(heading, C.BOLD + (C.AZURE if label.lower() == "audio" else C.VIOLET)))
 
@@ -189,7 +227,7 @@ def print_stream_choices(label: str, streams: List[StreamInfo], include_index: b
         return
 
     if include_index:
-        index_summary: Dict[Tuple[int, str, str, str], Tuple[int, int, str, str, str]] = {}
+        index_summary: dict[tuple[int, str, str, str], tuple[int, int, str, str, str]] = {}
         for stream in streams:
             add_stream_index_summary(index_summary, stream)
         # Distinct loop variables: the two summaries are keyed differently, and
@@ -200,7 +238,7 @@ def print_stream_choices(label: str, streams: List[StreamInfo], include_index: b
             echo(f"  {format_stream_index_summary_row(count, index, lang, title, codec)}")
         return
 
-    title_summary: Dict[Tuple[str, str, str], Tuple[int, str, str, str]] = {}
+    title_summary: dict[tuple[str, str, str], tuple[int, str, str, str]] = {}
     for stream in streams:
         add_stream_summary(title_summary, stream)
     for title_key in sorted(title_summary):
@@ -209,13 +247,13 @@ def print_stream_choices(label: str, streams: List[StreamInfo], include_index: b
 
 
 def matching_streams_for_selection(
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     codec_type: str,
     mode: str,
-    languages: Optional[List[str]] = None,
-    titles: Optional[List[str]] = None,
-    indexes: Optional[List[int]] = None,
-) -> List[StreamInfo]:
+    languages: list[str] | None = None,
+    titles: list[str] | None = None,
+    indexes: list[int] | None = None,
+) -> list[StreamInfo]:
     streams = streams_for_type(media_files, codec_type)
     languages = languages or []
     titles = titles or []
@@ -248,12 +286,12 @@ def matching_streams_for_selection(
 
 def print_selection_preview(
     label: str,
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     codec_type: str,
     mode: str,
-    languages: Optional[List[str]] = None,
-    titles: Optional[List[str]] = None,
-    indexes: Optional[List[int]] = None,
+    languages: list[str] | None = None,
+    titles: list[str] | None = None,
+    indexes: list[int] | None = None,
 ) -> None:
     selected_by_file = [
         (media, matching_streams_for_selection([media], codec_type, mode, languages, titles, indexes))
@@ -269,7 +307,7 @@ def print_selection_preview(
         echo(warn("  none matched"))
         return
 
-    index_summary: Dict[Tuple[int, str, str, str], Tuple[int, int, str, str, str]] = {}
+    index_summary: dict[tuple[int, str, str, str], tuple[int, int, str, str, str]] = {}
     for stream in streams:
         add_stream_index_summary(index_summary, stream)
     for key in sorted(index_summary):
@@ -284,9 +322,9 @@ def print_selection_preview(
             echo(warn(f"    ... {len(unmatched_files) - 8} more"))
 
 
-def print_unique_summary(media_files: List[MediaFile]) -> None:
-    audio_summary: Dict[Tuple[str, str, str], Tuple[int, str, str, str]] = {}
-    subtitle_summary: Dict[Tuple[str, str, str], Tuple[int, str, str, str]] = {}
+def print_unique_summary(media_files: list[MediaFile]) -> None:
+    audio_summary: dict[tuple[str, str, str], tuple[int, str, str, str]] = {}
+    subtitle_summary: dict[tuple[str, str, str], tuple[int, str, str, str]] = {}
 
     for media in media_files:
         for s in media.audio_streams:
@@ -315,7 +353,7 @@ def print_unique_summary(media_files: List[MediaFile]) -> None:
         echo(dim("  none"))
 
 
-def stream_indexes_for(media_files: List[MediaFile], codec_type: str) -> List[int]:
+def stream_indexes_for(media_files: list[MediaFile], codec_type: str) -> list[int]:
     return sorted({
         stream.index
         for media in media_files
@@ -324,7 +362,7 @@ def stream_indexes_for(media_files: List[MediaFile], codec_type: str) -> List[in
     })
 
 
-def stream_languages_for(media_files: List[MediaFile], codec_type: str) -> List[str]:
+def stream_languages_for(media_files: list[MediaFile], codec_type: str) -> list[str]:
     return sorted({
         normalize_language_code(stream.language)
         for media in media_files
@@ -333,7 +371,7 @@ def stream_languages_for(media_files: List[MediaFile], codec_type: str) -> List[
     })
 
 
-def max_stream_count_for(media_files: List[MediaFile], codec_type: str) -> int:
+def max_stream_count_for(media_files: list[MediaFile], codec_type: str) -> int:
     # Highest number of streams of this type found in any single file.
     # Used to decide whether stream selection can be skipped: selection is only
     # skippable when no file has more than one track, regardless of language.

@@ -8,9 +8,11 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, List, NamedTuple, Optional, Sequence, Tuple
+from typing import NamedTuple
 
+from .colors import err, info
 from .constants import (
     FFPROBE_BIN,
     OPERATION_TIMEOUT_ENV_VAR,
@@ -22,7 +24,6 @@ from .constants import (
     TIMEOUT_RETURNCODE,
     VIDEO_EXTENSIONS,
 )
-from .colors import err, info
 from .logsetup import LOGGER, command_to_text, log_command_output
 from .models import MediaFile, StreamInfo, parse_duration_seconds
 from .textutil import ProgressPrinter
@@ -32,11 +33,11 @@ class ScanResult(NamedTuple):
     """Everything a scan found: the files that probed cleanly and the ones that
     did not. Failures are returned rather than dropped so the caller decides."""
 
-    files: List[MediaFile]
-    failures: List[Path]
+    files: list[MediaFile]
+    failures: list[Path]
 
 
-def operation_timeout_seconds() -> Optional[float]:
+def operation_timeout_seconds() -> float | None:
     """One timeout policy for every remux and copy. Returns None only when the
     user explicitly disables the bound."""
     raw = os.environ.get(OPERATION_TIMEOUT_ENV_VAR, "").strip()
@@ -50,7 +51,7 @@ def operation_timeout_seconds() -> Optional[float]:
     return None if value <= 0 else value
 
 
-def read_new_output(handle, offset: int) -> Tuple[str, int]:
+def read_new_output(handle, offset: int) -> tuple[str, int]:
     """Read only what the child appended since `offset`.
 
     FFmpeg's -progress output grows for the whole run - an hour of remuxing is
@@ -92,7 +93,7 @@ def terminate_process(proc: subprocess.Popen, grace_seconds: float = PROCESS_KIL
 
 def run_command(
     args: Sequence[str],
-    timeout: Optional[float] = PROBE_TIMEOUT_SECONDS,
+    timeout: float | None = PROBE_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess:
     """Run a short command to completion. A timeout is a controlled failure, not
     a hang: subprocess.run kills the child before raising."""
@@ -100,8 +101,8 @@ def run_command(
     try:
         proc = subprocess.run(
             args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            check=False,
+            capture_output=True,
             stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
@@ -126,7 +127,7 @@ FFMPEG_SIZE_KEY = "total_size="
 ROBOCOPY_PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 
 
-def read_ffmpeg_percent(text: str, duration_seconds: Optional[float]) -> Optional[float]:
+def read_ffmpeg_percent(text: str, duration_seconds: float | None) -> float | None:
     """Position reported by `-progress pipe:1`, as a percentage of the duration.
 
     FFmpeg appends key=value blocks, so the last out_time_us wins.
@@ -144,7 +145,7 @@ def read_ffmpeg_percent(text: str, duration_seconds: Optional[float]) -> Optiona
     return max(0.0, min(100.0, seconds / duration_seconds * 100.0))
 
 
-def read_ffmpeg_bytes(text: str) -> Optional[int]:
+def read_ffmpeg_bytes(text: str) -> int | None:
     """Bytes written so far, from the same `-progress` blocks.
 
     Measured on a real HEVC/Opus release: a stream copy can report
@@ -162,7 +163,7 @@ def read_ffmpeg_bytes(text: str) -> Optional[int]:
         return None
 
 
-def read_robocopy_percent(text: str) -> Optional[float]:
+def read_robocopy_percent(text: str) -> float | None:
     """Robocopy's own percentage. It rewrites the figure with carriage returns,
     so the last match in what has been written so far is the current one."""
     matches = ROBOCOPY_PERCENT.findall(text)
@@ -191,9 +192,9 @@ LAUNCH_FAILED_RETURNCODE = 127
 
 def run_with_progress(
     args: Sequence[str],
-    total_started_at: Optional[float] = None,
-    timeout: Optional[float] = None,
-    on_output: Optional[Callable[[str], None]] = None,
+    total_started_at: float | None = None,
+    timeout: float | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a long command while showing its own elapsed timer.
 
@@ -284,7 +285,7 @@ def tool_version(binary: str) -> str:
     """
     try:
         proc = subprocess.run(
-            [binary, "-version"], capture_output=True, text=True,
+            [binary, "-version"], check=False, capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=PROBE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,
         )
@@ -303,8 +304,8 @@ def require_tool(binary: str) -> bool:
     return found is not None
 
 
-def find_video_files(input_path: Path) -> List[Path]:
-    files: List[Path] = []
+def find_video_files(input_path: Path) -> list[Path]:
+    files: list[Path] = []
 
     if input_path.is_file():
         if input_path.suffix.lower() in VIDEO_EXTENSIONS:
@@ -319,7 +320,7 @@ def find_video_files(input_path: Path) -> List[Path]:
     return sorted(files, key=lambda p: str(p).lower())
 
 
-def find_non_video_extensions(input_path: Path) -> List[str]:
+def find_non_video_extensions(input_path: Path) -> list[str]:
     extensions = set()
 
     if input_path.is_file():
@@ -337,7 +338,7 @@ def find_non_video_extensions(input_path: Path) -> List[str]:
     return sorted(extensions)
 
 
-def probe_file(path: Path) -> Optional[MediaFile]:
+def probe_file(path: Path) -> MediaFile | None:
     args = [
         FFPROBE_BIN,
         "-v",
@@ -387,9 +388,9 @@ def probe_file(path: Path) -> Optional[MediaFile]:
     return MediaFile(path=path, streams=streams, duration_seconds=duration)
 
 
-def scan_files(files: List[Path]) -> ScanResult:
-    scanned: List[MediaFile] = []
-    failures: List[Path] = []
+def scan_files(files: list[Path]) -> ScanResult:
+    scanned: list[MediaFile] = []
+    failures: list[Path] = []
     LOGGER.info("Scanning %s file(s)", len(files))
 
     for i, file_path in enumerate(files, start=1):

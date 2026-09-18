@@ -1,24 +1,50 @@
 # Part of the FFmWiz Stream Cleanup Remux subsystem.
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
-
-from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, AUDIO_NONE, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE, SUBTITLE_NONE
 from .colors import C, color, info, warn
+from .constants import (
+    AUDIO_ALL,
+    AUDIO_BY_INDEX,
+    AUDIO_BY_LANGUAGE,
+    AUDIO_BY_TITLE,
+    AUDIO_NONE,
+    SUBTITLE_ALL,
+    SUBTITLE_BY_INDEX,
+    SUBTITLE_BY_LANGUAGE,
+    SUBTITLE_BY_TITLE,
+    SUBTITLE_NONE,
+)
 from .logsetup import LOGGER
-from .models import MediaFile, SelectionRules
-from .textutil import format_index_list, format_prompt_label, format_text_list, parse_csv_int
-from .prompts import MenuBack, ask_csv_int_required, ask_csv_text_required, ask_language_codes_required, ask_numbered_menu, ask_text, ask_yes_no, print_metadata_note
 from .metadata_edits import ask_metadata_edits
-from .reporting import max_stream_count_for, print_selection_preview, print_stream_choices, stream_indexes_for, stream_languages_for, streams_for_type
+from .models import MediaFile, SelectionRules
+from .prompts import (
+    MenuBack,
+    ask_csv_int_required,
+    ask_csv_text_required,
+    ask_language_codes_required,
+    ask_numbered_menu,
+    ask_text,
+    ask_yes_no,
+    print_metadata_note,
+)
+from .reporting import (
+    max_stream_count_for,
+    print_selection_preview,
+    print_stream_choices,
+    stream_indexes_for,
+    stream_languages_for,
+    streams_for_type,
+)
+from .textutil import format_index_list, format_prompt_label, format_text_list, parse_csv_int
+
 
 def ask_keep_indexes(
     label: str,
-    available_indexes: List[int],
+    available_indexes: list[int],
     exact_mode: str,
     all_mode: str,
     none_mode: str,
-) -> Tuple[str, List[int]]:
+) -> tuple[str, list[int]]:
     print()
     print(color(f"{label} stream selection", C.BOLD + C.WHITE))
     print(info(f"Available {label.lower()} stream indexes: {format_index_list(available_indexes)}"))
@@ -136,7 +162,7 @@ def previous_exact_step(step: int, subtitle_mode: str, skip_copy_non_video: bool
     return 0
 
 
-def should_skip_audio_selection(media_files: List[MediaFile]) -> bool:
+def should_skip_audio_selection(media_files: list[MediaFile]) -> bool:
     """Only a set with no audio at all can skip the audio menu. Even a single
     track is a real choice: the user may want to drop it (AUDIO_NONE), and that
     option only exists inside the menu."""
@@ -144,8 +170,8 @@ def should_skip_audio_selection(media_files: List[MediaFile]) -> bool:
 
 
 def configure_rules_advanced(
-    media_files: List[MediaFile],
-    initial: Optional[SelectionRules] = None,
+    media_files: list[MediaFile],
+    initial: SelectionRules | None = None,
     start_step: int = 0,
     single_file_input: bool = False,
 ) -> SelectionRules:
@@ -410,8 +436,8 @@ def configure_rules_advanced(
 
 
 def configure_rules_exact(
-    media_files: List[MediaFile],
-    initial: Optional[SelectionRules] = None,
+    media_files: list[MediaFile],
+    initial: SelectionRules | None = None,
     start_step: int = 0,
     single_file_input: bool = False,
 ) -> SelectionRules:
@@ -524,7 +550,7 @@ def configure_rules_exact(
             print(warn("Back. Returning to previous step."))
 
 
-def configure_rules(media_files: List[MediaFile], single_file_input: bool = False) -> SelectionRules:
+def configure_rules(media_files: list[MediaFile], single_file_input: bool = False) -> SelectionRules:
     if len(stream_languages_for(media_files, "audio")) <= 1:
         LOGGER.info("Selection style skipped: one or zero audio languages found")
         return configure_rules_advanced(media_files, single_file_input=single_file_input)
@@ -554,7 +580,7 @@ def configure_rules(media_files: List[MediaFile], single_file_input: bool = Fals
 
 
 def revisit_last_rule_step(
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     rules: SelectionRules,
     single_file_input: bool = False,
 ) -> SelectionRules:
