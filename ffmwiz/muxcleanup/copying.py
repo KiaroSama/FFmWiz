@@ -10,23 +10,23 @@ from __future__ import annotations
 import os
 import shutil
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .constants import COPY_CHUNK_BYTES, IS_WINDOWS, PARTIAL_MARKER, ROBOCOPY_BIN, VIDEO_EXTENSIONS
 from .colors import err
+from .constants import COPY_CHUNK_BYTES, IS_WINDOWS, PARTIAL_MARKER, ROBOCOPY_BIN, VIDEO_EXTENSIONS
 from .logsetup import LOGGER
-from .models import SelectionRules
-from .textutil import ProgressPrinter
 from .media import operation_timeout_seconds, read_robocopy_percent, run_with_progress
+from .models import SelectionRules
 from .output import destination_snapshot, extra_file_sources, partial_path, path_is_under, robocopy_success
+from .textutil import ProgressPrinter
 
 
 def robocopy_available() -> bool:
     return IS_WINDOWS and shutil.which(ROBOCOPY_BIN) is not None
 
 
-def robocopy_skip_existing_flags() -> List[str]:
+def robocopy_skip_existing_flags() -> list[str]:
     """Excludes that make robocopy leave every existing destination alone. Only
     the no-overwrite tree copy uses robocopy now, so this is all it needs."""
     return ["/XC", "/XN", "/XO"]
@@ -35,9 +35,9 @@ def robocopy_skip_existing_flags() -> List[str]:
 def copy_file_with_progress(
     source: Path,
     destination: Path,
-    total_started_at: Optional[float] = None,
-    timeout: Optional[float] = None,
-    on_progress: Optional[Callable[[int], None]] = None,
+    total_started_at: float | None = None,
+    timeout: float | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> None:
     """Chunked stdlib copy with a live elapsed line.
 
@@ -87,10 +87,10 @@ def copy_video_without_remux(
     input_file: Path,
     output_file: Path,
     overwrite: bool = False,
-    total_started_at: Optional[float] = None,
-    timeout: Optional[float] = None,
-    on_progress: Optional[Callable[[int], None]] = None,
-    on_percent: Optional[Callable[[float], None]] = None,
+    total_started_at: float | None = None,
+    timeout: float | None = None,
+    on_progress: Callable[[int], None] | None = None,
+    on_percent: Callable[[float], None] | None = None,
 ) -> int:
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -111,9 +111,9 @@ def copy_video_with_robocopy(
     input_file: Path,
     output_file: Path,
     overwrite: bool,
-    total_started_at: Optional[float] = None,
-    timeout: Optional[float] = None,
-    on_percent: Optional[Callable[[float], None]] = None,
+    total_started_at: float | None = None,
+    timeout: float | None = None,
+    on_percent: Callable[[float], None] | None = None,
 ) -> int:
     """Copy through a private staging folder, then rename into place.
 
@@ -177,7 +177,7 @@ def copy_video_with_robocopy(
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def copy_extra_files(input_root: Path, output_root: Path, rules: SelectionRules) -> Tuple[int, int, int]:
+def copy_extra_files(input_root: Path, output_root: Path, rules: SelectionRules) -> tuple[int, int, int]:
     if input_root.is_file():
         return 0, 0, 0
 
@@ -200,7 +200,7 @@ def copy_extra_files_with_stdlib(
     input_root: Path,
     output_root: Path,
     rules: SelectionRules,
-) -> Tuple[int, int, int]:
+) -> tuple[int, int, int]:
     copied = 0
     skipped = 0
     failed = 0
@@ -230,8 +230,8 @@ def copy_extra_files_with_stdlib(
 
 
 def remove_incomplete_copies(
-    pairs: Sequence[Tuple[Path, Path]],
-    before: Dict[Path, Tuple[int, int]],
+    pairs: Sequence[tuple[Path, Path]],
+    before: dict[Path, tuple[int, int]],
 ) -> None:
     """Delete destinations this run created but did not finish writing.
 
@@ -254,8 +254,8 @@ def copy_extra_files_with_robocopy(
     input_root: Path,
     output_root: Path,
     rules: SelectionRules,
-) -> Tuple[int, int, int]:
-    pairs: List[Tuple[Path, Path]] = []
+) -> tuple[int, int, int]:
+    pairs: list[tuple[Path, Path]] = []
     for source in sources:
         try:
             pairs.append((source, output_root / source.relative_to(input_root)))

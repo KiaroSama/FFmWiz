@@ -2,13 +2,28 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .constants import AUDIO_ALL, PARTIAL_MARKER, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, AUDIO_NONE, INVALID_FILENAME_CHARS, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE, SUBTITLE_NONE, VIDEO_EXTENSIONS
+from .constants import (
+    AUDIO_ALL,
+    AUDIO_BY_INDEX,
+    AUDIO_BY_LANGUAGE,
+    AUDIO_BY_TITLE,
+    AUDIO_NONE,
+    INVALID_FILENAME_CHARS,
+    PARTIAL_MARKER,
+    SUBTITLE_ALL,
+    SUBTITLE_BY_INDEX,
+    SUBTITLE_BY_LANGUAGE,
+    SUBTITLE_BY_TITLE,
+    SUBTITLE_NONE,
+    VIDEO_EXTENSIONS,
+)
 from .logsetup import LOGGER
 from .models import SelectionRules
 from .textutil import compact_labels
+
 
 def sanitize_filename_part(value: str, fallback: str = "Muxed") -> str:
     cleaned = "".join("-" if ch in INVALID_FILENAME_CHARS else ch for ch in value)
@@ -18,7 +33,7 @@ def sanitize_filename_part(value: str, fallback: str = "Muxed") -> str:
     return cleaned or fallback
 
 
-def stream_rule_part(kind: str, mode: str, languages: List[str], titles: List[str], indexes: List[int]) -> str:
+def stream_rule_part(kind: str, mode: str, languages: list[str], titles: list[str], indexes: list[int]) -> str:
     if kind == "audio":
         if mode == AUDIO_BY_LANGUAGE and languages:
             return f"{compact_labels(languages)} Audio"
@@ -51,7 +66,7 @@ def selection_suffix(rules: SelectionRules) -> str:
         stream_rule_part("subtitle", rules.subtitle_mode, rules.subtitle_languages, rules.subtitle_titles, rules.subtitle_indexes),
     ]
 
-    compact: List[str] = []
+    compact: list[str] = []
     for part in parts:
         if part and part not in compact:
             compact.append(part)
@@ -89,7 +104,7 @@ def unique_directory_path(path: Path) -> Path:
     return unique_path(path, is_directory=True)
 
 
-def output_base_conflict(input_root: Path, output_base: Path) -> Optional[str]:
+def output_base_conflict(input_root: Path, output_base: Path) -> str | None:
     """Return why this output base is unusable, or None when it is safe.
 
     A folder run walks its input recursively, so writing anywhere inside that
@@ -171,7 +186,7 @@ def path_is_under(path: Path, root: Path) -> bool:
         return False
 
 
-def resolved_roots(paths: Optional[Sequence[Path]]) -> List[Path]:
+def resolved_roots(paths: Sequence[Path] | None) -> list[Path]:
     """Resolve each root once, for walks that then compare against them.
 
     Resolving inside the per-file loop instead is what made the end-of-run size
@@ -179,7 +194,7 @@ def resolved_roots(paths: Optional[Sequence[Path]]) -> List[Path]:
     *both* sides on every call, so the excluded root was re-resolved once per
     file in the tree.
     """
-    roots: List[Path] = []
+    roots: list[Path] = []
     for path in paths or []:
         try:
             roots.append(path.resolve())
@@ -211,7 +226,7 @@ def walk_files(root: Path, skip_roots: Sequence[Path]) -> Iterable[Path]:
             yield here / name
 
 
-def path_total_size(path: Path, exclude_paths: Optional[Sequence[Path]] = None) -> int:
+def path_total_size(path: Path, exclude_paths: Sequence[Path] | None = None) -> int:
     total = 0
 
     if not path.exists():
@@ -233,7 +248,7 @@ def path_total_size(path: Path, exclude_paths: Optional[Sequence[Path]] = None) 
     return total
 
 
-def extra_file_sources(input_root: Path, output_root: Path) -> List[Path]:
+def extra_file_sources(input_root: Path, output_root: Path) -> list[Path]:
     # Same pruning as path_total_size: skip the output tree at its root rather
     # than asking "is this file under it?" once per file.
     sources = [
@@ -244,8 +259,8 @@ def extra_file_sources(input_root: Path, output_root: Path) -> List[Path]:
     return sorted(sources, key=lambda path: str(path).lower())
 
 
-def destination_snapshot(paths: Iterable[Path]) -> Dict[Path, Tuple[int, int]]:
-    snapshot: Dict[Path, Tuple[int, int]] = {}
+def destination_snapshot(paths: Iterable[Path]) -> dict[Path, tuple[int, int]]:
+    snapshot: dict[Path, tuple[int, int]] = {}
     for path in paths:
         try:
             stat = path.stat()

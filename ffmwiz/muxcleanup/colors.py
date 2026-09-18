@@ -197,7 +197,7 @@ SETTING_FALSE_COLOR = C.BOLD + C.SETTING_FALSE
 # Every escape sequence the console output can carry, not just colour: the log
 # has to strip cursor moves and clears too, or a progress frame would arrive as
 # unreadable control codes.
-ANSI_PATTERN = re.compile(r"\[[0-9;?]*[A-Za-z]")
+ANSI_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def plain(text: object) -> str:

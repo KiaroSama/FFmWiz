@@ -2,20 +2,35 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Sequence
+from typing import NamedTuple
 
+from .colors import ACTION_SEPARATOR_COLOR, PROCESS_DONE_COLOR, PROCESS_SEPARATOR_COLOR, C, color, dim, err, info, warn
 from .constants import AUDIO_NONE
-from .colors import ACTION_SEPARATOR_COLOR, C, PROCESS_DONE_COLOR, PROCESS_SEPARATOR_COLOR, color, dim, err, info, warn
+from .copying import copy_extra_files, copy_video_without_remux
 from .logsetup import LOGGER
+from .media import (
+    find_video_files,
+    operation_timeout_seconds,
+    read_ffmpeg_bytes,
+    read_ffmpeg_percent,
+    run_with_progress,
+    scan_files,
+)
 from .models import MediaFile, SelectionRules
-from .textutil import center_for_terminal, format_elapsed_time, format_language_list, format_size_difference, format_stream_size, separator_line
-from .media import find_video_files, operation_timeout_seconds, read_ffmpeg_bytes, read_ffmpeg_percent, run_with_progress, scan_files
 from .muxlogic import build_ffmpeg_command, remux_needed_reasons, selected_audio_streams, selected_subtitle_streams
 from .output import display_path, make_output_path, partial_path, path_total_size
-from .copying import copy_extra_files, copy_video_without_remux
 from .progressview import DONE, FAILED, SKIPPED, ProgressRow, ProgressView
 from .reporting import echo, print_header
+from .textutil import (
+    center_for_terminal,
+    format_elapsed_time,
+    format_language_list,
+    format_size_difference,
+    format_stream_size,
+    separator_line,
+)
 
 
 class ProcessSummary(NamedTuple):
@@ -34,22 +49,22 @@ class ProcessSummary(NamedTuple):
     extra_failed: int
     size_delta: int
     elapsed: float
-    results: List[Dict[str, str]]
+    results: list[dict[str, str]]
 
 
 def append_file_result(
-    results: List[Dict[str, str]],
+    results: list[dict[str, str]],
     index: int,
     total: int,
     action: str,
     status: str,
     input_file: Path,
-    output_file: Optional[Path],
+    output_file: Path | None,
     detail: str,
     elapsed_seconds: float,
-    returncode: Optional[int] = None,
-    size_delta: Optional[int] = None,
-    log_name: Optional[str] = None,
+    returncode: int | None = None,
+    size_delta: int | None = None,
+    log_name: str | None = None,
 ) -> None:
     result = {
         "index": f"{index}/{total}",
@@ -80,7 +95,7 @@ def append_file_result(
         LOGGER.info(message)
 
 
-def file_size(path: Path) -> Optional[int]:
+def file_size(path: Path) -> int | None:
     size = path_total_size(path)
     return size or None
 
@@ -103,7 +118,7 @@ def print_file_size_change(input_file: Path, output_file: Path) -> int:
 
 
 def process_files(
-    media_files: List[MediaFile],
+    media_files: list[MediaFile],
     input_root: Path,
     output_root: Path,
     rules: SelectionRules,
@@ -129,9 +144,9 @@ def process_files(
     failed = 0
     copied_unchanged = 0
     remuxed = 0
-    output_files_for_size: List[Path] = []
+    output_files_for_size: list[Path] = []
     total_size_delta = 0
-    file_results: List[Dict[str, str]] = []
+    file_results: list[dict[str, str]] = []
     index = 0
 
     # One row per discovered file, in the order they are handled. On a terminal
@@ -166,8 +181,8 @@ def process_files(
         if index > 1:
             say(separator_line(PROCESS_SEPARATOR_COLOR))
 
-        def finish(action: str, status: str, out: Optional[Path], detail: str,
-                   returncode: Optional[int] = None, size_delta: Optional[int] = None) -> None:
+        def finish(action: str, status: str, out: Path | None, detail: str,
+                   returncode: int | None = None, size_delta: int | None = None) -> None:
             append_file_result(
                 file_results, index, total, action, status, input_file, out, detail,
                 time.perf_counter() - file_started_at, returncode, size_delta, str(rel),
@@ -407,7 +422,7 @@ def print_ready_for_next_task(message: str = "Task complete. Ready for next task
     print()
 
 
-def verify_output(root: Path, rules: Optional[SelectionRules] = None) -> None:
+def verify_output(root: Path, rules: SelectionRules | None = None) -> None:
     print_header("Verify Output Folder")
 
     files = find_video_files(root)

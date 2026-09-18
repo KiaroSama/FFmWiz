@@ -19,7 +19,6 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 from .colors import ANSI_PATTERN, C, color
 from .textutil import format_elapsed_time, format_stream_size, set_block_owns_screen
@@ -47,7 +46,7 @@ def truncate_visible(text: str, limit: int) -> str:
     """
     if visible_length(text) <= limit:
         return text
-    out: List[str] = []
+    out: list[str] = []
     shown = 0
     index = 0
     while index < len(text) and shown < limit:
@@ -79,7 +78,7 @@ def is_terminal() -> bool:
         return False
 
 
-def terminal_size() -> Tuple[int, int]:
+def terminal_size() -> tuple[int, int]:
     try:
         size = shutil.get_terminal_size((100, 24))
         return max(40, size.columns - 1), max(10, size.lines)
@@ -87,7 +86,7 @@ def terminal_size() -> Tuple[int, int]:
         return 99, 24
 
 
-def format_eta(seconds: Optional[float]) -> str:
+def format_eta(seconds: float | None) -> str:
     # Anything past a day is not a countdown any more, it is a guess.
     if seconds is None or seconds < 0 or seconds > 86400:
         return "--:--"
@@ -103,16 +102,16 @@ class ProgressRow:
     """One file's line in the block."""
 
     name: str
-    total: Optional[int] = None
+    total: int | None = None
     completed: int = 0
-    percent: Optional[float] = None
+    percent: float | None = None
     state: str = QUEUED
     detail: str = ""
-    started_at: Optional[float] = None
+    started_at: float | None = None
     elapsed: float = 0.0
 
     @property
-    def ratio(self) -> Optional[float]:
+    def ratio(self) -> float | None:
         """0..1 when known. An explicit percent wins: FFmpeg reports how much of
         the timeline it has written, which a copy's byte count cannot express."""
         if self.percent is not None:
@@ -154,7 +153,7 @@ def bar_width_for(width: int) -> int:
     return max(14, min(28, width - 90))
 
 
-def bar(ratio: Optional[float], width: int, state: str) -> str:
+def bar(ratio: float | None, width: int, state: str) -> str:
     full_char, empty_char = ("━", "─") if supports_unicode() else ("=", "-")
     width = max(1, width)
     if ratio is None:
@@ -166,7 +165,7 @@ def bar(ratio: Optional[float], width: int, state: str) -> str:
     return color(full_char * filled, fill_color) + color(empty_char * (width - filled), C.BAR_TRACK)
 
 
-def size_pair(completed: Optional[int], total: Optional[int]) -> str:
+def size_pair(completed: int | None, total: int | None) -> str:
     """`done / total`, the shape EVdlc's rows use. Showing only the total leaves
     the reader no idea how much of it has actually happened."""
     done_text = format_stream_size(completed) if completed else "0 B"
@@ -174,7 +173,7 @@ def size_pair(completed: Optional[int], total: Optional[int]) -> str:
     return f"{done_text} / {total_text}"
 
 
-def eta_seconds(ratio: Optional[float], started_at: Optional[float]) -> Optional[float]:
+def eta_seconds(ratio: float | None, started_at: float | None) -> float | None:
     """Project the remaining time from how long this row took to reach `ratio`.
 
     There is no byte rate to divide by: a remux reports a position on the
@@ -239,7 +238,7 @@ class ProgressView:
     Frames are driven by the caller's existing poll loop; there is no thread.
     """
 
-    def __init__(self, rows: List[ProgressRow], enabled: Optional[bool] = None) -> None:
+    def __init__(self, rows: list[ProgressRow], enabled: bool | None = None) -> None:
         self.rows = rows
         self.enabled = is_terminal() if enabled is None else enabled
         self.status = ""
@@ -260,8 +259,8 @@ class ProgressView:
             self.status = status
         self.render(force=True)
 
-    def update(self, index: int, percent: Optional[float] = None,
-               completed: Optional[int] = None) -> None:
+    def update(self, index: int, percent: float | None = None,
+               completed: int | None = None) -> None:
         row = self.rows[index]
         if percent is not None:
             row.percent = percent
@@ -311,12 +310,12 @@ class ProgressView:
             f"{color(format_elapsed_time(elapsed), C.PROGRESS_ELAPSED)}"
         )
 
-    def compose(self, width: int, height: int) -> List[str]:
+    def compose(self, width: int, height: int) -> list[str]:
         # Overall is its own labelled group, exactly like a file group, so the
         # two read as the same kind of thing.
         lines = [color("Overall", C.PROGRESS_OVERALL), self.overall_line(width), ""]
 
-        groups: List[List[str]] = []
+        groups: list[list[str]] = []
         for index, row in enumerate(self.rows, start=1):
             name_color = C.PROGRESS_MUTED if row.state == QUEUED else C.PROGRESS_SIZE
             groups.append([
@@ -336,7 +335,7 @@ class ProgressView:
                 (i for i, r in enumerate(self.rows) if r.state in (QUEUED, ACTIVE)),
                 max(0, len(groups) - 1),
             )
-            shown: List[int] = []
+            shown: list[int] = []
             used = 0
             cursor = first_active
             while cursor < len(groups) and used + len(groups[cursor]) <= budget - 2:
@@ -373,7 +372,7 @@ class ProgressView:
         width, height = terminal_size()
         lines = [truncate_visible(line, width) for line in self.compose(width, height)]
 
-        buffer: List[str] = []
+        buffer: list[str] = []
         if not self._cursor_hidden:
             buffer.append("\x1b[?25l")
             self._cursor_hidden = True

@@ -1,19 +1,31 @@
 # Part of the FFmWiz Stream Cleanup Remux subsystem.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
 
-from .constants import AUDIO_ALL, AUDIO_BY_INDEX, AUDIO_BY_LANGUAGE, AUDIO_BY_TITLE, FFMPEG_BIN, SUBTITLE_ALL, SUBTITLE_BY_INDEX, SUBTITLE_BY_LANGUAGE, SUBTITLE_BY_TITLE, SUBTITLE_NONE
+from .constants import (
+    AUDIO_ALL,
+    AUDIO_BY_INDEX,
+    AUDIO_BY_LANGUAGE,
+    AUDIO_BY_TITLE,
+    FFMPEG_BIN,
+    SUBTITLE_ALL,
+    SUBTITLE_BY_INDEX,
+    SUBTITLE_BY_LANGUAGE,
+    SUBTITLE_BY_TITLE,
+    SUBTITLE_NONE,
+)
 from .models import MediaFile, SelectionRules, StreamInfo, StreamMetadataEdit
 from .textutil import normalize_language_code
 
-def text_matches_any(value: str, needles: List[str]) -> bool:
+
+def text_matches_any(value: str, needles: list[str]) -> bool:
     haystack = (value or "").lower()
     return any(needle in haystack for needle in needles)
 
 
-def apply_stream_order(streams: List[StreamInfo], order: Sequence[int]) -> List[StreamInfo]:
+def apply_stream_order(streams: list[StreamInfo], order: Sequence[int]) -> list[StreamInfo]:
     """Put the streams the user named first, in the order they named them.
 
     `-map` order is what decides the output stream order, so reordering here is
@@ -26,7 +38,7 @@ def apply_stream_order(streams: List[StreamInfo], order: Sequence[int]) -> List[
         return streams
 
     by_index = {stream.index: stream for stream in streams}
-    ordered: List[StreamInfo] = []
+    ordered: list[StreamInfo] = []
     placed = set()
     for index in order:
         stream = by_index.get(index)
@@ -37,7 +49,7 @@ def apply_stream_order(streams: List[StreamInfo], order: Sequence[int]) -> List[
     return ordered + [stream for stream in streams if stream.index not in placed]
 
 
-def matched_audio_streams(media: MediaFile, rules: SelectionRules) -> List[StreamInfo]:
+def matched_audio_streams(media: MediaFile, rules: SelectionRules) -> list[StreamInfo]:
     audio = media.audio_streams
 
     if rules.audio_mode == AUDIO_BY_LANGUAGE:
@@ -56,12 +68,12 @@ def matched_audio_streams(media: MediaFile, rules: SelectionRules) -> List[Strea
     return []
 
 
-def selected_audio_streams(media: MediaFile, rules: SelectionRules) -> List[StreamInfo]:
+def selected_audio_streams(media: MediaFile, rules: SelectionRules) -> list[StreamInfo]:
     """The audio the output keeps, in the order the output will carry it."""
     return apply_stream_order(matched_audio_streams(media, rules), rules.audio_order)
 
 
-def matched_subtitle_streams(media: MediaFile, rules: SelectionRules) -> List[StreamInfo]:
+def matched_subtitle_streams(media: MediaFile, rules: SelectionRules) -> list[StreamInfo]:
     subtitles = media.subtitle_streams
 
     if rules.subtitle_mode == SUBTITLE_NONE:
@@ -83,7 +95,7 @@ def matched_subtitle_streams(media: MediaFile, rules: SelectionRules) -> List[St
     return []
 
 
-def selected_subtitle_streams(media: MediaFile, rules: SelectionRules) -> List[StreamInfo]:
+def selected_subtitle_streams(media: MediaFile, rules: SelectionRules) -> list[StreamInfo]:
     """The subtitles the output keeps, in the order the output will carry them."""
     return apply_stream_order(matched_subtitle_streams(media, rules), rules.subtitle_order)
 
@@ -100,7 +112,7 @@ def metadata_edit_applies(edit: StreamMetadataEdit, stream: StreamInfo) -> bool:
     return not edit.match_indexes and not edit.match_languages
 
 
-def metadata_values_for_stream(stream: StreamInfo, rules: SelectionRules) -> Tuple[str, str]:
+def metadata_values_for_stream(stream: StreamInfo, rules: SelectionRules) -> tuple[str, str]:
     language = ""
     title = ""
 
@@ -116,7 +128,7 @@ def metadata_values_for_stream(stream: StreamInfo, rules: SelectionRules) -> Tup
 
 
 def add_stream_metadata_options(
-    cmd: List[str],
+    cmd: list[str],
     stream_spec: str,
     stream: StreamInfo,
     rules: SelectionRules,
@@ -136,7 +148,7 @@ def stream_change_reason(
     label: str,
     original: Sequence[StreamInfo],
     selected: Sequence[StreamInfo],
-) -> Optional[str]:
+) -> str | None:
     """Why this stream type forces a remux, or None when nothing changed.
 
     Keeping every stream but reordering it is a real change, and calling that a
@@ -164,8 +176,8 @@ def remux_needed_reasons(
     rules: SelectionRules,
     audio_keep: Sequence[StreamInfo],
     subtitles_keep: Sequence[StreamInfo],
-) -> List[str]:
-    reasons: List[str] = []
+) -> list[str]:
+    reasons: list[str] = []
 
     audio_reason = stream_change_reason("audio", media.audio_streams, audio_keep)
     if audio_reason:
@@ -190,7 +202,7 @@ def build_ffmpeg_command(
     output_file: Path,
     media: MediaFile,
     rules: SelectionRules,
-) -> Tuple[List[str], List[StreamInfo], List[StreamInfo]]:
+) -> tuple[list[str], list[StreamInfo], list[StreamInfo]]:
     audio_keep = selected_audio_streams(media, rules)
     subtitles_keep = selected_subtitle_streams(media, rules)
 

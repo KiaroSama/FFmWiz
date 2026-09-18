@@ -1,14 +1,23 @@
 # Part of the FFmWiz Stream Cleanup Remux subsystem.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
 
+from .colors import PROMPT_DEFAULT_COLOR, YES_NO_HINT_COLOR, C, color, dim, err, info, plain, warn
 from .constants import EXIT_TOKENS, VIDEO_EXTENSIONS
 from .logsetup import LOGGER
-from .colors import C, PROMPT_DEFAULT_COLOR, YES_NO_HINT_COLOR, color, dim, err, info, plain, warn
-from .textutil import color_example_text, color_found_text, format_index_list, format_prompt_label, normalize_language_code, parse_csv_int, parse_csv_text
 from .output import output_base_conflict
+from .textutil import (
+    color_example_text,
+    color_found_text,
+    format_index_list,
+    format_prompt_label,
+    normalize_language_code,
+    parse_csv_int,
+    parse_csv_text,
+)
+
 
 class MenuExit(Exception):
     pass
@@ -18,8 +27,8 @@ class MenuBack(Exception):
     pass
 
 
-def colored_option_suffix(default: Optional[str], allow_back: bool, show_default: bool = True) -> str:
-    parts: List[str] = []
+def colored_option_suffix(default: str | None, allow_back: bool, show_default: bool = True) -> str:
+    parts: list[str] = []
     if default and show_default:
         parts.append(color(f"[{default}]", PROMPT_DEFAULT_COLOR))
 
@@ -31,13 +40,13 @@ def colored_option_suffix(default: Optional[str], allow_back: bool, show_default
     return " ".join(parts)
 
 
-def prompt_text(prompt: str, default: Optional[str], allow_back: bool, show_default: bool = True) -> str:
+def prompt_text(prompt: str, default: str | None, allow_back: bool, show_default: bool = True) -> str:
     label = format_prompt_label(prompt)
     suffix = colored_option_suffix(default, allow_back, show_default=show_default)
     return f"{label} {suffix}{color(':', C.GRAY)} "
 
 
-def read_rendered_input(rendered_prompt: str, default: Optional[str], allow_back: bool) -> str:
+def read_rendered_input(rendered_prompt: str, default: str | None, allow_back: bool) -> str:
     """Ask, and record both the question and the answer.
 
     A log that shows only the outcome cannot explain how a run reached it. Every
@@ -71,7 +80,7 @@ def read_rendered_input(rendered_prompt: str, default: Optional[str], allow_back
 
 def read_menu_input(
     prompt: str,
-    default: Optional[str] = None,
+    default: str | None = None,
     allow_back: bool = True,
     show_default: bool = True,
 ) -> str:
@@ -132,7 +141,7 @@ def absolute_path_for_display(path: Path) -> Path:
         return (Path.cwd() / path).absolute()
 
 
-def input_path_from_args(args: Sequence[str]) -> Optional[Path]:
+def input_path_from_args(args: Sequence[str]) -> Path | None:
     if not args:
         return None
 
@@ -237,13 +246,13 @@ def numbered_choice_prompt(prompt: str, allow_back: bool, colon_after_prompt: bo
 
 def ask_numbered_menu(
     title: str,
-    options: Sequence[Tuple[str, str]],
+    options: Sequence[tuple[str, str]],
     default: str,
     prompt: str,
     allow_back: bool = True,
     leading_blank: bool = True,
     colon_after_prompt: bool = False,
-    notes: Optional[Sequence[str]] = None,
+    notes: Sequence[str] | None = None,
 ) -> str:
     valid_set = {value.lower() for value, _ in options}
 
@@ -266,7 +275,7 @@ def ask_numbered_menu(
         print(warn(f"Invalid choice. Valid options: {', '.join(sorted(valid_set))}"))
 
 
-def ask_csv_text_required(prompt: str) -> List[str]:
+def ask_csv_text_required(prompt: str) -> list[str]:
     while True:
         values = parse_csv_text(ask_text(prompt))
         if values:
@@ -274,11 +283,11 @@ def ask_csv_text_required(prompt: str) -> List[str]:
         print(warn("Please enter at least one value."))
 
 
-def ask_language_codes_required(prompt: str) -> List[str]:
+def ask_language_codes_required(prompt: str) -> list[str]:
     return [normalize_language_code(value) for value in ask_csv_text_required(prompt)]
 
 
-def ask_csv_int_required(prompt: str, available_indexes: Optional[List[int]] = None) -> List[int]:
+def ask_csv_int_required(prompt: str, available_indexes: list[int] | None = None) -> list[int]:
     while True:
         indexes = parse_csv_int(ask_text(prompt))
         if not indexes:
