@@ -31,6 +31,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# WHERE THESE JOBS RUN, and why it matters now.
+#
+# `vars.CI_RUNNER` overrides the runner label; with the variable unset every job
+# runs on a GitHub-hosted `windows-latest`, which is the intended configuration
+# for this repository.
+#
+# DO NOT point this at a self-hosted runner while the repository is PUBLIC. A
+# public repository accepts pull requests from anyone, and a workflow that runs
+# on a self-hosted runner executes the fork's code on that machine. Hosted
+# minutes are free for public repositories, which is the reason the variable is
+# unset rather than the reason to set it back.
+
 jobs:
   # Installs nothing: py_compile, the template check and the import smoke check
   # all run on the standard library alone.
