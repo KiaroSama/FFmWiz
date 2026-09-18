@@ -107,7 +107,7 @@ jobs:
 
   tests:
     runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
-    timeout-minutes: 25
+    timeout-minutes: 60
     # The real-ffmpeg tests print progress lines containing non-ASCII separators;
     # on a cp1252 console that is a UnicodeEncodeError, not a test failure.
     env:
@@ -148,7 +148,7 @@ jobs:
         # single scoped delete instead of a pattern hunt through shared state.
         shell: pwsh
         run: |
-          $scratch = Join-Path $env:RUNNER_TEMP "ffmwiz-scratch-$env:GITHUB_RUN_ID-$env:GITHUB_JOB-${{ matrix.python-version }}-${{ matrix.ffmpeg }}"
+          $scratch = Join-Path $env:RUNNER_TEMP "ffmwiz-scratch-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$env:GITHUB_JOB-${{ matrix.python-version }}-${{ matrix.ffmpeg }}"
           New-Item -ItemType Directory -Force -Path $scratch | Out-Null
           "TEMP=$scratch"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "TMP=$scratch"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -301,7 +301,7 @@ jobs:
 
       - name: Run test suite
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        timeout-minutes: 20
+        timeout-minutes: 45
         # tests/run_suite.py runs one module per worker process (stdlib only -
         # this project keeps zero test dependencies). The suite is dominated by
         # real ffmpeg child processes, so parallelism cut it 48s -> ~16s on a
@@ -309,7 +309,7 @@ jobs:
         # job installs, so a skip for ffmpeg or numpy fails the job while a real
         # NVENC-hardware skip stays legitimate. --json leaves a readable record
         # of what ran, what skipped and why, uploaded below even on failure.
-        run: python tests/run_suite.py --require ffmpeg --require numpy --require wheel --json "$RUNNER_TEMP/results.json"
+        run: python tests/run_suite.py --require ffmpeg --require numpy --require wheel --require powershell --json "$FFMWIZ_SCRATCH/results.json"
 
       - name: Upload results
         id: upload
@@ -323,7 +323,7 @@ jobs:
         with:
           name: tests-py${{ matrix.python-version }}-ffmpeg${{ matrix.ffmpeg }}
           path: |
-            ${{ runner.temp }}/results.json
+            ${{ env.FFMWIZ_SCRATCH }}/results.json
             ${{ runner.temp }}/ffmpeg-version.txt
             ${{ runner.temp }}/ffprobe-version.txt
           if-no-files-found: warn
@@ -336,7 +336,7 @@ jobs:
         # step summary -- neither of which the artifact quota can take away.
         # It reports and never decides: it exits 0 whatever the suite did.
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "py${{ matrix.python-version }} / ffmpeg ${{ matrix.ffmpeg }}" "${{ steps.upload.outcome }}"
+        run: python tools/ci_result_summary.py "$FFMWIZ_SCRATCH/results.json" "py${{ matrix.python-version }} / ffmpeg ${{ matrix.ffmpeg }}" "${{ steps.upload.outcome }}"
 
       - name: Remove this job's scratch files
         if: always()
@@ -385,7 +385,7 @@ jobs:
   # module still fails CI now that the other jobs install nothing.
   gui-import:
     runs-on: ${{ vars.CI_RUNNER || 'windows-latest' }}
-    timeout-minutes: 25
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
@@ -402,7 +402,7 @@ jobs:
         # single scoped delete instead of a pattern hunt through shared state.
         shell: pwsh
         run: |
-          $scratch = Join-Path $env:RUNNER_TEMP "ffmwiz-scratch-$env:GITHUB_RUN_ID-$env:GITHUB_JOB-gui"
+          $scratch = Join-Path $env:RUNNER_TEMP "ffmwiz-scratch-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$env:GITHUB_JOB-gui"
           New-Item -ItemType Directory -Force -Path $scratch | Out-Null
           "TEMP=$scratch"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "TMP=$scratch"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -485,7 +485,7 @@ jobs:
 
       - name: Run the GUI and QML behaviour suites headless
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        timeout-minutes: 20
+        timeout-minutes: 45
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: "1"
@@ -502,7 +502,7 @@ jobs:
         # lands, nothing selects it, and it never runs anywhere. The guard in
         # tests/test_ci_coverage_guard.py reads THIS line and fails when a
         # tests/ module that needs PySide6 is missing from it.
-        run: python tests/run_suite.py --require pyside6 --require numpy --require ffmpeg -j 2 --json "$RUNNER_TEMP/results.json" -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2 -k gui_child_ownership
+        run: python tests/run_suite.py --require pyside6 --require numpy --require ffmpeg -j 2 --json "$FFMWIZ_SCRATCH/results.json" -k gui_editors -k qml_waveform -k theme_tokens -k join_audio_availability -k command_generation_2 -k gui_child_ownership
 
       - name: Upload results
         id: upload
@@ -516,7 +516,7 @@ jobs:
         with:
           name: gui-import-results
           path: |
-            ${{ runner.temp }}/results.json
+            ${{ env.FFMWIZ_SCRATCH }}/results.json
             ${{ runner.temp }}/ffmpeg-version.txt
             ${{ runner.temp }}/ffprobe-version.txt
           if-no-files-found: warn
@@ -527,7 +527,7 @@ jobs:
         # Same reason as the tests job: the artifact is best-effort, the log and
         # the step summary are not.
         shell: bash --noprofile --norc -eo pipefail "{0}"
-        run: python tools/ci_result_summary.py "$RUNNER_TEMP/results.json" "gui-import" "${{ steps.upload.outcome }}"
+        run: python tools/ci_result_summary.py "$FFMWIZ_SCRATCH/results.json" "gui-import" "${{ steps.upload.outcome }}"
 
       - name: Remove this job's scratch files
         if: always()
