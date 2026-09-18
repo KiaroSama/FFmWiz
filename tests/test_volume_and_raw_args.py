@@ -103,8 +103,8 @@ class TheRawArgumentsAreSplitLikeAShellWould(unittest.TestCase):
         # of Explorer silently lost every separator -- `C:\Users\me\logo.png`
         # became `C:Usersmelogo.png`.
         self.assertEqual(
-            ["-metadata", r"comment=C:\Users\mobin\video"],
-            wizard_raw.parse_raw_arguments(r"-metadata comment=C:\Users\mobin\video"))
+            ["-metadata", r"comment=C:\Users\example\video"],
+            wizard_raw.parse_raw_arguments(r"-metadata comment=C:\Users\example\video"))
 
     def test_a_quoted_value_keeps_its_spaces_and_loses_its_quotes(self):
         self.assertEqual(

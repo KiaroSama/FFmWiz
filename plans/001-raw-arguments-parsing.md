@@ -88,8 +88,8 @@ def parse_raw_arguments(text: str) -> list[str]:
 Measured on the current code (run these yourself to confirm the starting point):
 
 ```
-parse_raw_arguments(r'-metadata comment=C:\Users\mobin\video')
-  -> ['-metadata', 'comment=C:Usersmobinvideo']        # backslashes gone
+parse_raw_arguments(r'-metadata comment=C:\Users\example\video')
+  -> ['-metadata', 'comment=C:Usersexamplevideo']        # backslashes gone
 
 parse_raw_arguments('-c:v:0 libx265')     -> accepted   # bypass
 parse_raw_arguments('-vf:0 scale=2:2')    -> accepted   # bypass
@@ -200,8 +200,8 @@ are still consumed, and an unbalanced one still raises `No closing quotation`.
 Measured on this repository's Python before this revision was written:
 
 ```
-r'-metadata comment=C:\Users\mobin\video'
-    -> ['-metadata', 'comment=C:\\Users\\mobin\\video']     backslashes kept
+r'-metadata comment=C:\Users\example\video'
+    -> ['-metadata', 'comment=C:\\Users\\example\\video']     backslashes kept
 '-metadata title="My film" -tune film'
     -> ['-metadata', 'title=My film', '-tune', 'film']      quotes consumed
 '-metadata title="unclosed'

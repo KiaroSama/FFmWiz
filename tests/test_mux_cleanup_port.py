@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,11 @@ import ffmwiz.support.ext00  # noqa: F401
 from ffmwiz.support import ext00b
 
 FFPROBE_AVAILABLE = shutil.which("ffprobe") is not None
-UPSTREAM_REPO = Path(r"G:\Program Files\Portable\Scripts\MuxCls")
+# The upstream checkout is one developer's local clone, so its location is
+# read from the environment. Absent, the comparisons below self-skip: this
+# suite verifies the VENDORED copy against upstream when upstream is here.
+_UPSTREAM = os.environ.get("FFMWIZ_MUXCLS_REPO", "")
+UPSTREAM_REPO = Path(_UPSTREAM) if _UPSTREAM else Path("muxcls-upstream-not-configured")
 UPSTREAM_COMMIT = "8a9b948"
 VENDOR_HEADER = "# Part of the FFmWiz Stream Cleanup Remux subsystem.\n"
 
