@@ -291,7 +291,14 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
 
     started = time.monotonic()
     results: list[dict] = collected
-    scratch = Path(tempfile.mkdtemp(prefix="ffmwiz_suite_"))
+    # Named for THIS process, not a random suffix. The directory is removed in
+    # the `finally` below, but a runner that is killed outright never reaches
+    # it -- and a random name then leaves a directory nobody can prove they own.
+    # A pid names exactly one live process, so the only holder of this name is a
+    # runner that is already gone, and whoever killed us can clean it by pid.
+    scratch = Path(tempfile.gettempdir()) / f"ffmwiz_suite_{os.getpid()}"
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
     try:
         _execute(modules, args, results, parsed, scratch, started)
     finally:
