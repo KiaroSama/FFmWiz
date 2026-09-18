@@ -62,14 +62,24 @@ FFMPEG_VALUED_OPTIONS = {
 # inputs in the `-i` sense, and the guard has to protect them just the same: an
 # attachment consumed by `-attach` was being written over by its own job (A01).
 FFMPEG_FILE_VALUED_OPTIONS = {
-    "-attach", "-passlogfile", "-vstats_file", "-filter_script",
-    "-filter_complex_script", "-fpre", "-vpre", "-apre",
+    "-attach", "-filter_script", "-filter_complex_script",
+    "-fpre", "-vpre", "-apre",
+}
+
+# Options whose value is a file the run WRITES. Arity and DIRECTION are separate
+# properties, and treating these as reads is not a smaller mistake -- it is the
+# opposite one: `-vstats_file <input>` replaces that media with encoder
+# statistics while the real output goes elsewhere, and FFmpeg exits 0 (A01).
+# `-passlogfile x` writes `x-0.log`; the prefix expansion is a destination too.
+FFMPEG_WRITE_VALUED_OPTIONS = {
+    "-vstats_file", "-passlogfile",
 }
 
 __all__ = [
     "FFMPEG_VALUELESS_OPTIONS",
     "FFMPEG_VALUED_OPTIONS",
     "FFMPEG_FILE_VALUED_OPTIONS",
+    "FFMPEG_WRITE_VALUED_OPTIONS",
 ]
 
 # The options FFmWiz itself emits that take a value. They are refused as RAW

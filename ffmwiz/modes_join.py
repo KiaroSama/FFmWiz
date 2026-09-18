@@ -416,7 +416,16 @@ def run_join_videos_mode(base_answers: dict[str, Any]) -> tuple[int, float] | No
     print()
     print(paint("Starting FFmpeg...", Color.GREEN))
     try:
-        return run_ffmpeg_with_progress(cmd, total_duration=(total_duration if total_duration > 0 else None), label="Join")
+        # The planner's own read list. A join reads every input it was given,
+        # and for the concat route those are named inside a generated list file
+        # rather than on the command line -- so the guard would otherwise have
+        # to re-read that file to learn what an argument already knows. Declaring
+        # it here also keeps the protection when the list is unreadable for any
+        # reason, which is exactly when a heuristic has the least to offer (A01).
+        sources = [Path(item["path"]) for item in items if item.get("path")]
+        return run_ffmpeg_with_progress(
+            cmd, total_duration=(total_duration if total_duration > 0 else None),
+            label="Join", source_dependencies=sources)
     finally:
         cleanup_join_concat_list(answers)
 
