@@ -154,199 +154,37 @@ def path_is_existing_directory(path: Path) -> bool:
         return False
 
 
-def _is_ffmpeg_option(token: str) -> bool:
-    """A dashed token that is an OPTION, not a negative number (`-aq -1`)."""
-    text = str(token or "")
-    if not text.startswith("-") or len(text) == 1:
-        return False
-    try:
-        float(text)
-    except ValueError:
-        return True
-    return False
-
-
-def _takes_a_value(token: str) -> bool:
-    """Whether this option consumes the next token, per the shared contract."""
-    base = str(token or "").lower()
-    if base in FFMPEG_VALUELESS_OPTIONS:
-        return False
-    stem = base.partition(":")[0]
-    if stem in FFMPEG_VALUELESS_OPTIONS:
-        return False
-    if stem.startswith("-no") and len(stem) > 3:
-        return False            # FFmpeg's boolean-off spelling
-    if base in FFMPEG_ALL_VALUED_OPTIONS or stem in FFMPEG_ALL_VALUED_OPTIONS:
-        return True
-    # Unknown. For a SAFETY guard the protective reading is that the next token
-    # is POSITIONAL, because an over-detected output costs nothing -- it only
-    # matters if it is identical to a source -- while a missed one is a
-    # destroyed file.
-    return False
-
-
-def _names_a_file(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text or text.startswith("-"):
-        return False
-    lowered = text.lower()
-    if lowered.startswith("pipe:") or lowered in {"-", "nul", "null", os.devnull.lower()}:
-        return False
-    return True
-
-
-def _as_path(value: str):
-    """A local path for `value`, including the `file:` URL spelling.
-
-    `file:///C:/media/clip.mkv` and the plain Windows path are the same file and
-    FFmpeg accepts both, so comparing the literal text alone meant the URL form
-    was never recognised as a source (A01).
-    """
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.lower().startswith("file:"):
-        parsed = urlparse(text)
-        path_text = unquote(parsed.path)
-        if re.match(r"^/[A-Za-z]:", path_text):
-            path_text = path_text[1:]
-        elif parsed.netloc:
-            path_text = f"//{parsed.netloc}{path_text}"
-        text = path_text.replace("/", os.sep)
-    try:
-        return Path(text)
-    except (TypeError, ValueError):
-        return None
-
-
-def command_input_paths(cmd: list[str]) -> list[Path]:
-    """Every path an FFmpeg argv reads as an INPUT (`-i <path>`)."""
-    inputs: list[Path] = []
-    for index, token in enumerate(cmd[:-1] if cmd else []):
-        if str(token) != "-i":
-            continue
-        value = str(cmd[index + 1] or "").strip()
-        if not _names_a_file(value):
-            continue
-        path = _as_path(value)
-        if path is not None:
-            inputs.append(path)
-    return inputs
-
-
-def concat_list_members(listing: Path) -> list[Path]:
-    """The media a `-f concat` list names, resolved relative to the list itself.
-
-    Media reached this way is never on the command line, so a guard reading only
-    argv protected none of it (A01). Bounded and forgiving: an unreadable or
-    oversized list yields nothing rather than raising where a job starts.
-    """
-    try:
-        if listing.stat().st_size > CONCAT_LIST_MAX_BYTES:
-            return []
-        text = listing.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    members: list[Path] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.lower().startswith("file "):
-            continue
-        value = stripped[5:].strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in QUOTE_CHARS:
-            value = value[1:-1]
-        path = _as_path(value)
-        if path is None:
-            continue
-        members.append(path if path.is_absolute() else (listing.parent / path))
-    return members
-
-
-def command_file_dependencies(cmd: list[str]) -> list[Path]:
-    """Every file the command READS: inputs, concat members, file-valued options.
-
-    The complete read side of the manifest. `-i` alone was not it: media can
-    arrive through a concat list, an input can be spelled as a `file:` URL, and
-    an attachment is consumed by `-attach` without ever being an input (A01).
-    """
-    reads: list[Path] = list(command_input_paths(cmd))
-    concat_selected = False
-    for index, token in enumerate(cmd or []):
-        lowered = str(token or "").lower()
-        following = str(cmd[index + 1] or "") if index + 1 < len(cmd) else ""
-        if lowered == "-f" and following.lower() == "concat":
-            concat_selected = True
-            continue
-        if lowered == "-i" and concat_selected:
-            listing = _as_path(following)
-            if listing is not None:
-                reads.extend(concat_list_members(listing))
-            concat_selected = False
-            continue
-        if lowered.partition(":")[0] in FFMPEG_FILE_VALUED_OPTIONS and _names_a_file(following):
-            path = _as_path(following)
-            if path is not None:
-                reads.append(path)
-    return reads
+# The command read/write manifest moved to its own module: it answers what an
+# FFmpeg ARGV touches, which is a different responsibility from resolving a
+# path, and it grew a concat reader, a filtergraph reader and a write/read
+# direction split (A01). Re-exported here because `runtime` and the wizard tiers
+# import these names from this module.
+from ffmwiz.support.L00_command_io import (  # noqa: E402,F401
+    command_input_paths, command_reads, command_source_output_conflict,
+    command_unresolved_dependencies, command_writes, concat_list_members,
+    ffmpeg_url_path)
 
 
 def command_output_paths(cmd: list[str]) -> list[Path]:
-    """Every destination an FFmpeg argv writes.
+    """Every destination the command writes. Kept as the historical name."""
+    return command_writes(cmd)
 
-    A command has as many outputs as it has positional tokens the options did
-    not claim: `-map 0:v out.mkv -map 0:a out.mka` writes two. Reading only
-    `cmd[-1]` handed an alias of the source at the FIRST destination straight to
-    FFmpeg (A01).
+
+def command_file_dependencies(cmd: list[str]) -> list[Path]:
+    """Every file the command reads. Kept as the historical name.
+
+    The `problems` half of the answer is deliberately NOT collapsed into an
+    empty list here: `command_unresolved_dependencies` reports it, and the
+    execution boundary refuses on it.
     """
-    outputs: list[Path] = []
-    index = 1                    # cmd[0] is the executable
-    while index < len(cmd or []):
-        token = str(cmd[index] or "")
-        if _is_ffmpeg_option(token):
-            index += 2 if _takes_a_value(token) else 1
-            continue
-        if _names_a_file(token):
-            path = _as_path(token)
-            if path is not None:
-                outputs.append(path)
-        index += 1
-    return outputs
+    reads, _problems = command_reads(cmd)
+    return reads
 
 
 def command_output_path(cmd: list[str]):
     """The LAST destination, for callers that only ever had one."""
-    outputs = command_output_paths(cmd)
+    outputs = command_writes(cmd)
     return outputs[-1] if outputs else None
-
-
-def command_source_output_conflict(cmd: list[str], extra_sources=None):
-    """(source, output) when running `cmd` would overwrite something it reads.
-
-    Planning resolves a safe destination, but that is not the last word. The
-    destination can BECOME an alias of a source afterwards -- a hardlink created
-    between confirmation and execution -- and a caller can simply have failed to
-    consider one of its sources at all. This is the final point at which the
-    command is still data rather than a running process, so the check is
-    repeated here for every caller at once.
-
-    Every destination is compared against every source, including the ones argv
-    only implies: concat members, `file:` URLs and file-valued options.
-    `extra_sources` carries what the PLANNER knows and argv cannot show; an
-    explicit declaration beats another heuristic.
-
-    Not a proof of safety. A preflight stat cannot close the window between the
-    check and the open, which is why a caller that can should publish through a
-    staged path rather than write its destination in place.
-    """
-    outputs = command_output_paths(cmd)
-    if not outputs:
-        return None
-    sources = list(command_file_dependencies(cmd)) + list(extra_sources or [])
-    for output in outputs:
-        for source in sources:
-            if source and paths_same(source, output):
-                return source, output
-    return None
 
 
 def unique_numbered_path(path: Path) -> Path:
@@ -371,6 +209,10 @@ __all__ = [
     'concat_list_members',
     'command_file_dependencies',
     'command_output_paths',
+    'command_reads',
+    'command_writes',
+    'command_unresolved_dependencies',
+    'ffmpeg_url_path',
     'command_output_path',
     'command_source_output_conflict',
     'unique_numbered_path',

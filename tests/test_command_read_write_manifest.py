@@ -77,9 +77,24 @@ class TheGuardSeesEveryDestination(unittest.TestCase):
 
     # --- what the command reads ------------------------------------------
 
-    def test_a_file_url_input_is_a_source(self):
-        cmd = [FFMPEG or "ffmpeg", "-i", self.source.as_uri(), str(self.root / "out.mkv")]
+    def test_a_file_prefixed_input_is_a_source(self):
+        # `file:<path>` is the spelling FFmpeg actually opens. The RFC-8089
+        # form is covered below, and it is not this one.
+        cmd = [FFMPEG or "ffmpeg", "-i", f"file:{self.source}", str(self.root / "out.mkv")]
         self.assertIn(self.source, [p.resolve() for p in command_input_paths(cmd)])
+
+    def test_a_file_input_keeps_a_literal_percent_and_hash(self):
+        # FFmpeg's file protocol does NOT percent-decode and has no fragment.
+        # Running the value through a generic URL parser turned `a%20b.wav`
+        # into `a b.wav` and truncated `a#b.wav` at the `#`, so the guard
+        # compared paths FFmpeg never touches and both aliases went
+        # unprotected (A01).
+        for name in ("a%20b.mkv", "a#b.mkv"):
+            with self.subTest(name=name):
+                odd = self.root / name
+                odd.write_bytes(b"source")
+                cmd = [FFMPEG or "ffmpeg", "-i", f"file:{odd}", str(self.root / "out.mkv")]
+                self.assertIn(odd, [p.resolve() for p in command_input_paths(cmd)])
 
     def test_a_concat_list_contributes_its_members(self):
         listing = self.root / "list.txt"
@@ -117,9 +132,22 @@ class TheGuardSeesEveryDestination(unittest.TestCase):
         self.assertIsNotNone(command_source_output_conflict(cmd),
                              "media named only inside the concat list was unprotected")
 
-    def test_a_file_url_source_is_protected(self):
-        cmd = [FFMPEG or "ffmpeg", "-i", self.source.as_uri(), str(self.alias)]
+    def test_a_file_prefixed_source_is_protected(self):
+        cmd = [FFMPEG or "ffmpeg", "-i", f"file:{self.source}", str(self.alias)]
         self.assertIsNotNone(command_source_output_conflict(cmd))
+
+    def test_a_percent_or_hash_source_is_protected(self):
+        for name in ("a%20b.mkv", "a#b.mkv"):
+            with self.subTest(name=name):
+                odd = self.root / name
+                odd.write_bytes(b"source bytes")
+                odd_alias = self.root / f"alias_{abs(hash(name)) % 1000}.mkv"
+                try:
+                    os.link(odd, odd_alias)
+                except (OSError, NotImplementedError) as exc:   # pragma: no cover
+                    self.skipTest(f"no hardlink privilege: {exc}")
+                cmd = [FFMPEG or "ffmpeg", "-i", f"file:{odd}", str(odd_alias)]
+                self.assertIsNotNone(command_source_output_conflict(cmd))
 
     def test_an_attachment_is_protected_from_its_own_output(self):
         cover = self.root / "cover.png"

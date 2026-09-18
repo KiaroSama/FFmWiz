@@ -338,17 +338,30 @@ def run_ffmpeg_with_progress(
     # cannot show. The guard already reads inputs, concat members, `file:` URLs
     # and file-valued options out of the command itself (A01); this is where a
     # caller declares the rest instead of hoping a heuristic finds it.
-    conflict = command_source_output_conflict(cmd, extra_sources=source_dependencies)
-    if conflict is not None:
-        source, destination = conflict
-        message = (f"Refusing to run {label}: the output {destination} is the same file as "
-                   f"the input {source}. FFmpeg would overwrite that source while reading it.")
+    def _refuse(message: str) -> tuple[int, float]:
         log_error(message)
         try:
             appio.error(message)
         except Exception:      # noqa: BLE001 - a console failure must not hide the refusal
             print(message, file=sys.stderr)
         return 1, 0.0
+
+    # An INCOMPLETE read set and a CONFLICT are different answers and both
+    # refuse. "I cannot tell what this reads" was previously indistinguishable
+    # from "it reads nothing", and the second reading is what let an unreadable
+    # or oversized concat list become a command with no protected sources (A01).
+    unresolved = command_unresolved_dependencies(cmd)
+    if unresolved:
+        return _refuse(
+            f"Refusing to run {label}: its sources cannot be established, so no "
+            f"destination can be proved safe. " + " ".join(unresolved))
+
+    conflict = command_source_output_conflict(cmd, extra_sources=source_dependencies)
+    if conflict is not None:
+        source, destination = conflict
+        return _refuse(
+            f"Refusing to run {label}: the output {destination} is the same file as "
+            f"the input {source}. FFmpeg would overwrite that source while reading it.")
 
     progress_cmd = _inject_progress_args(cmd)
     # Record the difference, not the whole command again: the progress variant
