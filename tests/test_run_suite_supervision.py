@@ -142,18 +142,48 @@ class RunnerProbeCase(unittest.TestCase):
 
     def start_runner(self, *arguments: str) -> subprocess.Popen:
         environment = dict(os.environ, PYTHONIOENCODING="utf-8")
-        return subprocess.Popen(
+        process = subprocess.Popen(
             [sys.executable, str(RUNNER), *arguments],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace", cwd=str(PROJECT_ROOT),
             env=environment)
+        # A runner this test KILLS never reaches its own cleanup, so the test
+        # that killed it owns what is left. The runner names its scratch after
+        # its pid precisely so this is possible.
+        self.addCleanup(shutil.rmtree,
+                        Path(tempfile.gettempdir()) / f"ffmwiz_suite_{process.pid}",
+                        ignore_errors=True)
+        return process
+
+    def kill_tree(self, process: subprocess.Popen) -> None:
+        """End a runner AND the module processes it started.
+
+        `process.kill()` alone orphans them: they hold the runner's scratch
+        directory open and outlive the test. The tree has to go while its root
+        is still alive, which is what makes the parent link usable.
+        """
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                           capture_output=True, timeout=120)
+        else:
+            import signal
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                process.kill()
+        try:
+            process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
     def run_runner(self, *arguments: str, bound: float = 300.0):
         process = self.start_runner(*arguments)
         try:
             output, _ = process.communicate(timeout=bound)
         except subprocess.TimeoutExpired:
-            process.kill()
+            self.kill_tree(process)
             process.communicate()
             self.fail(f"the runner did not finish within {bound:.0f}s: "
                       f"a stuck module must be bounded, not waited on forever")
@@ -268,7 +298,7 @@ class WhatFinishedIsOnDiskBeforeTheRunEnds(RunnerProbeCase):
         self.probe(PASSES, suffix="a_ok")
         self.probe(STUCK_THREAD, suffix="b_stuck")
         process = self.start_runner("-k", self.tag, "-j", "1",
-                                    "--module-timeout", "90",
+                                    "--module-timeout", "20",
                                     "--json", str(self.json_path))
         try:
             deadline = time.monotonic() + 90.0
@@ -288,7 +318,7 @@ class WhatFinishedIsOnDiskBeforeTheRunEnds(RunnerProbeCase):
                             "nothing was persisted until the whole run ended, so a "
                             "cancelled or hung run leaves no evidence at all")
         finally:
-            process.kill()
+            self.kill_tree(process)
             process.communicate(timeout=60)
         self.assertTrue(self.json_path.exists(),
                         "the results file did not survive the cancellation")
