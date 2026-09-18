@@ -137,11 +137,14 @@ The log holds the exact FFmpeg command, full FFmpeg output, ffprobe diagnostics,
 
 ## License
 
-License: Proprietary / All Rights Reserved.
+FFmWiz is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License** as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-This project is not open source. Copying, modification, redistribution, publication, sublicensing, hosting, deployment, reverse engineering, or reuse in another project is not allowed without prior written permission from the copyright holder.
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. The full text is in the `LICENSE` file at the repository root, and at <https://www.gnu.org/licenses/>.
 
-See the `LICENSE` file at the repository root for the full notice.
+Two things this project carries that are not its own:
+
+- `ffmwiz/muxcleanup/` is a vendored copy of [MuxCls](https://github.com/KiaroSama/MuxCls), by the same author, which is published under the MIT License. MIT terms permit its inclusion here; the vendored copy is distributed as part of this program under the GPL, and `tests/test_mux_cleanup_port.py` records exactly which lines diverge from upstream and why.
+- FFmpeg and ffprobe are **not** bundled. FFmWiz invokes whatever build is on your `PATH` as a separate program, so their own licensing (LGPL or GPL, depending on how that build was configured) is a matter between you and the build you installed.
 
 ## Donate
 
