@@ -455,6 +455,14 @@ the zoom/pan/width changes — heavy work stays in the backend. Amplitudes are s
 int16 full scale (32768), so quiet stays quiet and loud stays loud. Deep zoom reads raw PCM
 for full detail; zoomed‑out views use the envelope.
 
+**The timeline is the picture's span, and audio sits on the picture clock.** A segment is
+as long as its video declares, never as long as its audio happens to be, and a sample is
+drawn at the instant the picture shows it: in a file whose picture starts a second into
+the container, a sound at container 1.5 s belongs at 0.5 s on the timeline. Each joined
+segment carries its own origin, so one late‑starting input does not shift the segments
+after it. A segment whose audio lies entirely outside its picture is silence of the right
+length, not a shorter timeline.
+
 ### Keyboard shortcuts (Unified Editor)
 
 ```text
