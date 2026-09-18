@@ -30,7 +30,14 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
     for idx, segment in enumerate(req.get("join_segments") or []):
         duration = max(0.001, float(segment.get("duration") or 0.001))
         path = Path(segment.get("path") or req.get("input_path") or "")
-        segments.append({
+        # The segment is CARRIED and then overridden, never rebuilt from a list
+        # of remembered field names. `has_audio` was lost that way once and
+        # `picture_clock_offset` the next time -- the decoder then defaulted the
+        # origin to zero and put a first-input impulse a whole second from where
+        # the picture clock says it is (A04). Copying first means a field added
+        # upstream reaches the consumers without this function being edited.
+        model = dict(segment)
+        model.update({
             "index": idx,
             "path": path,
             "name": str(segment.get("name") or path.name or f"Video {idx + 1}"),
@@ -39,7 +46,9 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
             "duration": duration,
             "label": f"Video {idx + 1}",
             "has_audio": bool(segment.get("has_audio", True)),
+            "picture_clock_offset": float(segment.get("picture_clock_offset") or 0.0),
         })
+        segments.append(model)
         offset += duration
     return segments
 
@@ -50,8 +59,8 @@ def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_s
 
     Shared shape with the QML engine's waveform so both editors lay audio on
     the same clock: `aresample=...:first_pts=0` keeps a late-starting audio
-    stream at its true offset, `atrim` cuts a long input to the segment span
-    and `apad=whole_dur` pads a short one with silence.
+    stream at its true offset, `apad` extends it to the far edge of the wanted
+    interval and `atrim` cuts that interval out.
     """
     span = max(0.001, float(duration))
     start = max(0.0, float(origin or 0.0))
@@ -59,10 +68,16 @@ def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_s
     # `origin` is where the PICTURE starts on the demuxer's clock; audio before
     # it belongs to no part of this timeline. Same contract and same order as
     # the QML engine, so both editors place a sample identically (A04).
+    # PAD BEFORE TRIM. A segment whose audio lies entirely before its picture
+    # has nothing left after the trim, and trimming first handed the graph an
+    # empty stream -- FFmpeg then failed the WHOLE joined decode and every later
+    # segment went with it (A04). Padding to the far edge of the interval first
+    # guarantees the trim always has `span` seconds to take.
     return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
             f"aresample={rate}:first_pts=0,"
+            f"apad=whole_dur={start + span:.6f},"
             f"atrim=start={start:.6f}:end={start + span:.6f},"
-            f"asetpts=PTS-STARTPTS,apad=whole_dur={span:.6f}[{out}]")
+            f"asetpts=PTS-STARTPTS[{out}]")
 
 
 def build_classic_waveform_args(
