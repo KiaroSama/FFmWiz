@@ -21,7 +21,11 @@ Run just this file locally, from the repo root:
 """
 from __future__ import annotations
 
+import pathlib
+import shutil
 import subprocess
+import tempfile
+import threading
 import sys
 import unittest
 
@@ -172,6 +176,131 @@ class OrdinaryLifecycleIsUnchanged(unittest.TestCase):
         self.owner.worker_started()
         self.addCleanup(self.owner.worker_finished)
         self.assertFalse(self.owner.close(worker_timeout=0.3))
+
+
+
+class ATerminationInProgressStillOwnsItsChild(unittest.TestCase):
+    """A03: the registry must not go empty DURING a stop.
+
+    `cancel()` removed the child, then terminated it, then put it back if the
+    stop had failed. For the whole length of the termination the owner reported
+    zero children -- so a `close()` arriving in that window returned True with a
+    live PID, and the caller went on to delete the files that PID was writing.
+
+    The barrier here is deterministic, not a race to lose: termination is held
+    open until the test says otherwise. It demonstrates the Qt-free owner's
+    concurrency contract, not that a Qt UI action reproduces this ordering.
+    """
+
+    def setUp(self) -> None:
+        self.owner = ChildProcessOwner(kill_timeout=2.0)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+        real_terminate = self.owner._terminate
+
+        def held_terminate(proc):
+            self.entered.set()
+            self.release.wait(20)
+            return real_terminate(proc)
+
+        self.owner._terminate = held_terminate
+        self.proc = self.owner.start(SLEEPER, popen=lambda args, **kw: spawn_sleeper())
+        self.addCleanup(self._really_stop)
+
+    def _really_stop(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.kill()
+            try:
+                self.proc.wait(timeout=10)
+            except Exception:       # noqa: BLE001 - best effort in cleanup
+                pass
+
+    def test_the_child_is_still_counted_while_it_is_being_stopped(self):
+        worker = threading.Thread(target=self.owner.cancel, name="canceller")
+        worker.start()
+        self.addCleanup(worker.join, 20)
+        self.assertTrue(self.entered.wait(10), "termination never started")
+        self.assertEqual(1, self.owner.active_children(),
+                         "the owner reported zero children while a stop was in flight")
+        self.assertIsNone(self.proc.poll(), "the fixture's child exited on its own")
+
+    def test_close_refuses_while_a_stop_is_in_flight(self):
+        worker = threading.Thread(target=self.owner.cancel, name="canceller")
+        worker.start()
+        self.addCleanup(worker.join, 20)
+        self.assertTrue(self.entered.wait(10), "termination never started")
+        self.assertFalse(self.owner.close(worker_timeout=0.3),
+                         "close() reported a completed shutdown during a live stop")
+
+    def test_the_transition_completes_once_the_stop_is_allowed_to_finish(self):
+        worker = threading.Thread(target=self.owner.cancel, name="canceller")
+        worker.start()
+        self.assertTrue(self.entered.wait(10))
+        self.release.set()
+        worker.join(20)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(0, self.owner.active_children())
+        self.assertIsNotNone(self.proc.poll(), "the child was never reaped")
+        self.assertTrue(self.owner.close(worker_timeout=1.0))
+
+
+class AFailedStopKeepsItsArtifact(unittest.TestCase):
+    """A03: the file a live child is writing is not the caller's to delete.
+
+    `_load_pcm` stopped its child after a communication error and then removed
+    the PCM in an unconditional `finally` -- even when the stop had been REFUSED
+    and the decoder was still writing into that file. The stop's outcome has to
+    decide, and a retained artifact stays owned and retryable rather than
+    disappearing or being reported as cleaned.
+    """
+
+    def setUp(self) -> None:
+        self.owner = ChildProcessOwner(kill_timeout=0.4)
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="ffmwiz_a03art_"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.artifact = self.root / "decode.pcm"
+        self.artifact.write_bytes(b"partial samples")
+
+    def test_a_retained_artifact_is_listed_with_its_reason(self):
+        self.owner.retain_artifact(self.artifact, "terminate refused")
+        self.assertEqual([self.artifact], self.owner.retained_artifacts())
+        self.assertIn("terminate refused", " ".join(self.owner.retained_reasons()))
+
+    def test_a_retained_artifact_is_not_deleted_while_a_child_is_alive(self):
+        stubborn = Unkillable()
+        self.addCleanup(stubborn.really_stop)
+        self.owner.start(SLEEPER, popen=lambda args, **kw: stubborn)
+        self.owner.retain_artifact(self.artifact, "terminate refused")
+        self.assertFalse(self.owner.sweep_retained(),
+                         "a live child's artifact was swept")
+        self.assertTrue(self.artifact.exists())
+
+    def test_it_is_swept_once_the_owner_is_really_empty(self):
+        self.owner.retain_artifact(self.artifact, "terminate refused")
+        self.assertTrue(self.owner.sweep_retained())
+        self.assertFalse(self.artifact.exists())
+        self.assertEqual([], self.owner.retained_artifacts())
+
+    def test_close_admits_the_shutdown_is_incomplete_while_a_writer_lives(self):
+        # The artifact alone does not make a shutdown incomplete -- an owner
+        # with nothing running can remove it, and then it really is complete.
+        # What must never happen is reporting complete while the WRITER is
+        # alive, because that is when deleting the file is the race.
+        stubborn = Unkillable()
+        self.addCleanup(stubborn.really_stop)
+        self.owner.start(SLEEPER, popen=lambda args, **kw: stubborn)
+        self.owner.retain_artifact(self.artifact, "terminate refused")
+        self.assertFalse(self.owner.close(worker_timeout=0.2),
+                         "cleanup reported complete with a live writer")
+        self.assertTrue(self.artifact.exists(),
+                        "the file a live child is writing was deleted anyway")
+
+    def test_close_completes_and_sweeps_once_nothing_is_running(self):
+        self.owner.retain_artifact(self.artifact, "terminate refused")
+        self.assertTrue(self.owner.close(worker_timeout=0.2))
+        self.assertFalse(self.artifact.exists(),
+                         "the retained file was left behind with nobody responsible")
 
 
 if __name__ == "__main__":
