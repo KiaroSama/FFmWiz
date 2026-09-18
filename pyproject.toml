@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    # Still not published to PyPI; this is an upload guard, not a licence claim.
     "Private :: Do Not Upload",
 ]
 dependencies = [
