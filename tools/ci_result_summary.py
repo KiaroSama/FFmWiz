@@ -111,6 +111,18 @@ def render(payload: dict, label: str, upload: str = "") -> str:
         lines.append(f"- result artifact: **{'uploaded' if kept else 'NOT retained'}**"
                      + ("" if kept else f" (upload {upload}); this summary is the record"))
 
+    # A module that timed out, crashed or never ran is the fact a red job is
+    # read for, and it is invisible in the failure/error counts above when its
+    # process died before it could report anything (A06).
+    unfinished = [(str(item.get("module") or "?"), str(item.get("status")))
+                  for item in modules
+                  if str(item.get("status") or "ok") != "ok"]
+    if unfinished:
+        lines += ["", f"#### Modules that did not finish ({len(unfinished)})", ""]
+        lines += [f"- `{name}`: **{status}**" for name, status in unfinished[:MAX_NAMES]]
+        if len(unfinished) > MAX_NAMES:
+            lines.append(f"- ... and {len(unfinished) - MAX_NAMES} more")
+
     identity_lines = identity(payload.get("environment") or {})
     if identity_lines:
         lines += ["", "#### Identity and tool versions", ""] + identity_lines

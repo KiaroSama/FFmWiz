@@ -261,5 +261,33 @@ class TheWorkflowActuallyRunsIt(unittest.TestCase):
                          "a summary reads steps.upload.outcome from a step with no id")
 
 
+class AModuleThatDidNotFinishIsNamed(unittest.TestCase):
+    """A dead process reports no failures, so the counts alone read as a pass."""
+
+    def render(self, *modules: dict) -> str:
+        payload = {"verdict": "failed", "exit_code": 1, "seconds": 3.0,
+                   "workers": 2, "environment": {}, "modules": list(modules)}
+        return _module().render(payload, "py3.13")
+
+    def module(self, name: str, status: str) -> dict:
+        return {"module": name, "status": status, "seconds": 6.0, "tests": 0,
+                "failures": [], "errors": [], "unexpected": [], "skipped": []}
+
+    def test_a_timeout_is_named_with_its_status(self):
+        text = self.render(self.module("test_stuck", "timeout"))
+        self.assertIn("test_stuck", text)
+        self.assertIn("timeout", text)
+
+    def test_a_crash_and_a_module_that_never_ran_are_told_apart(self):
+        text = self.render(self.module("test_died", "crash"),
+                           self.module("test_never", "not-run"))
+        self.assertIn("crash", text)
+        self.assertIn("not-run", text)
+
+    def test_a_clean_run_says_nothing_about_unfinished_modules(self):
+        healthy = dict(self.module("test_fine", "ok"), tests=12)
+        self.assertNotIn("did not finish", self.render(healthy))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -155,5 +155,33 @@ class QtSuitesAreActuallySelectedInCi(unittest.TestCase):
         self.assertEqual(["test_brand_new_qml_suite"], missing)
 
 
+class TheJobsRequireWhatTheyProvide(unittest.TestCase):
+    """A capability the runner has must not be excusable by a skip.
+
+    The PowerShell suites parametrise over Windows PowerShell 5.1 and pwsh 7
+    and skip when neither is on PATH. The main test job runs on a Windows
+    machine that has both, so such a skip means the suite shrank -- but the
+    command did not pass `--require powershell`, so it shrank silently.
+    """
+
+    def setUp(self) -> None:
+        self.text = WORKFLOW.read_text(encoding="utf-8")
+
+    def main_test_command(self) -> str:
+        for line in self.text.splitlines():
+            if "run_suite.py" in line and "--require ffmpeg" in line and "-k " not in line:
+                return line
+        raise AssertionError("no unfiltered test step found in the workflow")
+
+    def test_the_main_test_job_requires_powershell(self):
+        self.assertIn("--require powershell", self.main_test_command())
+
+    def test_it_still_requires_the_other_installed_capabilities(self):
+        command = self.main_test_command()
+        for capability in ("ffmpeg", "numpy", "wheel"):
+            with self.subTest(capability=capability):
+                self.assertIn(f"--require {capability}", command)
+
+
 if __name__ == "__main__":
     unittest.main()

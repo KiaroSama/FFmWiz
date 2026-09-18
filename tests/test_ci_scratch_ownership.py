@@ -91,6 +91,29 @@ class TheWorkflowNeverSweepsSharedTemp(unittest.TestCase):
                 self.assertIn("-eq $root", script)
                 self.assertIn("ReparsePoint", script)
 
+    def test_each_scratch_is_specific_to_the_run_ATTEMPT(self):
+        # A re-run keeps GITHUB_RUN_ID, so attempt 2 of a leg inherited whatever
+        # attempt 1 left behind on a runner whose RUNNER_TEMP survives. The
+        # attempt is what makes a re-run's scratch its own.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        scratch_lines = [line for line in text.splitlines()
+                         if "ffmwiz-scratch-" in line]
+        self.assertEqual(2, len(scratch_lines), scratch_lines)
+        for line in scratch_lines:
+            with self.subTest(line=line.strip()[:60]):
+                self.assertIn("$env:GITHUB_RUN_ID", line)
+                self.assertIn("$env:GITHUB_RUN_ATTEMPT", line)
+                self.assertIn("$env:GITHUB_JOB", line)
+
+    def test_the_result_file_belongs_to_the_job_that_wrote_it(self):
+        # Every leg used to write, upload and summarise the SAME
+        # $RUNNER_TEMP/results.json, so a re-run of one leg could read the
+        # previous attempt's record and report it as its own.
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("$RUNNER_TEMP/results.json", text)
+        self.assertNotIn("runner.temp }}/results.json", text)
+        self.assertEqual(4, text.count("$FFMWIZ_SCRATCH/results.json"))
+
     def test_no_step_sweeps_runner_temp_by_name(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn('Join-Path $env:RUNNER_TEMP "ffmpeg-*"', text,
