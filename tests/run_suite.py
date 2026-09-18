@@ -3,13 +3,18 @@
 The suite is dominated by real FFmpeg encodes: measured on a 16-core machine it
 spends ~13 s on CPU and the rest waiting on ffmpeg child processes and disk.
 That is exactly the shape parallelism helps, and `unittest` has no parallel
-runner, so this composes `unittest` with `concurrent.futures`.
+runner, so this supervises one child interpreter per test module.
 
-Each worker process runs ONE test module to completion, pulling the next module
-off the queue as it frees up (chunksize=1), so a single slow module cannot
-stall a whole bucket the way a static split would. Module-level isolation is
-what keeps it safe: several suites monkeypatch module globals such as
-`appio.note`, which is only sound while one module owns its interpreter.
+ONE shape for serial and parallel runs alike: every module is executed by
+`run_suite_child.py` in its own process, bounded by a wall ceiling, and its
+record is written to the results file the moment it arrives. `-j` only changes
+how many of those children run at once. That is what makes a module's own
+failures survivable -- an `os._exit` used to take the serial runner down with
+it, and a stuck non-daemon thread used to hang the run with nothing written.
+
+Module-level isolation is also what keeps the suite safe: several modules
+monkeypatch module globals such as `appio.note`, which is only sound while one
+module owns its interpreter.
 
 Not a test file -- named `run_suite.py` so `unittest discover` (test*.py) does
 not try to load the runner as a suite.
@@ -21,169 +26,49 @@ not try to load the runner as a suite.
 from __future__ import annotations
 
 import argparse
-import os
-import re
-import sys
-import gc
 import json
-import threading
-import platform
+import os
 import shutil
+import subprocess
+import sys
+import tempfile
+import threading
 import time
-import traceback
-import unittest
-import warnings
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from concurrent.futures.process import BrokenProcessPool
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TESTS_DIR.parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from run_suite_child import MODULE_THREAD_SETTLE_S, run_module  # noqa: E402,F401
+from run_suite_report import (CAPABILITY_PATTERNS,  # noqa: E402
+                              ENVIRONMENT_SKIP_RE, MAX_DETAIL_CHARS,
+                              classify_skip, environment_report,
+                              probe_capability, probe_executable, probe_import,
+                              trimmed, write_results)
+
+# The self-tests reach for the previous private spellings; they name the same
+# functions, which now belong to the reporting module.
+_probe_executable = probe_executable
+_probe_import = probe_import
+_trimmed = trimmed
+
+CHILD = TESTS_DIR / "run_suite_child.py"
 
 # Leave headroom for the OS, this parent process and the ffmpeg children each
 # worker spawns; saturating every core makes the encodes contend and get slower.
 DEFAULT_WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))
 
-# A skip is legitimate only when the machine genuinely cannot provide the thing
-# (no NVIDIA GPU, no symlink privilege). A skip for a capability the job INSTALLS
-# means the suite silently shrank -- the false green the guard exists to stop.
-#
-# Named capabilities rather than one fuzzy alternation: the old pattern was
-# `ffmpeg|ffprobe|numpy|powershell`, which did not mention PySide6, QtQml or
-# QtQuick. The CI job that installs PySide6 to run the QML behaviour suites
-# therefore reported OK with those very classes skipped -- a false green for the
-# exact dependency the guard was added to enforce (B17).
-CAPABILITY_PATTERNS: dict[str, re.Pattern[str]] = {
-    "ffmpeg": re.compile(r"ffmpeg|ffprobe", re.I),
-    "numpy": re.compile(r"numpy", re.I),
-    "powershell": re.compile(r"powershell|pwsh", re.I),
-    # A word-boundary `qt` too: with the broad `headless` exemption gone (R08), a skip that
-    # says "Qt cannot start headless" has to land on a capability rather than
-    # fall through unattributed. For this project Qt IS PySide6.
-    "pyside6": re.compile(r"pyside6|qtqml|qtquick|qt quick|qml|\bqt\b", re.I),
-    "wheel": re.compile(r"setuptools|wheel", re.I),
-}
+# How long one module gets, from its first import to its last thread. A ceiling,
+# not an expected duration: the slowest module in this suite runs in ~8 s. It
+# exists because nothing INSIDE a hung interpreter can end it -- a stuck
+# non-daemon thread blocks shutdown forever and the run never reports at all.
+MODULE_TIMEOUT_S = 600.0
 
-# Genuinely environmental: no amount of installing fixes them on a given runner.
-# Matched FIRST, so "no usable NVIDIA CUDA/hevc_nvenc hardware" is never blamed
-# on the ffmpeg the job did install.
-#
-# `no usable` is NOT in this list, and must not be put back. It used to be, and
-# it matched first -- so "No usable FFmpeg binary" and "No usable PySide6
-# installation" were both filed as environmental and sailed past `--require
-# ffmpeg` / `--require pyside6`. A required dependency does not become optional
-# because of the wording of the skip that announced its absence.
-#
-# `headless` and `display` are gone for the same reason (R08). They were added
-# for "no display" skips, but the GUI job runs under QT_QPA_PLATFORM=offscreen,
-# where a missing display is not a legitimate excuse -- so the only thing those
-# two words could do was let a Qt capability failure through by wording.
-# Everything left here names hardware or an OS privilege that installing
-# cannot provide.
-ENVIRONMENT_SKIP_RE = re.compile(
-    r"nvenc|nvidia|cuda|symlink|privilege|hardware", re.I)
-
-
-def classify_skip(reason: str) -> str:
-    """Which capability a skip blames, or "" when it is environmental."""
-    if ENVIRONMENT_SKIP_RE.search(reason):
-        return ""
-    for name, pattern in CAPABILITY_PATTERNS.items():
-        if pattern.search(reason):
-            return name
-    return ""
-
-
-def probe_capability(name: str) -> str:
-    """"" when the capability is really present, else why it is not.
-
-    A preflight, so `--require X` fails on the missing dependency itself rather
-    than on the wording of whatever skip happened to mention it -- and fails
-    even when the affected suites skipped for some other reason, or were not
-    selected at all.
-    """
-    import importlib.util
-    import shutil
-
-    if name == "ffmpeg":
-        for tool in ("ffmpeg", "ffprobe"):
-            found = shutil.which(tool)
-            if not found:
-                return f"{tool} is not on PATH"
-            why = _probe_executable(found)
-            if why:
-                return f"{tool} at {found} {why}"
-        return ""
-    if name == "powershell":
-        # Probed by RUNNING it, exactly like ffmpeg above. `which` only proves a
-        # file of that name exists: a wrapper that exits 2 satisfied --require
-        # powershell, and every PowerShell test that then skipped was excused by
-        # a capability the job never actually had (A06).
-        reasons = []
-        for tool in ("powershell", "pwsh"):
-            found = shutil.which(tool)
-            if not found:
-                continue
-            why = _probe_executable(found, ["-NoLogo", "-NoProfile", "-Command", "exit 0"])
-            if not why:
-                return ""
-            reasons.append(f"{tool} at {found} {why}")
-        if reasons:
-            return "; ".join(reasons)
-        return "neither powershell nor pwsh is on PATH"
-    modules = {"numpy": ("numpy",), "pyside6": ("PySide6", "PySide6.QtQml", "PySide6.QtQuick"),
-               "wheel": ("wheel", "setuptools")}
-    for module in modules.get(name, ()):  # pragma: no branch - table-driven
-        if importlib.util.find_spec(module) is None:
-            return f"{module} is not importable"
-        why = _probe_import(module)
-        if why:
-            return why
-    return ""
-
-
-def _probe_executable(path: str, arguments: list[str] | None = None) -> str:
-    """"" when the binary actually RUNS, else why it does not.
-
-    `shutil.which` only proves a file with that name is on PATH. A wrapper that
-    exits 2, or a binary missing a shared library, satisfied `--require` and the
-    suite then skipped every test that needed it (R08, and again for PowerShell
-    in A06). `arguments` is the bounded sentinel command for this tool; FFmpeg
-    answers `-version`, a shell needs its own.
-    """
-    import subprocess
-    sentinel = list(arguments) if arguments else ["-version"]
-    label = " ".join(sentinel)
-    try:
-        result = subprocess.run([path, *sentinel], capture_output=True, timeout=60)
-    except OSError as exc:
-        return f"could not be executed: {exc}"
-    except subprocess.SubprocessError as exc:
-        return f"did not answer `{label}`: {exc}"
-    if result.returncode != 0:
-        return f"exited {result.returncode} for `{label}`"
-    return ""
-
-
-def _probe_import(module: str) -> str:
-    """"" when the module actually IMPORTS, else why it does not.
-
-    `find_spec` only proves a file is in the right place. A package that raises
-    at import time -- a broken Qt install is the usual one -- has a spec and no
-    working module, and that satisfied `--require pyside6` (R08). The import
-    runs in a FRESH interpreter so a half-initialised module cannot poison this
-    process, and it is bounded.
-    """
-    import subprocess
-    try:
-        result = subprocess.run([sys.executable, "-c", f"import {module}"],
-                                capture_output=True, text=True, timeout=180)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"{module} could not be probed: {exc}"
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip().splitlines()
-        return f"{module} fails at import: {detail[-1] if detail else 'unknown error'}"
-    return ""
+# Enough of the child's console output to act on, never enough to bury the file.
+MAX_LOG_TAIL = 4000
 
 
 def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
@@ -214,165 +99,107 @@ def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
     return sorted(names, key=lambda name: (rank.get(name, len(slow_first)), name))
 
 
-# A traceback is the useful part of a failure record; a 200 KB one is not, and
-# the file has to stay readable. Keep the head and the tail, which is where the
-# cause and the assertion live.
-MAX_DETAIL_CHARS = 4000
+def _module_problem(name: str, status: str, seconds: float, detail: str) -> dict:
+    """A module that did not report for itself, shaped like one that did.
 
-
-def _trimmed(text: str) -> str:
-    text = str(text or "")
-    if len(text) <= MAX_DETAIL_CHARS:
-        return text
-    half = MAX_DETAIL_CHARS // 2
-    return f"{text[:half]}\n... [{len(text) - MAX_DETAIL_CHARS} characters omitted] ...\n{text[-half:]}"
-
-
-def _worker_crash_record(name: str, reason) -> dict:
-    """A module whose worker died: a real failure with a real traceback.
-
-    Shaped exactly like a normal module record so every consumer -- the verdict,
-    the printed failures, the JSON -- handles it without a special case. An
-    abrupt exit carries no traceback of its own, so the cause is named instead
-    of left as an empty error.
+    Same keys as a real record so the verdict, the printed failures and the JSON
+    all handle it without a special case -- and a distinct `status`, because a
+    module killed at its ceiling, one whose process died and one that never
+    started are three different facts and none of them is a pass.
     """
-    text = "".join(traceback.format_exception(reason)) if isinstance(reason, BaseException) \
-        else str(reason)
     return {
-        "module": name,
-        "seconds": 0.0,
-        "run": 0,
-        "unraisable": [],
-        "failures": [],
-        "errors": [(f"{name} (worker crash)",
-                    f"the worker process running {name} did not return a result.\n{text}")],
-        "skipped": [],
-        "unexpected": [],
+        "module": name, "status": status, "seconds": seconds, "run": 0,
+        "unraisable": [], "failures": [],
+        "errors": [(f"{name} ({status})", detail)],
+        "skipped": [], "unexpected": [], "ok": False,
     }
 
 
-# How long a module's own threads get to finish after its last test returned.
-# A ceiling, not an expected duration: a test that needs longer should join its
-# thread itself, which is what makes the wait deterministic.
-MODULE_THREAD_SETTLE_S = 10.0
-
-
-def _settle_module_threads(before: set, module_name: str) -> list[tuple[str, str]]:
-    """Wait for the threads THIS module started; report the ones that outlive it.
-
-    Returns the same (label, text) shape the unraisable/thread hooks produce, so
-    a leaked worker lands in the module's errors like any other defect instead
-    of disappearing into the next module's run.
-    """
-    new_threads = [thread for thread in threading.enumerate()
-                   if thread not in before and thread is not threading.current_thread()]
-    if not new_threads:
-        return []
-    deadline = time.monotonic() + MODULE_THREAD_SETTLE_S
-    for thread in new_threads:
-        if thread.daemon:
-            continue          # a daemon thread is declared not-owned-to-completion
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        try:
-            thread.join(remaining)
-        except RuntimeError:  # pragma: no cover - joining self or a dead thread
-            continue
-    leaked = [thread for thread in new_threads if thread.is_alive()]
-    return [(f"{module_name} (leaked thread {thread.name})",
-             f"still running {MODULE_THREAD_SETTLE_S:.0f}s after the module's last test "
-             f"returned; daemon={thread.daemon}. A test owns what it starts: join it, "
-             f"or give it a bounded stop.")
-            for thread in leaked]
-
-
-def run_module(name: str) -> dict:
-    """Run one test module in this process and return a picklable summary."""
-    module_name = name
-    # Unclosed subprocess pipes are a real, previously shipped bug class.
-    warnings.simplefilter("error", ResourceWarning)
-    sys.path.insert(0, str(TESTS_DIR))
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-    # An exception raised inside __del__ -- which is where an unclosed file or
-    # pipe turns the ResourceWarning above into one -- cannot propagate. Python
-    # hands it to sys.unraisablehook, which PRINTS it and moves on, so a real
-    # leak produced "1 test, 0 errors" and a green suite. Collect them here
-    # instead, as module errors.
-    unraisable: list[tuple[str, str]] = []
-    previous_hook = sys.unraisablehook
-    previous_thread_hook = threading.excepthook
-
-    def collect_unraisable(entry) -> None:
-        # Never raise out of this hook, and never keep a reference to the
-        # object being finalized: only formatted text crosses back.
-        try:
-            where = getattr(entry, "err_msg", None) or "Exception ignored in"
-            text = "".join(traceback.format_exception(
-                entry.exc_type, entry.exc_value, entry.exc_traceback))
-            unraisable.append((f"{name} (unraisable)", f"{where}\n{text}"))
-        except Exception:       # noqa: BLE001 - a broken hook hides everything
-            unraisable.append((f"{name} (unraisable)", "unraisable exception (details unavailable)"))
-
-    def collect_thread_exception(entry) -> None:
-        # An exception that escapes a thread's run() is printed by the default
-        # hook and changes nothing else: a test that joins that thread still
-        # passed, and the runner still reported OK (R08). Same contract as the
-        # unraisable hook -- never raise, keep only text.
-        try:
-            name = getattr(entry.thread, "name", "thread")
-            text = "".join(traceback.format_exception(
-                entry.exc_type, entry.exc_value, entry.exc_traceback))
-            unraisable.append((f"{module_name} (thread {name})", text))
-        except Exception:       # noqa: BLE001 - a broken hook hides everything
-            unraisable.append((f"{module_name} (thread)", "thread exception (details unavailable)"))
-
-    sys.unraisablehook = collect_unraisable
-    threading.excepthook = collect_thread_exception
-    started = time.monotonic()
-    before = set(threading.enumerate())
+def _log_tail(path: Path) -> str:
     try:
-        suite = unittest.defaultTestLoader.loadTestsFromName(name)
-        stream = __import__("io").StringIO()
-        result = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
-        # A module is not finished while the threads its tests started are
-        # still running. The hooks used to be restored the moment `run()`
-        # returned, so a thread that raised a fraction of a second later met
-        # the DEFAULT hook, which prints and returns -- module green, run green
-        # (A06). Only threads that appeared during this module are waited for;
-        # joining anything else would mean waiting on the pool's own workers.
-        unraisable.extend(_settle_module_threads(before, module_name))
-        # Force pending finalizers to run while the hook is still installed,
-        # so a leak that CPython had not collected yet is still attributed to
-        # the module that caused it.
-        gc.collect()
-    finally:
-        # Restored in `finally` and in this order, so a failure inside the run
-        # cannot leave the interpreter with this module's hooks installed.
-        sys.unraisablehook = previous_hook
-        threading.excepthook = previous_thread_hook
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-MAX_LOG_TAIL:] if len(text) > MAX_LOG_TAIL else text
 
-    return {
-        "module": name,
-        "seconds": time.monotonic() - started,
-        "run": result.testsRun,
-        "unraisable": list(unraisable),
-        # Tracebacks are already formatted strings; the TestCase objects are not
-        # reliably picklable, so only the text crosses the process boundary.
-        "failures": [(str(test), text) for test, text in result.failures],
-        "errors": [(str(test), text) for test, text in result.errors] + list(unraisable),
-        "skipped": [(str(test), why) for test, why in result.skipped],
-        # An @unittest.expectedFailure test that PASSES lands here and in
-        # nothing else -- not in `failures`, not in `errors`. The markers in
-        # this suite are self-removing: each says "delete me once the defect
-        # is fixed", and the signal to delete it is the run going red.
-        # Without this list the verdict below could not see them, so a fixed
-        # defect kept its marker and the suite still said OK -- which is how
-        # the join builder gap stayed marked after it was closed.
-        "unexpected": [str(test) for test in result.unexpectedSuccesses],
-        "ok": result.wasSuccessful(),
-    }
+
+def _kill_tree(process: subprocess.Popen) -> None:
+    """End the module's process AND whatever it started, then prove it is gone.
+
+    A test module spawns real ffmpeg children; killing only the interpreter
+    would leave them running after the run reported. Nothing outside the tree
+    this runner started is ever touched.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                           capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            process.kill()
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            process.kill()
+    try:
+        process.wait(timeout=60)
+    except subprocess.TimeoutExpired:      # pragma: no cover - the OS refused
+        pass
+
+
+def supervise_module(name: str, scratch: Path, timeout: float,
+                     live: dict | None = None) -> dict:
+    """Run one module in its own interpreter and come back with a record.
+
+    Always comes back: a module that hangs is killed at the ceiling, a module
+    whose process dies leaves its exit code and console tail, and either way the
+    caller gets something to write down.
+    """
+    result_path = scratch / f"{name}.json"
+    log_path = scratch / f"{name}.log"
+    started = time.monotonic()
+    arguments = [sys.executable, str(CHILD), name, str(result_path), f"{timeout:.3f}"]
+    options: dict = {}
+    if os.name != "nt":
+        # Its own session, so the whole tree can be signalled at once.
+        options["start_new_session"] = True
+    with open(log_path, "wb") as log:
+        process = subprocess.Popen(arguments, stdout=log, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.DEVNULL, cwd=str(PROJECT_ROOT),
+                                   **options)
+        if live is not None:
+            live[name] = process
+        try:
+            code = process.wait(timeout=timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            _kill_tree(process)
+            code, timed_out = None, True
+        finally:
+            if live is not None:
+                live.pop(name, None)
+    seconds = time.monotonic() - started
+    tail = _log_tail(log_path)
+
+    if result_path.exists():
+        try:
+            record = json.loads(result_path.read_text(encoding="utf-8"))
+            record["seconds"] = seconds
+            return record
+        except (ValueError, OSError):
+            pass                            # fall through to the crash record
+    if timed_out:
+        return _module_problem(
+            name, "timeout", seconds,
+            f"the module was killed after {timeout:.0f}s. It never finished: a test "
+            f"left work running that nothing joined or stopped, and no result of "
+            f"its own reached disk.\nlast output:\n{tail}")
+    return _module_problem(
+        name, "crash", seconds,
+        f"the interpreter running this module exited {code} without writing a "
+        f"result. The module took its own process down -- os._exit, a segfault in "
+        f"a C extension, or an OOM kill.\nlast output:\n{tail}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -380,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
 
     A red CI job is exactly the run whose log is hardest to read, so the result
     file is written on every exit path -- including the ones that refuse to run
-    anything at all.
+    anything at all, and every time one more module finishes.
     """
     started = time.monotonic()
     collected: list[dict] = []
@@ -392,8 +219,34 @@ def main(argv: list[str] | None = None) -> int:
         arguments = parsed.get("args")
         if arguments is not None and getattr(arguments, "json", None):
             write_results(arguments.json, collected, verdict,
-                          time.monotonic() - started, arguments)
+                          time.monotonic() - started, arguments,
+                          parsed.get("environment"))
     return verdict
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("-j", "--jobs", type=int, default=DEFAULT_WORKERS,
+                        help=f"module processes at once (default {DEFAULT_WORKERS})")
+    parser.add_argument("-k", "--filter", action="append", default=None,
+                        help="only modules whose name contains this substring; "
+                             "repeat to select several")
+    parser.add_argument("--strict-skips", action="store_true",
+                        help="fail when a suite skipped for any installable capability")
+    parser.add_argument("--json", metavar="PATH", default=None,
+                        help="write a machine-readable result file (modules, "
+                             "counts, failures, skip reasons, environment)")
+    parser.add_argument("--module-timeout", type=float, default=MODULE_TIMEOUT_S,
+                        metavar="SECONDS",
+                        help=f"ceiling for one module, first import to last "
+                             f"thread (default {MODULE_TIMEOUT_S:.0f})")
+    parser.add_argument("--require", action="append", default=None,
+                        metavar="CAPABILITY",
+                        help="fail when a suite skipped for THIS capability "
+                             "(repeat or comma-separate: "
+                             "ffmpeg, numpy, powershell, pyside6, wheel). "
+                             "Use it in a job that installs the dependency.")
+    return parser
 
 
 def _run(argv, collected: list[dict], parsed: dict) -> int:
@@ -406,24 +259,7 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
         except (AttributeError, ValueError):
             pass
 
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("-j", "--jobs", type=int, default=DEFAULT_WORKERS,
-                        help=f"worker processes (default {DEFAULT_WORKERS})")
-    parser.add_argument("-k", "--filter", action="append", default=None,
-                        help="only modules whose name contains this substring; "
-                             "repeat to select several")
-    parser.add_argument("--strict-skips", action="store_true",
-                        help="fail when a suite skipped for any installable capability")
-    parser.add_argument("--json", metavar="PATH", default=None,
-                        help="write a machine-readable result file (modules, "
-                             "counts, failures, skip reasons, environment)")
-    parser.add_argument("--require", action="append", default=None,
-                        metavar="CAPABILITY",
-                        help="fail when a suite skipped for THIS capability "
-                             "(repeat or comma-separate: "
-                             "ffmpeg, numpy, powershell, pyside6, wheel). "
-                             "Use it in a job that installs the dependency.")
-    args = parser.parse_args(argv)
+    args = _parser().parse_args(argv)
     parsed["args"] = args
 
     required = {name.strip().lower()
@@ -449,49 +285,82 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
         print("no test modules matched", file=sys.stderr)
         return 1
 
+    # Probed once, here, so the incremental writes below cost nothing and a
+    # hung tool cannot stall every one of them.
+    parsed["environment"] = environment_report()
+
     started = time.monotonic()
-    # `collected` IS the results list, not a copy taken at the end: `main`
-    # writes it from a `finally`, so anything appended here survives an
-    # exception. `list(pool.map(...))` used to collect only after every module
-    # had returned, so one worker dying abruptly threw away the records of the
-    # modules that had already finished and left `modules: []` behind (A06).
     results: list[dict] = collected
-    if args.jobs <= 1:
-        for name in modules:
-            results.append(run_module(name))
-    else:
-        with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-            # Submitted individually rather than mapped, so each result is kept
-            # the moment it arrives and a broken worker is attributable.
-            pending = {pool.submit(run_module, name): name for name in modules}
+    scratch = Path(tempfile.mkdtemp(prefix="ffmwiz_suite_"))
+    try:
+        _execute(modules, args, results, parsed, scratch, started)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    elapsed = time.monotonic() - started
+    return _report(results, args, required, elapsed)
+
+
+def _execute(modules: list[str], args, results: list[dict], parsed: dict,
+             scratch: Path, started: float) -> None:
+    """Run every module and persist each record the moment it arrives.
+
+    `results` IS the list `main` writes from its `finally`, not a copy taken at
+    the end: a run that is cancelled, killed or hangs still leaves the record of
+    everything that had finished (A06).
+    """
+    lock = threading.Lock()
+    live: dict[str, subprocess.Popen] = {}
+    timeout = max(1.0, float(args.module_timeout))
+
+    def keep(record: dict) -> None:
+        with lock:
+            results.append(record)
+            if args.json:
+                write_results(args.json, results, 1, time.monotonic() - started,
+                              args, parsed.get("environment"))
+
+    workers = max(1, int(args.jobs))
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            pending = {pool.submit(supervise_module, name, scratch, timeout, live): name
+                       for name in modules}
             recorded: set[str] = set()
             try:
                 for future in as_completed(pending):
                     name = pending[future]
                     recorded.add(name)
                     try:
-                        results.append(future.result())
-                    except Exception as exc:   # noqa: BLE001 - any worker fault
-                        # BrokenProcessPool included: an abrupt exit gives every
-                        # outstanding future this same exception.
-                        results.append(_worker_crash_record(name, exc))
+                        keep(future.result())
+                    except Exception as exc:    # noqa: BLE001 - supervising failed
+                        keep(_module_problem(name, "crash", 0.0,
+                                             f"the module could not be supervised: {exc!r}"))
             finally:
                 # Completeness is the point: every module that was submitted
                 # gets a record, so "modules" can never be shorter than the
                 # selection and quietly read as "these are all that ran" (A06).
                 for name in modules:
                     if name not in recorded:
-                        results.append(_worker_crash_record(
-                            name, "not run: the worker pool broke before this module "
-                                  "produced a result"))
-    elapsed = time.monotonic() - started
+                        keep(_module_problem(
+                            name, "not-run", 0.0,
+                            "this module was selected and never produced a result."))
+    finally:
+        # Nothing this runner started outlives it, including on the cancelled
+        # path: a module process is owned until it is proven gone.
+        for process in list(live.values()):
+            if process.poll() is None:
+                _kill_tree(process)
 
+
+def _report(results: list[dict], args, required: set[str], elapsed: float) -> int:
     total = sum(item["run"] for item in results)
     # A module that matched the selection but ran nothing is a silent hole: a
     # renamed class, a bad -k, an import guard that swallowed everything. It
     # used to be accepted by the parent verdict as zero tests, zero failures.
+    # A timeout or a crash is NOT that hole -- it has its own record and its own
+    # message, and reporting it as "ran no tests" would hide what happened.
     empty = [item["module"] for item in results
-             if item["run"] == 0 and not item["skipped"]]
+             if item.get("status", "ok") == "ok" and item["run"] == 0
+             and not item["skipped"] and not item["errors"] and not item["failures"]]
     failures = [entry for item in results for entry in item["failures"]]
     errors = [entry for item in results for entry in item["errors"]]
     skipped = [entry for item in results for entry in item["skipped"]]
@@ -507,6 +376,10 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
         f"{item['module']} {item['seconds']:.1f}s" for item in slowest))
     print(f"\nRan {total} tests in {elapsed:.2f}s across {args.jobs} worker(s)")
 
+    unfinished = [item for item in results if item.get("status", "ok") != "ok"]
+    for item in unfinished:
+        print(f"{item['status'].upper()}: {item['module']}")
+
     for test in unexpected:
         print("=" * 70)
         print(f"UNEXPECTED SUCCESS: {test}")
@@ -520,13 +393,13 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
         print("a matched module with zero tests is a hole in the suite, not a pass.")
         return 1
 
-    if total == 0:
-        print("the selection ran 0 tests")
-        return 1
-
     if failures or errors or unexpected:
         print(f"FAILED (failures={len(failures)}, errors={len(errors)}, "
               f"unexpected successes={len(unexpected)})")
+        return 1
+
+    if total == 0:
+        print("the selection ran 0 tests")
         return 1
 
     if args.strict_skips or required:
@@ -545,72 +418,6 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
 
     print("OK" + (f" (skipped={len(skipped)})" if skipped else ""))
     return 0
-
-
-def environment_report() -> dict:
-    """Versions and tool paths a failed CI run needs and a log line loses."""
-    report = {
-        "python": sys.version.split()[0],
-        "implementation": platform.python_implementation(),
-        "platform": platform.platform(),
-        "cpu_count": os.cpu_count(),
-    }
-    for tool in ("ffmpeg", "ffprobe", "powershell", "pwsh"):
-        found = shutil.which(tool)
-        report[tool] = found or ""
-        if found and tool in ("ffmpeg", "ffprobe"):
-            try:
-                import subprocess
-                first = subprocess.run([found, "-version"], capture_output=True,
-                                       text=True, timeout=60).stdout.splitlines()
-                report[tool + "_version"] = first[0] if first else ""
-            except Exception as exc:      # noqa: BLE001 - reporting must not fail the run
-                report[tool + "_version"] = f"unavailable: {exc}"
-    for module in ("numpy", "PySide6", "setuptools", "wheel"):
-        try:
-            report[module] = __import__(module).__version__
-        except Exception:                 # noqa: BLE001
-            report[module] = ""
-    return report
-
-
-def write_results(path: str, results: list[dict], verdict: int, elapsed: float,
-                  arguments) -> None:
-    """One JSON file per run, so a red CI job is readable without the log."""
-    payload = {
-        "verdict": "ok" if verdict == 0 else "failed",
-        "exit_code": verdict,
-        "seconds": round(elapsed, 3),
-        "workers": arguments.jobs,
-        "selection": arguments.filter or [],
-        "required": arguments.require or [],
-        "environment": environment_report(),
-        "modules": [
-            {
-                "module": item["module"],
-                "seconds": round(item["seconds"], 3),
-                "tests": item["run"],
-                # Name AND text. A name alone says a thread failed but not what
-                # it raised, so the record a red CI job is read from could not
-                # be acted on without the log it was meant to replace (A06).
-                "failures": [{"test": name, "detail": _trimmed(text)}
-                             for name, text in item["failures"]],
-                "errors": [{"test": name, "detail": _trimmed(text)}
-                           for name, text in item["errors"]],
-                "unexpected": item["unexpected"],
-                "skipped": [{"test": name, "reason": why,
-                             "capability": classify_skip(why)}
-                            for name, why in item["skipped"]],
-            }
-            for item in results
-        ],
-    }
-    try:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                              encoding="utf-8")
-    except OSError as exc:
-        print(f"could not write {path}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

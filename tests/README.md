@@ -5,20 +5,40 @@ From the repo root:
     python tests/run_suite.py                     # whole suite, in parallel
     python tests/run_suite.py -k practical        # only matching modules
     python tests/run_suite.py -k join -k reverse  # -k repeats, and unions
-    python tests/run_suite.py -j 1                # serial, same reporting
+    python tests/run_suite.py -j 1                # serial, same shape and reporting
     python tests/run_suite.py --json results.json # machine-readable result file
+    python tests/run_suite.py --module-timeout 60 # a tighter per-module ceiling
 
     python -m unittest discover -s tests          # whole suite, stdlib runner
     python -m unittest discover -s tests -p test_practical_ffmpeg.py   # one module
 
-`run_suite.py` is what CI runs. It gives each test module its own worker process
-and pulls the next module off the queue as a worker frees up: measured on a
-16-core machine, ~2450 tests take ~306 s at `-j 8` — the suite is
-dominated by real ffmpeg child processes, not CPU. It adds no dependency; the project keeps a
-zero-test-dependency policy, so it is `unittest` plus `concurrent.futures`.
-Module-per-process is also what keeps it safe: several suites monkeypatch module
-globals such as `appio.note`, which is only sound while one module owns its
-interpreter.
+`run_suite.py` is what CI runs. It gives each test module its own child
+interpreter — `run_suite_child.py`, one process per module — and `-j` only decides
+how many run at once: measured on a 16-core machine, ~2620 tests take ~316 s at
+`-j 8`, because the suite is dominated by real ffmpeg child processes rather than
+CPU. It adds no dependency; the project keeps a zero-test-dependency policy, so it
+is `unittest` plus `subprocess`. Module-per-process is also what keeps it safe:
+several suites monkeypatch module globals such as `appio.note`, which is only
+sound while one module owns its interpreter.
+
+Serial and parallel runs are the SAME shape, which is what makes a module's own
+failures survivable:
+
+* a module is bounded by `--module-timeout` (default 600 s), from its first import
+  to its last thread. Nothing inside a hung interpreter can end it — a stuck
+  non-daemon thread blocks shutdown forever — so the ceiling belongs to the parent,
+  which kills the module's whole process tree and records a **timeout**.
+* a module that takes its own process down (`os._exit`, a segfault in a C
+  extension, an OOM kill) loses only itself and is recorded as a **crash** with its
+  exit code and console tail. In `-j 1` it used to take the runner with it.
+* every record is written to the `--json` file the moment it arrives, so a run that
+  is cancelled, killed or hangs still leaves the evidence of what had finished.
+* the child keeps its exception hooks installed for its whole life, so a thread
+  started BY a thread — which no snapshot of "threads this module started" contains
+  — is still attributed to the module that started it.
+
+`ok`, `timeout`, `crash` and `not-run` are four different statuses in that file and
+in the CI step summary. None of them reads as a pass.
 
 A skip is classified by the CAPABILITY it names — `ffmpeg`, `numpy`, `powershell`,
 `pyside6`, `wheel` — and two flags act on that:
