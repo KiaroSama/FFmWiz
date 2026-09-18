@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from pathlib import Path
 
 
 class ChildProcessOwner:
@@ -39,6 +40,16 @@ class ChildProcessOwner:
         # so a later attempt can finish the job and a caller can say what is
         # still holding the files (A03).
         self._unreaped: dict[int, str] = {}
+        # id(proc) for children whose termination is IN FLIGHT. A stop takes
+        # real time, and for the length of it the child was neither registered
+        # nor reaped -- so a concurrent close() saw an empty owner and reported
+        # a completed shutdown over a live PID (A03).
+        self._stopping: set[int] = set()
+        # Files a child was still writing when its stop failed. They are OWNED,
+        # not leaked and not deleted: removing one while the writer is alive is
+        # the race this class exists to prevent, and forgetting it is how a
+        # partial PCM stayed on disk with nobody responsible for it (A03).
+        self._retained: dict[str, str] = {}
         self._closed = False
         self._generation = 0
         self._workers = 0
@@ -53,8 +64,56 @@ class ChildProcessOwner:
             return self._closed
 
     def active_children(self) -> int:
+        """How many children this owner is still responsible for.
+
+        Includes one whose stop has started and not finished. Ownership ends at
+        confirmed exit, so the count may not drop before then.
+        """
         with self._lock:
             return len(self._children)
+
+    def stopping(self) -> int:
+        """How many terminations are in flight right now."""
+        with self._lock:
+            return len(self._stopping)
+
+    # --- artifacts a failed stop left behind -------------------------------
+    def retain_artifact(self, path, reason: str) -> None:
+        """Keep a file whose writer could not be stopped, with the reason why."""
+        if path is None:
+            return
+        with self._lock:
+            self._retained[str(path)] = str(reason or "the writer could not be stopped")
+
+    def retained_artifacts(self) -> list:
+        with self._lock:
+            return [Path(text) for text in self._retained]
+
+    def retained_reasons(self) -> list[str]:
+        with self._lock:
+            return [f"{text}: {why}" for text, why in self._retained.items()]
+
+    def sweep_retained(self) -> bool:
+        """Remove retained artifacts once nothing is still writing them.
+
+        False while any child is alive or any stop is in flight -- that is the
+        whole point of retaining them. False too when a removal fails, so the
+        caller never reports a cleanup that did not happen.
+        """
+        with self._lock:
+            if self._children or self._stopping:
+                return False
+            pending = list(self._retained)
+        removed = True
+        for text in pending:
+            try:
+                Path(text).unlink(missing_ok=True)
+            except OSError:
+                removed = False
+                continue
+            with self._lock:
+                self._retained.pop(text, None)
+        return removed
 
     def active_workers(self) -> int:
         with self._lock:
@@ -144,15 +203,17 @@ class ChildProcessOwner:
         if proc is None:
             return True
         with self._lock:
-            entry = self._children.pop(id(proc), None)
-        why = self._terminate(proc)
-        if why:
+            self._stopping.add(id(proc))
+        try:
+            why = self._terminate(proc)
+        finally:
             with self._lock:
-                if entry is not None:
-                    self._children[id(proc)] = entry
-                self._unreaped[id(proc)] = why
-            return False
+                self._stopping.discard(id(proc))
         with self._lock:
+            if why:
+                self._unreaped[id(proc)] = why
+                return False
+            self._children.pop(id(proc), None)
             self._unreaped.pop(id(proc), None)
         return True
 
@@ -165,19 +226,27 @@ class ChildProcessOwner:
         `active_children()` read 0 while the process was still running (A03).
         """
         with self._lock:
+            # Selected, NOT removed: the entry stays until the exit is
+            # confirmed. A stop already in flight is left to its owner rather
+            # than terminated twice.
             doomed = [entry for entry in self._children.values()
-                      if keep_generation is None or entry[1] != int(keep_generation)]
+                      if (keep_generation is None or entry[1] != int(keep_generation))
+                      and id(entry[0]) not in self._stopping]
             for proc, _generation in doomed:
-                self._children.pop(id(proc), None)
+                self._stopping.add(id(proc))
         stopped = 0
-        for proc, generation in doomed:
-            why = self._terminate(proc)
+        for proc, _generation in doomed:
+            try:
+                why = self._terminate(proc)
+            finally:
+                with self._lock:
+                    self._stopping.discard(id(proc))
             with self._lock:
                 if why:
-                    self._children[id(proc)] = (proc, generation)
                     self._unreaped[id(proc)] = why
                 else:
                     stopped += 1
+                    self._children.pop(id(proc), None)
                     self._unreaped.pop(id(proc), None)
         return stopped
 
@@ -200,10 +269,17 @@ class ChildProcessOwner:
         idle = self.wait_idle(worker_timeout)
         self.cancel()      # a worker may have raced one last child in
         with self._lock:
-            # A surviving child counts too. Workers idle while a process they
-            # started is still writing is exactly the state in which deleting
-            # its directory is a race (A03).
-            return bool(idle) and self._workers == 0 and not self._children
+            # A surviving child counts, and so does one still being stopped.
+            # Workers idle while a process they started is alive is exactly the
+            # state in which deleting its directory is a race (A03).
+            complete = (bool(idle) and self._workers == 0
+                        and not self._children and not self._stopping)
+        if not complete:
+            return False
+        # A retained artifact means a previous stop failed and its file is still
+        # here. Sweeping now is safe -- nothing is running -- and a sweep that
+        # cannot finish keeps the shutdown honestly incomplete.
+        return self.sweep_retained()
 
     def _terminate(self, proc) -> str:
         """Bounded terminate -> kill -> reap. "" on confirmed exit, else why not.

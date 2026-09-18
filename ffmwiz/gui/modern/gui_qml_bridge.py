@@ -169,6 +169,9 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             ffmpeg = str(self._req.get("ffmpeg") or "ffmpeg")
             fd, pcm_path = tempfile.mkstemp(suffix=".pcm", prefix="ffmwiz_qmlwave_")
             os.close(fd)
+            # Whether this function may delete the PCM at the end. A refused
+            # stop transfers that decision to the owner (A03).
+            stopped_cleanly = True
             try:
                 args = build_wave_decode_args(self._req, pcm_path)
                 # Popen through the owner, not subprocess.run: run() holds the
@@ -183,10 +186,18 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                     _, stderr = proc.communicate()
                 except BaseException:
                     # Communication failed, so nothing is known about the child.
-                    # Stop and reap it BEFORE releasing anything: an
-                    # unconditional finish() here handed cleanup a green light
-                    # to delete the PCM a live decoder was still writing (A03).
-                    self._wave_children.stop(proc)
+                    # Stop it BEFORE releasing anything -- and READ the answer:
+                    # the stop can be refused, and then the decoder is still
+                    # writing this PCM. Deleting it in the `finally` below was
+                    # the same mistake one level down (A03).
+                    if not self._wave_children.stop(proc):
+                        stopped_cleanly = False
+                        self._wave_children.retain_artifact(
+                            pcm_path, "the waveform decoder could not be stopped")
+                        _log("WARNING",
+                             f"Waveform decode could not be stopped; keeping {pcm_path} "
+                             "for a later retry rather than deleting a file it may "
+                             "still be writing")
                     raise
                 else:
                     self._wave_children.finish(proc)
@@ -206,11 +217,14 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             finally:
                 # `finally`, and after the child is reaped: on Windows the file
                 # stays locked while ffmpeg holds it, so removing it earlier
-                # silently failed and left the PCM behind.
-                try:
-                    os.remove(pcm_path)
-                except OSError as exc:
-                    _log("DEBUG", f"Could not remove the waveform PCM {pcm_path}: {exc}")
+                # silently failed and left the PCM behind. Skipped entirely when
+                # the stop was refused -- the owner holds that file now, and it
+                # sweeps it when nothing is writing any more.
+                if stopped_cleanly:
+                    try:
+                        os.remove(pcm_path)
+                    except OSError as exc:
+                        _log("DEBUG", f"Could not remove the waveform PCM {pcm_path}: {exc}")
             pcm = decode_pcm_samples(data)
             self._pcm = pcm
             self._wave_rate = WAVE_RATE
@@ -383,10 +397,19 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 # A worker is still running and still owns what it is writing.
                 # Deleting its directory now is the race this guard exists for;
                 # the temp directory is reported instead of silently removed.
+                # The diagnostics travel with the verdict: "incomplete" without
+                # the reason leaves the next reader guessing which child or
+                # which file is still held (A03).
+                detail = []
+                for owner, name in ((self._reverse_children, "reverse"),
+                                    (self._wave_children, "waveform")):
+                    detail.extend(f"{name}: {why}" for why in owner.unreaped())
+                    detail.extend(f"{name} kept: {why}" for why in owner.retained_reasons())
                 _log("WARNING",
                      f"Shutdown incomplete (reverse={reverse_done}, waveform={wave_done}); "
                      f"leaving {self._rev_temp.name} in place rather than deleting files "
-                     f"a worker still owns")
+                     f"a worker still owns."
+                     + (" " + "; ".join(detail) if detail else ""))
                 return False
             # The children are reaped by now, so the handles Windows kept on
             # the proxies are gone; a short bounded retry still covers an
