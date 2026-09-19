@@ -26,10 +26,9 @@ not try to load the runner as a suite.
 from __future__ import annotations
 
 import argparse
-import json
+import math
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -99,107 +98,13 @@ def discover_modules(patterns: str | list[str] | None = None) -> list[str]:
     return sorted(names, key=lambda name: (rank.get(name, len(slow_first)), name))
 
 
-def _module_problem(name: str, status: str, seconds: float, detail: str) -> dict:
-    """A module that did not report for itself, shaped like one that did.
-
-    Same keys as a real record so the verdict, the printed failures and the JSON
-    all handle it without a special case -- and a distinct `status`, because a
-    module killed at its ceiling, one whose process died and one that never
-    started are three different facts and none of them is a pass.
-    """
-    return {
-        "module": name, "status": status, "seconds": seconds, "run": 0,
-        "unraisable": [], "failures": [],
-        "errors": [(f"{name} ({status})", detail)],
-        "skipped": [], "unexpected": [], "ok": False,
-    }
+# Keep the old import surface while the lifecycle boundary has one owner.
+from run_suite_process import (module_problem as _module_problem,
+                               supervise_module as _supervise_module)
 
 
-def _log_tail(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return text[-MAX_LOG_TAIL:] if len(text) > MAX_LOG_TAIL else text
-
-
-def _kill_tree(process: subprocess.Popen) -> None:
-    """End the module's process AND whatever it started, then prove it is gone.
-
-    A test module spawns real ffmpeg children; killing only the interpreter
-    would leave them running after the run reported. Nothing outside the tree
-    this runner started is ever touched.
-    """
-    if os.name == "nt":
-        try:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                           capture_output=True, timeout=120)
-        except (OSError, subprocess.SubprocessError):
-            process.kill()
-    else:
-        import signal
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            process.kill()
-    try:
-        process.wait(timeout=60)
-    except subprocess.TimeoutExpired:      # pragma: no cover - the OS refused
-        pass
-
-
-def supervise_module(name: str, scratch: Path, timeout: float,
-                     live: dict | None = None) -> dict:
-    """Run one module in its own interpreter and come back with a record.
-
-    Always comes back: a module that hangs is killed at the ceiling, a module
-    whose process dies leaves its exit code and console tail, and either way the
-    caller gets something to write down.
-    """
-    result_path = scratch / f"{name}.json"
-    log_path = scratch / f"{name}.log"
-    started = time.monotonic()
-    arguments = [sys.executable, str(CHILD), name, str(result_path), f"{timeout:.3f}"]
-    options: dict = {}
-    if os.name != "nt":
-        # Its own session, so the whole tree can be signalled at once.
-        options["start_new_session"] = True
-    with open(log_path, "wb") as log:
-        process = subprocess.Popen(arguments, stdout=log, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, cwd=str(PROJECT_ROOT),
-                                   **options)
-        if live is not None:
-            live[name] = process
-        try:
-            code = process.wait(timeout=timeout)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            _kill_tree(process)
-            code, timed_out = None, True
-        finally:
-            if live is not None:
-                live.pop(name, None)
-    seconds = time.monotonic() - started
-    tail = _log_tail(log_path)
-
-    if result_path.exists():
-        try:
-            record = json.loads(result_path.read_text(encoding="utf-8"))
-            record["seconds"] = seconds
-            return record
-        except (ValueError, OSError):
-            pass                            # fall through to the crash record
-    if timed_out:
-        return _module_problem(
-            name, "timeout", seconds,
-            f"the module was killed after {timeout:.0f}s. It never finished: a test "
-            f"left work running that nothing joined or stopped, and no result of "
-            f"its own reached disk.\nlast output:\n{tail}")
-    return _module_problem(
-        name, "crash", seconds,
-        f"the interpreter running this module exited {code} without writing a "
-        f"result. The module took its own process down -- os._exit, a segfault in "
-        f"a C extension, or an OOM kill.\nlast output:\n{tail}")
+def supervise_module(name, scratch, timeout, live=None, *, cancel=None):
+    return _supervise_module(name, scratch, timeout, live, cancel=cancel, child=CHILD)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,6 +166,9 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
 
     args = _parser().parse_args(argv)
     parsed["args"] = args
+    if args.jobs < 1 or not math.isfinite(args.module_timeout) or args.module_timeout <= 0:
+        print("jobs and module timeout must be positive; timeout must be finite", file=sys.stderr)
+        return 1
 
     required = {name.strip().lower()
                 for value in (args.require or [])
@@ -291,14 +199,10 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
 
     started = time.monotonic()
     results: list[dict] = collected
-    # Named for THIS process, not a random suffix. The directory is removed in
-    # the `finally` below, but a runner that is killed outright never reaches
-    # it -- and a random name then leaves a directory nobody can prove they own.
-    # A pid names exactly one live process, so the only holder of this name is a
-    # runner that is already gone, and whoever killed us can clean it by pid.
+    # Preserve the documented PID lookup, but never delete a pre-existing
+    # directory: a recycled PID or planted path is not proof of ownership.
     scratch = Path(tempfile.gettempdir()) / f"ffmwiz_suite_{os.getpid()}"
-    shutil.rmtree(scratch, ignore_errors=True)
-    scratch.mkdir(parents=True, exist_ok=True)
+    scratch.mkdir(parents=True, exist_ok=False)
     try:
         _execute(modules, args, results, parsed, scratch, started)
     finally:
@@ -315,47 +219,56 @@ def _execute(modules: list[str], args, results: list[dict], parsed: dict,
     the end: a run that is cancelled, killed or hangs still leaves the record of
     everything that had finished (A06).
     """
-    lock = threading.Lock()
-    live: dict[str, subprocess.Popen] = {}
-    timeout = max(1.0, float(args.module_timeout))
+    cancelled = threading.Event()
+    timeout = float(args.module_timeout)
 
     def keep(record: dict) -> None:
-        with lock:
-            results.append(record)
-            if args.json:
-                write_results(args.json, results, 1, time.monotonic() - started,
-                              args, parsed.get("environment"))
+        results.append(record)
+        if args.json:
+            write_results(args.json, results, 1, time.monotonic() - started,
+                          args, parsed.get("environment"))
 
-    workers = max(1, int(args.jobs))
+    pool = ThreadPoolExecutor(max_workers=args.jobs)
+    pending, recorded = {}, set()
+    interrupted = None
     try:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            pending = {pool.submit(supervise_module, name, scratch, timeout, live): name
-                       for name in modules}
-            recorded: set[str] = set()
+        for name in modules:
+            pending[pool.submit(supervise_module, name, scratch, timeout,
+                                cancel=cancelled)] = name
+        for future in as_completed(pending):
+            name = pending[future]
             try:
-                for future in as_completed(pending):
-                    name = pending[future]
-                    recorded.add(name)
-                    try:
-                        keep(future.result())
-                    except Exception as exc:    # noqa: BLE001 - supervising failed
-                        keep(_module_problem(name, "crash", 0.0,
-                                             f"the module could not be supervised: {exc!r}"))
-            finally:
-                # Completeness is the point: every module that was submitted
-                # gets a record, so "modules" can never be shorter than the
-                # selection and quietly read as "these are all that ran" (A06).
-                for name in modules:
-                    if name not in recorded:
-                        keep(_module_problem(
-                            name, "not-run", 0.0,
-                            "this module was selected and never produced a result."))
+                record = future.result()
+            except Exception as exc:  # noqa: BLE001 - supervisory failure is not a pass
+                record = _module_problem(name, "crash", 0.0, repr(exc))
+            keep(record)
+            recorded.add(name)
+    except BaseException as exc:
+        interrupted = exc
+        # Signal BEFORE executor shutdown waits. Supervisors own the teardown;
+        # queued tasks never open the gate after cancellation was requested.
+        cancelled.set()
+        for future in pending:
+            future.cancel()
     finally:
-        # Nothing this runner started outlives it, including on the cancelled
-        # path: a module process is owned until it is proven gone.
-        for process in list(live.values()):
-            if process.poll() is None:
-                _kill_tree(process)
+        pool.shutdown(wait=True, cancel_futures=True)
+        for future, name in pending.items():
+            if name in recorded:
+                continue
+            if future.cancelled():
+                record = _module_problem(name, "not-run", 0.0, "cancelled before launch")
+            else:
+                try:
+                    record = future.result()
+                except BaseException as exc:
+                    record = _module_problem(name, "crash", 0.0, repr(exc))
+            keep(record)
+            recorded.add(name)
+        for name in modules:
+            if name not in recorded:
+                keep(_module_problem(name, "not-run", 0.0, "not submitted before interruption"))
+    if interrupted is not None:
+        raise interrupted
 
 
 def _report(results: list[dict], args, required: set[str], elapsed: float) -> int:
@@ -400,7 +313,7 @@ def _report(results: list[dict], args, required: set[str], elapsed: float) -> in
         print("a matched module with zero tests is a hole in the suite, not a pass.")
         return 1
 
-    if failures or errors or unexpected:
+    if failures or errors or unexpected or unfinished:
         print(f"FAILED (failures={len(failures)}, errors={len(errors)}, "
               f"unexpected successes={len(unexpected)})")
         return 1
@@ -428,4 +341,10 @@ def _report(results: list[dict], args, required: set[str], elapsed: float) -> in
 
 
 if __name__ == "__main__":
+    import signal
+
+    def _request_shutdown(_signum, _frame):
+        raise KeyboardInterrupt("runner termination requested")
+
+    signal.signal(signal.SIGTERM, _request_shutdown)
     raise SystemExit(main())
