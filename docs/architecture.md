@@ -274,13 +274,26 @@ probing, mux logic, output paths, reporting, selection, processing, and the app
 menu). `ffmwiz/support/ext00b.py::run_mux_cleanup_mode` calls
 `ffmwiz.muxcleanup.app.main_menu()` directly.
 
+The package is **vendored**, not written here: it is a copy of
+[MuxCls](https://github.com/KiaroSama/MuxCls) (MIT, same author) pinned to one
+upstream commit, plus a declared set of local edits. Both the pin and every
+divergence live in `tests/test_mux_cleanup_port.py`, which regenerates the
+expected tree from the pinned commit rather than trusting the files on disk, so
+drift fails a test instead of accumulating quietly.
+
+Refreshing it means moving the pin and re-applying the declared edits; an edit
+whose upstream anchor has moved has to be re-expressed, never dropped. Check
+each refresh for APIs newer than this project's floor: upstream MuxCls supports
+Python 3.11+, FFmWiz supports 3.10, and its move to `datetime.UTC` (a 3.11 name)
+is one of the declared divergences for exactly that reason.
+
 ## Running and testing
 
 ```powershell
 py FFmWiz.py                       # run the wizard
 py -m py_compile FFmWiz.py         # syntax check the entry
 py -m compileall -q ffmwiz         # compile the whole package
-py -m unittest discover -s tests   # full test suite
+py tests/run_suite.py              # full test suite (see tests/README.md)
 py FFmWiz.py --preview-colors      # color/theme smoke check
 ```
 
