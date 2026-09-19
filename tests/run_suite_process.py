@@ -119,12 +119,20 @@ def supervise_module(name: str, scratch: Path, timeout: float,
     cancelled = cancel or threading.Event()
     if cancelled.is_set():
         return module_problem(name, "not-run", 0.0, "cancelled before module launch")
-    args = [sys.executable, str(child), name, str(result_path), str(timeout), "--gated"]
+    executable, environment = sys.executable, None
+    if os.name == "nt" and getattr(sys, "_base_executable", executable) != executable:
+        # Match PC/venvlauncher.c's __PYVENV_LAUNCHER__ contract without its
+        # intermediate kill-on-close job. That job could kill a leaked child
+        # as the interpreter exits, BEFORE our supervisor observes the leak.
+        # The base interpreter still resolves this venv's prefix/dependencies.
+        environment = dict(os.environ, __PYVENV_LAUNCHER__=executable)
+        executable = sys._base_executable
+    args = [executable, str(child), name, str(result_path), str(timeout), "--gated"]
     options = {"start_new_session": True} if os.name != "nt" else {}
     outcome, details, scope = "ok", [], None
     with log_path.open("wb") as log:
         process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log,
-                                   stderr=subprocess.STDOUT, cwd=root, **options)
+                                   stderr=subprocess.STDOUT, cwd=root, env=environment, **options)
         try:
             scope = ProcessScope(process)
             if live is not None:
