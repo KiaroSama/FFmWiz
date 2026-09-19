@@ -136,6 +136,41 @@ class ThePublicDispatchersUseIt(NoLeakedArtifacts, unittest.TestCase):
         self.assertEqual(1, calls["bounded"])
 
 
+    def test_cancelling_the_first_step_stops_the_mode_and_reaches_no_executor(self):
+        """Mode 11's other outcome: the user backs out of the first question.
+
+        `Back` is "go back one question" everywhere else -- `run_mode_steps`
+        only lets it out of the mode from index 0, which is why this raises it
+        there and not from a later step. What matters is the second assertion:
+        a cancelled job must not reach the bounded executor, because an
+        executor that runs anyway writes a file the user never asked for.
+        """
+        calls = {"bounded": 0}
+
+        def spy(*args, **kwargs):
+            calls["bounded"] += 1
+            raise AssertionError("the executor ran for a cancelled job")
+
+        def go_back(answers):
+            raise modes_transform.Back()
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                modes_transform, "run_bounded_audio_reverse", spy))
+            stack.enter_context(mock.patch.object(
+                modes_transform.wizard, "step_input_path", go_back))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            result = FFmWiz.run_audio_transform_mode({
+                "ffmpeg": FFMPEG, "ffprobe": FFPROBE,
+                "input_path": self.source,
+                "output_location": self._tmp,
+                "audio_tool_output_ext": "flac",
+            })
+
+        self.assertIsNone(result, "a cancelled mode must not report a run")
+        self.assertEqual(0, calls["bounded"])
+
+
 class TheJoinCarriesEveryPart(unittest.TestCase):
     """The concat DEMUXER silently drops FLAC parts; the filter does not.
 
