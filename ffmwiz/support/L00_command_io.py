@@ -25,6 +25,7 @@ Three rules this module exists to keep:
 from __future__ import annotations
 
 import os
+from ffmwiz.support.L00_command_grammar import bounded_text, filter_files, passlog_outputs
 from pathlib import Path
 
 from ffmwiz.core.constants_ffmpeg_options import (FFMPEG_ALL_VALUED_OPTIONS,
@@ -90,10 +91,11 @@ def looks_like_concat_list(path: Path) -> bool:
     members at all for the auto-detected spelling.
     """
     try:
-        if path.stat().st_size > CONCAT_LIST_MAX_BYTES:
+        if not path.is_file():
             return False
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return handle.readline().strip().lower().startswith(FFCONCAT_SIGNATURE)
+        with path.open("rb") as handle:
+            header = handle.read(64)
+        return header.startswith(FFCONCAT_SIGNATURE.encode("ascii"))
     except OSError:
         return False
 
@@ -115,8 +117,8 @@ def concat_list_members(listing: Path) -> tuple[list[Path], list[str]]:
                     f"{CONCAT_LIST_MAX_BYTES}-byte limit this guard can read, so the "
                     "files it names cannot be protected"]
     try:
-        text = listing.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
+        text = bounded_text(listing, CONCAT_LIST_MAX_BYTES)
+    except (OSError, ValueError) as exc:
         return [], [f"concat list {listing} could not be read: {exc}"]
 
     members: list[Path] = []
@@ -134,8 +136,14 @@ def concat_list_members(listing: Path) -> tuple[list[Path], list[str]]:
         value, _ = concat_token(stripped, index)
         if not value:
             continue
-        candidate = Path(value)
-        members.append(candidate if candidate.is_absolute() else (listing.parent / candidate))
+        candidate = ffmpeg_url_path(value)
+        if candidate is None:
+            return members, [f"unsupported concat member: {value}"]
+        # Explicit file: operands use the file protocol's own CWD semantics.
+        if value.startswith("file:") or candidate.is_absolute():
+            members.append(candidate)
+        else:
+            members.append(listing.parent / candidate)
     return members, []
 
 
@@ -198,75 +206,69 @@ def _names_a_file(value: str) -> bool:
 
 
 def filter_graph_files(value: str) -> list[Path]:
-    """Files a filtergraph READS: `subtitles=`, `ass=`, `movie=`, `amovie=`.
+    """Files read by graph instances, not text resembling a filter name."""
+    reads, _writes, _problems = filter_files(str(value or ""))
+    return [path for value in reads if (path := ffmpeg_url_path(value)) is not None]
 
-    A burned-in subtitle is a source the job reads, and it was in no dependency
-    set at all -- so an output hardlinked to that SRT truncated it. Bounded and
-    forgiving: this recognises the option shapes FFmpeg documents and skips
-    anything it cannot read, because a missed filter file is reported by the
-    caller rather than guessed at.
-    """
-    text = str(value or "")
-    found: list[Path] = []
-    for name in FILTER_FILE_OPTIONS:
-        cursor = 0
-        while True:
-            at = text.find(name + "=", cursor)
-            if at < 0:
+
+def _concat_closure(path: Path, force: bool, reads: list[Path], problems: list[str],
+                    stack: set[Path], budget: list[int]) -> None:
+    if not (force or looks_like_concat_list(path)):
+        return
+    try:
+        identity = path.resolve()
+    except (OSError, RuntimeError) as exc:
+        problems.append(f"concat dependency cannot be resolved: {exc}")
+        return
+    if identity in stack or len(stack) >= 32:
+        problems.append(f"cyclic or over-depth concat dependency: {path}")
+        return
+    try:
+        budget[0] -= path.stat().st_size
+        if budget[0] < 0:
+            problems.append("concat dependency tree exceeds the total byte limit")
+            return
+    except OSError as exc:
+        problems.append(f"concat dependency cannot be inspected: {exc}")
+        return
+    members, trouble = concat_list_members(path)
+    problems.extend(trouble)
+    stack.add(identity)
+    try:
+        for member in members:
+            budget[1] -= 1
+            if budget[1] < 0:
+                problems.append("concat dependency tree exceeds the member limit")
                 break
-            cursor = at + len(name) + 1
-            # `subtitles=f=x.srt` and `subtitles=filename=x.srt` name the option
-            # explicitly; `subtitles=x.srt` is the shorthand.
-            rest = text[cursor:]
-            for prefix in ("filename=", "f="):
-                if rest.startswith(prefix):
-                    rest = rest[len(prefix):]
-                    cursor += len(prefix)
-                    break
-            value_text, consumed = _filter_value(rest)
-            cursor += consumed
-            if value_text:
-                path = ffmpeg_url_path(value_text)
-                if path is not None:
-                    found.append(path)
-    return found
+            reads.append(member)
+            _concat_closure(member, False, reads, problems, stack, budget)
+    finally:
+        stack.remove(identity)
 
 
-def _filter_value(text: str) -> tuple[str, int]:
-    r"""One filtergraph option value, read the way FFmpeg reads it.
-
-    Measured on ffmpeg 9.0.1, because the intuitive readings are all wrong:
-
-        subtitles=C:/media/x.srt        FAILS -- `:` is an option separator, so
-                                        the filename is `C` and `/media/x.srt`
-                                        becomes the next positional option
-        subtitles=C\:/media/x.srt        FAILS -- one unescape pass is not enough
-        subtitles=filename=C\:/media/... FAILS
-        subtitles='C\:/media/x.srt'      WORKS
-        subtitles=cues.srt              WORKS (no colon to separate)
-
-    So: single quotes protect the separators, a backslash escapes the next
-    character INSIDE quotes as well as outside (the graph is unescaped twice),
-    and a drive letter gets NO special treatment -- FFmpeg gives it none, and a
-    guard that invented one would read a path FFmpeg never opens.
-    """
-    out: list[str] = []
-    index = 0
-    quoted = False
-    while index < len(text):
-        char = text[index]
-        if char == "\\" and index + 1 < len(text):
-            out.append(text[index + 1])
+def _file_arguments(cmd: list[str]) -> tuple[list[str], list[Path], list[str]]:
+    """Expand -/option file once, retaining the parameter file as a read."""
+    args, reads, problems = list(cmd), [], []
+    index = 1
+    while index < len(args):
+        option = args[index]
+        if option.startswith("-/"):
+            if index + 1 >= len(args):
+                problems.append(f"missing parameter file for {option}")
+                break
+            path = ffmpeg_url_path(args[index + 1])
+            try:
+                if path is None:
+                    raise ValueError("parameter file is not local")
+                reads.append(path)
+                args[index], args[index + 1] = "-" + option[2:], bounded_text(path)
+            except (OSError, ValueError) as exc:
+                problems.append(f"cannot inspect {option}: {exc}")
             index += 2
-        elif char == "'":
-            quoted = not quoted
-            index += 1
-        elif not quoted and char in ":,;[]":
-            break
         else:
-            out.append(char)
-            index += 1
-    return "".join(out), index
+            index += 2 if _is_option(option) and _takes_a_value(option) else 1
+    return args, reads, problems
+
 
 
 def command_input_paths(cmd: list[str]) -> list[Path]:
@@ -285,43 +287,45 @@ def command_input_paths(cmd: list[str]) -> list[Path]:
 
 
 def command_reads(cmd: list[str]) -> tuple[list[Path], list[str]]:
-    """(files the command READS, problems that make the answer incomplete).
-
-    Inputs, the members of every concat list -- explicit `-f concat` AND the
-    auto-detected `ffconcat version 1.0` spelling -- file-valued option reads
-    such as `-attach` and `-filter_script`, and files named inside a
-    filtergraph. `problems` carries a list that could not be read; a caller
-    that ignores it is asserting "no dependency" about something unknown.
-    """
-    reads: list[Path] = []
-    problems: list[str] = []
-    concat_selected = False
-    for index, token in enumerate(cmd or []):
-        text = str(token or "")
-        lowered = text.lower()
-        following = str(cmd[index + 1] or "") if index + 1 < len(cmd) else ""
-        if lowered == "-f" and following.lower() == "concat":
-            concat_selected = True
-            continue
-        if lowered == "-i" and _names_a_file(following):
-            listing = ffmpeg_url_path(following)
-            if listing is None:
-                continue
-            reads.append(listing)
-            if concat_selected or looks_like_concat_list(listing):
-                members, trouble = concat_list_members(listing)
-                reads.extend(members)
+    """Bounded transitive reads, with uncertainty carried to the runtime guard."""
+    args, reads, problems = _file_arguments(cmd)
+    input_format, index = None, 1
+    budget = [8 * 1024 * 1024, 10000]
+    while index < len(args):
+        option = str(args[index])
+        stem = option.lower().partition(":")[0]
+        following = str(args[index + 1]) if index + 1 < len(args) else ""
+        if stem == "-f":
+            input_format = following
+        elif stem == "-i" and _names_a_file(following):
+            if input_format == "lavfi":
+                found, _writes, trouble = filter_files(following)
+                reads.extend(path for value in found if (path := ffmpeg_url_path(value)) is not None)
                 problems.extend(trouble)
-            concat_selected = False
-            continue
-        stem = lowered.partition(":")[0]
-        if stem in FFMPEG_FILE_VALUED_OPTIONS and _names_a_file(following):
+            else:
+                path = ffmpeg_url_path(following)
+                if path is not None:
+                    reads.append(path)
+                    _concat_closure(path, input_format == "concat", reads, problems, set(), budget)
+            input_format = None
+        elif stem in FFMPEG_FILE_VALUED_OPTIONS and _names_a_file(following):
             path = ffmpeg_url_path(following)
             if path is not None:
                 reads.append(path)
+                if stem in {"-filter_script", "-filter_complex_script"}:
+                    try:
+                        found, _writes, trouble = filter_files(bounded_text(path))
+                        reads.extend(path for value in found if (path := ffmpeg_url_path(value)) is not None)
+                        problems.extend(trouble)
+                    except (OSError, ValueError) as exc:
+                        problems.append(f"cannot inspect filter script {path}: {exc}")
         elif stem in {"-vf", "-af", "-filter", "-filter_complex", "-lavfi"} and following:
-            reads.extend(filter_graph_files(following))
-    return reads, problems
+            found, _writes, trouble = filter_files(following)
+            reads.extend(path for value in found if (path := ffmpeg_url_path(value)) is not None)
+            problems.extend(trouble)
+        index += 2 if _is_option(option) and _takes_a_value(option) else 1
+    return list(dict.fromkeys(reads)), problems
+
 
 
 def command_writes(cmd: list[str]) -> list[Path]:
@@ -332,6 +336,7 @@ def command_writes(cmd: list[str]) -> list[Path]:
     `-vstats_file` replaces whatever it points at with encoder statistics while
     the media output goes elsewhere, and FFmpeg exits 0 either way (A01).
     """
+    cmd, _parameter_reads, _problems = _file_arguments(cmd)
     outputs: list[Path] = []
     index = 1                    # cmd[0] is the executable
     while index < len(cmd or []):
@@ -346,7 +351,17 @@ def command_writes(cmd: list[str]) -> list[Path]:
                     # `-passlogfile x` writes `x-0.log`, not `x`. The prefix
                     # expansion is a destination too.
                     if stem == "-passlogfile":
-                        outputs.extend(Path(f"{path}-{n}.log") for n in range(2))
+                        outputs.extend(passlog_outputs(path))
+            if stem in {"-vf", "-af", "-filter", "-filter_complex", "-lavfi",
+                        "-filter_script", "-filter_complex_script"}:
+                graph = following
+                if stem in {"-filter_script", "-filter_complex_script"}:
+                    try:
+                        graph = bounded_text(Path(following))
+                    except (OSError, ValueError):
+                        graph = ""  # command_reads carries the refusal reason
+                _reads, writes, _trouble = filter_files(graph)
+                outputs.extend(path for value in writes if (path := ffmpeg_url_path(value)) is not None)
             index += 2 if _takes_a_value(token) else 1
             continue
         if _names_a_file(token):
