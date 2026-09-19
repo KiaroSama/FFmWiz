@@ -41,7 +41,7 @@ jobs:
         # The existing Windows matrix remains the full-suite gate. This leg
         # adds POSIX grammar and filesystem coverage without pretending to run Qt.
         run: |
-          python tests/run_suite.py -j 2 --require ffmpeg --json "$RUNNER_TEMP/source-safety.json" -k command_io_transitive -k command_read_write_manifest -k source_alias -k track_manager_source_safety
+          python tests/run_suite.py -j 2 --require ffmpeg --json "$RUNNER_TEMP/source-safety.json" -k command_io_transitive -k command_io_lavfi -k command_read_write_manifest -k source_alias -k track_manager_source_safety
       - name: Retain result
         id: result-upload
         if: always()

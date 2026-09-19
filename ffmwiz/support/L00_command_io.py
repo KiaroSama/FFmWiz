@@ -339,11 +339,17 @@ def command_writes(cmd: list[str]) -> list[Path]:
     cmd, _parameter_reads, _problems = _file_arguments(cmd)
     outputs: list[Path] = []
     index = 1                    # cmd[0] is the executable
+    input_format = None
     while index < len(cmd or []):
         token = str(cmd[index] or "")
         if _is_option(token):
             stem = token.lower().partition(":")[0]
             following = str(cmd[index + 1] or "") if index + 1 < len(cmd) else ""
+            if stem == "-f":
+                input_format = following
+            input_graph = stem == "-i" and input_format == "lavfi"
+            if stem == "-i":
+                input_format = None
             if stem in FFMPEG_WRITE_VALUED_OPTIONS and _names_a_file(following):
                 path = ffmpeg_url_path(following)
                 if path is not None:
@@ -353,7 +359,9 @@ def command_writes(cmd: list[str]) -> list[Path]:
                     if stem == "-passlogfile":
                         outputs.extend(passlog_outputs(path))
             if stem in {"-vf", "-af", "-filter", "-filter_complex", "-lavfi",
-                        "-filter_script", "-filter_complex_script"}:
+                        "-filter_script", "-filter_complex_script"} or input_graph:
+                # A lavfi INPUT can write filter statistics too. Its position
+                # before -i does not make those side effects read-only.
                 graph = following
                 if stem in {"-filter_script", "-filter_complex_script"}:
                     try:
