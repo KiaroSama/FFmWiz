@@ -72,6 +72,8 @@ ffmwiz/                # the application package (all implementation lives here)
     gui_editor_*.py    # cut / crop / speed / audio / unified editor builders
                        # (unified also has _canvas / _timeline widget modules)
     gui_child_owner.py # one bounded owner for every GUI child process
+    gui_waveform_decode.py # the ONE waveform decode contract, shared by both engines
+    gui_worker_artifacts.py# temp directory that will not delete a live writer's file
     ffmwiz_gui_qml.py  # modern QtQuick unified editor driver (opt-in)
     gui_qml_bridge.py  # the modern engine's Bridge object (built by a factory)
     gui_qml_waveform.py# the modern engine's Qt-free waveform model
@@ -252,9 +254,13 @@ and panels are one file each):
   imported, and this module has to stay importable without it. Making it a
   factory is also what lets the child-process lifecycle be tested at all — while
   the class lived inside `main()` nothing could construct it.
-- `gui_qml_waveform.py` — the waveform model. Plain functions over request dicts
-  and PCM arrays, no Qt, so segment lengths and envelopes can be checked against
-  real FFmpeg output with no display.
+- `gui_qml_waveform.py` — the waveform model: the cache key, PCM decoding and
+  envelope building. Plain functions over request dicts and PCM arrays, no Qt, so
+  segment lengths and envelopes can be checked against real FFmpeg output with no
+  display. The FFmpeg argument building itself lives in `gui/gui_waveform_decode.py`
+  and is re-exported here, because the classic engine has to produce the same PCM
+  from the same request; both engines' output is compared sample for sample in
+  `tests/test_waveform_stream_contract.py`.
 
 A source-text guard over the modern engine must read ALL THREE, not just the
 driver. The engine is opt-in via `gui_engine=qml` (or `FFMWIZ_GUI_ENGINE=qml`)
