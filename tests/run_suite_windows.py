@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import ctypes
 import os
+import uuid
 from ctypes import wintypes
 
 
 class Job:
     """A private kill-on-close job; never attach an unrelated process."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: str | None = None) -> None:
         if os.name != "nt":
             raise OSError("Job Objects require Windows")
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self._kernel = kernel
         signatures = {
+            "OpenJobObjectW": ([wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
             "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
             "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int,
                                          ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
@@ -31,12 +33,16 @@ class Job:
             "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
             "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
         }
-        for name, (args, result) in signatures.items():
-            function = getattr(kernel, name)
+        for api_name, (args, result) in signatures.items():
+            function = getattr(kernel, api_name)
             function.argtypes, function.restype = args, result
-        self.handle = kernel.CreateJobObjectW(None, None)
+        self.name = name or ("Local\\FFmWizSuite-" + uuid.uuid4().hex)
+        self.handle = (kernel.OpenJobObjectW(0x0001 | 0x0004, False, name) if name
+                       else kernel.CreateJobObjectW(None, self.name))
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())
+        if name is not None:
+            return
         limits = _ExtendedLimits()
         limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         try:
@@ -99,3 +105,18 @@ class _Accounting(ctypes.Structure):
                 ("user_time", "kernel_time", "period_user_time", "period_kernel_time")] + [
                     (name, wintypes.DWORD) for name in
                     ("page_faults", "total_processes", "active_processes", "terminated_processes")]
+
+
+def join_current_process(name: str) -> None:
+    """Join the ACTUAL interpreter, not a venv redirector that spawned it.
+
+    CPython's Windows venv executable is a launcher, and can create the real
+    interpreter before Popen returns. Assigning the launcher afterwards misses
+    that existing descendant. The controlled child joins before opening its
+    test-import gate, while the supervisor remains the job's lifetime owner.
+    """
+    job = Job(name)
+    try:
+        job.assign(os.getpid())
+    finally:
+        job.close()

@@ -23,7 +23,9 @@ keep = Late()
 FINALIZER_HANG = PASS + """
 import time
 class Late:
- def __del__(self, sleep=time.sleep): sleep(120)
+ def __del__(self, clock=time.monotonic):
+  deadline = clock() + 120
+  while clock() < deadline: pass
 keep = Late()
 """
 DAEMON_DESCENDANT = """
@@ -110,6 +112,7 @@ class FinalOutcome(unittest.TestCase):
                                 cwd=self.root, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=60)
         data = json.loads((self.root / "result.json").read_text())
+        self.diagnostic = result.stdout + result.stderr + "\n" + json.dumps(data)
         return result, data
 
     def test_a_passing_module_still_passes(self):
@@ -123,7 +126,7 @@ class FinalOutcome(unittest.TestCase):
         for jobs in (1, 2):
             with self.subTest(jobs=jobs):
                 result, data = self.run_case(FINALIZER_EXIT, jobs)
-                self.assertEqual(1, result.returncode)
+                self.assertEqual(1, result.returncode, self.diagnostic)
                 self.assertEqual("failed", data["verdict"])
                 self.assertEqual("crash", data["modules"][0]["status"])
                 self.assertEqual(1, data["modules"][0]["tests"])
@@ -133,7 +136,7 @@ class FinalOutcome(unittest.TestCase):
         for jobs in (1, 2):
             with self.subTest(jobs=jobs):
                 result, data = self.run_case(FINALIZER_HANG, jobs)
-                self.assertEqual(1, result.returncode)
+                self.assertEqual(1, result.returncode, self.diagnostic)
                 self.assertEqual("timeout", data["modules"][0]["status"])
                 self.assertEqual(1, data["modules"][0]["tests"])
 
@@ -142,7 +145,7 @@ class FinalOutcome(unittest.TestCase):
             with self.subTest(jobs=jobs):
                 (self.root / "stop").unlink(missing_ok=True)
                 result, data = self.run_case(PROCESS_LEAK, jobs)
-                self.assertEqual(1, result.returncode)
+                self.assertEqual(1, result.returncode, self.diagnostic)
                 self.assertEqual("failed", data["verdict"])
                 self.assertFalse(pid_alive(int((self.root / "pid").read_text())))
                 self.assertIn("live child process", json.dumps(data))
@@ -151,7 +154,7 @@ class FinalOutcome(unittest.TestCase):
         for jobs in (1, 2):
             with self.subTest(jobs=jobs):
                 result, data = self.run_case(DAEMON_DESCENDANT, jobs)
-                self.assertEqual(1, result.returncode)
+                self.assertEqual(1, result.returncode, self.diagnostic)
                 self.assertIn("late-daemon", json.dumps(data))
 
     @unittest.skipIf(os.name == "nt", "SIGINT delivery uses POSIX signals; Windows Job tested separately")
