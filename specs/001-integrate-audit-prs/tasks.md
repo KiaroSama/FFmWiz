@@ -63,7 +63,7 @@ each ends OK with no skip blaming a capability the machine has.
       tree; the full suite belongs to CI
 - [X] T020a [US1] Diff main-before against main-after for deletions nobody asked for, since this
       session restructured the same files the three diffs touch (FR-010)
-- [ ] T020b [US1] Execute quickstart.md section 5 and observe all four repaired behaviours from main
+- [X] T020b [US1] Execute quickstart.md section 5 and observe all four repaired behaviours from main
       itself, not only through their test modules (SC-001)
 
 ## Phase 4: User Story 2 — The review is a review, not a countersignature (P1)
@@ -99,15 +99,15 @@ or closed with its integrating commit linked.
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T027 Push main and verify every required check against that exact SHA, per the constitution's
+- [X] T027 Push main and verify every required check against that exact SHA, per the constitution's
       third principle
-- [ ] T028 [P] Update .ai/ memory — the router, plus BUGS/DECISIONS/TESTING_NOTES where they gained
+- [X] T028 [P] Update .ai/ memory — the router, plus BUGS/DECISIONS/TESTING_NOTES where they gained
       durable value — and write the transferable lesson to the cross-project store
-- [ ] T029 [P] Re-index the Codebase Memory graph and refresh the Graphify graph, since the
+- [X] T029 [P] Re-index the Codebase Memory graph and refresh the Graphify graph, since the
       integration changes structure
-- [ ] T030 Run the survivor sweep and confirm no process, temp directory or bytecode cache the work
+- [X] T030 Run the survivor sweep and confirm no process, temp directory or bytecode cache the work
       started is left behind
-- [ ] T031 Deliver the closure table: reviewed head, issue IDs, regression evidence, exact
+- [X] T031 Deliver the closure table: reviewed head, issue IDs, regression evidence, exact
       counts/skips, integrating commit, resulting main SHA and PR disposition, with IMPLEMENTED /
       VERIFIED / INTEGRATED kept distinct
 
