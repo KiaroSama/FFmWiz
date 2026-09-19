@@ -53,85 +53,16 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
     return segments
 
 
-def segment_audio_filter(index: int, duration: float, rate: int = 4000, stream_spec: str = "a:0",
-                         label: str | None = None, origin: float = 0.0) -> str:
-    """One join segment's audio, bounded to the SEGMENT's own declared length.
-
-    Shared shape with the QML engine's waveform so both editors lay audio on
-    the same clock: `aresample=...:first_pts=0` keeps a late-starting audio
-    stream at its true offset, `apad` extends it to the far edge of the wanted
-    interval and `atrim` cuts that interval out.
-    """
-    span = max(0.001, float(duration))
-    start = max(0.0, float(origin or 0.0))
-    out = label if label is not None else f"a{index}"
-    # `origin` is where the PICTURE starts on the demuxer's clock; audio before
-    # it belongs to no part of this timeline. Same contract and same order as
-    # the QML engine, so both editors place a sample identically (A04).
-    # PAD BEFORE TRIM. A segment whose audio lies entirely before its picture
-    # has nothing left after the trim, and trimming first handed the graph an
-    # empty stream -- FFmpeg then failed the WHOLE joined decode and every later
-    # segment went with it (A04). Padding to the far edge of the interval first
-    # guarantees the trim always has `span` seconds to take.
-    return (f"[{index}:{stream_spec}]aformat=channel_layouts=mono,"
-            f"aresample={rate}:first_pts=0,"
-            f"apad=whole_dur={start + span:.6f},"
-            f"atrim=start={start:.6f}:end={start + span:.6f},"
-            f"asetpts=PTS-STARTPTS[{out}]")
+# Retain these public entry points while both engines use one decode contract.
+from ffmwiz.gui.gui_waveform_decode import segment_audio_filter, build_wave_decode_args
 
 
 def build_classic_waveform_args(
     req: dict[str, Any], segments: list[dict[str, Any]], out_path: Any
 ) -> list[str]:
-    """FFmpeg args that decode the (joined) audio to 4 kHz mono PCM.
-
-    Module level and Qt-free so the join graph can be run for real in a test:
-    it is the part that breaks when a segment's audio flag is wrong, and the
-    window it used to live in cannot be built without a display.
-    """
-    args = ["-hide_banner", "-loglevel", "error", "-y"]
-    if segments:
-        labels = []
-        for idx, segment in enumerate(segments):
-            if segment.get("has_audio", True):
-                args.extend(["-i", str(segment["path"])])
-            else:
-                # [idx:a:0] matching nothing makes ffmpeg refuse the WHOLE
-                # filtergraph, so one silent segment killed the waveform
-                # for the entire join. Feed matching silence instead (D07).
-                seg_duration = max(0.001, float(segment.get("duration") or 0.0))
-                args.extend(["-f", "lavfi", "-t", f"{seg_duration:.6f}",
-                             "-i", "anullsrc=channel_layout=mono:sample_rate=4000"])
-            labels.append(f"[a{idx}]")
-        # Each segment is bounded to its DECLARED length, the same clock the
-        # timeline is laid out on. Unbounded concat made the waveform as long
-        # as the audio instead, so every marker after a segment whose audio was
-        # shorter or longer than its picture sat at the wrong time.
-        filters = [
-            segment_audio_filter(
-                idx, float(segment.get("duration") or 0.0), 4000,
-                origin=0.0 if not segment.get("has_audio", True)
-                else float(segment.get("picture_clock_offset") or 0.0))
-            for idx, segment in enumerate(segments)
-        ]
-        filters.append(f"{''.join(labels)}concat=n={len(segments)}:v=0:a=1[mix]")
-        args.extend(["-filter_complex", ";".join(filters), "-map", "[mix]"])
-    else:
-        # The same picture-clock contract as the joined branch above (R05).
-        duration = float(req.get("duration") or 0.0)
-        if duration > 0:
-            chain = segment_audio_filter(
-                0, duration, 4000, label="mix",
-                origin=float(req.get("picture_clock_offset") or 0.0))
-        else:
-            chain = "[0:a:0]aformat=channel_layouts=mono,aresample=4000:first_pts=0[mix]"
-        args.extend([
-            "-i", str(req.get("input_path") or ""),
-            "-filter_complex", chain,
-            "-map", "[mix]",
-        ])
-    args.extend(["-f", "s16le", "-acodec", "pcm_s16le", str(out_path)])
-    return args
+    """Decode the actual Classic model, including per-segment stream choices."""
+    request = dict(req, join_segments=segments)
+    return build_wave_decode_args(request, str(out_path))
 
 
 def request_has_any_audio(req: dict[str, Any]) -> bool:
