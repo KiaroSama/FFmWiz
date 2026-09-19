@@ -310,7 +310,12 @@ the sibling at its end (`from ffmwiz.<sibling> import *`;
 needs a name the source owns, the definition moves down to a shared module
 rather than the sibling reaching back up. Calls to monkeypatched names are
 qualified at the module that DEFINES the name, so one `mock.patch` covers every
-caller. The pure-data modules
+caller -- but a split moves that target. When a function moves to the sibling
+and keeps calling names the source still owns, it must reach them as
+`<source>.<name>` or the existing patches stop reaching it; and when it keeps
+calling names the SOURCE only re-exported, the patch has to move to the sibling,
+because the source's copy is then an alias nothing calls. `ext04c` /
+`ext04c_run` is the worked example of both halves. The pure-data modules
 `core/constants_config_template.py` and `core/constants_tables.py` are leaf
 siblings of `constants.py`.
 
