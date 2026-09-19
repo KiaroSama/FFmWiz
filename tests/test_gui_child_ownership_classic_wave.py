@@ -25,7 +25,7 @@ class ClassicWaveformCompletion(unittest.TestCase):
         # The real entry module assembles the editor namespace before its factory
         # runs. No extracted method or substituted success predicate is tested.
         from ffmwiz.gui.classic import ffmwiz_gui
-        self.window = ffmwiz_gui.build_unified_video_editor(
+        self.window = ffmwiz_gui.gui_editor_unified.build_unified_video_editor(
             {"input_path": "unused.mkv", "duration": 1, "source_w": 64,
              "source_h": 48, "has_audio": False})
         self.addCleanup(self.dispose)
