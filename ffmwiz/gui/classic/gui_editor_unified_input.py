@@ -46,11 +46,19 @@ def build_unified_editor_input_mixin():
                 self._view_handle_width_px = None
                 QtCore.QTimer.singleShot(0, self._sync_timeline_view_handle)
             crop_widgets = set(getattr(self, "crop_spinboxes", {}).values())
-            crop_widgets.update(
-                box.lineEdit()
-                for box in getattr(self, "crop_spinboxes", {}).values()
-                if box.lineEdit() is not None
-            )
+            try:
+                crop_widgets.update(
+                    box.lineEdit()
+                    for box in getattr(self, "crop_spinboxes", {}).values()
+                    if box.lineEdit() is not None
+                )
+            except RuntimeError:
+                # A destroyed C++ spinbox. This window is installed as a filter on
+                # the application AND on its canvas, sliders and combo line edits,
+                # so events keep arriving while its own children are being torn
+                # down -- and this block dereferences them before it has even
+                # looked at `obj`. There is nothing left to filter for.
+                return False
             if obj in crop_widgets:
                 if event.type() == QtCore.QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
                     self._apply_crop_fields(commit=True)
