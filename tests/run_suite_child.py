@@ -217,6 +217,16 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 2
     name, result_path = argv[0], Path(argv[1])
+    if len(argv) > 3 and argv[3] == "--gated":
+        gate = sys.stdin.buffer.readline(256).decode("ascii").rstrip("\r\n")
+        sys.stdin.close()
+        if not gate.startswith("G"):
+            return 2
+        if os.name == "nt":
+            if not gate[1:].startswith("Local\\FFmWizSuite-"):
+                return 2
+            from run_suite_windows import join_current_process
+            join_current_process(gate[1:])
     seconds = float(argv[2]) if len(argv) > 2 else 0.0
 
     for stream in (sys.stdout, sys.stderr):
@@ -257,7 +267,17 @@ def main(argv: list[str]) -> int:
     sys.unraisablehook = collect_late_unraisable
     threading.excepthook = collect_late_thread
 
+    infrastructure_threads = set(threading.enumerate())
+
     def publish() -> None:
+        # Non-daemon threads are already joined by CPython here. A daemon
+        # spawned by one of them may never have appeared in the earlier
+        # snapshot: account for it before publishing the final record.
+        for thread in threading.enumerate():
+            if thread not in infrastructure_threads and thread.is_alive():
+                late.append((f"{name} (leaked thread {thread.name})",
+                             "module-owned thread survived interpreter shutdown; "
+                             f"daemon={thread.daemon}"))
         if late:
             record["errors"] = list(record["errors"]) + late
             record["unraisable"] = list(record["unraisable"]) + late

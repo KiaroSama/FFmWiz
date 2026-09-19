@@ -154,19 +154,22 @@ class RealFFmpegRunsFromASpacedPath(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def linked_ffmpeg(self) -> Path:
-        """FFmpeg under a spaced, non-ASCII directory, hardlinked not copied."""
+        """An executable in THIS test's spaced directory, without privileges.
+
+        Linux protected_hardlinks prevents an unprivileged runner linking a
+        root-owned /usr/bin/ffmpeg. Copying preserves the executable mode and
+        keeps the actual invocation test runnable; cross-volume copies also
+        avoid writing beside the developer's installed FFmpeg on Windows.
+        """
         real = Path(os.path.realpath(FFMPEG))
-        spaced = Path(tempfile.gettempdir()) / "ffmwiz ps بررسی"
-        if real.drive.lower() != spaced.drive.lower():
-            spaced = real.parent.parent / "ffmwiz ps بررسی"
+        spaced = self.root / "ffmwiz ps بررسی"
         spaced.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(shutil.rmtree, spaced, ignore_errors=True)
         target = spaced / "ffmpeg.exe"
         if not target.exists():
             try:
                 os.link(real, target)
-            except OSError as exc:
-                self.skipTest(f"cannot place ffmpeg under a spaced path: {exc}")
+            except OSError:
+                shutil.copy2(real, target)
         return target
 
     def test_ffmpeg_under_a_spaced_unicode_path_actually_runs(self):
@@ -202,6 +205,23 @@ class RealFFmpegRunsFromASpacedPath(unittest.TestCase):
                                 "format_tags=title", "-of", "default=nw=1:nk=1", str(out)],
                                capture_output=True, text=True, encoding="utf-8", timeout=180)
         self.assertEqual(probe.stdout.strip(), title)
+
+
+@requires_ffmpeg
+class ExecutableFixtureOwnership(unittest.TestCase):
+    def test_a_denied_hardlink_uses_a_private_executable_copy(self):
+        import hashlib
+        from unittest import mock
+        fixture = RealFFmpegRunsFromASpacedPath()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        with mock.patch.object(os, "link", side_effect=PermissionError("protected hardlinks")):
+            target = fixture.linked_ffmpeg()
+        self.assertTrue(target.is_relative_to(fixture.root))
+        self.assertEqual(hashlib.sha256(Path(FFMPEG).read_bytes()).digest(),
+                         hashlib.sha256(target.read_bytes()).digest())
+        result = subprocess.run([str(target), "-version"], capture_output=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,64 @@
+name: Portable verification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Record the exact tested source
+        shell: bash
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/tested-sha.txt"
+          git archive --format=zip -o "$RUNNER_TEMP/tested-source.zip" HEAD
+      - name: Retain reproducible source (no Git configuration or credentials)
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: tested-source-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/tested-source.zip
+            ${{ runner.temp }}/tested-sha.txt
+          retention-days: 3
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install portable test capabilities
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python -m pip install --disable-pip-version-check numpy setuptools wheel
+      - name: Run the portable suite
+        shell: bash
+        # This verifies portable behavior, not native Windows/Qt/NVENC paths.
+        # Windows jobs remain mandatory for those contracts.
+        run: |
+          set -o pipefail
+          python tests/run_suite.py -j 2 --require ffmpeg --require numpy --require wheel --json "$RUNNER_TEMP/portable-results.json" 2>&1 | tee "$RUNNER_TEMP/portable-tests.log"
+      - name: Retain results even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: portable-results-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/portable-results.json
+            ${{ runner.temp }}/portable-tests.log
+            ${{ runner.temp }}/tested-sha.txt
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Record a quota-independent result summary
+        if: always()
+        run: python tools/ci_result_summary.py "$RUNNER_TEMP/portable-results.json" "portable Linux (not native Windows coverage)" "see upload step"
