@@ -1,7 +1,6 @@
 """A06: a module's whole life is supervised, in both -j 1 and -j 2.
 
-Three ways the runner still reported something that was not true, each run
-against the REAL runner in a fresh process:
+Three failures reproduced with the previous runner, in a fresh process:
 
 * `_settle_module_threads()` takes ONE snapshot of the threads a module
   started. A thread that starts ANOTHER thread escapes it: the descendant is
@@ -146,7 +145,7 @@ class RunnerProbeCase(unittest.TestCase):
             [sys.executable, str(RUNNER), *arguments],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace", cwd=str(PROJECT_ROOT),
-            env=environment)
+            env=environment, **({"start_new_session": True} if os.name != "nt" else {}))
         # A runner this test KILLS never reaches its own cleanup, so the test
         # that killed it owns what is left. The runner names its scratch after
         # its pid precisely so this is possible.
@@ -169,10 +168,14 @@ class RunnerProbeCase(unittest.TestCase):
                            capture_output=True, timeout=120)
         else:
             import signal
+            # The nested runner owns separate module sessions. Ask it to stop
+            # those before terminating its own isolated process group. Killing
+            # the inherited group used to kill THIS test interpreter as well.
+            process.send_signal(signal.SIGTERM)
             try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                process.kill()
+                process.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
         try:
             process.wait(timeout=60)
         except subprocess.TimeoutExpired:
