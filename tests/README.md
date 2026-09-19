@@ -67,6 +67,19 @@ phrase "no usable X" is NOT a hardware exemption: "No usable FFmpeg binary" is a
 missing ffmpeg, and it used to slip past `--require` because a broad pattern
 matched it first.
 
+The NVENC suite is LOCAL BY DESIGN. `test_cuda_scale_fallback` probes for a
+usable CUDA/`hevc_nvenc` pair and encodes for real when it finds one; no
+GitHub-hosted runner has an NVIDIA GPU, and this repository must not point
+`vars.CI_RUNNER` at a self-hosted one while it is public, because a fork's pull
+request would then execute on that machine. So the three hardware tests skip in
+CI and are run on a developer's own GPU instead:
+
+    python tests/run_suite.py -k cuda_scale_fallback
+
+Verified 2026-09-19 on an RTX 4070 Ti (driver 616.92, ffmpeg with
+`h264_nvenc`/`hevc_nvenc`/`av1_nvenc` and the `cuda` hwaccel): the gate opened and
+all 14 tests passed, including the three CI reports as skipped.
+
 `--json PATH` writes the run as data — every module with its counts, failures,
 errors, unexpected successes, and every skip with the capability it was
 attributed to, plus the environment (Python, platform, the resolved ffmpeg and
