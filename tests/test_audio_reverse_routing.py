@@ -229,9 +229,10 @@ class EveryPathIsBounded(NoLeakedArtifacts, unittest.TestCase):
         out = self._tmp / "content"
         out.mkdir(parents=True, exist_ok=True)
         answers = self._answers(out)
-        # Patch the module that DEFINES it: `run_bounded_audio_reverse` resolves
-        # the name from its own globals, and both `FFmWiz` and `encoding` only
-        # re-export it.
+        # Patch the module that DEFINES it. The executor lives in `ext04c_run`
+        # now and reaches the plan as `ext04c.audio_reverse_segment_seconds`
+        # precisely so this stays possible; `FFmWiz` and `encoding` only
+        # re-export the name and patching them would change nothing.
         from ffmwiz.support import ext04c
         real_budget = ext04c.audio_reverse_segment_seconds
         ext04c.audio_reverse_segment_seconds = lambda _a, _i=None: 1.0

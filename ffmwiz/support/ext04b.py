@@ -670,6 +670,14 @@ __all__ += ext04c.__all__
 # the sibling addressable as a module, and the `_` alias is what
 # tests/test_module_reference_hygiene reads to find re-export pairs. It
 # imports only lower tiers and never reaches back up into here.
+# ext04c_run holds the part of the bounded reverse that RUNS, split off
+# when ext04c reached the size ceiling. Same double binding as below.
+from ffmwiz.support import ext04c_run as _ext04c_run  # noqa: E402
+from ffmwiz.support import ext04c_run  # noqa: E402,F401
+from ffmwiz.support.ext04c_run import *  # noqa: E402,F401,F403
+__all__ = list(__all__) + list(_ext04c_run.__all__)
+
+
 from ffmwiz.support import ext04_inspect as _ext04_inspect  # noqa: E402
 from ffmwiz.support import ext04_inspect  # noqa: E402,F401
 from ffmwiz.support.ext04_inspect import *  # noqa: E402,F401,F403
