@@ -15,8 +15,8 @@ From the repo root:
 `run_suite.py` is what CI runs. It gives each test module its own child
 interpreter — `run_suite_child.py`, one process per module, supervised by
 `run_suite_process.py` (and `run_suite_windows.py` for the Windows ownership
-boundary) — and `-j` only decides how many run at once: GitHub CI measures 2654
-tests in 173-222 s at `-j 2`, because the suite is dominated by real ffmpeg child
+boundary) — and `-j` only decides how many run at once: GitHub CI measures 2663
+tests in 174-224 s at `-j 2`, because the suite is dominated by real ffmpeg child
 processes rather than CPU. It adds no dependency; the project keeps a zero-test-dependency policy, so it
 is `unittest` plus `subprocess`. Module-per-process is also what keeps it safe:
 several suites monkeypatch module globals such as `appio.note`, which is only
