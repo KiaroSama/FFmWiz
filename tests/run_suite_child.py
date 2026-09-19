@@ -218,9 +218,15 @@ def main(argv: list[str]) -> int:
         return 2
     name, result_path = argv[0], Path(argv[1])
     if len(argv) > 3 and argv[3] == "--gated":
-        if sys.stdin.buffer.read(1) != b"G":
-            return 2
+        gate = sys.stdin.buffer.readline(256).decode("ascii").rstrip("\r\n")
         sys.stdin.close()
+        if not gate.startswith("G"):
+            return 2
+        if os.name == "nt":
+            if not gate[1:].startswith("Local\\FFmWizSuite-"):
+                return 2
+            from run_suite_windows import join_current_process
+            join_current_process(gate[1:])
     seconds = float(argv[2]) if len(argv) > 2 else 0.0
 
     for stream in (sys.stdout, sys.stderr):

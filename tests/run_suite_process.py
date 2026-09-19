@@ -61,11 +61,6 @@ class ProcessScope:
         if os.name == "nt":
             from run_suite_windows import Job
             self.job = Job()
-            try:
-                self.job.assign(process.pid)
-            except BaseException:
-                self.job.close()
-                raise
 
     def active(self) -> bool:
         return bool(self.job.active()) if self.job else _group_active(self.pgid)
@@ -137,7 +132,8 @@ def supervise_module(name: str, scratch: Path, timeout: float,
             if cancelled.is_set():
                 outcome = "cancelled"
             else:
-                process.stdin.write(b"G")
+                gate = "G" + (scope.job.name if scope.job else "") + "\n"
+                process.stdin.write(gate.encode("ascii"))
                 process.stdin.flush()
             process.stdin.close()
             deadline = started + timeout
@@ -188,6 +184,8 @@ def supervise_module(name: str, scratch: Path, timeout: float,
         record = module_problem(name, outcome if outcome != "ok" else "crash",
                                 seconds, "module did not publish a complete result")
     record["seconds"] = seconds
+    record["process_exit_code"] = code
+    record["supervisor_outcome"] = outcome
     if outcome != "ok":
         # Keep completed tests and their diagnostics, but never let a pre-exit
         # JSON snapshot overrule a crash, timeout, cancellation or surviving PID.
