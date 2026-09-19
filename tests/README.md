@@ -13,10 +13,11 @@ From the repo root:
     python -m unittest discover -s tests -p test_practical_ffmpeg.py   # one module
 
 `run_suite.py` is what CI runs. It gives each test module its own child
-interpreter — `run_suite_child.py`, one process per module — and `-j` only decides
-how many run at once: measured on a 16-core machine, ~2620 tests take ~316 s at
-`-j 8`, because the suite is dominated by real ffmpeg child processes rather than
-CPU. It adds no dependency; the project keeps a zero-test-dependency policy, so it
+interpreter — `run_suite_child.py`, one process per module, supervised by
+`run_suite_process.py` (and `run_suite_windows.py` for the Windows ownership
+boundary) — and `-j` only decides how many run at once: GitHub CI measures 2654
+tests in 173-222 s at `-j 2`, because the suite is dominated by real ffmpeg child
+processes rather than CPU. It adds no dependency; the project keeps a zero-test-dependency policy, so it
 is `unittest` plus `subprocess`. Module-per-process is also what keeps it safe:
 several suites monkeypatch module globals such as `appio.note`, which is only
 sound while one module owns its interpreter.
@@ -27,7 +28,10 @@ failures survivable:
 * a module is bounded by `--module-timeout` (default 600 s), from its first import
   to its last thread. Nothing inside a hung interpreter can end it — a stuck
   non-daemon thread blocks shutdown forever — so the ceiling belongs to the parent,
-  which kills the module's whole process tree and records a **timeout**.
+  which ends the module's whole owned process scope and records a **timeout**. That
+  scope is a new session on POSIX and a kill-on-close Job Object on Windows; the
+  child joins its job over a stdin gate BEFORE it imports any test code, so a
+  descendant started by a venv redirector cannot escape it.
 * a module that takes its own process down (`os._exit`, a segfault in a C
   extension, an OOM kill) loses only itself and is recorded as a **crash** with its
   exit code and console tail. In `-j 1` it used to take the runner with it.
@@ -37,8 +41,13 @@ failures survivable:
   started BY a thread — which no snapshot of "threads this module started" contains
   — is still attributed to the module that started it.
 
-`ok`, `timeout`, `crash` and `not-run` are four different statuses in that file and
-in the CI step summary. None of them reads as a pass.
+`ok`, `timeout`, `crash`, `cancelled` and `not-run` are five different statuses in
+that file and in the CI step summary. None of them reads as a pass.
+
+The FINAL outcome decides, not the record the module published: a module whose
+interpreter exits abnormally after writing a passing result, or that leaves a live
+child process behind, is recorded as a **crash** and fails the run. A module result
+that is malformed, oversized or names a different module is rejected the same way.
 
 A skip is classified by the CAPABILITY it names — `ffmpeg`, `numpy`, `powershell`,
 `pyside6`, `wheel` — and two flags act on that:
