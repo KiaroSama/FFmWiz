@@ -309,9 +309,14 @@ class JoinWaveformGraphTests(unittest.TestCase):
         self.assertIn("a.mkv", Q.build_wave_decode_args(req, "o.pcm"))
 
     def test_classic_engine_has_the_same_silence_branch(self):
-        src = _classic_unified_source()
-        self.assertIn("anullsrc=channel_layout=mono:sample_rate=4000", src)
-        self.assertIn('segment.get("has_audio", True)', src)
+        from ffmwiz.gui.classic.gui_editor_unified import build_classic_waveform_args
+        segments = [{"path": "silent.mkv", "duration": 2, "has_audio": False},
+                    {"path": "audible.mkv", "duration": 1, "has_audio": True}]
+        args = build_classic_waveform_args({}, segments, "out.pcm")
+        self.assertIn("anullsrc=channel_layout=mono:sample_rate=4000", args)
+        self.assertNotIn("silent.mkv", args)
+        self.assertIn("audible.mkv", args)
+        self.assertIn("concat=n=2:v=0:a=1", " ".join(args))
 
 
 class ReverseProxyTests(unittest.TestCase):
@@ -393,7 +398,7 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
         self.assertNotIn("keep_generation", slot)
 
     def test_proxies_live_in_one_owned_temp_dir(self):
-        self.assertIn('tempfile.TemporaryDirectory(prefix="ffmwiz_qmlrev_")', self.SRC)
+        self.assertIn("self._rev_temp = WorkerTemporaryDirectory(", self.SRC)
         self.assertNotIn('mkstemp(suffix=".mp4"', self.SRC)
         self.assertIn("self._rev_temp.cleanup()", self.SRC)
 
