@@ -359,20 +359,23 @@ jobs:
         # name match is not ownership (R01).
         shell: pwsh
         run: |
-          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([char]92)
+          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
           # Component-wise, not a string prefix: "G:\runner temp2" StartsWith
           # "G:\runner temp", so a bare prefix test calls a SIBLING contained.
           # Comparing against the root plus a separator is what makes it mean
           # "inside", and the root itself is never a target.
-          $prefix = $root + [char]92
+          $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+          $comparison = if ([System.IO.Path]::DirectorySeparatorChar -eq [char]92) {
+            [System.StringComparison]::OrdinalIgnoreCase
+          } else { [System.StringComparison]::Ordinal }
           foreach ($target in @($env:FFMWIZ_SCRATCH, (Join-Path $env:RUNNER_TEMP "venv-tests"))) {
             if ([string]::IsNullOrWhiteSpace($target)) { continue }
             if (-not (Test-Path -LiteralPath $target)) { continue }
-            $full = [System.IO.Path]::GetFullPath($target).TrimEnd([char]92)
+            $full = [System.IO.Path]::GetFullPath($target).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
             if ($full -eq $root) {
               Write-Host "refusing to clean RUNNER_TEMP itself: $full"; continue
             }
-            if (-not ($full + [char]92).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not ($full + [System.IO.Path]::DirectorySeparatorChar).StartsWith($prefix, $comparison)) {
               Write-Host "refusing to clean outside RUNNER_TEMP: $full"; continue
             }
             $item = Get-Item -LiteralPath $full -Force
@@ -550,20 +553,23 @@ jobs:
         # name match is not ownership (R01).
         shell: pwsh
         run: |
-          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([char]92)
+          $root = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
           # Component-wise, not a string prefix: "G:\runner temp2" StartsWith
           # "G:\runner temp", so a bare prefix test calls a SIBLING contained.
           # Comparing against the root plus a separator is what makes it mean
           # "inside", and the root itself is never a target.
-          $prefix = $root + [char]92
+          $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+          $comparison = if ([System.IO.Path]::DirectorySeparatorChar -eq [char]92) {
+            [System.StringComparison]::OrdinalIgnoreCase
+          } else { [System.StringComparison]::Ordinal }
           foreach ($target in @($env:FFMWIZ_SCRATCH, (Join-Path $env:RUNNER_TEMP "venv-gui"))) {
             if ([string]::IsNullOrWhiteSpace($target)) { continue }
             if (-not (Test-Path -LiteralPath $target)) { continue }
-            $full = [System.IO.Path]::GetFullPath($target).TrimEnd([char]92)
+            $full = [System.IO.Path]::GetFullPath($target).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
             if ($full -eq $root) {
               Write-Host "refusing to clean RUNNER_TEMP itself: $full"; continue
             }
-            if (-not ($full + [char]92).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not ($full + [System.IO.Path]::DirectorySeparatorChar).StartsWith($prefix, $comparison)) {
               Write-Host "refusing to clean outside RUNNER_TEMP: $full"; continue
             }
             $item = Get-Item -LiteralPath $full -Force
