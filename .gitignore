@@ -98,6 +98,7 @@ _tmp*
 /.codex/
 /.cursor/
 /.specify/
+/specs/
 /.kiro/
 /AGENTS.md
 /explain-AI.md
