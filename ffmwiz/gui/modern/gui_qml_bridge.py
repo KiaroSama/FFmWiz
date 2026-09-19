@@ -97,6 +97,12 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             except Exception as exc:
                 _log("ERROR", f"Bad result JSON from QML: {exc}")
                 result = {"status": "error", "message": f"Bad result JSON: {exc}"}
+            if not isinstance(result, dict):
+                # Valid JSON that is not an object. Reading "status" out of it
+                # raised here, so no reply was written and the editor process
+                # never quit -- it hung instead of reporting anything.
+                _log("ERROR", f"Result JSON from QML is {type(result).__name__}, not an object")
+                result = {"status": "error", "message": "Result JSON is not an object"}
             if "status" not in result:
                 result["status"] = "ok"
             write_reply(result)
@@ -283,6 +289,9 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             except Exception as exc:
                 _log("DEBUG", f"renderReverse bad spec: {exc}")
                 return
+            if not isinstance(spec, dict):
+                _log("DEBUG", f"renderReverse spec is {type(spec).__name__}, not an object")
+                return
             if self._reverse_children.closed:
                 return
             # The previous chunk's result is already superseded and each render
@@ -297,7 +306,11 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             # too -- it used to call cancel(keep_generation=current), so a
             # direct QML cancel spared the very process it was asked to stop
             # (R04).
-            generation = int(spec.get("gen", 0))
+            try:
+                generation = int(spec.get("gen", 0))
+            except (TypeError, ValueError):
+                _log("DEBUG", f"renderReverse gen is not a number: {spec.get('gen')!r}")
+                return
             self._reverse_children.bump_generation(generation)
             self._reverse_children.cancel(keep_generation=generation)
             self._reverse_children.worker_started()

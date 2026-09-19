@@ -4,6 +4,17 @@ from __future__ import annotations
 WAVE_RATE = 4000
 
 
+def pcm_is_whole_samples(data: bytes) -> bool:
+    """True when `data` is a whole number of `s16le` samples.
+
+    Two bytes per sample, so an odd byte count is a writer that was interrupted
+    mid-sample -- a decode killed part-way through, not a short waveform. The
+    Classic timeline keeps whatever buffer it is handed, so half a sample would
+    be drawn as if it were data.
+    """
+    return bool(data) and len(data) % 2 == 0
+
+
 def segment_audio_stream_spec(req: dict, seg: dict | None = None) -> str:
     """Which audio stream of an input the waveform reads.
 

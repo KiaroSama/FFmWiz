@@ -54,7 +54,8 @@ def build_join_segment_model(req: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # Retain these public entry points while both engines use one decode contract.
-from ffmwiz.gui.gui_waveform_decode import segment_audio_filter, build_wave_decode_args
+from ffmwiz.gui.gui_waveform_decode import (segment_audio_filter, build_wave_decode_args,
+                                            pcm_is_whole_samples)
 
 
 def build_classic_waveform_args(
@@ -447,7 +448,8 @@ def build_unified_video_editor(request: dict[str, Any]):
                 return
             try:
                 data = self._wave_path.read_bytes()
-                if not data:
+                if not pcm_is_whole_samples(data):
+                    self.status.setText("Waveform preview could not be generated.")
                     return
                 # Hand the raw mono PCM to the timeline; it renders a crisp,
                 # detailed per-pixel waveform from it at any zoom.
