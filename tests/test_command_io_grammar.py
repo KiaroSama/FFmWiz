@@ -354,17 +354,22 @@ class EachCounterexampleReallyDestroysItsSource(unittest.TestCase):
             # zero bytes. A nonzero exit is not source protection.
             expect_exit_zero=False)
 
-    def test_the_rfc_file_uri_is_not_a_spelling_this_backend_opens(self):
-        # Stated as a measured fact, because the previous round asserted
-        # protection for exactly this form -- a command FFmpeg cannot run, so
-        # the assertion proved nothing either way.
+    def test_an_accepted_file_uri_uses_the_same_identity_as_the_backend(self):
+        # POSIX accepts file:///tmp/... as a literal path after file:. Windows
+        # builds may refuse file:///C:/.... Verify identity whenever it opens;
+        # rejecting an OS-specific spelling is not a universal safety property.
+        before = digest(self.source)
+        uri = self.source.as_uri()
         result = subprocess.run(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-             "-i", self.source.as_uri(), str(self.root / "uri.wav")],
+             "-i", uri, str(self.root / "uri.wav")],
             capture_output=True, timeout=180)
-        self.assertNotEqual(0, result.returncode,
-                            "this ffmpeg now accepts file:/// URIs; the guard's "
-                            "literal reading of `file:` needs rechecking")
+        if result.returncode == 0:
+            path = ffmpeg_url_path(uri)
+            self.assertIsNotNone(path)
+            self.assertTrue(os.path.samefile(path, self.source),
+                            "the guard and FFmpeg disagree on an accepted URI")
+        self.assertEqual(before, digest(self.source))
 
 if __name__ == "__main__":
     unittest.main()
