@@ -94,8 +94,10 @@ _tmp*
 /.agents/
 /.claude/
 /.cline/
+/.codebase-memory/
 /.codex/
 /.cursor/
+/.specify/
 /.kiro/
 /AGENTS.md
 /explain-AI.md
