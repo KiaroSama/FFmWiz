@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from ffmwiz.gui.gui_child_owner import ChildProcessOwner  # type: ignore
+from ffmwiz.gui.gui_resources import OwnedTemporaryDirectory, read_completed_pcm
 from ffmwiz.gui.gui_style import PALETTE as _PALETTE  # type: ignore
 from ffmwiz.gui.modern.gui_qml_waveform import (build_wave_decode_args,
                                                 build_wave_envelope,
@@ -67,7 +68,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             self._reverse_children = ChildProcessOwner()
             self._wave_children = ChildProcessOwner()
             self._rev_lock = threading.Lock()
-            self._rev_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_qmlrev_")
+            self._rev_temp = OwnedTemporaryDirectory(prefix="ffmwiz_qmlrev_")
             self._rev_files: list[str] = []
             # Cached waveform source (decoded once per cache key; reused after).
             self._wave_key: str | None = None
@@ -92,6 +93,8 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             self._submitted = True
             try:
                 result = json.loads(result_json)
+                if not isinstance(result, dict):
+                    raise ValueError("the editor result must be a JSON object")
             except Exception as exc:
                 _log("ERROR", f"Bad result JSON from QML: {exc}")
                 result = {"status": "error", "message": f"Bad result JSON: {exc}"}
@@ -139,8 +142,14 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 self._wave_pending = key
                 return
             self._wave_children.worker_started()
-            self._wave_thread = threading.Thread(target=self._decode_waveform, args=(key,), daemon=True)
-            self._wave_thread.start()
+            try:
+                self._wave_thread = threading.Thread(target=self._decode_waveform, args=(key,), daemon=True)
+                self._wave_thread.start()
+            except Exception as exc:
+                self._wave_children.worker_finished()
+                self._wave_thread = None
+                _log("ERROR", f"Could not start waveform worker: {exc}")
+                self.waveformReady.emit(key, "[]")
 
         def _decode_waveform(self, key: str) -> None:
             try:
@@ -213,7 +222,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                     raise RuntimeError(f"waveform decode failed (rc={proc.returncode})")
                 if self._wave_children.closed:
                     raise RuntimeError("waveform decode cancelled by shutdown")
-                data = Path(pcm_path).read_bytes()
+                data = read_completed_pcm(Path(pcm_path), returncode=proc.returncode)
             finally:
                 # `finally`, and after the child is reaped: on Windows the file
                 # stays locked while ffmpeg holds it, so removing it earlier
@@ -224,7 +233,8 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                     try:
                         os.remove(pcm_path)
                     except OSError as exc:
-                        _log("DEBUG", f"Could not remove the waveform PCM {pcm_path}: {exc}")
+                        self._wave_children.retain_artifact(pcm_path, str(exc))
+                        _log("WARNING", f"Retaining waveform PCM for cleanup retry {pcm_path}: {exc}")
             pcm = decode_pcm_samples(data)
             self._pcm = pcm
             self._wave_rate = WAVE_RATE
@@ -266,6 +276,9 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
         def renderReverse(self, spec_json: str) -> None:  # noqa: N802 (QML camelCase)
             try:
                 spec = json.loads(spec_json)
+                if not isinstance(spec, dict):
+                    raise ValueError("the reverse request must be a JSON object")
+                generation = int(spec.get("gen", 0))
             except Exception as exc:
                 _log("DEBUG", f"renderReverse bad spec: {exc}")
                 return
@@ -283,11 +296,15 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             # too -- it used to call cancel(keep_generation=current), so a
             # direct QML cancel spared the very process it was asked to stop
             # (R04).
-            generation = int(spec.get("gen", 0))
             self._reverse_children.bump_generation(generation)
             self._reverse_children.cancel(keep_generation=generation)
             self._reverse_children.worker_started()
-            threading.Thread(target=self._do_reverse, args=(spec,), daemon=True).start()
+            try:
+                threading.Thread(target=self._do_reverse, args=(spec,), daemon=True).start()
+            except Exception as exc:
+                self._reverse_children.worker_finished()
+                _log("ERROR", f"Could not start reverse worker: {exc}")
+                self.reverseReady.emit(generation, "")
 
         @Slot()
         def cancelReverse(self) -> None:  # noqa: N802 (QML camelCase)
@@ -309,6 +326,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
         def _render_reverse(self, spec: dict) -> None:
             gen = int(spec.get("gen", 0))
             out = ""
+            may_discard = True
             try:
                 ffmpeg = str(self._req.get("ffmpeg") or "ffmpeg")
                 src = str(spec.get("src") or self._req.get("input_path") or "")
@@ -342,7 +360,11 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 try:
                     _, err = proc.communicate()
                 except BaseException:
-                    self._reverse_children.stop(proc)      # same contract (A03)
+                    if not self._reverse_children.stop(proc):
+                        may_discard = False
+                        self._reverse_children.retain_artifact(
+                            out, "reverse proxy writer could not be stopped")
+                        _log("WARNING", f"Retaining live reverse proxy: {out}")
                     raise
                 else:
                     self._reverse_children.finish(proc)
@@ -371,8 +393,10 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
                 self.reverseReady.emit(gen, out)
             except Exception as exc:  # noqa: BLE001
                 _log("DEBUG", f"reverse proxy failed: {exc}")
-                self._discard_proxy(out)
-                self.reverseReady.emit(gen, "")
+                if may_discard:
+                    self._discard_proxy(out)
+                if self._reverse_children.is_current(gen):
+                    self.reverseReady.emit(gen, "")
 
         @staticmethod
         def _discard_proxy(path: str) -> None:
@@ -394,6 +418,7 @@ def build_bridge(QObject, Slot, Signal, Property, write_reply, log,
             with self._rev_lock:
                 self._rev_files = []
             if not (reverse_done and wave_done):
+                self._rev_temp.preserve()
                 # A worker is still running and still owns what it is writing.
                 # Deleting its directory now is the race this guard exists for;
                 # the temp directory is reported instead of silently removed.

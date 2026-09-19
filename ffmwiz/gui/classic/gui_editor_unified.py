@@ -9,6 +9,7 @@ is a `self` method on this window.
 """
 from __future__ import annotations
 from ffmwiz.gui import gui_common  # noqa: F401
+from ffmwiz.gui.gui_resources import OwnedTemporaryDirectory, selected_audio_stream, read_completed_pcm
 from ffmwiz.gui.gui_common import *  # noqa: F401,F403
 from ffmwiz.gui.classic.gui_editor_unified_edits import UnifiedEditorEditMixin
 from ffmwiz.gui.classic.gui_editor_unified_input import build_unified_editor_input_mixin
@@ -110,7 +111,7 @@ def build_classic_waveform_args(
         filters = [
             segment_audio_filter(
                 idx, float(segment.get("duration") or 0.0), 4000,
-                origin=0.0 if not segment.get("has_audio", True)
+                selected_audio_stream(req, segment), origin=0.0 if not segment.get("has_audio", True)
                 else float(segment.get("picture_clock_offset") or 0.0))
             for idx, segment in enumerate(segments)
         ]
@@ -121,10 +122,11 @@ def build_classic_waveform_args(
         duration = float(req.get("duration") or 0.0)
         if duration > 0:
             chain = segment_audio_filter(
-                0, duration, 4000, label="mix",
+                0, duration, 4000, selected_audio_stream(req), label="mix",
                 origin=float(req.get("picture_clock_offset") or 0.0))
         else:
-            chain = "[0:a:0]aformat=channel_layouts=mono,aresample=4000:first_pts=0[mix]"
+            chain = (f"[0:{selected_audio_stream(req)}]aformat=channel_layouts=mono,"
+                     "aresample=4000:first_pts=0[mix]")
         args.extend([
             "-i", str(req.get("input_path") or ""),
             "-filter_complex", chain,
@@ -186,7 +188,7 @@ def build_unified_video_editor(request: dict[str, Any]):
             self.chapters = normalize_chapters(req.get("chapters") or [], self.duration)
             self.result = {"status": "canceled"}
             self._icon = _icon_loader(self, self.style())
-            self._wave_temp = tempfile.TemporaryDirectory(prefix="ffmwiz_unified_waveform_")
+            self._wave_temp = OwnedTemporaryDirectory(prefix="ffmwiz_unified_waveform_")
             self._wave_path = Path(self._wave_temp.name) / "waveform.pcm"
             self._wave_proc = None
             # FFmWiz hands back KEEP ranges (the segments to keep). Internally the
@@ -511,18 +513,21 @@ def build_unified_video_editor(request: dict[str, Any]):
             self._wave_proc.start(str(self.request.get("ffmpeg") or "ffmpeg"), args)
 
         def _waveform_finished(self, *_args):
-            if not self._wave_path.exists() or self._wave_path.stat().st_size == 0:
-                self.status.setText("Waveform preview could not be generated.")
+            if getattr(self, "_closing", False):
                 return
             try:
-                data = self._wave_path.read_bytes()
-                if not data:
-                    return
-                # Hand the raw mono PCM to the timeline; it renders a crisp,
-                # detailed per-pixel waveform from it at any zoom.
+                proc = self._wave_proc
+                if proc is None:
+                    raise RuntimeError("waveform process is unavailable")
+                data = read_completed_pcm(
+                    self._wave_path, returncode=proc.exitCode(),
+                    normal_exit=proc.exitStatus() == QtCore.QProcess.NormalExit)
                 self.timeline.set_pcm(data, 4000)
-            except Exception as exc:  # noqa: BLE001
-                self.status.setText(f"Waveform preview could not be generated ({exc}).")
+            except Exception as exc:  # noqa: BLE001 - report failure; do not cache partial data
+                message = f"Waveform preview could not be generated ({exc})."
+                if hasattr(self, "status"):
+                    self.status.setText(message)
+                gui_common._gui_write_log("WARNING", message)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
@@ -559,28 +564,49 @@ def build_unified_video_editor(request: dict[str, Any]):
 
         def closeEvent(self, event):
             self._closing = True
+            problems = []
             try:
-                self.player.stop()
-            except Exception:
-                pass
-            # Stop the frame-extract QThread first — destroying a running QThread on
-            # teardown crashes Qt (0xC0000409).
+                if self.player is not None:
+                    self.player.stop()
+            except Exception as exc:
+                problems.append(f"player stop failed: {exc}")
+            # Keep the worker reference until its exit is confirmed. Its old
+            # stop helper clears the field before waiting, even on failure.
+            worker = getattr(self, "_frame_worker", None)
             try:
                 self._stop_preview_frame_worker()
-            except Exception:
-                pass
-            for _attr in ("_rev_proc", "_wave_proc"):
+                if worker is not None and worker.isRunning():
+                    self._frame_worker = worker
+                    problems.append("preview worker is still running")
+            except Exception as exc:
+                self._frame_worker = worker
+                problems.append(f"preview worker stop failed: {exc}")
+            for attr in ("_rev_proc", "_wave_proc"):
                 try:
-                    proc = getattr(self, _attr, None)
+                    proc = getattr(self, attr, None)
                     if proc is not None and proc.state() != QtCore.QProcess.NotRunning:
                         proc.kill()
                         proc.waitForFinished(1000)
-                except Exception:
-                    pass
-            try:
-                self._wave_temp.cleanup()
-            except Exception:
-                pass
+                        if proc.state() != QtCore.QProcess.NotRunning:
+                            problems.append(f"{attr} is still running")
+                except Exception as exc:
+                    problems.append(f"{attr} stop failed: {exc}")
+            if not problems:
+                try:
+                    self._wave_temp.cleanup()
+                except OSError as exc:
+                    problems.append(f"temporary files could not be removed: {exc}")
+            if problems:
+                # Reject a normal window close rather than destroy live Qt
+                # children. Preserve files even if a later forced exit runs GC.
+                self._wave_temp.preserve()
+                self._closing = False
+                message = "Shutdown incomplete; retry closing: " + "; ".join(problems)
+                gui_common._gui_write_log("WARNING", message)
+                if hasattr(self, "status"):
+                    self.status.setText(message)
+                event.ignore()
+                return
             super().closeEvent(event)
 
     return UnifiedVideoEditorWindow(request)

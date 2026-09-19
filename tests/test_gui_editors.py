@@ -393,7 +393,8 @@ class ReverseProxyLifecycleTests(unittest.TestCase):
         self.assertNotIn("keep_generation", slot)
 
     def test_proxies_live_in_one_owned_temp_dir(self):
-        self.assertIn('tempfile.TemporaryDirectory(prefix="ffmwiz_qmlrev_")', self.SRC)
+        self.assertIn('OwnedTemporaryDirectory(prefix="ffmwiz_qmlrev_")', self.SRC)
+        self.assertIn("self._rev_temp.preserve()", self.SRC)
         self.assertNotIn('mkstemp(suffix=".mp4"', self.SRC)
         self.assertIn("self._rev_temp.cleanup()", self.SRC)
 
