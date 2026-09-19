@@ -1,0 +1,96 @@
+name: Integrated audit review
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrated-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  combined-windows-qt:
+    # This review composes PRs 7/8 with PR 9; normal CI covers other PRs.
+    # Manual runs remain useful after integration and record already-applied patches.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 9
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: '1'
+      QT_QPA_PLATFORM: offscreen
+      REVIEW_BASE: 10649901c3a97b98bf0445d560b1510f3e43d5e8
+      REVIEW_COMPANIONS: a5c92f28e779b14f9dd42a86c14a6315dbb2ddad 08200134ab08442500ebe025aed526ff8bc64137
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Compose pinned review patches without any merge or remote write
+        shell: python
+        run: |
+          import json, os, pathlib, re, subprocess
+          def git(*args, **kwargs):
+              return subprocess.run(['git', *args], check=True, **kwargs)
+          base = os.environ['REVIEW_BASE']
+          heads = os.environ['REVIEW_COMPANIONS'].split()
+          records = []
+          for ref in [base, *heads]:
+              if not re.fullmatch(r'[0-9a-f]{40}', ref):
+                  raise ValueError('review refs must be immutable commit SHAs')
+              git('fetch', '--no-tags', 'origin', ref)
+          for head in heads:
+              patch = git('diff', '--binary', base, head, capture_output=True).stdout
+              if subprocess.run(['git', 'apply', '--reverse', '--check', '-'],
+                                input=patch, capture_output=True).returncode == 0:
+                  records.append({'head': head, 'state': 'already-applied'})
+                  continue
+              git('apply', '--check', '-', input=patch)
+              git('apply', '-', input=patch)
+              records.append({'head': head, 'state': 'applied-to-ephemeral-worktree'})
+          git('add', '-A')
+          tree = git('write-tree', capture_output=True, text=True).stdout.strip()
+          checkout = git('rev-parse', 'HEAD', capture_output=True, text=True).stdout.strip()
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])
+          payload = {'checkout': checkout, 'base': base, 'companions': records, 'tested_tree': tree}
+          (out / 'integrated-identity.json').write_text(json.dumps(payload, indent=2), encoding='utf-8')
+          (out / 'integrated.patch').write_bytes(git('diff', '--cached', '--binary', capture_output=True).stdout)
+          print(json.dumps(payload, indent=2))
+      - name: Create isolated test environment
+        shell: pwsh
+        run: |
+          python -m venv "$env:RUNNER_TEMP/integration-venv"
+          "$env:RUNNER_TEMP/integration-venv/Scripts" >> $env:GITHUB_PATH
+      - name: Install the repository's Qt and test capabilities
+        run: python -m pip install --disable-pip-version-check -r requirements.txt numpy setuptools wheel
+      - name: Install job-owned FFmpeg
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "integration-ffmpeg.zip"
+          $dst = Join-Path $env:RUNNER_TEMP "integration-ffmpeg"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zip -TimeoutSec 900
+          Write-Host "FFmpeg SHA256: $((Get-FileHash -Algorithm SHA256 $zip).Hash)"
+          Expand-Archive -Path $zip -DestinationPath $dst
+          $exe = Get-ChildItem $dst -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe missing" }
+          $exe.Directory.FullName >> $env:GITHUB_PATH
+      - name: Run the full combined tree with native Qt and PowerShell
+        shell: pwsh
+        run: python tests/run_suite.py -j 4 --require ffmpeg --require numpy --require wheel --require powershell --require pyside6 --json "$env:RUNNER_TEMP/integrated-results.json"
+      - name: Retain combined-tree evidence
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: integrated-review-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/integrated-results.json
+            ${{ runner.temp }}/integrated-identity.json
+            ${{ runner.temp }}/integrated.patch
+          retention-days: 7
+      - name: Record quota-independent summary
+        if: always()
+        run: python tools/ci_result_summary.py "$env:RUNNER_TEMP/integrated-results.json" "combined audit / Windows Qt" "${{ steps.evidence.outcome }}"
