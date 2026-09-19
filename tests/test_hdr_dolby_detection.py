@@ -6,16 +6,20 @@ tone-map / Dolby prompt when one of those is set. README also promises a warning
 when Dolby Vision is detected, because DV dynamic metadata cannot survive a
 hard-sub re-encode.
 
-None of that had a test, because neither format can be synthesised: FFmpeg 8.1.1
-has no Dolby Vision RPU encoder, and a synthetic PQ clip comes out of the
-Matroska muxer with `color_transfer=unknown`, so it would not trip the detector
-at all.
+Dolby Vision cannot be synthesised -- FFmpeg has no RPU encoder -- so those two
+tests stay gated on a local sample. HDR10 CAN be: the earlier note that a
+synthetic PQ clip "comes out with `color_transfer=unknown`" is true of the
+MATROSKA muxer only. MP4 writes the `colr` atom, so an x265 clip tagged
+`bt2020`/`smpte2084`/`bt2020nc` probes as real HDR10 and the detector reads it as
+`hdr=True, dolby=False`. That is what `_hdr10_sample()` builds when the local
+file is absent, which is what lets CI cover the HDR10 half at all.
 
 The dict-driven half below always runs -- detection is a pure function of an
 ffprobe stream dict. The real-media half is gated on local sample files, because
 the assumption most likely to be wrong is whether REAL ffprobe output actually
 contains the substrings the matcher looks for.
 """
+import atexit
 import json
 import os
 import shutil
@@ -32,9 +36,42 @@ FFPROBE = shutil.which("ffprobe")
 # Local-only samples; see .ai/TEST_MEDIA.md. Overridable so the location is not
 # hard-wired to one machine.
 MEDIA_DIR = Path(os.environ.get("FFMWIZ_TEST_MEDIA_DIR", r"I:/Video Templates"))
-HDR10 = MEDIA_DIR / "HDR10-PQ-BT2020-colorbars.mp4"
+HDR10_CURATED = MEDIA_DIR / "HDR10-PQ-BT2020-colorbars.mp4"
 DOVI = MEDIA_DIR / "DolbyVision-plus-HDR10-sample.mkv"
 DOVI_UNTAGGED = MEDIA_DIR / "DolbyVision-no-container-tags.mkv"
+
+
+def _hdr10_sample() -> Path:
+    """The curated HDR10 clip, or an equivalent one built here.
+
+    The curated file is local-only and carries no redistribution licence, so CI
+    never has it. A generated clip is not a stand-in here: HDR10 *is* container
+    signalling plus a 10-bit PQ/BT.2020 bitstream, and every assertion in this
+    module reads exactly those fields. `-color_range tv` is stated explicitly
+    because a fixture that leaves the range unresolved errors on the project's
+    declared FFmpeg floor (B16).
+    """
+    if HDR10_CURATED.exists() or not FFMPEG:
+        return HDR10_CURATED
+    directory = Path(tempfile.mkdtemp(prefix="ffmwiz_hdr10_"))
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    built = directory / "HDR10-PQ-BT2020-synthetic.mp4"
+    result = subprocess.run(
+        [FFMPEG, "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=3,format=yuv420p10le",
+         "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "30",
+         "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+         "-colorspace", "bt2020nc", "-color_range", "tv",
+         "-x265-params",
+         "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:"
+         "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):"
+         "max-cll=1000,400",
+         str(built)],
+        capture_output=True, timeout=180)
+    return built if result.returncode == 0 and built.exists() else HDR10_CURATED
+
+
+HDR10 = _hdr10_sample()
 
 
 class HdrDolbyDetectionLogic(unittest.TestCase):
@@ -68,7 +105,7 @@ class HdrDolbyDetectionLogic(unittest.TestCase):
 
 
 @unittest.skipIf(not FFPROBE, "ffprobe not on PATH")
-@unittest.skipIf(not HDR10.exists() or not DOVI.exists(),
+@unittest.skipIf(not HDR10.exists(),
                  f"HDR/Dolby samples not present in {MEDIA_DIR}")
 class HdrDolbyRealMedia(unittest.TestCase):
     """Real files: does actual ffprobe output carry what the matcher expects?"""
@@ -87,13 +124,14 @@ class HdrDolbyRealMedia(unittest.TestCase):
         self.assertTrue(info.get("hdr"), "a real smpte2084 file must read as HDR")
         self.assertFalse(info.get("dolby"))
 
+    @unittest.skipIf(not DOVI.exists(), "Dolby Vision sample not present; no RPU encoder exists")
     def test_real_dolby_vision_file_is_detected_as_both(self):
         # DV normally rides on top of an HDR10 base layer, so both must fire.
         info = FFmWiz.video_hdr_dolby_info(self._video_stream(DOVI))
         self.assertTrue(info.get("dolby"), "a real DV RPU must read as Dolby Vision")
         self.assertTrue(info.get("hdr"))
 
-    @unittest.skipIf(not DOVI_UNTAGGED.exists(), "untagged DV sample not present")
+    @unittest.skipIf(not DOVI_UNTAGGED.exists(), "untagged DV sample not present; no RPU encoder exists")
     def test_dolby_without_container_tags_still_detected(self):
         # The edge case: a DV RPU whose container carries no colour tags, so the
         # Dolby half of the detector has to fire on its own.
