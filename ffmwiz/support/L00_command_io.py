@@ -148,25 +148,25 @@ def concat_list_members(listing: Path) -> tuple[list[Path], list[str]]:
 
 
 def ffmpeg_url_path(value: str) -> Path | None:
-    """The local path FFmpeg opens for `value`, or None when it is not a file.
+    """The exact local operand FFmpeg opens; shell/UI normalization is over.
 
-    `file:` is a PREFIX, not a URL: FFmpeg takes the remainder verbatim. Running
-    it through a generic URL parser percent-decoded `%20` and threw away
-    everything after `#`, so a source named `a%20b.wav` or `a#b.wav` was
-    compared against a path FFmpeg never touches and its alias went unprotected.
+    Whitespace, a leading dash and the filename ``null`` are meaningful here.
+    Removing them compares a different file from the one FFmpeg will open.
+    Only an unprefixed ``-``, the pipe protocol and actual OS null devices are
+    non-file endpoints. The null MUXER is handled by the output parser, not by
+    guessing from a filename. ``file:`` forces literal filename semantics.
     """
-    text = str(value or "").strip()
+    text = str(value) if value is not None else ""
     if not text:
         return None
-    lowered = text.lower()
-    if lowered.startswith("pipe:") or text in {"-"}:
-        return None
-    if lowered in {"nul", "null", os.devnull.lower()}:
-        return None
-    if lowered.startswith("file:"):
+    if text.startswith("file:"):
         text = text[len("file:"):]
         if not text:
             return None
+    elif text == "-" or text.startswith("pipe:"):
+        return None
+    if text == os.devnull or (os.name == "nt" and text.casefold() == "nul"):
+        return None
     try:
         return Path(text)
     except (TypeError, ValueError):
@@ -196,13 +196,11 @@ def _takes_a_value(token: str) -> bool:
 
 
 def _names_a_file(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text or text.startswith("-"):
-        return False
-    lowered = text.lower()
-    if lowered.startswith("pipe:") or lowered in {"-", "nul", "null", os.devnull.lower()}:
-        return False
-    return True
+    """Whether a FILE OPERAND names a file; the caller determines argv arity.
+
+    In ``-i -source.wav``, the dashed value is a pathname, not another option.
+    """
+    return ffmpeg_url_path(value) is not None
 
 
 def filter_graph_files(value: str) -> list[Path]:
@@ -272,17 +270,23 @@ def _file_arguments(cmd: list[str]) -> tuple[list[str], list[Path], list[str]]:
 
 
 def command_input_paths(cmd: list[str]) -> list[Path]:
-    """Every path an FFmpeg argv reads as an INPUT (`-i <path>`)."""
+    """Direct file inputs, consuming option values exactly once."""
+    args, _reads, _problems = _file_arguments(cmd)
     inputs: list[Path] = []
-    for index, token in enumerate(cmd[:-1] if cmd else []):
-        if str(token) != "-i":
-            continue
-        value = str(cmd[index + 1] or "").strip()
-        if not _names_a_file(value):
-            continue
-        path = ffmpeg_url_path(value)
-        if path is not None:
-            inputs.append(path)
+    index, input_format = 1, None
+    while index < len(args):
+        option = str(args[index])
+        following = str(args[index + 1]) if index + 1 < len(args) else ""
+        if option == "-f":
+            input_format = following
+        elif option == "-i":
+            path = ffmpeg_url_path(following)
+            if input_format != "lavfi" and path is not None:
+                inputs.append(path)
+            input_format = None
+        elif not _is_option(option):
+            input_format = None
+        index += 2 if _is_option(option) and _takes_a_value(option) else 1
     return inputs
 
 
@@ -372,10 +376,14 @@ def command_writes(cmd: list[str]) -> list[Path]:
                 outputs.extend(path for value in writes if (path := ffmpeg_url_path(value)) is not None)
             index += 2 if _takes_a_value(token) else 1
             continue
-        if _names_a_file(token):
+        # The null muxer does not open its positional destination. A file
+        # called "null" with any other muxer is still a real output. Reset at
+        # every output boundary so this exemption cannot hide the next write.
+        if input_format != "null" and _names_a_file(token):
             path = ffmpeg_url_path(token)
             if path is not None:
                 outputs.append(path)
+        input_format = None
         index += 1
     return outputs
 
