@@ -172,7 +172,10 @@ class TheFileProtocolIsAPrefixNotAUrl(unittest.TestCase):
         self.assertEqual(Path(r"C:\media\clip.mkv"), ffmpeg_url_path(r"C:\media\clip.mkv"))
 
     def test_a_pipe_or_null_sink_is_not_a_file(self):
-        for value in ("pipe:1", "-", "NUL", os.devnull):
+        devices = ["pipe:1", "-", os.devnull]
+        if os.name == "nt":
+            devices.append("NUL")
+        for value in devices:
             with self.subTest(value=value):
                 self.assertIsNone(ffmpeg_url_path(value))
 

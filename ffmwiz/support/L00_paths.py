@@ -46,18 +46,13 @@ def _progress_output_paths_from_command(cmd: list[str]) -> list[Path]:
     """Infer the final output path for simple single-output FFmpeg commands."""
     if not cmd:
         return []
-    candidate = str(cmd[-1] or "").strip()
-    if not candidate or candidate.startswith("-"):
+    # Keep progress on the same literal filename as execution. All shell and
+    # terminal unquoting already happened before the argv was constructed.
+    candidate = str(cmd[-1])
+    if candidate.startswith("-"):
         return []
-    lowered = candidate.lower()
-    blocked = {"-", "nul", "null", os.devnull.lower()}
-    if lowered in blocked or lowered.startswith("pipe:"):
-        return []
-    try:
-        path = Path(candidate)
-    except (TypeError, ValueError):
-        return []
-    return [path] if path.suffix else []
+    path = ffmpeg_url_path(candidate)
+    return [path] if path is not None and path.suffix and path in command_writes(cmd) else []
 
 
 def mux_display_path(input_root: Path, input_file: Path) -> Path:

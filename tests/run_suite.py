@@ -123,9 +123,11 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         arguments = parsed.get("args")
         if arguments is not None and getattr(arguments, "json", None):
-            write_results(arguments.json, collected, verdict,
-                          time.monotonic() - started, arguments,
-                          parsed.get("environment"))
+            if not write_results(arguments.json, collected, verdict,
+                                 time.monotonic() - started, arguments,
+                                 parsed.get("environment")):
+                verdict = 1
+                print("FAILED: the requested JSON result was not published", file=sys.stderr)
     return verdict
 
 
@@ -196,6 +198,12 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
     # Probed once, here, so the incremental writes below cost nothing and a
     # hung tool cannot stall every one of them.
     parsed["environment"] = environment_report()
+    # Fail before launching tests if the requested evidence cannot be written.
+    # This also replaces a stale green report with an explicit non-final one.
+    if args.json and not write_results(args.json, [], 1, 0.0, args,
+                                       parsed["environment"]):
+        parsed["report_failed"] = True
+        return 1
 
     started = time.monotonic()
     results: list[dict] = collected
@@ -208,7 +216,11 @@ def _run(argv, collected: list[dict], parsed: dict) -> int:
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     elapsed = time.monotonic() - started
-    return _report(results, args, required, elapsed)
+    verdict = _report(results, args, required, elapsed)
+    if parsed.get("report_failed"):
+        print("FAILED: at least one required JSON publication failed", file=sys.stderr)
+        return 1
+    return verdict
 
 
 def _execute(modules: list[str], args, results: list[dict], parsed: dict,
@@ -225,8 +237,11 @@ def _execute(modules: list[str], args, results: list[dict], parsed: dict,
     def keep(record: dict) -> None:
         results.append(record)
         if args.json:
-            write_results(args.json, results, 1, time.monotonic() - started,
-                          args, parsed.get("environment"))
+            if not write_results(args.json, results, 1, time.monotonic() - started,
+                                 args, parsed.get("environment")):
+                # Keep completed records and continue safely; publication
+                # failure is sticky even if a later retry happens to succeed.
+                parsed["report_failed"] = True
 
     pool = ThreadPoolExecutor(max_workers=args.jobs)
     pending, recorded = {}, set()
