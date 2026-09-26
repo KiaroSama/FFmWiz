@@ -88,6 +88,13 @@ replaced atomically. A pre-existing `results.json.partial` is never touched.
 `test_run_suite_publication` covers all three publication stages, previous-report
 preservation, foreign partial-file aliases and concurrent temporary ownership.
 
+The source guard resolves FFmpeg wrapper protocols to the files they really open:
+`cache:`, `async:`, `crypto:`, `shared:`, `subfile`, `concat:`, `concatf:`, `md5:`
+and `tee:`, nested to 16 levels. An unknown protocol on an input or output is
+refused before FFmpeg starts; `pipe:`, `fd:`, `data:` and network URLs are not
+files. `test_ffmpeg_url_protocols` holds the grammar cases, the runtime refusals
+for each wrapper FFmpeg can run without key material, and two positive controls.
+
 `--json PATH` writes the run as data — every module with its counts, failures,
 errors, unexpected successes, and every skip with the capability it was
 attributed to, plus the environment (Python, platform, the resolved ffmpeg and
