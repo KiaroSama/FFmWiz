@@ -4,6 +4,18 @@
 
 <h1 align="center">FFmWiz</h1>
 
+<p align="center">
+  <a href="https://github.com/KiaroSama/FFmWiz/actions/workflows/python-smoke.yml"><img src="https://github.com/KiaroSama/FFmWiz/actions/workflows/python-smoke.yml/badge.svg?branch=main" alt="CI status"></a>
+  <a href="https://github.com/KiaroSama/FFmWiz/actions/workflows/source-safety.yml"><img src="https://github.com/KiaroSama/FFmWiz/actions/workflows/source-safety.yml/badge.svg?branch=main" alt="Source safety verification status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/KiaroSama/FFmWiz" alt="License: GPL-3.0"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10 or newer"></a>
+  <a href=".github/workflows/python-smoke.yml"><img src="https://img.shields.io/badge/FFmpeg-6.1%2B-007808?logo=ffmpeg&amp;logoColor=white" alt="Tested with FFmpeg 6.1, 7.1 and latest"></a>
+  <br>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D6" alt="Platform: Windows">
+  <a href="docs/DOCUMENTATION.md"><img src="https://img.shields.io/badge/docs-reference-blue" alt="Documentation"></a>
+  <a href="https://github.com/KiaroSama/FFmWiz/commits/main"><img src="https://img.shields.io/github/last-commit/KiaroSama/FFmWiz" alt="Last commit"></a>
+</p>
+
 FFmWiz is a Windows-focused interactive FFmpeg command builder. It inspects a source file, asks practical encode questions, builds a PowerShell-safe command, shows a final summary, and can run FFmpeg immediately.
 
 It is designed for repeated local encoding work with NVIDIA/NVENC support, config-driven presets, audio-track cleanup helpers, and a unified graphical video editor.
