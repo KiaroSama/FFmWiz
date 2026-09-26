@@ -1,0 +1,16 @@
+name: Dependency review
+
+# Fails a pull request that adds a dependency with a known vulnerability.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
