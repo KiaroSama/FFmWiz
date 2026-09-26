@@ -69,9 +69,9 @@ matched it first.
 
 The NVENC suite is LOCAL BY DESIGN. `test_cuda_scale_fallback` probes for a
 usable CUDA/`hevc_nvenc` pair and encodes for real when it finds one; no
-GitHub-hosted runner has an NVIDIA GPU, and this repository must not point
-`vars.CI_RUNNER` at a self-hosted one while it is public, because a fork's pull
-request would then execute on that machine. So the three hardware tests skip in
+GitHub-hosted runner has an NVIDIA GPU, and CI never uses a self-hosted runner
+because the repository is public and a fork's pull request would then execute
+on that machine. So the three hardware tests skip in
 CI and are run on a developer's own GPU instead:
 
     python tests/run_suite.py -k cuda_scale_fallback
