@@ -107,6 +107,10 @@ Missing icon assets are logged but never stop the GUI from opening.
   import/API smoke check, and runs the command-generation regression tests on
   Windows with Python 3.10-3.13.
 - `.github/dependabot.yml` checks Python and GitHub Actions updates weekly.
+- `.github/workflows/codeql.yml` runs CodeQL code scanning (Python and workflow
+  files) on every push, pull request and weekly; `dependency-review.yml` fails a
+  pull request that adds a dependency with a known vulnerability. Every job runs
+  on a GitHub-hosted runner; `tests/test_ci_hosted_runners.py` enforces that.
 - `.gitattributes` normalizes text line endings and marks image assets binary;
   `.editorconfig` keeps indentation, UTF-8, and final-newline rules consistent.
 - `.gitignore` excludes runtime logs, generated media info reports, Python
