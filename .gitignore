@@ -115,3 +115,5 @@ _tmp*
 
 # Local CI executor: binaries, credentials and a full working checkout.
 /.actions-runner/
+
+/plans/
