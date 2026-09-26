@@ -24,8 +24,9 @@ Three rules this module exists to keep:
 """
 from __future__ import annotations
 
-import os
 from ffmwiz.support.L00_command_grammar import bounded_text, filter_files, passlog_outputs
+from ffmwiz.support.L00_ffmpeg_url import (CONCAT_LIST_MAX_BYTES, ffmpeg_url_path,
+                                          resolve_url, url_scheme)
 from pathlib import Path
 
 from ffmwiz.core.constants_ffmpeg_options import (FFMPEG_ALL_VALUED_OPTIONS,
@@ -33,10 +34,6 @@ from ffmwiz.core.constants_ffmpeg_options import (FFMPEG_ALL_VALUED_OPTIONS,
                                                   FFMPEG_VALUELESS_OPTIONS,
                                                   FFMPEG_WRITE_VALUED_OPTIONS)
 
-# A concat list is a text file. Beyond this it is not one, and a guard must not
-# read an arbitrary amount of disk at the moment a job starts -- but it must say
-# so rather than report "no members".
-CONCAT_LIST_MAX_BYTES = 4 * 1024 * 1024
 
 # The first line of a list FFmpeg auto-detects as concat WITHOUT `-f concat`.
 FFCONCAT_SIGNATURE = "ffconcat version"
@@ -136,6 +133,12 @@ def concat_list_members(listing: Path) -> tuple[list[Path], list[str]]:
         value, _ = concat_token(stripped, index)
         if not value:
             continue
+        if url_scheme(value) not in (None, "file"):
+            found, trouble = resolve_url(value)
+            if trouble:
+                return members, trouble
+            members.extend(found)
+            continue
         candidate = ffmpeg_url_path(value)
         if candidate is None:
             return members, [f"unsupported concat member: {value}"]
@@ -145,32 +148,6 @@ def concat_list_members(listing: Path) -> tuple[list[Path], list[str]]:
         else:
             members.append(listing.parent / candidate)
     return members, []
-
-
-def ffmpeg_url_path(value: str) -> Path | None:
-    """The exact local operand FFmpeg opens; shell/UI normalization is over.
-
-    Whitespace, a leading dash and the filename ``null`` are meaningful here.
-    Removing them compares a different file from the one FFmpeg will open.
-    Only an unprefixed ``-``, the pipe protocol and actual OS null devices are
-    non-file endpoints. The null MUXER is handled by the output parser, not by
-    guessing from a filename. ``file:`` forces literal filename semantics.
-    """
-    text = str(value) if value is not None else ""
-    if not text:
-        return None
-    if text.startswith("file:"):
-        text = text[len("file:"):]
-        if not text:
-            return None
-    elif text == "-" or text.startswith("pipe:"):
-        return None
-    if text == os.devnull or (os.name == "nt" and text.casefold() == "nul"):
-        return None
-    try:
-        return Path(text)
-    except (TypeError, ValueError):
-        return None
 
 
 def _is_option(token: str) -> bool:
@@ -195,18 +172,20 @@ def _takes_a_value(token: str) -> bool:
     return base in FFMPEG_ALL_VALUED_OPTIONS or stem in FFMPEG_ALL_VALUED_OPTIONS
 
 
-def _names_a_file(value: str) -> bool:
-    """Whether a FILE OPERAND names a file; the caller determines argv arity.
-
-    In ``-i -source.wav``, the dashed value is a pathname, not another option.
-    """
-    return ffmpeg_url_path(value) is not None
-
-
 def filter_graph_files(value: str) -> list[Path]:
     """Files read by graph instances, not text resembling a filter name."""
     reads, _writes, _problems = filter_files(str(value or ""))
-    return [path for value in reads if (path := ffmpeg_url_path(value)) is not None]
+    return _loose_files(reads, [])
+
+
+def _loose_files(values: list[str], problems: list[str]) -> list[Path]:
+    """Files named by filter arguments or file-valued options (literal + wrapped)."""
+    files: list[Path] = []
+    for value in values:
+        found, trouble = resolve_url(value, strict=False)
+        files.extend(found)
+        problems.extend(trouble)
+    return files
 
 
 def _concat_closure(path: Path, force: bool, reads: list[Path], problems: list[str],
@@ -280,9 +259,8 @@ def command_input_paths(cmd: list[str]) -> list[Path]:
         if option == "-f":
             input_format = following
         elif option == "-i":
-            path = ffmpeg_url_path(following)
-            if input_format != "lavfi" and path is not None:
-                inputs.append(path)
+            if input_format != "lavfi":
+                inputs.extend(resolve_url(following)[0])
             input_format = None
         elif not _is_option(option):
             input_format = None
@@ -301,31 +279,32 @@ def command_reads(cmd: list[str]) -> tuple[list[Path], list[str]]:
         following = str(args[index + 1]) if index + 1 < len(args) else ""
         if stem == "-f":
             input_format = following
-        elif stem == "-i" and _names_a_file(following):
+        elif stem == "-i":
             if input_format == "lavfi":
                 found, _writes, trouble = filter_files(following)
-                reads.extend(path for value in found if (path := ffmpeg_url_path(value)) is not None)
+                reads.extend(_loose_files(found, problems))
                 problems.extend(trouble)
             else:
+                found, trouble = resolve_url(following)
+                reads.extend(found)
+                problems.extend(trouble)
                 path = ffmpeg_url_path(following)
                 if path is not None:
-                    reads.append(path)
                     _concat_closure(path, input_format == "concat", reads, problems, set(), budget)
             input_format = None
-        elif stem in FFMPEG_FILE_VALUED_OPTIONS and _names_a_file(following):
+        elif stem in FFMPEG_FILE_VALUED_OPTIONS and following:
+            reads.extend(_loose_files([following], problems))
             path = ffmpeg_url_path(following)
-            if path is not None:
-                reads.append(path)
-                if stem in {"-filter_script", "-filter_complex_script"}:
-                    try:
-                        found, _writes, trouble = filter_files(bounded_text(path))
-                        reads.extend(path for value in found if (path := ffmpeg_url_path(value)) is not None)
-                        problems.extend(trouble)
-                    except (OSError, ValueError) as exc:
-                        problems.append(f"cannot inspect filter script {path}: {exc}")
+            if path is not None and stem in {"-filter_script", "-filter_complex_script"}:
+                try:
+                    found, _writes, trouble = filter_files(bounded_text(path))
+                    reads.extend(_loose_files(found, problems))
+                    problems.extend(trouble)
+                except (OSError, ValueError) as exc:
+                    problems.append(f"cannot inspect filter script {path}: {exc}")
         elif stem in {"-vf", "-af", "-filter", "-filter_complex", "-lavfi"} and following:
             found, _writes, trouble = filter_files(following)
-            reads.extend(path for value in found if (path := ffmpeg_url_path(value)) is not None)
+            reads.extend(_loose_files(found, problems))
             problems.extend(trouble)
         index += 2 if _is_option(option) and _takes_a_value(option) else 1
     return list(dict.fromkeys(reads)), problems
@@ -333,7 +312,12 @@ def command_reads(cmd: list[str]) -> tuple[list[Path], list[str]]:
 
 
 def command_writes(cmd: list[str]) -> list[Path]:
-    """Every destination an FFmpeg argv writes: positional outputs AND sidecars.
+    """Every destination an FFmpeg argv writes: positional outputs AND sidecars."""
+    return _write_set(cmd)[0]
+
+
+def _write_set(cmd: list[str]) -> tuple[list[Path], list[str]]:
+    """(destinations, reasons the write set is incomplete).
 
     A command has as many positional outputs as it has tokens the options did
     not claim. On top of those, some options take a value the run WRITES --
@@ -342,6 +326,7 @@ def command_writes(cmd: list[str]) -> list[Path]:
     """
     cmd, _parameter_reads, _problems = _file_arguments(cmd)
     outputs: list[Path] = []
+    problems: list[str] = []
     index = 1                    # cmd[0] is the executable
     input_format = None
     while index < len(cmd or []):
@@ -354,14 +339,13 @@ def command_writes(cmd: list[str]) -> list[Path]:
             input_graph = stem == "-i" and input_format == "lavfi"
             if stem == "-i":
                 input_format = None
-            if stem in FFMPEG_WRITE_VALUED_OPTIONS and _names_a_file(following):
+            if stem in FFMPEG_WRITE_VALUED_OPTIONS and following:
+                outputs.extend(_loose_files([following], problems))
                 path = ffmpeg_url_path(following)
-                if path is not None:
-                    outputs.append(path)
-                    # `-passlogfile x` writes `x-0.log`, not `x`. The prefix
-                    # expansion is a destination too.
-                    if stem == "-passlogfile":
-                        outputs.extend(passlog_outputs(path))
+                # `-passlogfile x` writes `x-0.log`, not `x`. The prefix
+                # expansion is a destination too.
+                if path is not None and stem == "-passlogfile":
+                    outputs.extend(passlog_outputs(path))
             if stem in {"-vf", "-af", "-filter", "-filter_complex", "-lavfi",
                         "-filter_script", "-filter_complex_script"} or input_graph:
                 # A lavfi INPUT can write filter statistics too. Its position
@@ -373,19 +357,19 @@ def command_writes(cmd: list[str]) -> list[Path]:
                     except (OSError, ValueError):
                         graph = ""  # command_reads carries the refusal reason
                 _reads, writes, _trouble = filter_files(graph)
-                outputs.extend(path for value in writes if (path := ffmpeg_url_path(value)) is not None)
+                outputs.extend(_loose_files(writes, problems))
             index += 2 if _takes_a_value(token) else 1
             continue
         # The null muxer does not open its positional destination. A file
         # called "null" with any other muxer is still a real output. Reset at
         # every output boundary so this exemption cannot hide the next write.
-        if input_format != "null" and _names_a_file(token):
-            path = ffmpeg_url_path(token)
-            if path is not None:
-                outputs.append(path)
+        if input_format != "null":
+            found, trouble = resolve_url(token)
+            outputs.extend(found)
+            problems.extend(trouble)
         input_format = None
         index += 1
-    return outputs
+    return outputs, problems
 
 
 def command_source_output_conflict(
@@ -424,7 +408,7 @@ def command_unresolved_dependencies(cmd: list[str]) -> list[str]:
     safety.
     """
     _reads, problems = command_reads(cmd)
-    return problems
+    return problems + _write_set(cmd)[1]
 
 
 __all__ = [
