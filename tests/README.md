@@ -80,6 +80,14 @@ Verified 2026-09-19 on an RTX 4070 Ti (driver 616.92, ffmpeg with
 `h264_nvenc`/`hevc_nvenc`/`av1_nvenc` and the `cuda` hwaccel): the gate opened and
 all 14 tests passed, including the three CI reports as skipped.
 
+A requested JSON report is part of the runner's success contract. An unwritable
+path fails before modules start. Incremental or final publication failure makes
+the run fail even if every test passed or a later publication recovers. Results
+are written through an exclusively created sibling temporary, flushed and
+replaced atomically. A pre-existing `results.json.partial` is never touched.
+`test_run_suite_publication` covers all three publication stages, previous-report
+preservation, foreign partial-file aliases and concurrent temporary ownership.
+
 `--json PATH` writes the run as data — every module with its counts, failures,
 errors, unexpected successes, and every skip with the capability it was
 attributed to, plus the environment (Python, platform, the resolved ffmpeg and

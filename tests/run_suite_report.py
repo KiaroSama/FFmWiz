@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # A skip is legitimate only when the machine genuinely cannot provide the thing
@@ -191,7 +192,7 @@ def environment_report() -> dict:
     """Versions and tool paths a failed CI run needs and a log line loses.
 
     Every external call here is bounded: a hung `ffmpeg -version` used to be
-    able to stall the one artifact a red job is read from.
+    able to stall the one artifact a red CI job is read from.
     """
     report = {
         "python": sys.version.split()[0],
@@ -215,7 +216,7 @@ def environment_report() -> dict:
 
 
 def write_results(path: str, results: list[dict], verdict: int, elapsed: float,
-                  arguments, environment: dict | None = None) -> None:
+                  arguments, environment: dict | None = None) -> bool:
     """One JSON file per run, so a red CI job is readable without the log.
 
     Written after EVERY module, not only at the end: a run that is killed, hangs
@@ -256,13 +257,29 @@ def write_results(path: str, results: list[dict], verdict: int, elapsed: float,
         ],
     }
     target = Path(path)
+    scratch: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Written beside the target and moved into place, so a reader never
-        # sees half a file and a crash mid-write cannot destroy the last one.
-        scratch = target.with_name(target.name + ".partial")
-        scratch.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                           encoding="utf-8")
+        # An exclusive sibling belongs to this publication only. A predictable
+        # `<target>.partial` can be someone else's file, symlink or hardlink,
+        # and concurrent writers must never share the same staging inode.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", suffix=".partial", delete=False,
+        ) as handle:
+            scratch = Path(handle.name)
+            handle.write(json.dumps(payload, indent=2, ensure_ascii=False))
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(scratch, target)
-    except OSError as exc:
+        return True
+    except (OSError, UnicodeError) as exc:
         print(f"could not write {path}: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if scratch is not None:
+            try:
+                scratch.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"could not remove owned result temporary {scratch}: {exc}",
+                      file=sys.stderr)
